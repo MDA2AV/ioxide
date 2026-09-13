@@ -8,7 +8,7 @@
     <RootNamespace>ioxide.httpclient</RootNamespace>
 
     <PackageId>ioxide.httpclient</PackageId>
-    <Version>0.13.225</Version>
+    <Version>0.13.233</Version>
     <Authors>MDA2AV</Authors>
     <Description>The ring-native HTTP/1.1 client for the ioxide io_uring runtime - the upstream leg between a proxy and an origin. Connections are opened on the reactor thread that will use them, so a request never crosses a thread on its way out or back, and every response resumes the awaiting handler inline on its own reactor. Includes client-side TLS (SNI, ALPN, certificate verification and client certificates for mutual TLS) for https:// origins. Depends on ioxide core alone: no protocol package, no native asset.</Description>
     <PackageLicenseExpression>MIT</PackageLicenseExpression>
