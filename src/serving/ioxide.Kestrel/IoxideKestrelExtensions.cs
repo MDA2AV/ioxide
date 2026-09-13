@@ -15,16 +15,25 @@ public static class IoxideKestrelExtensions
     /// </summary>
     public static IWebHostBuilder UseIoxide(this IWebHostBuilder builder, Action<IoxideTransportOptions>? configure = null)
     {
-        return builder.ConfigureServices(services =>
-        {
-            services.AddOptions<IoxideTransportOptions>();
-            if (configure is not null)
-            {
-                services.Configure(configure);
-            }
+        return builder.ConfigureServices(services => services.AddIoxideTransport(configure));
+    }
 
-            services.RemoveAll<IConnectionListenerFactory>();
-            services.AddSingleton<IConnectionListenerFactory, IoxideTransportFactory>();
-        });
+    /// <summary>
+    /// <see cref="UseIoxide"/> against the service collection, for apps that wire everything through
+    /// <c>builder.Services</c>: <c>builder.Services.AddIoxideTransport()</c>. Same precedence rule - it
+    /// evicts any previously-registered <see cref="IConnectionListenerFactory"/>, so Kestrel has to be
+    /// registered first, which <c>WebApplication.CreateBuilder</c> has already done by the time it returns.
+    /// </summary>
+    public static IServiceCollection AddIoxideTransport(this IServiceCollection services, Action<IoxideTransportOptions>? configure = null)
+    {
+        services.AddOptions<IoxideTransportOptions>();
+        if (configure is not null)
+        {
+            services.Configure(configure);
+        }
+
+        services.RemoveAll<IConnectionListenerFactory>();
+        services.AddSingleton<IConnectionListenerFactory, IoxideTransportFactory>();
+        return services;
     }
 }
