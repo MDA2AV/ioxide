@@ -8,7 +8,7 @@
     <RootNamespace>ioxide.ngtcp2</RootNamespace>
 
     <PackageId>ioxide.ngtcp2</PackageId>
-    <Version>0.13.225</Version>
+    <Version>0.13.233</Version>
     <Authors>MDA2AV</Authors>
     <Description>QUIC engine for the ioxide io_uring runtime: ngtcp2 + picotls bundled as a single self-contained native library (only system dependency: libcrypto.so.3 / OpenSSL 3.x). Plugs into the reactor's QUIC transport via QuicConnection. Server side; engine bindings in progress.</Description>
     <PackageLicenseExpression>MIT</PackageLicenseExpression>

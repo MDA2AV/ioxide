@@ -8,7 +8,7 @@
     <RootNamespace>ioxide.Kestrel</RootNamespace>
 
     <PackageId>ioxide.Kestrel</PackageId>
-    <Version>0.13.225</Version>
+    <Version>0.13.233</Version>
     <Authors>MDA2AV</Authors>
     <Description>ASP.NET Core Kestrel transport backed by the ioxide io_uring runtime: one reactor (ring) per core, SO_REUSEPORT load-balanced, with Kestrel's HTTP request loop pinned to the reactor thread. Drop-in via UseIoxide().</Description>
     <PackageLicenseExpression>MIT</PackageLicenseExpression>
@@ -26,6 +26,15 @@
   <ItemGroup>
     <None Include="README.md" Pack="true" PackagePath="/" />
     <ProjectReference Include="../../ioxide/ioxide.csproj" />
+  </ItemGroup>
+
+
+  <ItemGroup>
+    <!-- .NET 11 added System.Net.Security.TlsSession (SYSLIB5007, experimental). Every file here
+         that imports both System.Net.Security and ioxide.tls then sees an ambiguous TlsSession,
+         and neither import is droppable. One alias for the project rather than one per file, so
+         a file added later cannot reintroduce it. -->
+    <Using Include="ioxide.tls.TlsSession" Alias="TlsSession" />
   </ItemGroup>
 
 </Project>

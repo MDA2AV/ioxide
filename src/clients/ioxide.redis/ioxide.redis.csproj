@@ -8,7 +8,7 @@
     <RootNamespace>ioxide.redis</RootNamespace>
 
     <PackageId>ioxide.redis</PackageId>
-    <Version>0.13.225</Version>
+    <Version>0.13.233</Version>
     <Authors>MDA2AV</Authors>
     <Description>Redis client for the ioxide io_uring runtime: pooled ring-native connections per reactor, full RESP2 protocol, a generic command API plus typed helpers (strings, keys, hashes, lists, sets, sorted sets, pub/sub, transactions, scripting), and pipelining. Inline completion resume.</Description>
     <PackageLicenseExpression>MIT</PackageLicenseExpression>
