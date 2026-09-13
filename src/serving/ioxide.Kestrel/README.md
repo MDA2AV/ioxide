@@ -16,7 +16,17 @@ app.MapGet("/", () => "Hello, World!");
 app.Run();
 ```
 
-Options:
+Or through the service collection, for apps that wire everything up there:
+
+```csharp
+builder.Services.AddIoxideTransport();
+```
+
+The two are the same registration, so use whichever fits the app. Both evict the transport Kestrel
+already registered, which means they have to run after it - by the time `CreateBuilder` returns it
+has, so anywhere in your own code is late enough.
+
+Options, on either:
 
 ```csharp
 builder.WebHost.UseIoxide(o =>
