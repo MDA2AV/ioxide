@@ -107,9 +107,46 @@ internal static class WriterContractTests
                 "Complete threw out of a teardown that may not fail: " + outcome.Error);
         }, "Complete catches only IOException, but its commit reaches TcpConnection.GetSpan, which "
            + "throws InvalidOperationException(\"Cannot write while flush is in progress\")");
+
+        // The other half of the same two-line teardown, and the half that reached production: a
+        // handler that flushed everything it wrote leaves Complete nothing to commit, so it returns
+        // quietly and DisposeAsync's OWN flush is what meets the connection's one-flush-at-a-time
+        // guard. Reported as a websocket over TLS faulting with "FlushAsync already in progress"
+        // a few times per run (#234), where the throw escapes as a faulted connection handler.
+        //
+        // Same park as above, because the state is the same one: what differs is only that nothing
+        // is staged before the teardown.
+        runner.Test("tls writer: disposal does not throw while the connection's flush is in flight", () =>
+        {
+            (string certPath, string keyPath) = TestCert.Ensure();
+            var options = new TlsOptions { CertificatePath = certPath, KeyPath = keyPath };
+
+            var report = new TaskCompletionSource<Outcome>(TaskCreationOptions.RunContinuationsAsynchronously);
+            int port = TestServer.Start(AbandonedFlushDisposalHandler(report), r => TlsService.Start(r, options));
+
+            RequestAndStopReading(port, report.Task);
+
+            Assert.True(report.Task.Wait(TimeSpan.FromSeconds(5)),
+                "the handler never reached the disposal under test");
+
+            Outcome outcome = report.Task.Result;
+
+            // Non-vacuous in both directions: a flush genuinely still in flight, and nothing staged.
+            // Without the first there is no second flush to refuse; with the second this would be
+            // measuring the pending test above, which throws a line earlier and for another reason.
+            Assert.True(outcome.FlushPending,
+                $"no flush was in flight when the pipe was disposed: {outcome.Error}");
+            Assert.True(outcome.Staged == 0,
+                $"plaintext was staged, so Complete threw before the flush under test: {outcome.Staged} B");
+
+            Assert.True(outcome.Error.Length == 0,
+                "disposal threw against a flush the application left in flight: " + outcome.Error);
+        });
     }
 
-    /// <summary>What the handler observed at the moment it completed the writer.</summary>
+    /// <summary>
+    /// What the handler observed at the moment it completed the writer, or disposed the pipe.
+    /// </summary>
     private readonly record struct Outcome(bool FlushPending, long Staged, string Error);
 
     /// <summary>
@@ -276,6 +313,90 @@ internal static class WriterContractTests
                 {
                     // See above.
                 }
+            }
+            catch (Exception e)
+            {
+                if (reproducing)
+                {
+                    report.TrySetResult(new Outcome(false, 0,
+                        $"the reproduction broke before the disposal: {e.GetType().Name}: {e.Message}"));
+                }
+            }
+            finally
+            {
+                await ReleaseAsync(pipe, session, connection);
+            }
+        };
+
+    /// <summary>
+    /// The handler of the production report: it writes until one flush stops coming back, gives up
+    /// on it, and tears the connection down with nothing staged - so the disposal's own flush is
+    /// the only call left that can throw. Reports whether a flush was still in flight, that nothing
+    /// was staged, and whatever the disposal threw.
+    /// </summary>
+    private static Func<Reactor, TcpConnection, Task> AbandonedFlushDisposalHandler(TaskCompletionSource<Outcome> report)
+        => async (reactor, connection) =>
+        {
+            TlsSession? session = null;
+            TlsConnectionDualPipe? pipe = null;
+
+            bool reproducing = false;
+
+            try
+            {
+                session = await reactor.GetService<TlsService>()!.AcceptAsync(connection);
+                pipe = new TlsConnectionDualPipe(connection, session);
+
+                if (!await ReadHeadAsync(pipe.Input))
+                {
+                    return;
+                }
+                reproducing = true;
+
+                byte[] chunk = new byte[ParkChunkBytes];
+                Task<FlushResult>? parked = null;
+
+                for (int attempt = 0; attempt < 64 && parked is null; attempt++)
+                {
+                    pipe.Output.Write(chunk);
+                    Task<FlushResult> flush = pipe.Output.FlushAsync().AsTask();
+
+                    if (await Task.WhenAny(flush, Task.Delay(TimeSpan.FromSeconds(2))) != flush)
+                    {
+                        parked = flush;
+                    }
+                }
+
+                if (parked is null)
+                {
+                    report.TrySetResult(new Outcome(false, 0,
+                        "the peer drained 16 MB; no flush ever stayed in flight"));
+                    return;
+                }
+
+                // Deliberately nothing written here, unlike the test above: everything this handler
+                // produced went into the flush that parked, which is the shape the report describes
+                // - the application's writes were serialized and all of them were flushed.
+                long staged = pipe.Output.UnflushedBytes;
+
+                // Read on the reactor thread with nothing awaited before the disposal, so what is
+                // reported is the state the disposal actually ran against.
+                bool flushPending = !parked.IsCompleted;
+
+                TlsConnectionDualPipe disposing = pipe;
+                pipe = null;   // disposed here; the finally must not do it a second time
+
+                string error = "";
+                try
+                {
+                    await disposing.DisposeAsync();
+                }
+                catch (Exception e)
+                {
+                    error = $"{e.GetType().Name}: {e.Message}";
+                }
+
+                report.TrySetResult(new Outcome(flushPending, staged, error));
             }
             catch (Exception e)
             {

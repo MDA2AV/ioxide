@@ -99,10 +99,17 @@ public sealed class TlsConnectionDualPipe : IDuplexPipe, IAsyncDisposable
         // unflushed plaintext into the slab, and the flush carries it out. The read side's disposal
         // marks the connection closed (nothing else releases a pump parked on a quiet peer), and
         // after that a flush is a no-op - so this order is load-bearing, not stylistic.
+        //
+        // FlushIfIdleAsync rather than FlushAsync, because this flush is the connection's, not the
+        // application's. A handler that left a flush in flight - wrote, stopped waiting on a peer
+        // that was not draining, and tore down - met the one-flush-at-a-time guard here and had
+        // the InvalidOperationException come out of its teardown as a faulted connection handler
+        // (#234). There is nothing to carry out in that state anyway: the in-flight send owns the
+        // whole slab, and the write guards have refused everything since it armed.
         try
         {
             _writer.Complete();
-            await _conn.FlushAsync();
+            await _conn.FlushIfIdleAsync();
         }
         finally
         {
