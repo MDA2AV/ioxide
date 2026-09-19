@@ -185,6 +185,8 @@ public sealed unsafe partial class Reactor
                 break;
             }
 
+            NowMs = Environment.TickCount64;   // one read per batch; see Reactor.Tcp.Sweep.cs
+
             uint ready = _ring.CqReady();
             for (uint i = 0; i < ready; i++)
             {

@@ -45,4 +45,50 @@ public sealed record TcpOptions
 
     // Per-connection SPSC recv queue depth (power of two); overflow closes the connection.
     public int RecvQueueEntries { get; init; } = 64;
+
+    /// <summary>
+    /// Close a connection that has neither received nor sent anything for this long. 0 disables.
+    ///
+    /// What it defends: a peer that connects and goes quiet holds an fd, a pooled
+    /// <see cref="TcpConnection"/> with its native write slab, and a recv queue - and in
+    /// incremental mode a registered buffer ring plus a gid, which is capped, so an idle
+    /// connection at the cap converts directly into shed accepts.
+    ///
+    /// Enforced on the reactor's ticker, so the granularity is the tick (~250 ms) and a connection
+    /// closes at the first tick after its deadline rather than exactly on it.
+    /// </summary>
+    /// <remarks>
+    /// A connection with a flush in flight is NOT idle - it is sending, and
+    /// <see cref="SendTimeoutMs"/> governs it instead. Otherwise a large response to a slow peer
+    /// would be reaped for making no INBOUND progress while it was working perfectly.
+    ///
+    /// The shape to check before deploying this: a protocol that legitimately goes quiet for
+    /// longer than the timeout in both directions - an idle websocket, a long-poll - is closed by
+    /// it. Raise it past the protocol's own keep-alive interval, or set 0 and bound those
+    /// connections some other way.
+    /// </remarks>
+    public int IdleTimeoutMs { get; init; } = 60_000;
+
+    /// <summary>
+    /// Close a connection whose flush has been in flight for this long. 0 disables.
+    ///
+    /// What it defends: a peer that stops reading. Its window shuts, the socket send buffer fills,
+    /// and the SEND never completes - so <c>FlushAsync</c> parks forever, holding the connection,
+    /// its slab and the handler's state. TCP will not end it either: a zero window is legitimate
+    /// and a peer can hold one indefinitely. Nothing else in the stack bounds this.
+    /// </summary>
+    /// <remarks>
+    /// This is the deadline for the WHOLE flush, not for progress within it, because MSG_WAITALL
+    /// (the default - see <see cref="TcpConnection.SendOpFlags"/>) coalesces a flush into a single
+    /// completion: there is no per-chunk signal to measure progress against. So set it against the
+    /// slowest legitimate full response, not against a stall - a large body over a slow link is
+    /// the false positive to watch for.
+    ///
+    /// It is deliberately not folded into <see cref="IdleTimeoutMs"/>: a peer that keeps SENDING
+    /// while it has stopped READING refreshes the idle stamp on every inbound completion, so an
+    /// idle sweep never fires while that connection's send is wedged. Duplex protocols - a
+    /// websocket written from a background task is the reported case - need this clock and are not
+    /// covered by the other one.
+    /// </remarks>
+    public int SendTimeoutMs { get; init; } = 60_000;
 }

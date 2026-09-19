@@ -18,6 +18,24 @@ public sealed unsafe partial class TcpConnection : IValueTaskSource
     private int _flushArmed;
     private int _flushInProgress;
 
+    /// <summary>
+    /// The reactor's cached clock at the moment a flush was handed over, read by the sweep against
+    /// <see cref="TcpOptions.SendTimeoutMs"/>.
+    ///
+    /// Only meaningful while <see cref="FlushOutstanding"/> - it is written on every arm and never
+    /// cleared, because clearing it would put a store on CompleteFlush, which is the hottest path
+    /// in the server, to maintain a value nothing reads in that state.
+    /// </summary>
+    internal long FlushArmedMs;
+
+    /// <summary>
+    /// Whether a flush is outstanding - which is what tells the reactor's sweep that this
+    /// connection is sending rather than idle, so the send clock governs it and the idle one does
+    /// not. Read rather than <see cref="FlushArmedMs"/> being non-zero, so the stamp never has to
+    /// double as a flag.
+    /// </summary>
+    internal bool FlushOutstanding => Volatile.Read(ref _flushInProgress) != 0;
+
     public ValueTask FlushAsync()
     {
         if (Volatile.Read(ref _closed) == 1)
@@ -123,6 +141,7 @@ public sealed unsafe partial class TcpConnection : IValueTaskSource
 
         _flushSignal.Reset();
         WriteInFlight = target;
+        Volatile.Write(ref FlushArmedMs, _reactor.NowMs);
 
         // A segmented response that spilled past the primary slab is gathered into one SENDMSG.
         _flushVectored = _inOverflow;

@@ -38,6 +38,7 @@ public sealed unsafe partial class Reactor
             return;
         }
         conn.WriteHead += res;
+        conn.LastActivityMs = NowMs;
 
         // A zero-copy send posts its data CQE with F_MORE and a notif will follow; hold the slab until
         // that notif arrives. Plain SEND never sets F_MORE, so this is a no-op for it.

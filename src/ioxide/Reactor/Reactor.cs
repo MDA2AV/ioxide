@@ -129,6 +129,8 @@ public sealed unsafe partial class Reactor
         _incRecvBufferSize = (uint)inc.RecvBufferSize;
         _pool = new Stack<TcpConnection>(_tcp.PoolMax);
         _zeroCopySend = _tcp.ZeroCopySend;
+        _idleTimeoutMs = _tcp.IdleTimeoutMs;
+        _sendTimeoutMs = _tcp.SendTimeoutMs;
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]

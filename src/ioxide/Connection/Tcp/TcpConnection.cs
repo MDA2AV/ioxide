@@ -13,6 +13,24 @@ public sealed unsafe partial class TcpConnection
     public ushort ListenerPort { get; internal set; }
 
     /// <summary>
+    /// Environment.TickCount64 at the last completion this connection saw in either direction -
+    /// stamped at accept and on every recv and send completion, read by the reactor's sweep
+    /// (Reactor.Tcp.Sweep.cs) against <see cref="TcpOptions.IdleTimeoutMs"/>.
+    /// </summary>
+    /// <remarks>
+    /// A coarse tick rather than a precise clock on purpose: the sweep runs at ~250 ms and the
+    /// timeouts it serves are second-scale, so the cheapest read that cannot fall back is enough.
+    /// Reactor thread only, like the rest of the connection.
+    /// </remarks>
+    internal long LastActivityMs;
+
+    /// <summary>
+    /// Set once the sweep has shut this connection down, so the next tick skips it instead of
+    /// re-issuing shutdown() every 250 ms until the teardown completions land.
+    /// </summary>
+    internal bool SweepClosed;
+
+    /// <summary>
     /// Whether this connection sends with SEND_ZC (zero-copy). Bound at accept from
     /// <see cref="TcpOptions.ZeroCopySend"/>; kTLS forces it back to plain via the
     /// <see cref="SendOpFlags"/> setter. The reactor branches on this bool per send instead of
@@ -124,6 +142,9 @@ public sealed unsafe partial class TcpConnection
         Volatile.Write(ref _closed, 0);
         Volatile.Write(ref _flushArmed, 0);
         Volatile.Write(ref _flushInProgress, 0);
+        Volatile.Write(ref FlushArmedMs, 0);
+        LastActivityMs = _reactor.NowMs;
+        SweepClosed = false;
 
         WriteHead = 0;
         WriteTail = 0;

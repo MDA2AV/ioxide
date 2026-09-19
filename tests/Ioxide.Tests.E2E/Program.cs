@@ -15,6 +15,7 @@ internal static class Program
         TimerTests.Register(runner);
         AffinityTests.Register(runner);
         HardeningTests.Register(runner);
+        TcpTimeoutTests.Register(runner);
         UdpTests.Register(runner);
         QuicTests.Register(runner);
         QuicEngineTests.Register(runner);

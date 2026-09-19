@@ -16,6 +16,9 @@ public static unsafe partial class Native {
     public const int SO_RCVBUF    = 8;
     public const int SO_REUSEPORT = 15;
 
+    /// <summary>shutdown(2) how: both directions.</summary>
+    public const int SHUT_RDWR    = 2;
+
     public const int AF_INET6     = 10;
     public const int IPPROTO_IPV6 = 41;
     public const int IPV6_V6ONLY  = 26;
@@ -27,6 +30,9 @@ public static unsafe partial class Native {
     /// bind to port 0 (QUIC client sockets take an ephemeral port).
     [DllImport("libc")] public static extern int getsockname(int fd, void* addr, uint* len);
     [DllImport("libc")] public static extern int listen(int fd, int backlog);
+    /// End a connection at the socket: the peer gets a FIN and any outstanding io_uring recv or
+    /// send completes, which is what releases a connection the reactor still holds a ref to.
+    [DllImport("libc")] public static extern int shutdown(int fd, int how);
     [DllImport("libc")] public static extern int setsockopt(int fd, int level, int optname, void* optval, uint optlen);
     [DllImport("libc")] public static extern int getsockopt(int fd, int level, int optname, void* optval, uint* optlen);
 

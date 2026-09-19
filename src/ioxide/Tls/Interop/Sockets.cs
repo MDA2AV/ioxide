@@ -1,15 +1,8 @@
-using System.Runtime.InteropServices;
-
 namespace ioxide.tls;
 
 /// <summary>The one socket call the TLS module needs that is not about TLS itself.</summary>
-internal static partial class Sockets
+internal static class Sockets
 {
-    private const int SHUT_RDWR = 2;
-
-    [LibraryImport("libc", SetLastError = true)]
-    private static partial int shutdown(int fd, int how);
-
     /// <summary>
     /// Ends a connection at the socket, so the peer gets a FIN and any outstanding io_uring recv
     /// completes with EOF - which is what actually releases a connection the reactor is still
@@ -24,7 +17,7 @@ internal static partial class Sockets
     {
         if (fd >= 0)
         {
-            _ = shutdown(fd, SHUT_RDWR);
+            _ = Native.shutdown(fd, Native.SHUT_RDWR);
         }
     }
 }
