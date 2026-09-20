@@ -53,10 +53,20 @@ public sealed unsafe partial class Reactor
 
         StartTicker();
 
-        if (_incremental) LoopIncremental();
-        else LoopSharedRing();
-
-        Teardown();
+        // Teardown in a finally, not after the loop: anything thrown out of the loop - a fatal
+        // io_uring_enter, GetSqeOrFlush giving up on a full SQ, a handler fault that escapes -
+        // otherwise skipped it and leaked the ring fd, both mmaps, the eventfd and the buffer slab.
+        // Ring memory is charged against RLIMIT_MEMLOCK, so leaking rings is how a long-lived host
+        // eventually cannot create any.
+        try
+        {
+            if (_incremental) LoopIncremental();
+            else LoopSharedRing();
+        }
+        finally
+        {
+            Teardown();
+        }
     }
 
     // Record the owning thread (off-reactor callers detect themselves and go through the handoff

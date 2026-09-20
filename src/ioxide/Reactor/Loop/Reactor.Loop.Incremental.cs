@@ -177,12 +177,21 @@ public sealed unsafe partial class Reactor
             RearmStarvedRecvs();
             QuicFireDueTimers();
 
+            // These three are the transient ones and the loop simply carries on: EINTR is a signal,
+            // EAGAIN is the kernel short of resources, EBUSY means overflow entries could not be
+            // flushed - and the fall-through below drains the CQ, which is exactly what EBUSY wants.
+            // Until #220 this comparison could never match, because the wrapper returned -1 for
+            // every failure, so the first signal delivered to a reactor thread ended it.
+            //
+            // Anything else is a lifecycle or programming error (EBADF, EINVAL, ENXIO on a dying
+            // ring). Throwing rather than breaking, because a reactor that vanishes while the
+            // process keeps reporting healthy is the worst of both: Run's finally tears the ring
+            // down and the exception reaches whoever started the thread.
             int rc = _ring.SubmitAndWait(1);
             if (rc < 0 && rc != -EINTR && rc != -EAGAIN && rc != -EBUSY)
             {
-                Console.Error.WriteLine($"[r{_id}] io_uring_enter failed: {rc}");
-
-                break;
+                throw new InvalidOperationException(
+                    $"[r{_id}] io_uring_enter failed with errno {-rc}; this reactor cannot continue");
             }
 
             NowMs = Environment.TickCount64;   // one read per batch; see Reactor.Tcp.Sweep.cs

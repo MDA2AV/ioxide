@@ -69,26 +69,43 @@ public static unsafe partial class Native {
     public const uint   IORING_SETUP_NO_SQARRAY    = 1u << 16;
 
     public const int EINVAL = 22;
+    public const int ENOMEM = 12;
 
     public const int PROT_READ    = 1;
     public const int PROT_WRITE   = 2;
     public const int MAP_SHARED   = 1;
     public const int MAP_POPULATE = 0x8000;
 
-    [DllImport("libc", EntryPoint = "syscall")]
+    // All three go through glibc's syscall(), which reports failure as -1 with the code in errno -
+    // it never returns -errno. So every one of them needs SetLastError, and the wrappers below
+    // normalise to liburing's convention: a negative errno, which is what every caller compares
+    // against. Two of these were declared without it (#220), which made three branches dead code:
+    // Ring.Create's fallback for kernels without IORING_SETUP_NO_SQARRAY, and the EINTR/EAGAIN/EBUSY
+    // tolerance in both reactor loops - so one signal delivered to a reactor thread ended it.
+    [DllImport("libc", EntryPoint = "syscall", SetLastError = true)]
     private static extern long syscall3(long nr, uint a1, IoUringParams* a2);
 
-    [DllImport("libc", EntryPoint = "syscall")]
+    [DllImport("libc", EntryPoint = "syscall", SetLastError = true)]
     private static extern long syscall6(long nr, uint a1, uint a2, uint a3, uint a4, void* a5, nuint a6);
 
     [DllImport("libc", EntryPoint = "syscall", SetLastError = true)]
     private static extern long syscall4(long nr, uint a1, uint a2, void* a3, uint a4);
 
-    public static int io_uring_setup(uint entries, IoUringParams* p) =>
-        (int)syscall3(SYS_IO_URING_SETUP, entries, p);
+    // Test the long before narrowing: a successful io_uring_enter returns a submission count, and
+    // errno is only meaningful on the failure branch.
+    public static int io_uring_setup(uint entries, IoUringParams* p)
+    {
+        long rc = syscall3(SYS_IO_URING_SETUP, entries, p);
 
-    public static int io_uring_enter(int fd, uint toSubmit, uint minComplete, uint flags) =>
-        (int)syscall6(SYS_IO_URING_ENTER, (uint)fd, toSubmit, minComplete, flags, null, 0);
+        return rc < 0 ? -Marshal.GetLastPInvokeError() : (int)rc;
+    }
+
+    public static int io_uring_enter(int fd, uint toSubmit, uint minComplete, uint flags)
+    {
+        long rc = syscall6(SYS_IO_URING_ENTER, (uint)fd, toSubmit, minComplete, flags, null, 0);
+
+        return rc < 0 ? -Marshal.GetLastPInvokeError() : (int)rc;
+    }
 
     public static int io_uring_register(int fd, uint opcode, void* arg, uint nrArgs) =>
         (int)syscall4(SYS_IO_URING_REGISTER, (uint)fd, opcode, arg, nrArgs);
