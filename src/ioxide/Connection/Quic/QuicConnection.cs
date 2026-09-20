@@ -8,7 +8,7 @@ namespace ioxide;
 /// <summary>
 /// A logical QUIC connection tracked by the transport's CID demux. The QUIC engine binding
 /// (ngtcp2/quicly - the sans-I/O protocol state machine) subclasses this: datagrams routed by
-/// DCID arrive via <see cref="OnDatagram"/>, replies leave via <see cref="Send"/>, and the timer
+/// DCID arrive via <see cref="OnDatagram(System.ReadOnlySpan{byte}, byte)"/>, replies leave via <see cref="Send"/>, and the timer
 /// sweep drives loss/handshake deadlines. All members run on the owning reactor thread unless
 /// noted - the read surface below is the exception, built for a handler on any thread.
 ///

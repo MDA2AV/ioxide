@@ -16,7 +16,7 @@ namespace ioxide.httpclient;
 /// </code>
 /// </summary>
 /// <remarks>
-/// This is the client mirror of <see cref="TlsService"/>. It deliberately does NOT use kTLS: the
+/// This is the client mirror of <see cref="ioxide.tls.TlsService"/>. It deliberately does NOT use kTLS: the
 /// offload there is a server-side trick tied to capturing the traffic secret from the keylog
 /// callback and handing transmit to the kernel, which pays off for big responses. A client sends
 /// small requests and reads whatever it is given, so both directions stay in userspace.

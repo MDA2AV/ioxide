@@ -6,14 +6,14 @@ namespace ioxide.ngtcp2;
 
 /// <summary>
 /// A live ngtcp2 server connection, bridging the reactor's QUIC transport to the native engine.
-/// Datagrams routed by CID arrive at <see cref="OnDatagram"/> and are fed to ngtcp2; the engine's
+/// Datagrams routed by CID arrive at <see cref="OnDatagram(System.ReadOnlySpan{byte}, byte)"/> and are fed to ngtcp2; the engine's
 /// output is flushed back through the transport's <c>Send</c>; loss/idle deadlines ride the reactor
 /// ticker via <see cref="GetNextTimeout"/> / <see cref="OnTimer"/>. Everything runs on the owning
 /// reactor thread, so the whole connection - transport half and engine half - is single-threaded.
 ///
 /// Application bytes flow through the read surface on <see cref="QuicConnection"/>: each decrypted
 /// stream event is copied into the recv queue during iq_conn_read, and the IVTS fires ONCE after
-/// the read returns, so the resumed handler (see <see cref="QuicOptions.Handle"/>) can never
+/// the read returns, so the resumed handler (see <see cref="Reactor.QuicHandle"/>) can never
 /// re-enter the engine mid-read. Replies go out via <see cref="SendStream"/>.
 /// </summary>
 public unsafe partial class QuicEngineConnection : QuicConnection

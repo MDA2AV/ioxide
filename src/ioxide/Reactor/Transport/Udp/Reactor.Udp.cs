@@ -23,7 +23,7 @@ public sealed unsafe partial class Reactor
     private static int _udpBufferClampReported;
 
     /// <summary>
-    /// Per-datagram handler, invoked inline on the reactor thread. Like the TCP <see cref="Handle"/>,
+    /// Per-datagram handler, invoked inline on the reactor thread. Like the TCP <see cref="Reactor.TcpHandle"/>,
     /// set it before <see cref="Run"/>.
     /// </summary>
     public UdpDatagramHandler? OnDatagram;
