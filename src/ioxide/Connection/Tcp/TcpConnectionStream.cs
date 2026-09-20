@@ -62,6 +62,26 @@ public sealed class TcpConnectionStream : Stream, IValueTaskSource<int>, IValueT
     /// Give back the slice still being copied out, if there is one. Idempotent - clearing
     /// <c>_haveCur</c> is what makes a second call, from recycle after a normal drain, a no-op.
     /// </summary>
+    /// <summary>
+    /// Returns the slice still being copied out, so a disposed stream does not hold ring memory
+    /// until its connection is recycled.
+    /// </summary>
+    /// <remarks>
+    /// This type inherited <see cref="Stream"/>'s do-nothing Dispose, which made the idiomatic
+    /// spelling silently wrong: <c>new SslStream(new TcpConnectionStream(conn), leaveInnerStreamOpen:
+    /// false)</c> disposes this on the way out - Playground/Tls/SslStream and Playground/Http2/SslStream
+    /// both do exactly that - and the held buffer stayed held anyway. An aborted handshake or a
+    /// truncated record leaves one, which on a TLS listener is routine rather than exceptional.
+    ///
+    /// The reactor still reclaims at recycle (<see cref="IRecvBufferHolder"/>); this is the prompt
+    /// path, and the release is idempotent, so the later reclaim finds nothing and does nothing.
+    /// </remarks>
+    protected override void Dispose(bool disposing)
+    {
+        ((IRecvBufferHolder)this).ReleaseHeldBuffers();
+        base.Dispose(disposing);
+    }
+
     void IRecvBufferHolder.ReleaseHeldBuffers()
     {
         // Terminal, like the reader's. _haveSnap otherwise survives with the PREVIOUS life's tail,

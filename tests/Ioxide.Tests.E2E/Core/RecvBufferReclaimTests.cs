@@ -186,6 +186,81 @@ internal static class RecvBufferReclaimTests
             Assert.Equal(Connections, DriveConnections(port, request: "xxxxxxxx"u8.ToArray()));
         });
 
+        runner.Test("recv buffers: disposing a stream returns its buffer without waiting for recycle", () =>
+        {
+            // Recycle cannot help here: one connection, held open for the whole run, so the reclaim
+            // never fires. The only thing that can give a buffer back is Dispose - which this type
+            // inherited from Stream as a no-op, making the idiomatic
+            // `new SslStream(stream, leaveInnerStreamOpen: false)` silently fail to return anything.
+            // A fresh stream per round, each reading one byte of eight and leaving the rest held.
+            var report = new TaskCompletionSource<int>(TaskCreationOptions.RunContinuationsAsynchronously);
+
+            int port = TestServer.StartConfigured(async (_, conn) =>
+            {
+                int served = 0;
+                try
+                {
+                    for (int i = 0; i < Connections; i++)
+                    {
+                        var stream = new TcpConnectionStream(conn);
+
+                        var one = new byte[1];
+                        if (await stream.ReadAsync(one) <= 0)
+                        {
+                            break;
+                        }
+
+                        stream.Dispose();   // returns the slice, with seven bytes still unread in it
+
+                        // A stream abandoned mid-snapshot never drains it, so the connection's read
+                        // signal is still armed from that read; the next stream needs it re-armed.
+                        conn.ResetRead();
+
+                        conn.Write("."u8);
+                        await conn.FlushAsync();
+                        served++;
+                    }
+                }
+                catch (Exception)
+                {
+                    // Reported as a short count.
+                }
+                finally
+                {
+                    report.TrySetResult(served);
+                    conn.DecRef();
+                }
+            }, SmallGroup()).Port;
+
+            using var client = new TcpClient();
+            client.Connect("127.0.0.1", port);
+            client.ReceiveTimeout = 2_000;
+            NetworkStream io = client.GetStream();
+
+            int answered = 0;
+            for (int i = 0; i < Connections; i++)
+            {
+                try
+                {
+                    io.Write("xxxxxxxx"u8);
+
+                    var reply = new byte[1];
+                    if (io.Read(reply, 0, 1) != 1)
+                    {
+                        break;
+                    }
+                    answered++;
+                }
+                catch (Exception)
+                {
+                    break;   // the group is empty and this connection can no longer be read from
+                }
+            }
+
+            // Many times the slot count, on ONE connection that never recycled.
+            Assert.Equal(Connections, answered);
+        });
+
         runner.Test("recv buffers: completing the reader returns them, with or without reclaim", () =>
         {
             // The control. Same shape, same tiny group, but the handler completes its reader - the
