@@ -8,7 +8,7 @@
     <RootNamespace>ioxide.Kestrel</RootNamespace>
 
     <PackageId>ioxide.Kestrel</PackageId>
-    <Version>0.13.233</Version>
+    <Version>0.14.236</Version>
     <Authors>MDA2AV</Authors>
     <Description>ASP.NET Core Kestrel transport backed by the ioxide io_uring runtime: one reactor (ring) per core, SO_REUSEPORT load-balanced, with Kestrel's HTTP request loop pinned to the reactor thread. Drop-in via UseIoxide().</Description>
     <PackageLicenseExpression>MIT</PackageLicenseExpression>
