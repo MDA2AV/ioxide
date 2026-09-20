@@ -298,18 +298,11 @@ public sealed unsafe class TcpConnectionPipeReader : PipeReader, IValueTaskSourc
     /// </remarks>
     private void ReleaseHeld()
     {
-        // Deliberately does NOT de-register. Completing while a read is still parked used to null
-        // the slot and leave the awaiter armed, so the next recv CQE resumed OnRecvReady, ingested
-        // into this reader, and left those buffers with nobody registered to reclaim them - the
-        // original leak, reintroduced by the fix for it. It is also the shape
-        // TlsConnectionDualPipe.DisposeAsync produces on the kTLS RX column, and the shape a
-        // read-timeout handler produces, since CancelPendingRead only sets a flag and never wakes a
-        // parked read. Staying registered costs one reference until Clear() drops it, and keeps the
-        // invariant at "the last holder constructed in this life, cleared per life".
+        // Does NOT de-register: completing leaves a parked read armed, so items can still be
+        // ingested after this runs and the holder has to stay reachable. Clear() drops the slot.
         //
-        // Terminal, on both paths. Without this a reader kept past its handler still reads as open,
-        // and its next ReadAsync would arm against the recycled connection's NEXT tenant and hand
-        // out another peer's bytes.
+        // Terminal, so a reader kept past its handler fails instead of arming against the recycled
+        // connection's NEXT tenant and handing out another peer's bytes.
         _completed = true;
         _connectionClosed = true;
         _lastSequence = default;

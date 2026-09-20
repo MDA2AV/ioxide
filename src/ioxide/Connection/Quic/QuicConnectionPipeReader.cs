@@ -19,7 +19,7 @@ namespace ioxide;
 /// Fin, Closed or Reset on the bound stream (or connection close) completes the reader; StopSending
 /// only concerns the write side and is ignored here.
 /// </summary>
-public sealed class QuicConnectionPipeReader : PipeReader, IValueTaskSource<ReadResult>
+public sealed class QuicConnectionPipeReader : PipeReader, IValueTaskSource<ReadResult>, IRecvBufferHolder
 {
     // One pooled object per held item: sequence segment over the item's pooled array plus the
     // original item (needed to return the buffer).
@@ -80,6 +80,9 @@ public sealed class QuicConnectionPipeReader : PipeReader, IValueTaskSource<Read
     {
         _conn = connection ?? throw new ArgumentNullException(nameof(connection));
         _binding = binding;
+
+        // So the connection can reclaim at teardown what this reader dequeued and never gave back.
+        _conn.BufferHolder = this;
         _onRecvReady = OnRecvReady;
     }
 
@@ -315,6 +318,28 @@ public sealed class QuicConnectionPipeReader : PipeReader, IValueTaskSource<Read
         }
 
         _completed = true;
+
+        ReleaseHeld();
+    }
+
+    void IRecvBufferHolder.ReleaseHeldBuffers() => ReleaseHeld();
+
+    /// <summary>
+    /// Hand every held item's pooled buffer back and forget the chain.
+    /// </summary>
+    /// <remarks>
+    /// Called by <see cref="Complete"/> and by the connection at teardown
+    /// (<see cref="QuicConnection.ReleaseHeldRecvBuffers"/>). Idempotent: the second walk finds an
+    /// empty chain, so each item is returned exactly once however the two are ordered.
+    ///
+    /// Does not de-register and ends terminal, for the reasons on
+    /// <see cref="TcpConnectionPipeReader"/>.
+    /// </remarks>
+    private void ReleaseHeld()
+    {
+        _completed = true;
+        _ended = true;
+        _lastSequence = default;
 
         while (_head != null)
         {

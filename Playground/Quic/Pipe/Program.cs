@@ -90,19 +90,29 @@ for (int id = 0; id < threads.Length; id++)
     {
         var pipe = new QuicConnectionDualPipe(conn);
 
-        while (true)
+        try
         {
-            ReadResult result = await pipe.Input.ReadAsync();
-            ReadOnlySequence<byte> buffer = result.Buffer;
-
-            foreach (ReadOnlyMemory<byte> segment in buffer)
+            while (true)
             {
-                await pipe.Output.WriteAsync(segment);
+                ReadResult result = await pipe.Input.ReadAsync();
+                ReadOnlySequence<byte> buffer = result.Buffer;
+
+                foreach (ReadOnlyMemory<byte> segment in buffer)
+                {
+                    await pipe.Output.WriteAsync(segment);
+                }
+
+                pipe.Input.AdvanceTo(buffer.End);
+
+                if (result.IsCompleted) return;
             }
-
-            pipe.Input.AdvanceTo(buffer.End);
-
-            if (result.IsCompleted) return;
+        }
+        finally
+        {
+            // The handler owns a ref on the connection - without this it never reaches zero and the
+            // connection is never torn down. Completing the reader hands back what it still holds.
+            pipe.Input.Complete();
+            conn.DecRef();
         }
     };
 
