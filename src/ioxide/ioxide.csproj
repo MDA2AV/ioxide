@@ -8,7 +8,7 @@
     <RootNamespace>ioxide</RootNamespace>
 
     <PackageId>ioxide</PackageId>
-    <Version>0.14.236</Version>
+    <Version>0.14.239</Version>
     <Authors>MDA2AV</Authors>
     <Description>A shared-nothing io_uring runtime for .NET: one ring per reactor thread, inline completions, zero native dependencies. The engine - reactor, connection, and the IRingHost client seam. Includes TLS termination: the OpenSSL handshake driven over the ring, then kernel TLS (kTLS) transmit offload, so handlers keep writing plaintext. TLS needs OpenSSL 3 and the Linux tls module; nothing else does, and neither is loaded unless you use it.</Description>
     <PackageLicenseExpression>MIT</PackageLicenseExpression>

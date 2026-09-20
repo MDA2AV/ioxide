@@ -8,7 +8,7 @@
     <RootNamespace>ioxide.pg</RootNamespace>
 
     <PackageId>ioxide.pg</PackageId>
-    <Version>0.14.236</Version>
+    <Version>0.14.239</Version>
     <Authors>MDA2AV</Authors>
     <Description>Postgres driver for the ioxide io_uring runtime: pooled ring-native connections per reactor, ring-native connect and handshake, inline completion resume.</Description>
     <PackageLicenseExpression>MIT</PackageLicenseExpression>
