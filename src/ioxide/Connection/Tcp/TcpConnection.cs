@@ -13,6 +13,38 @@ public sealed unsafe partial class TcpConnection
     public ushort ListenerPort { get; internal set; }
 
     /// <summary>
+    /// The reader currently holding recv buffers taken out of this connection's queue, if any.
+    /// </summary>
+    /// <remarks>
+    /// <see cref="TryGetItem"/> is a DEQUEUE: the moment a buffer is handed to a reader, the
+    /// connection's queue no longer has it, so <see cref="DrainRecv"/> at recycle walks past it and
+    /// the buffer comes back only if the reader is completed. Nothing enforced that - the plaintext
+    /// <see cref="TcpConnectionDualPipe"/> has no disposal, unlike the TLS one - so a handler that
+    /// returned early stranded a buffer per connection, and in shared mode those are slots out of
+    /// the one group the whole reactor draws from.
+    ///
+    /// One reference, assigned once when a holder is constructed. Recycle asks it back through
+    /// <see cref="ReleaseHeldRecvBuffers"/>, so the leak cannot depend on the caller remembering.
+    /// </remarks>
+    internal IRecvBufferHolder? BufferHolder;
+
+    /// <summary>
+    /// Hand back whatever a holder is still holding, before the buffers stop being reachable.
+    /// Called from the reactor's recycle; a no-op when the holder completed normally, which is the
+    /// common path.
+    /// </summary>
+    /// <remarks>
+    /// The slot is claimed rather than read so the reclaim runs at most once, which is all this
+    /// buys: the holder still walks its own chain on <c>Complete</c>, so it does not by itself make
+    /// a double return impossible. What rules that out is the refcount protocol - recycle runs at
+    /// refcount zero, so a conforming handler has finished with the connection before this is
+    /// reached, exactly as everywhere else that touches it. A handler that DecRefs and then keeps
+    /// using its reader is racing the reactor over the connection generally, not only here.
+    /// </remarks>
+    internal void ReleaseHeldRecvBuffers()
+        => Interlocked.Exchange(ref BufferHolder, null)?.ReleaseHeldBuffers();
+
+    /// <summary>
     /// Environment.TickCount64 at the last completion this connection saw in either direction -
     /// stamped at accept and on every recv and send completion, read by the reactor's sweep
     /// (Reactor.Tcp.Sweep.cs) against <see cref="TcpOptions.IdleTimeoutMs"/>.
@@ -170,6 +202,7 @@ public sealed unsafe partial class TcpConnection
         _flushSignal.Reset();
 
         _recv.Reset();
+        BufferHolder = null;
         Volatile.Write(ref _handlerRefReleased, 0);
         IncrementalMode = false;
         SendOpFlags = 0x100;   // MSG_WAITALL; a kTLS connection re-sets this per handshake

@@ -13,7 +13,7 @@ namespace ioxide;
 /// chain's front. Honors <c>examined</c>: when everything held has been examined, ReadAsync waits
 /// for new bytes instead of returning the same data again.
 /// </summary>
-public sealed unsafe class TcpConnectionPipeReader : PipeReader, IValueTaskSource<ReadResult>
+public sealed unsafe class TcpConnectionPipeReader : PipeReader, IValueTaskSource<ReadResult>, IRecvBufferHolder
 {
     // One pooled object per held recv slice: sequence segment + reusable memory
     // manager + the original ring item (needed to return the buffer).
@@ -70,6 +70,9 @@ public sealed unsafe class TcpConnectionPipeReader : PipeReader, IValueTaskSourc
     {
         _conn = connection ?? throw new ArgumentNullException(nameof(connection));
         _onRecvReady = OnRecvReady;
+
+        // So the reactor can reclaim at recycle what this reader dequeued and never gave back.
+        _conn.BufferHolder = this;
     }
 
     public override ValueTask<ReadResult> ReadAsync(CancellationToken cancellationToken = default)
@@ -280,6 +283,41 @@ public sealed unsafe class TcpConnectionPipeReader : PipeReader, IValueTaskSourc
         }
 
         _completed = true;
+
+        ReleaseHeld();
+    }
+
+    void IRecvBufferHolder.ReleaseHeldBuffers() => ReleaseHeld();
+
+    /// <summary>
+    /// Hand every held slice's buffer back to the ring and forget the chain.
+    /// </summary>
+    /// <remarks>
+    /// Called by <see cref="Complete"/>, and by the reactor at recycle for a reader whose caller
+    /// never completed it (<see cref="TcpConnection.ReleaseHeldRecvBuffers"/>). Idempotent: once the
+    /// chain is empty it does nothing, so the ordinary path of Complete-then-recycle returns each
+    /// buffer exactly once.
+    /// </remarks>
+    private void ReleaseHeld()
+    {
+        // Deliberately does NOT de-register. Completing while a read is still parked used to null
+        // the slot and leave the awaiter armed, so the next recv CQE resumed OnRecvReady, ingested
+        // into this reader, and left those buffers with nobody registered to reclaim them - the
+        // original leak, reintroduced by the fix for it. It is also the shape
+        // TlsConnectionDualPipe.DisposeAsync produces on the kTLS RX column, and the shape a
+        // read-timeout handler produces, since CancelPendingRead only sets a flag and never wakes a
+        // parked read.
+        //
+        // Staying registered costs one reference on a pooled connection until Clear() drops it, and
+        // makes the invariant simply "the last holder constructed in this life, cleared per life".
+        // Releasing twice is free because the chain is empty the second time.
+        //
+        // Terminal, on both paths. Without this a reader kept past its handler still reads as open,
+        // and its next ReadAsync would arm against the recycled connection's NEXT tenant and hand
+        // out another peer's bytes. Failing loudly beats that.
+        _completed = true;
+        _connectionClosed = true;
+        _lastSequence = default;
 
         while (_head != null)
         {

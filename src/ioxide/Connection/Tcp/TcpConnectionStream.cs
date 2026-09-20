@@ -13,7 +13,7 @@ namespace ioxide;
 /// the <see cref="Stream"/> contract forces is a copy into the caller's buffer (the raw API and
 /// the pipe adapter expose ring memory directly). Single reader, single writer, reactor-thread.
 /// </summary>
-public sealed class TcpConnectionStream : Stream, IValueTaskSource<int>, IValueTaskSource
+public sealed class TcpConnectionStream : Stream, IValueTaskSource<int>, IValueTaskSource, IRecvBufferHolder
 {
     private readonly TcpConnection _conn;
 
@@ -38,6 +38,12 @@ public sealed class TcpConnectionStream : Stream, IValueTaskSource<int>, IValueT
     public TcpConnectionStream(TcpConnection connection)
     {
         _conn = connection ?? throw new ArgumentNullException(nameof(connection));
+
+        // The slice being copied out is held across calls and returned only once drained, so a
+        // caller that stops mid-buffer strands it - and this type has no disposal of its own. The
+        // SslStream samples are exactly that shape: an aborted handshake or a truncated record
+        // leaves _cur held. Registering lets the reactor reclaim it at recycle.
+        _conn.BufferHolder = this;
         _onReadReady = OnReadReady;
         _onFlushDone = OnFlushDone;
     }
@@ -50,6 +56,26 @@ public sealed class TcpConnectionStream : Stream, IValueTaskSource<int>, IValueT
     {
         get => throw new NotSupportedException();
         set => throw new NotSupportedException();
+    }
+
+    /// <summary>
+    /// Give back the slice still being copied out, if there is one. Idempotent - clearing
+    /// <c>_haveCur</c> is what makes a second call, from recycle after a normal drain, a no-op.
+    /// </summary>
+    void IRecvBufferHolder.ReleaseHeldBuffers()
+    {
+        // Terminal, like the reader's. _haveSnap otherwise survives with the PREVIOUS life's tail,
+        // and SpscRecvRing.Reset only moves head/tail without clearing the items - so a read after
+        // recycle would dequeue a stale entry, copy out another tenant's bytes, and on draining it
+        // return a buffer id the group already holds.
+        _haveSnap = false;
+        _eof = true;
+
+        if (_haveCur)
+        {
+            _haveCur = false;
+            _conn.ReturnBuffer(in _cur);
+        }
     }
 
     // -1 = nothing buffered, caller must await a fresh snapshot; >= 0 = bytes produced (0 = EOF).
