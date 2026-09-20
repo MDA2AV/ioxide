@@ -13,7 +13,7 @@ namespace ioxide;
 /// chain's front. Honors <c>examined</c>: when everything held has been examined, ReadAsync waits
 /// for new bytes instead of returning the same data again.
 /// </summary>
-public sealed unsafe class TcpConnectionPipeReader : PipeReader, IValueTaskSource<ReadResult>
+public sealed unsafe class TcpConnectionPipeReader : PipeReader, IValueTaskSource<ReadResult>, IRecvBufferHolder
 {
     // One pooled object per held recv slice: sequence segment + reusable memory
     // manager + the original ring item (needed to return the buffer).
@@ -70,6 +70,9 @@ public sealed unsafe class TcpConnectionPipeReader : PipeReader, IValueTaskSourc
     {
         _conn = connection ?? throw new ArgumentNullException(nameof(connection));
         _onRecvReady = OnRecvReady;
+
+        // So the reactor can reclaim at recycle what this reader dequeued and never gave back.
+        _conn.BufferHolder = this;
     }
 
     public override ValueTask<ReadResult> ReadAsync(CancellationToken cancellationToken = default)
@@ -221,15 +224,13 @@ public sealed unsafe class TcpConnectionPipeReader : PipeReader, IValueTaskSourc
             return;
         }
 
-        // GetOffset measures from the start *segment*, not the sequence's logical
-        // start. When the held sequence begins mid-segment (the head recv slice is
-        // partially consumed - e.g. a request whose header and body arrive in one
-        // recv: the body read advances after the header was already skipped),
-        // GetOffset over-counts by _headConsumed. Rebase by the sequence start so
-        // consumed/examined stay consistent with the relative _heldBytes/_examined
-        // counters below. Without this, _heldBytes underflows negative and the next
-        // ReadAsync parks forever waiting for bytes that already arrived (the hang
-        // seen on chunked request bodies, which read again for the terminating chunk).
+        // GetOffset measures from the start *segment*, not the sequence's logical start. When the
+        // held sequence begins mid-segment (the head recv slice is partially consumed - a request
+        // whose header and body arrive in one recv), GetOffset over-counts by _headConsumed. Rebase
+        // by the sequence start so consumed/examined stay consistent with the relative
+        // _heldBytes/_examined counters below. Without this, _heldBytes underflows negative and the
+        // next ReadAsync parks forever waiting for bytes that already arrived (the hang seen on
+        // chunked request bodies, which read again for the terminating chunk).
         long startOffset = _lastSequence.GetOffset(_lastSequence.Start);
         long consumedBytes = _lastSequence.GetOffset(consumed) - startOffset;
         long examinedBytes = _lastSequence.GetOffset(examined) - startOffset;
@@ -280,6 +281,31 @@ public sealed unsafe class TcpConnectionPipeReader : PipeReader, IValueTaskSourc
         }
 
         _completed = true;
+
+        ReleaseHeld();
+    }
+
+    void IRecvBufferHolder.ReleaseHeldBuffers() => ReleaseHeld();
+
+    /// <summary>
+    /// Hand every held slice's buffer back to the ring and forget the chain.
+    /// </summary>
+    /// <remarks>
+    /// Called by <see cref="Complete"/>, and by the reactor at recycle for a reader whose caller
+    /// never completed it (<see cref="TcpConnection.ReleaseHeldRecvBuffers"/>). Idempotent: once the
+    /// chain is empty it does nothing, so the ordinary path of Complete-then-recycle returns each
+    /// buffer exactly once.
+    /// </remarks>
+    private void ReleaseHeld()
+    {
+        // Does NOT de-register: completing leaves a parked read armed, so items can still be
+        // ingested after this runs and the holder has to stay reachable. Clear() drops the slot.
+        //
+        // Terminal, so a reader kept past its handler fails instead of arming against the recycled
+        // connection's NEXT tenant and handing out another peer's bytes.
+        _completed = true;
+        _connectionClosed = true;
+        _lastSequence = default;
 
         while (_head != null)
         {

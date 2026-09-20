@@ -18,13 +18,11 @@ public sealed partial class Nghttp3Connection
     /// Records a fault from a callback and fails the connection. Nothing may be thrown from here:
     /// native nghttp3 frames sit between these entry points and any managed caller, so an escaping
     /// exception does not fault the connection - it aborts the PROCESS, uncatchably and with no
-    /// stack. Two of these callbacks dispatch into user code, so "the body cannot throw" was never
-    /// something this file got to assume.
+    /// stack.
     ///
     /// Teardown cannot happen here either, for the same reason it could not on the QUIC side: the
     /// engine is still on the stack below. _protocolFailed is the flag the run loops already check
-    /// once the native call unwinds, and both native call sites already fail the connection through
-    /// it - the callbacks simply never fed it.
+    /// once the native call unwinds.
     /// </summary>
     private static unsafe void Fault(void* user, Exception e)
     {
@@ -39,7 +37,7 @@ public sealed partial class Nghttp3Connection
         {
             // The handler is the last frame before native code, so it is guarded too: resolving the
             // connection or formatting the message can itself throw, and that throw would be the
-            // process. If the fault cannot even be recorded, returning is all that is left.
+            // process.
         }
     }
 

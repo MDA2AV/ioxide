@@ -115,8 +115,7 @@ public sealed partial class Nghttp3Connection
             }
 
             // Before letting go, because letting go is all the transport sees: DecRef neither
-            // closes nor unregisters, so a connection dropped without a code stays routable until
-            // the idle sweep while the client waits on a request that will never be answered.
+            // closes nor unregisters.
             CloseWithPeerCode();
 
             _quicConnection.DecRef();
@@ -340,7 +339,7 @@ public sealed partial class Nghttp3Connection
         // NOT RunContinuationsAsynchronously: everything on a reactor resumes inline on the
         // reactor thread, and a parked writer is no different. Completing this runs the handler
         // to its next park right there, so the drain loop needs no scheduler round trip to let it
-        // make progress - which is the whole reason a per-chunk Task.Yield used to be here.
+        // make progress.
         var waiter = new TaskCompletionSource();
         _passWaiters.Add(waiter);
         return waiter.Task;

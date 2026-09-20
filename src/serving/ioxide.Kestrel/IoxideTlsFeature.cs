@@ -14,13 +14,10 @@ namespace ioxide.Kestrel;
 /// <see cref="IoxideConnectionContext"/> makes Kestrel treat the connection as HTTPS (scheme, IsHttps) and
 /// pick the application protocol from ALPN.
 ///
-/// These values are READ from the session rather than assumed. They used to be constants - TLS 1.3,
-/// AES-128-GCM-SHA256, no client certificate - which was true only while kTLS-TX was the default,
-/// because kTLS pins exactly those. Once kTLS became opt-in the transport negotiated whatever the
-/// options allowed, and this feature went on reporting the old pinned values to ASP.NET: a TLS 1.2
-/// or AES-256 or ChaCha20 connection was logged and policy-checked as TLS 1.3 AES-128. And with
-/// mutual TLS shipped, ClientCertificate stayed permanently null, so the standard certificate
-/// authentication handler denied every verified peer.
+/// These values are READ from the session rather than assumed. Pinned constants (TLS 1.3,
+/// AES-128-GCM-SHA256, no client certificate) held only while kTLS-TX was the default; once it became
+/// opt-in, a TLS 1.2 or ChaCha20 connection was policy-checked as TLS 1.3 AES-128, and a permanently
+/// null ClientCertificate made certificate authentication deny every verified peer.
 /// </summary>
 internal sealed class IoxideTlsFeature : ITlsConnectionFeature, ITlsHandshakeFeature, ITlsApplicationProtocolFeature
 {
@@ -34,7 +31,7 @@ internal sealed class IoxideTlsFeature : ITlsConnectionFeature, ITlsHandshakeFea
         _session = session;
     }
 
-    // ITlsApplicationProtocolFeature - the negotiated ALPN (HTTP/1.1 in Phase 1).
+    // ITlsApplicationProtocolFeature - the negotiated ALPN.
     public ReadOnlyMemory<byte> ApplicationProtocol { get; }
 
     /// <summary>
@@ -69,9 +66,9 @@ internal sealed class IoxideTlsFeature : ITlsConnectionFeature, ITlsHandshakeFea
     public Task<X509Certificate2?> GetClientCertificateAsync(CancellationToken cancellationToken)
         => Task.FromResult(ClientCertificate);
 
-    // ITlsHandshakeFeature - fixed by ioxide.tls's single TLS 1.3 ciphersuite. NegotiatedCipherSuite is the
-    // modern accessor; the legacy CipherAlgorithm/HashAlgorithm/KeyExchangeAlgorithm (+ *Strength) properties
-    // are obsolete (SYSLIB0058) but still required interface members, so implement and suppress the warning.
+    // ITlsHandshakeFeature. NegotiatedCipherSuite is the modern accessor; the legacy
+    // CipherAlgorithm/HashAlgorithm/KeyExchangeAlgorithm (+ *Strength) properties are obsolete
+    // (SYSLIB0058) but still required interface members, so implement and suppress the warning.
     public SslProtocols Protocol => _session?.NegotiatedProtocolVersion switch
     {
         0x0304 => SslProtocols.Tls13,

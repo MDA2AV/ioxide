@@ -72,7 +72,6 @@ public sealed class TlsEncryptingPipeWriter : PipeWriter
 
         if (_staged > 0)
         {
-            // Encrypt into the connection's slab, then let the ordinary send path move it.
             _tls.WriteEncrypted(_conn, _staging.AsSpan(0, _staged));
             _staged = 0;
         }

@@ -8,7 +8,7 @@ namespace ioxide;
 /// <summary>
 /// A logical QUIC connection tracked by the transport's CID demux. The QUIC engine binding
 /// (ngtcp2/quicly - the sans-I/O protocol state machine) subclasses this: datagrams routed by
-/// DCID arrive via <see cref="OnDatagram"/>, replies leave via <see cref="Send"/>, and the timer
+/// DCID arrive via <see cref="OnDatagram(System.ReadOnlySpan{byte}, byte)"/>, replies leave via <see cref="Send"/>, and the timer
 /// sweep drives loss/handshake deadlines. All members run on the owning reactor thread unless
 /// noted - the read surface below is the exception, built for a handler on any thread.
 ///
@@ -339,9 +339,30 @@ public abstract class QuicConnection : IValueTaskSource<QuicRecvSnapshot>
     {
         if (Interlocked.Decrement(ref _refs) == 0)
         {
+            // Before DrainRecv, which only sees what is still queued. Same reasoning as the TCP
+            // side: TryGetItem is a dequeue, so a reader that pulled items out holds the only
+            // record of them.
+            ReleaseHeldRecvBuffers();
             DrainRecv();
         }
     }
+
+    /// <summary>
+    /// The reader currently holding recv items taken out of this connection's queue, if any.
+    /// </summary>
+    /// <remarks>
+    /// Mirrors <see cref="TcpConnection.BufferHolder"/>, with one difference worth knowing: these
+    /// items carry pooled managed arrays (<see cref="EnqueueStreamData"/> rents a copy of the
+    /// decrypted stream event), not io_uring provided buffers. The io_uring buffer behind the
+    /// datagram is already back in its group by then. So failing to return one is allocation churn
+    /// rather than a group that empties and stops the reactor receiving - the TCP failure. Worth
+    /// fixing because renting without returning defeats the pool, not because it stalls anything.
+    /// </remarks>
+    internal IRecvBufferHolder? BufferHolder;
+
+    /// <summary>Hand back whatever a reader is still holding, before the items go out of reach.</summary>
+    internal void ReleaseHeldRecvBuffers()
+        => Interlocked.Exchange(ref BufferHolder, null)?.ReleaseHeldBuffers();
 
     /// <summary>
     /// Release the handler's ref on behalf of a handler that faulted before its own DecRef.
@@ -365,7 +386,7 @@ public abstract class QuicConnection : IValueTaskSource<QuicRecvSnapshot>
     }
 
     // --- IValueTaskSource<QuicRecvSnapshot>: token = generation snapshot; the core's own Version
-    //     is passed through for the dispatch. Same shape as the TCP source, shared with nothing. ---
+    //     is passed through for the dispatch. ---
 
     QuicRecvSnapshot IValueTaskSource<QuicRecvSnapshot>.GetResult(short token)
     {
@@ -397,10 +418,8 @@ public abstract class QuicConnection : IValueTaskSource<QuicRecvSnapshot>
             return;
         }
 
-        // This source only completes on the owning reactor thread, so the continuation already runs
-        // where ReactorSynchronizationContext would post it. Strip the scheduling-context flag or
-        // MRVTSC posts every resume to the mailbox instead of invoking it inline
-        // (RunContinuationsAsynchronously=false only covers the null-context case).
+        // Completes on the reactor thread only - strip the context-post so resumes stay inline
+        // (see ReactorSynchronizationContext).
         _readSignal.OnCompleted(continuation, state, _readSignal.Version,
             flags & ~ValueTaskSourceOnCompletedFlags.UseSchedulingContext);
     }

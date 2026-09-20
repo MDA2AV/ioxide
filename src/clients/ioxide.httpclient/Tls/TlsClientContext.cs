@@ -16,7 +16,7 @@ namespace ioxide.httpclient;
 /// </code>
 /// </summary>
 /// <remarks>
-/// This is the client mirror of <see cref="TlsService"/>. It deliberately does NOT use kTLS: the
+/// This is the client mirror of <see cref="ioxide.tls.TlsService"/>. It deliberately does NOT use kTLS: the
 /// offload there is a server-side trick tied to capturing the traffic secret from the keylog
 /// callback and handing transmit to the kernel, which pays off for big responses. A client sends
 /// small requests and reads whatever it is given, so both directions stay in userspace.
@@ -56,7 +56,7 @@ public sealed unsafe class TlsClientContext : IDisposable
         {
             // Checked, because ssl3_ctx_ctrl returns 0 for a version it will not accept and applies
             // NOTHING - silently, with no error queued. A caller pinning a floor got OpenSSL's
-            // default instead and no way to find out. The server side has always checked this.
+            // default instead and no way to find out.
             if (OpenSsl.SSL_CTX_ctrl(ctx, OpenSsl.SSL_CTRL_SET_MIN_PROTO_VERSION, options.MinimumVersion, 0) != 1)
             {
                 throw new IOException(

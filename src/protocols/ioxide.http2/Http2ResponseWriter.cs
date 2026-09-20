@@ -30,10 +30,7 @@ public sealed class Http2ResponseWriter : IBufferWriter<byte>
     private int _staged;
 
     // Bytes THIS response has staged since its last real flush. Inside a pass a writer normally
-    // rides the pass flush, but past Http2Connection.CoalesceLimit it flushes for real anyway -
-    // the yield that keeps a producer looping without any await of its own from spinning the
-    // reactor. Per writer on purpose: a per-pass version of this bound split the pass write and
-    // cost a third of streamed throughput.
+    // rides the pass flush, but past Http2Connection.CoalesceLimit it flushes for real anyway.
     private int _sinceRealFlush;
 
     private bool _headersSent;

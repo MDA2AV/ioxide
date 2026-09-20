@@ -43,7 +43,7 @@ public sealed class PgConnection : IDisposable
     private int _sendEnd;
 
     // Auto-prepared statements: SQL text -> server statement name. Parse once per connection, then
-    // Bind/Execute on every reuse. Single-threaded per reactor, so no lock is needed.
+    // Bind/Execute on every reuse.
     private readonly Dictionary<string, string> _prepared = new();
     private int _statementCounter;
 
@@ -62,8 +62,7 @@ public sealed class PgConnection : IDisposable
 
     /// <summary>
     /// Open a connection over the ring: connect, send the startup message, and consume the
-    /// handshake until ReadyForQuery. Trust authentication only for now - anything else fails
-    /// with a clear error rather than a silent hang.
+    /// handshake until ReadyForQuery.
     /// </summary>
     public static async Task<PgConnection> ConnectAsync(IRingHost host, PgOptions options)
     {
@@ -195,8 +194,6 @@ public sealed class PgConnection : IDisposable
         bool parse = !_prepared.TryGetValue(sql, out string? name);
         if (parse)
         {
-            // Cache full: fall back to the unnamed statement - the server re-parses it each call and
-            // never accumulates, so distinct-SQL churn can't leak server-side prepared statements.
             name = _prepared.Count < MaxPreparedStatements ? "s" + _statementCounter++ : "";
         }
 
@@ -627,8 +624,7 @@ public sealed class PgConnection : IDisposable
     }
 
     // Append an extended-protocol command (Parse? + Bind + Execute + Sync) to the pipelined send
-    // buffer. Fixed buffer like WriteQueryAt: throws on overflow rather than realloc'ing, since an
-    // in-flight send holds the buffer's address.
+    // buffer. Fixed buffer like WriteQueryAt: throws on overflow rather than realloc'ing.
     private unsafe void WriteExtendedAt(bool parse, string statementName, string sql, ReadOnlySpan<PgParam> args)
     {
         int needed = PgProtocol.ExtendedLength(parse, statementName, sql, args);

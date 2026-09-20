@@ -97,6 +97,16 @@ public sealed unsafe partial class Reactor
         conn.MarkClosed();
         SubmitCancel(Tag(KindTcpRecv, (ushort)conn.Generation, fd));   // before Clear() bumps the generation
 
+        // Before DrainRecv, which only sees what is still QUEUED: a reader or stream that pulled
+        // buffers out holds the only record of them, and nothing obliges a handler to give them
+        // back. A holder can still be GROWING when it gets here: MarkClosed completes a parked read
+        // inline, which runs the reader's ingest and dequeues more items - that happens on whichever
+        // path marked the connection closed first, so by now the chain holds everything it ever will.
+        //
+        // Shared mode is where this matters: a stranded id is gone from the one group the reactor
+        // draws from. Incremental mode frees the per-connection ring wholesale just below.
+        conn.ReleaseHeldRecvBuffers();
+
         if (_incremental)
         {
             TeardownConnectionBufRing(conn);   // per-conn ring freed wholesale

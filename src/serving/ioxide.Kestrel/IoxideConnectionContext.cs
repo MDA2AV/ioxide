@@ -28,8 +28,6 @@ internal sealed class IoxideConnectionContext : ConnectionContext,
     private readonly CancellationTokenSource _connectionClosedCts = new();
     private readonly FeatureCollection _features = new();
 
-    // Completed when Kestrel is done with the connection (DisposeAsync, or Abort). The ioxide Handle
-    // callback awaits this and only then DecRefs the connection.
     private readonly TaskCompletionSource _completion = new(TaskCreationOptions.RunContinuationsAsynchronously);
 
     private int _disposed;

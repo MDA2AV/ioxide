@@ -98,9 +98,8 @@ internal sealed class IoxideConnectionListener : IConnectionListener
     {
         var id = Interlocked.Increment(ref _connectionCounter);
 
-        // kTLS handshake (TLS endpoints only) runs here on the reactor thread, before Kestrel sees the
-        // connection. It awaits the ring recv/send and resumes inline. On success the kernel does TX
-        // encryption from here on; the returned session decrypts inbound records - Kestrel gets plaintext.
+        // TLS handshake (TLS endpoints only) runs here on the reactor thread, before Kestrel sees the
+        // connection; the returned session decrypts inbound records - Kestrel gets plaintext.
         TlsSession? session = null;
         if (_tlsOptions is not null)
         {
@@ -129,7 +128,6 @@ internal sealed class IoxideConnectionListener : IConnectionListener
             return;
         }
 
-        // Launch the recv/send pumps on this reactor thread (we're inside the Handle callback).
         ctx.StartPumps();
 
         // Park until Kestrel disposes the connection, then release the handler-side ref (-> recycle).

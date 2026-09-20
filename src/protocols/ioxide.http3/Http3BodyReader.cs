@@ -5,8 +5,8 @@ namespace ioxide.http3;
 
 /// <summary>
 /// Pull surface for a streaming request body (the async <see cref="Http3Connection.RunAsync(Func{Http3Request, ValueTask{Http3Response}})"/>
-/// overload): the connection loop pushes body chunks in as nghttp3 delivers them, the handler
-/// pulls with <see cref="ReadAsync"/>. An empty chunk means end of body (fin or stream reset).
+/// overload): the connection loop pushes body chunks in, the handler pulls with
+/// <see cref="ReadAsync"/>. An empty chunk means end of body (fin or stream reset).
 ///
 /// Backpressure is real, not buffered-and-prayed: the request stream is flow-control paced, and
 /// each chunk is credited back to the peer's window only as it is handed to the handler - a slow
@@ -14,8 +14,7 @@ namespace ioxide.http3;
 /// window's worth (256 KB by engine default).
 ///
 /// Contract: single consumer, reactor thread only, and each ReadAsync invalidates the previous
-/// chunk's memory (its pooled buffer is recycled). Wakes are deferred by the connection loop to
-/// after nghttp3 unwinds - same discipline as the engine's once-per-read fire.
+/// chunk's memory (its pooled buffer is recycled).
 /// </summary>
 public sealed class Http3BodyReader : IValueTaskSource<ReadOnlyMemory<byte>>
 {
@@ -64,9 +63,9 @@ public sealed class Http3BodyReader : IValueTaskSource<ReadOnlyMemory<byte>>
         return new ValueTask<ReadOnlyMemory<byte>>(this, _core.Version);
     }
 
-    // Body bytes from nghttp3 (reactor thread, inside ih3_read_stream - the span dies at return,
-    // so copy into a pooled buffer). Never completes the reader inline: the wake is deferred to
-    // FireIfReady after nghttp3 unwinds, so a resumed handler can't re-enter it mid-read.
+    // Body bytes (reactor thread - the span dies at return, so copy into a pooled buffer). Never
+    // completes the reader inline: the wake is deferred to FireIfReady, so a resumed handler can't
+    // re-enter it mid-read.
     internal void Push(ReadOnlySpan<byte> data)
     {
         if (data.IsEmpty)

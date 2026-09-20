@@ -9,9 +9,14 @@ namespace ioxide.nghttp3;
 /// </summary>
 public sealed partial class Nghttp3Connection
 {
+    /// <summary>Streaming: dispatch at END-OF-HEADERS, body pulled through
+    /// <see cref="Nghttp3Request.BodyReader"/> while the request stream is flow-control paced - a slow
+    /// consumer freezes the peer's window instead of buffering (memory bound = one window, not the
+    /// body size). The handler must resume on the reactor (every ioxide await does). Owns the
+    /// handler's connection ref.</summary>
     public async Task RunStreamingAsync(Func<Nghttp3Request, ValueTask<Nghttp3Response>> handler)
     {
-        _streaming = true; // not needed
+        _streaming = true;
         try
         {
             while (true)
@@ -61,8 +66,7 @@ public sealed partial class Nghttp3Connection
             _sinks.Clear();
 
             // Before letting go, because letting go is all the transport sees: DecRef neither
-            // closes nor unregisters, so a connection dropped without a code stays routable until
-            // the idle sweep while the client waits on a request that will never be answered.
+            // closes nor unregisters.
             CloseWithPeerCode();
 
             _quicConnection.DecRef();

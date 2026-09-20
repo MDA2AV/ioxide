@@ -4,9 +4,8 @@ using System.Text;
 namespace ioxide.pg;
 
 /// <summary>
-/// The Postgres v3 frontend/backend protocol - just enough of it for trust authentication and the
-/// simple query flow. This class is pure: it formats and parses bytes, and knows nothing about
-/// io_uring, reactors, or sockets.
+/// The Postgres v3 frontend/backend protocol. This class is pure: it formats and parses bytes, and
+/// knows nothing about io_uring, reactors, or sockets.
 /// </summary>
 internal static class PgProtocol
 {
@@ -297,7 +296,7 @@ internal static class PgProtocol
         return true;
     }
 
-    /// <summary>The AuthenticationRequest code: 0 = Ok; anything else needs a method we don't speak yet.</summary>
+    /// <summary>The AuthenticationRequest code: 0 = Ok.</summary>
     public static int ReadAuthCode(ReadOnlySpan<byte> body)
     {
         return body.Length >= 4 ? BinaryPrimitives.ReadInt32BigEndian(body) : -1;

@@ -12,7 +12,7 @@ namespace ioxide.tls;
 /// forever on a response to a request the server dropped.
 ///
 /// This serves that carry first, then <b>gets out of the way</b>: once the caller has consumed past
-/// it, every later read delegates straight to <paramref name="inner"/> with no copy and no
+/// it, every later read delegates straight to <c>inner</c> with no copy and no
 /// bookkeeping. It is a startup detour, not a pump.
 /// </summary>
 /// <remarks>Reactor thread only.</remarks>

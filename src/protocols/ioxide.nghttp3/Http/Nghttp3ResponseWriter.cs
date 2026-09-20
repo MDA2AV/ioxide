@@ -128,8 +128,7 @@ public sealed class Nghttp3ResponseWriter : IBufferWriter<byte>
     /// This used to throw, which made the writer a non-conforming IBufferWriter, and the callers it
     /// broke are not exotic: a Stream reads into a Memory&lt;byte&gt; and cannot read into a
     /// Span&lt;byte&gt;, so every "copy this stream to the response" helper reaches for GetMemory -
-    /// which is exactly how a framework serves a static file. Headers were already on the wire by
-    /// then, so the exception could not even become a 500: the peer got a 200 with an empty body.
+    /// which is exactly how a framework serves a static file.
     /// </remarks>
     public Memory<byte> GetMemory(int sizeHint = 0)
     {
@@ -209,8 +208,7 @@ public sealed class Nghttp3ResponseWriter : IBufferWriter<byte>
     }
 
     /// <summary>
-    /// Flush what is left and mark the end of the body. The stream is not finished until nghttp3
-    /// has taken the final chunk, so this returns only once it has.
+    /// Flush what is left and mark the end of the body.
     /// </summary>
     public async ValueTask CompleteAsync()
     {

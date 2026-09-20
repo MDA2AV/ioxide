@@ -13,7 +13,7 @@ namespace ioxide;
 /// the <see cref="Stream"/> contract forces is a copy into the caller's buffer (the raw API and
 /// the pipe adapter expose ring memory directly). Single reader, single writer, reactor-thread.
 /// </summary>
-public sealed class TcpConnectionStream : Stream, IValueTaskSource<int>, IValueTaskSource
+public sealed class TcpConnectionStream : Stream, IValueTaskSource<int>, IValueTaskSource, IRecvBufferHolder
 {
     private readonly TcpConnection _conn;
 
@@ -38,6 +38,11 @@ public sealed class TcpConnectionStream : Stream, IValueTaskSource<int>, IValueT
     public TcpConnectionStream(TcpConnection connection)
     {
         _conn = connection ?? throw new ArgumentNullException(nameof(connection));
+
+        // The slice being copied out is held across calls and returned only once drained, so a
+        // caller that stops mid-buffer strands it. Registering lets the reactor reclaim it at
+        // recycle even when Dispose never runs.
+        _conn.BufferHolder = this;
         _onReadReady = OnReadReady;
         _onFlushDone = OnFlushDone;
     }
@@ -50,6 +55,42 @@ public sealed class TcpConnectionStream : Stream, IValueTaskSource<int>, IValueT
     {
         get => throw new NotSupportedException();
         set => throw new NotSupportedException();
+    }
+
+    /// <summary>
+    /// Returns the slice still being copied out, so a disposed stream does not hold ring memory
+    /// until its connection is recycled.
+    /// </summary>
+    /// <remarks>
+    /// This type inherited <see cref="Stream"/>'s do-nothing Dispose, which made the idiomatic
+    /// spelling silently wrong: <c>new SslStream(new TcpConnectionStream(conn), leaveInnerStreamOpen:
+    /// false)</c> disposes this on the way out and the held buffer stayed held anyway. An aborted
+    /// handshake or a truncated record leaves one, which on a TLS listener is routine rather than
+    /// exceptional.
+    ///
+    /// The reactor still reclaims at recycle (<see cref="IRecvBufferHolder"/>); this is the prompt
+    /// path, and the release is idempotent, so the later reclaim finds nothing and does nothing.
+    /// </remarks>
+    protected override void Dispose(bool disposing)
+    {
+        ((IRecvBufferHolder)this).ReleaseHeldBuffers();
+        base.Dispose(disposing);
+    }
+
+    void IRecvBufferHolder.ReleaseHeldBuffers()
+    {
+        // Terminal, like the reader's. _haveSnap otherwise survives with the PREVIOUS life's tail,
+        // and SpscRecvRing.Reset only moves head/tail without clearing the items - so a read after
+        // recycle would dequeue a stale entry, copy out another tenant's bytes, and on draining it
+        // return a buffer id the group already holds.
+        _haveSnap = false;
+        _eof = true;
+
+        if (_haveCur)
+        {
+            _haveCur = false;
+            _conn.ReturnBuffer(in _cur);
+        }
     }
 
     // -1 = nothing buffered, caller must await a fresh snapshot; >= 0 = bytes produced (0 = EOF).

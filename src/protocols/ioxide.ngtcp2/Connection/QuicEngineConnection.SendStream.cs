@@ -86,8 +86,7 @@ public unsafe partial class QuicEngineConnection
         {
             Console.Error.WriteLine("[ioxide.ngtcp2] send retention backstop exceeded (producer ignored backpressure); closing connection.");
 
-            // Through Teardown, so the peer is told. This was a fourth death path that freed the
-            // connection without a CONNECTION_CLOSE - the abort is ours, not the peer's, so it
+            // Through Teardown, so the peer is told. The abort is ours, not the peer's, so it
             // hears INTERNAL_ERROR rather than waiting out a timeout for silence.
             Teardown(WriteTransportFarewell(Ngtcp2.NGTCP2_ERR_INTERNAL));
             return;

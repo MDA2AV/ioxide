@@ -32,8 +32,6 @@ internal sealed class ReactorPinReader : PipeReader
     {
         ReadResult result = await _inner.ReadAsync(cancellationToken).ConfigureAwait(false);
 
-        // If we resumed off the reactor (the common first-read case), hop onto this connection's reactor so
-        // Kestrel's header parse and the application run there.
         if (IoxideReactor.TryCurrent() != _reactor)
         {
             await new ReactorSwitch(_reactor);

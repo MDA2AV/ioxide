@@ -25,10 +25,6 @@ namespace ioxide.tls;
 /// achievable - a handshake that left a partial record in the BIO cannot hand off to kTLS RX at
 /// all, and that connection silently keeps the userspace reader. <see cref="TlsSession"/> then
 /// reports the OUTCOME, which is what this reads.
-///
-/// That is why picking a type at the call site does not work: you would choose from configuration
-/// and be wrong for the connection where alignment failed. Choosing from the session is right by
-/// construction.
 /// </summary>
 /// <remarks>Reactor thread only, like everything else that touches a connection.</remarks>
 public sealed class TlsConnectionDualPipe : IDuplexPipe, IAsyncDisposable

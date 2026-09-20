@@ -150,8 +150,6 @@ static int ih3_cb_stream_close(nghttp3_conn *conn, int64_t stream_id, uint64_t a
     return 0;
 }
 
-/* The transport (iq shim) extends QUIC flow-control credit for every byte at delivery, before
- * nghttp3 ever sees it - so deferred consumption needs no follow-up here. */
 static int ih3_cb_deferred_consume(nghttp3_conn *conn, int64_t stream_id, size_t nconsumed,
                                    void *conn_user_data, void *stream_user_data)
 {

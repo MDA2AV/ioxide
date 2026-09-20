@@ -5,7 +5,7 @@ namespace ioxide.http2;
 /// <summary>
 /// An ordered list of HTTP field lines as raw bytes - names and values both
 /// <see cref="ReadOnlyMemory{T}"/>, never decoded to text. Enumerate with <see cref="AsSpan"/>.
-/// Same shape as Glyph11's KeyValueList (the h1 stack's), minus the ArrayPool: see below.
+/// Same shape as Glyph11's KeyValueList (the h1 stack's).
 ///
 /// Ordered and duplicate-preserving: HTTP fields may repeat (set-cookie on responses, cookie on
 /// h3 requests), so this is a list, not a map. The array is allocated lazily on first Add and

@@ -121,12 +121,6 @@ public unsafe partial class QuicEngineConnection
     /// <summary>
     /// ngtcp2 moved this connection to a new peer address, and the transport must follow - it owns
     /// the socket, which is the half ngtcp2 cannot do for itself.
-    ///
-    /// It is worth being exact about what this does NOT say. The address is not validated when
-    /// this fires: ngtcp2 adopts the current path on the first non-probing 1-RTT packet from a new
-    /// address and validates afterwards. Safety comes from the packet having decrypted under 1-RTT
-    /// keys - which an off-path attacker cannot forge - and from ngtcp2's own anti-amplification
-    /// limit, which caps what it will send on a path that has not validated yet.
     /// </summary>
     [UnmanagedCallersOnly]
     internal static void CbPathChange(void* user, void* remoteAddr, nuint len)

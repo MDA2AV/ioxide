@@ -286,8 +286,7 @@ public sealed class HttpClientPool : IDisposable
         }
     }
 
-    // The acquire deadline, plus why connecting kept failing when we know. Without the reason a
-    // rejected certificate and a refused connect are indistinguishable to the caller.
+    // The acquire deadline, plus why connecting kept failing when we know.
     private string AcquireTimeoutMessage()
     {
         string basic = $"no connection to {_options.Host}:{_options.Port} within {_options.AcquireTimeoutMs} ms";

@@ -3,14 +3,13 @@ using static ioxide.Native;
 namespace ioxide;
 
 /// <summary>
-/// The clocks on a TCP connection's lifecycle, which until now had none: an idle connection is
-/// reaped, and so is one whose send the peer stopped draining.
+/// The clocks on a TCP connection's lifecycle: an idle connection is reaped, and so is one whose
+/// send the peer stopped draining.
 /// </summary>
 /// <remarks>
 /// Rides the reactor's existing ~250 ms ticker rather than arming anything of its own, which is
 /// what <see cref="ioxide.tls.TlsService"/> does for handshakes and the QUIC transport does for
-/// idle connections. Second-scale timeouts do not need better granularity than that, and a
-/// connection closes at the first tick past its deadline rather than exactly on it.
+/// idle connections. Second-scale timeouts do not need better granularity than that.
 /// </remarks>
 public sealed unsafe partial class Reactor
 {
@@ -23,8 +22,7 @@ public sealed unsafe partial class Reactor
     /// The stamps this feeds are read by a sweep that runs four times a second, so a clock good to
     /// one batch of completions is far finer than anything that consumes it - while reading the
     /// real one per CQE put a vDSO call on both the recv and the send hot path, three per request,
-    /// and measured as a 4-9% throughput cost on the small-response samples. Refreshing here is one
-    /// read per io_uring_enter, amortised over the whole batch it returned.
+    /// and measured as a 4-9% throughput cost on the small-response samples.
     /// </summary>
     internal long NowMs = Environment.TickCount64;
 
@@ -48,10 +46,9 @@ public sealed unsafe partial class Reactor
             }
 
             // A connection with a flush outstanding is not idle, it is sending - so the send clock
-            // governs it and the idle one does not apply. Without this split a large response to a
-            // slow peer would be reaped for making no INBOUND progress while it was working
-            // perfectly: under MSG_WAITALL the whole flush is a single completion, so nothing
-            // refreshes the activity stamp for as long as the send legitimately takes.
+            // governs it and the idle one does not apply. Under MSG_WAITALL the whole flush is a
+            // single completion, so nothing refreshes the activity stamp for as long as the send
+            // legitimately takes.
             if (conn.FlushOutstanding)
             {
                 if (_sendTimeoutMs > 0 && now - Volatile.Read(ref conn.FlushArmedMs) > _sendTimeoutMs)
@@ -72,8 +69,6 @@ public sealed unsafe partial class Reactor
     /// End one connection the sweep has condemned - and nothing more than that.
     /// </summary>
     /// <remarks>
-    /// Both halves are needed and neither is redundant, exactly as in TlsService.SweepHandshakes.
-    ///
     /// shutdown() is what the PEER sees, and it is also what releases the connection: a
     /// TcpConnection is held by two refs, the handler's and the reactor's, and the reactor's is
     /// given up only when its outstanding operation completes. For an idle connection that is a

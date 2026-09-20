@@ -78,8 +78,7 @@ public sealed class TcpConnectionPipeWriter : PipeWriter, IValueTaskSource<Flush
         // report it. This one did not, so a flush that PARKED on a real send and was then released
         // by teardown told the caller the pipe was still open - and a caller doing the ordinary
         // "write until IsCompleted" loop kept producing against a peer that had gone, which is the
-        // unbounded growth TcpConnection.FlushAsync's own comment warns about. It was fixed in the
-        // TLS writer and missed here, so the kTLS-TX column of the dual pipe still had it.
+        // unbounded growth TcpConnection.DropStaged warns about.
         _core.SetResult(new FlushResult(canceled, _completed || _conn.IsClosed));
     }
 

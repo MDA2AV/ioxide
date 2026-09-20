@@ -12,9 +12,8 @@ namespace ioxide;
 public sealed unsafe partial class TcpConnection
 {
     // Grows the per-connection write slab so a response larger than the current capacity can be
-    // buffered before the single contiguous flush. Doubles until it fits, copies the bytes written so
-    // far, and re-points the unmanaged manager backing GetMemory. Runs on the reactor thread while
-    // building a response (never during a flush), so WriteBuffer is never in flight when it moves.
+    // buffered before the single contiguous flush. Runs on the reactor thread while building a
+    // response (never during a flush), so WriteBuffer is never in flight when it moves.
     private void GrowWriteSlab(int required)
     {
         int newSize = _writeSlabSize;

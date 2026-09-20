@@ -150,8 +150,7 @@ public sealed unsafe partial class Reactor
             forward.Payload = ArrayPool<byte>.Shared.Rent(length);
         }
 
-        // The copy that makes this safe: Payload points into the recv slot, which returns to the
-        // provided-buffer ring as soon as dispatch does.
+        // The copy that makes this safe: Payload points into the recv slot, returned at dispatch.
         datagram.Payload.CopyTo(forward.Payload);
         forward.Length = length;
 

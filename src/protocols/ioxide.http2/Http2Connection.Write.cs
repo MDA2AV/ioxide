@@ -14,7 +14,7 @@ namespace ioxide.http2;
 /// in a queue instead of the pipe; when it completes, the whole queue moves into the pipe and goes
 /// out as the next flush. Every response that completed during one transport write leaves on the
 /// single write after it, which is what extends the pass coalescing to handlers that finish
-/// outside the pass. Kestrel's Http2FrameWriter and Go's net/http2 writer land on this same shape.
+/// outside the pass.
 /// </summary>
 public sealed partial class Http2Connection
 {

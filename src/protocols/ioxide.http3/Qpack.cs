@@ -216,7 +216,6 @@ internal static class Qpack
         (100, 63), (204, 64), (206, 65), (302, 66), (400, 67), (403, 68), (421, 69), (425, 70), (500, 71),
     ];
 
-    /// <summary>Encode a response's field section (prefix + :status + headers) into a pooled buffer.</summary>
     /// <summary>
     /// The static table indexed for encoding: distinct names, each with the entries sharing it.
     /// </summary>

@@ -142,8 +142,7 @@ internal sealed class HopDuplexPipe : IDuplexPipe, IAsyncDisposable
             // Kept, not swallowed. This pump decrypts, so the exceptions reaching here include a
             // bad MAC and a truncated record - and completing the pipe CLEANLY on those makes an
             // attack that cuts a connection short indistinguishable from a peer hanging up
-            // politely. That is precisely the property TlsDecryptingPipeReader documents, and this
-            // is its Kestrel twin, which had the opposite behaviour.
+            // politely (the property TlsDecryptingPipeReader documents).
             fault = e;
         }
         finally

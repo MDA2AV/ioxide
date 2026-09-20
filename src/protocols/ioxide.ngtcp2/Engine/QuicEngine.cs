@@ -81,10 +81,7 @@ public sealed unsafe class QuicEngine : IDisposable
     /// when the engine is constructed: the verifier belongs to the engine and every certificate
     /// generation points at it, which is what stops a renewal from quietly changing who may
     /// connect. Editing the file afterwards therefore changes nothing, and neither does
-    /// <see cref="ReplaceCertificates"/> - changing the anchors on QUIC needs a new engine. The
-    /// sentence that used to be here said a path is re-read whenever a context is built; that is
-    /// true of TlsOptions.ClientCaPem on the TCP side, where it is the documented way to revoke an
-    /// issuer, and it was copied to a stack where it is not true.
+    /// <see cref="ReplaceCertificates"/> - changing the anchors on QUIC needs a new engine.
     /// </param>
     /// <param name="requireClientCertificate">
     /// With a CA configured, whether a client offering no certificate is refused during the
@@ -296,11 +293,7 @@ public sealed unsafe class QuicEngine : IDisposable
             ObjectDisposedException.ThrowIf(_engine == 0, this);
 
             // Omitting the table on an engine that answers for names is refused, because both
-            // readings are plausible and one of them silently turns off SNI. A renewal hook that
-            // rotates only the default certificate - the obvious thing to write - published a
-            // generation with an EMPTY table, after which every registered host was answered with
-            // the default certificate: no exception, no log line, and a name mismatch at each
-            // client. State the table to keep it, or pass an empty one to mean it.
+            // readings are plausible and one of them silently turns off SNI.
             if (certificatesByHost is null && _hostCount > 0)
             {
                 throw new ArgumentNullException(nameof(certificatesByHost),
@@ -387,14 +380,14 @@ public sealed unsafe class QuicEngine : IDisposable
         return wire.ToArray();
     }
 
+    /// <summary>Factory for the plain engine connection - the delegate-handler model needs no subclass.</summary>
+    public QuicConnectionFactory CreateFactory() => CreateFactory(_ => new QuicEngineConnection(this));
+
     /// <summary>
     /// Wrap a user connection constructor into the reactor's factory contract: on a new handshake,
     /// construct the connection, run the ngtcp2 accept + validation, and either adopt it (registering
     /// the server-minted CID) or drop the packet.
     /// </summary>
-    /// <summary>Factory for the plain engine connection - the delegate-handler model needs no subclass.</summary>
-    public QuicConnectionFactory CreateFactory() => CreateFactory(_ => new QuicEngineConnection(this));
-
     public QuicConnectionFactory CreateFactory(Func<Reactor, QuicEngineConnection> create)
     {
         // From here the SNI table can be read by any reactor a handshake lands on, so it is closed

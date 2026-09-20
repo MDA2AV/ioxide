@@ -1,0 +1,34 @@
+<Project>
+
+  <!--
+    Every shipped package under src/. Nothing else in the repo inherits this - tests, Playground,
+    bench and Research sit outside it on purpose.
+  -->
+  <PropertyGroup>
+    <!--
+      Generating the XML means the compiler finally PARSES the doc comments. Without it Roslyn
+      skips them entirely, which is how roughly eleven <summary> blocks drifted onto neighbouring
+      members across four independent areas without anything complaining - including a warning
+      about a bad MAC looking like a quiet peer, stranded on the wrong method.
+
+      It also ships the docs with the packages, so the prose these files are full of reaches
+      IntelliSense instead of stopping at the repo.
+    -->
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+
+    <!--
+      CS1591 is "missing XML comment for publicly visible member". Not every public member is
+      documented and that is a deliberate choice, not a defect - the comments here explain what is
+      surprising, not what is obvious. Suppressed so the warnings that DO matter stay visible:
+      CS1570 malformed XML, CS1571 duplicate tag, CS1572 param that does not exist, CS1574 broken
+      cref.
+
+      CS1573 goes with it, for the same reason one step down: it fires when SOME parameters are
+      documented and others are not, which is the house style rather than a defect. A member
+      explains the one argument that surprises people and leaves `reactor` and `keyPemPath` alone.
+      Silencing it is cheaper than padding every signature back out with tags that say nothing.
+    -->
+    <NoWarn>$(NoWarn);CS1591;CS1573</NoWarn>
+  </PropertyGroup>
+
+</Project>

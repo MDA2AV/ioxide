@@ -83,8 +83,6 @@ internal static unsafe class Nghttp3
 
     // --- client side (ioxide.httpclient) ------------------------------------------------------
 
-    /// <summary>Create the client-side nghttp3 connection; same event surface as the server one,
-    /// requests out instead of responses. 0 on failure.</summary>
     /// <summary>
     /// Submit a response whose body arrives over time through <see cref="Callbacks.OnReadBody"/>.
     /// Nothing is copied here, unlike <c>ih3_submit_response</c>.
@@ -94,6 +92,8 @@ internal static unsafe class Nghttp3
     /// <summary>Undefer a stream that answered a body pull with "nothing yet".</summary>
     [DllImport(Lib)] internal static extern int ih3_resume_stream(nint connection, long streamId);
 
+    /// <summary>Create the client-side nghttp3 connection; same event surface as the server one,
+    /// requests out instead of responses. 0 on failure.</summary>
     [DllImport(Lib)] internal static extern nint ih3_client_new(Callbacks callbacks, void* user);
 
     /// <summary>Submit a request on a client-opened bidi stream: packed headers, optional body
