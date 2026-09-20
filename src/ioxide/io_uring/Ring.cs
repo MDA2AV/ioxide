@@ -43,6 +43,11 @@ public sealed unsafe class Ring : IDisposable
     /// 14,788 times, and every failure cleared on a retry 5 ms later.
     ///
     /// Only ENOMEM is retried. Every other errno is a decision the kernel has already made.
+    ///
+    /// This buys time against a reclaim backlog, not against a limit that is simply too small: with
+    /// an 8 MB RLIMIT_MEMLOCK and the default ring size, measured, a third of attempts still fail
+    /// first time and a few per thousand exhaust all six. There the answer is a bigger limit or a
+    /// smaller ring, and the message below says so.
     /// </remarks>
     private static int SetupWithMemlockRetry(uint entries, IoUringParams* parameters)
     {

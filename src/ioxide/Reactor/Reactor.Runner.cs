@@ -25,6 +25,14 @@ public sealed unsafe partial class Reactor
         BindReactorThread();
         _ring = Ring.Create(_ringEntries);
 
+        // The try opens HERE, not at the loop: setup is where the leak actually happens. OnStart is
+        // user code and the test harness deliberately throws from it, which leaked the ring fd, the
+        // listener and the eventfd - three descriptors and ~745 KiB of RLIMIT_MEMLOCK - on every
+        // failed start. Ring.Create itself is outside because there is nothing to tear down until
+        // it returns.
+        try
+        {
+
         // Transports: TCP always; UDP sockets + the QUIC demux only when configured (no-ops otherwise).
         OpenTcpListeners();
         OpenUdpSockets();
@@ -53,18 +61,20 @@ public sealed unsafe partial class Reactor
 
         StartTicker();
 
-        // Teardown in a finally, not after the loop: anything thrown out of the loop - a fatal
-        // io_uring_enter, GetSqeOrFlush giving up on a full SQ, a handler fault that escapes -
-        // otherwise skipped it and leaked the ring fd, both mmaps, the eventfd and the buffer slab.
-        // Ring memory is charged against RLIMIT_MEMLOCK, so leaking rings is how a long-lived host
-        // eventually cannot create any.
-        try
-        {
             if (_incremental) LoopIncremental();
             else LoopSharedRing();
         }
+        catch (Exception e) when (OnFault is not null)
+        {
+            // Handled by the host, so it does not escape to kill the process. Teardown still runs.
+            OnFault(this, e);
+        }
         finally
         {
+            // Whatever happened - a fatal io_uring_enter, a throw from OnStart, GetSqeOrFlush
+            // giving up on a full SQ - the ring fd, both mmaps, the eventfd and the buffer slab go
+            // back. Ring memory is charged against RLIMIT_MEMLOCK, so leaking rings is how a
+            // long-lived host eventually cannot create one.
             Teardown();
         }
     }

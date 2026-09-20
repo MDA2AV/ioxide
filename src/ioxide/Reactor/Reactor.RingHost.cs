@@ -58,6 +58,20 @@ public sealed unsafe partial class Reactor : IRingHost
     public Func<Reactor, TcpConnection, Task> TcpHandle = null!;
 
     /// <summary>
+    /// Raised on the reactor's own thread when it is ending because of a fault rather than a
+    /// <see cref="Stop"/>, after the ring has been torn down. Handle it to log, restart, or bring
+    /// the process down deliberately.
+    /// </summary>
+    /// <remarks>
+    /// Without a handler the exception propagates out of <see cref="Run"/>. On a bare
+    /// <c>new Thread(reactor.Run)</c> - which is how every sample and <c>ioxide.Kestrel</c> start
+    /// one - that terminates the process. Which of the two is right is the host's call, not this
+    /// library's: losing one shard of N silently is indefensible, and so is taking the whole server
+    /// down without being asked.
+    /// </remarks>
+    public Action<Reactor, Exception>? OnFault;
+
+    /// <summary>
     /// The per-connection QUIC handler, invoked once per adopted connection (CID demux path).
     /// Null: no handler is launched (raw engine mode, e.g. a custom <see cref="QuicConnection"/>
     /// subclass consuming its own events).

@@ -216,7 +216,7 @@ public sealed unsafe partial class Reactor
         int ret = io_uring_register(_ring.Fd, IORING_REGISTER_PBUF_RING, &reg, 1);
         if (ret < 0)
         {
-            throw new InvalidOperationException($"register udp pbuf_ring failed: ret={ret}");
+            throw new InvalidOperationException($"register udp pbuf_ring failed with errno {-ret}");
         }
 
         // Template: reserved name/control sizes only; iov unused (buffer comes from the ring).

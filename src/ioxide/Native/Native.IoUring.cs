@@ -107,8 +107,12 @@ public static unsafe partial class Native {
         return rc < 0 ? -Marshal.GetLastPInvokeError() : (int)rc;
     }
 
-    public static int io_uring_register(int fd, uint opcode, void* arg, uint nrArgs) =>
-        (int)syscall4(SYS_IO_URING_REGISTER, (uint)fd, opcode, arg, nrArgs);
+    public static int io_uring_register(int fd, uint opcode, void* arg, uint nrArgs)
+    {
+        long rc = syscall4(SYS_IO_URING_REGISTER, (uint)fd, opcode, arg, nrArgs);
+
+        return rc < 0 ? -Marshal.GetLastPInvokeError() : (int)rc;
+    }
 
     [DllImport("libc")] public static extern void* mmap(void* addr, nuint length, int prot, int flags, int fd, long offset);
     [DllImport("libc")] public static extern int   munmap(void* addr, nuint length);

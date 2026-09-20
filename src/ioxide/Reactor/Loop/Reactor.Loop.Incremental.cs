@@ -65,7 +65,7 @@ public sealed unsafe partial class Reactor
         int ret = io_uring_register(_ring.Fd, IORING_REGISTER_PBUF_RING, &reg, 1);
         if (ret < 0)
         {
-            throw new InvalidOperationException($"register pbuf_ring (inc) failed: ret={ret} gid={gid}");
+            throw new InvalidOperationException($"register pbuf_ring (inc) failed with errno {-ret}, gid={gid}");
         }
 
         conn.Bgid            = gid;
@@ -185,8 +185,9 @@ public sealed unsafe partial class Reactor
             //
             // Anything else is a lifecycle or programming error (EBADF, EINVAL, ENXIO on a dying
             // ring). Throwing rather than breaking, because a reactor that vanishes while the
-            // process keeps reporting healthy is the worst of both: Run's finally tears the ring
-            // down and the exception reaches whoever started the thread.
+            // process keeps reporting healthy is the worst of both. Run's finally tears the ring
+            // down; whether the process then dies is the host's decision, via Reactor.OnFault -
+            // on a bare Thread with no handler, an unhandled exception ends the process.
             int rc = _ring.SubmitAndWait(1);
             if (rc < 0 && rc != -EINTR && rc != -EAGAIN && rc != -EBUSY)
             {
