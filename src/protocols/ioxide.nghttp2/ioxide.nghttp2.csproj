@@ -8,7 +8,7 @@
     <RootNamespace>ioxide.nghttp2</RootNamespace>
 
     <PackageId>ioxide.nghttp2</PackageId>
-    <Version>0.13.233</Version>
+    <Version>0.14.236</Version>
     <Authors>MDA2AV</Authors>
     <Description>HTTP/2 for the ioxide io_uring runtime: framing, HPACK and flow control from nghttp2, statically linked behind a small shim with no external dependencies beyond libc. Serves HTTP/2 over any TcpConnection - h2c with prior knowledge, or h2 over TLS via ALPN. nghttp2 is sans-I/O, so ioxide keeps the ring and the loop.</Description>
     <PackageLicenseExpression>MIT</PackageLicenseExpression>

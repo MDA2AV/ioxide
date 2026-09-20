@@ -8,7 +8,7 @@
     <RootNamespace>ioxide.http3</RootNamespace>
 
     <PackageId>ioxide.http3</PackageId>
-    <Version>0.13.233</Version>
+    <Version>0.14.236</Version>
     <Authors>MDA2AV</Authors>
     <Description>Pure C# HTTP/3 for the ioxide io_uring runtime: frame parsing, QPACK (static table + Huffman) and request dispatch with zero native dependencies. Rides any QuicConnection via its stream read surface - engine-agnostic, drop-in alternative to ioxide.nghttp3.</Description>
     <PackageLicenseExpression>MIT</PackageLicenseExpression>

@@ -20,7 +20,7 @@ ioxide hands you raw bytes and stays out of HTTP; when you want a framework on t
 `ioxide.Kestrel` swaps the transport under an existing ASP.NET Core app with your endpoints
 unchanged.
 
-> Linux 6.1+ · .NET 10 / .NET 11 · `0.4.169` - experimental
+> Linux 6.1+ · .NET 10 / .NET 11 · `0.14.236` - experimental
 
 **[Documentation](https://mda2av.github.io/ioxide/)** - architecture, guides, and every example as
 runnable code side by side.

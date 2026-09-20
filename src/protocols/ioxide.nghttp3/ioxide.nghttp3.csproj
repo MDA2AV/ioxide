@@ -8,7 +8,7 @@
     <RootNamespace>ioxide.nghttp3</RootNamespace>
 
     <PackageId>ioxide.nghttp3</PackageId>
-    <Version>0.13.233</Version>
+    <Version>0.14.236</Version>
     <Authors>MDA2AV</Authors>
     <Description>HTTP/3 layer for the ioxide io_uring runtime: nghttp3 (H3 + QPACK) bundled as a single self-contained native library with no external dependencies. Rides any QuicConnection via its stream read surface - engine-agnostic, no ioxide.ngtcp2 dependency.</Description>
     <PackageLicenseExpression>MIT</PackageLicenseExpression>
