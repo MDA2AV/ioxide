@@ -22,10 +22,12 @@ unchanged.
 
 > Linux 6.1+ · .NET 10 / .NET 11 · experimental
 
-Each reactor's ring is charged against `RLIMIT_MEMLOCK` - roughly 700 KB at the default
-`RingEntries`, so the common 8 MB `ulimit -l` fits about ten of them. A closed ring's memory comes
-back asynchronously, so standing many servers up and tearing them down in quick succession can hit
-`ENOMEM` while nothing is leaking; `Ring.Create` retries briefly before giving up, and says so.
+Each reactor is charged against `RLIMIT_MEMLOCK`: measured at 772 KB for the ring at the default
+`RingEntries`, plus 64 KB for a 4096-slot buffer ring, so about 836 KB per reactor. The common 8 MB
+`ulimit -l` fits roughly ten. The counter is **per uid**, not per process, so every process you run
+shares one budget. A closed ring's memory is reclaimed asynchronously, so standing servers up and
+tearing them down in quick succession can hit `ENOMEM` while nothing is leaking; `Ring.Create`
+retries briefly before giving up, and names the errno when it does.
 
 **[Documentation](https://mda2av.github.io/ioxide/)** - architecture, guides, and every example as
 runnable code side by side.
