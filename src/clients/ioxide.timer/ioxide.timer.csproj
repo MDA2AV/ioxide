@@ -8,7 +8,7 @@
     <RootNamespace>ioxide.timer</RootNamespace>
 
     <PackageId>ioxide.timer</PackageId>
-    <Version>0.14.236</Version>
+    <Version>0.14.239</Version>
     <Authors>MDA2AV</Authors>
     <Description>Deadlines for the ioxide io_uring runtime: waits submitted to the reactor's own ring with IORING_OP_TIMEOUT, completing inline on the reactor that owns the caller, with no timer thread and nothing allocated per wait.</Description>
     <PackageLicenseExpression>MIT</PackageLicenseExpression>
