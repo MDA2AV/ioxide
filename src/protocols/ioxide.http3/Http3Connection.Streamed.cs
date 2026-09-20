@@ -5,10 +5,6 @@ namespace ioxide.http3;
 /// <summary>
 /// The STREAMED-RESPONSE half of the pure-C# HTTP/3 server: headers go out first and the body
 /// follows as DATA frames, pushed by the handler through an <see cref="Http3ResponseWriter"/>.
-///
-/// Owning the framing is what makes this simple. There is no data-reader callback to answer, so
-/// nothing has to be deferred out of a library call, no buffer lifetime is dictated from outside,
-/// and a chunk is sent the moment it exists rather than when something asks for it.
 /// </summary>
 public sealed partial class Http3Connection
 {

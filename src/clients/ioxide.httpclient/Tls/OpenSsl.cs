@@ -95,9 +95,7 @@ internal static unsafe partial class OpenSsl
     /// upstream connection on it, and SSL_get_error consults that queue BEFORE asking the SSL
     /// whether it merely wants more data. So a residue left by any other connection - most
     /// reliably by a teardown calling SSL_shutdown on a handshake that never finished - is read as
-    /// THIS connection's fatal error and kills it. The server half of ioxide was given this shape
-    /// after exactly that; this copy of the bindings never got it, and had no ERR_clear_error call
-    /// anywhere at all.
+    /// THIS connection's fatal error and kills it.
     /// </remarks>
     public static unsafe int Connect(nint ssl, out int error)
     {

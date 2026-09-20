@@ -8,9 +8,7 @@ namespace ioxide.nghttp2;
 ///
 /// It reads as a push and is a PULL underneath. nghttp2 owns the framing, so it asks for body bytes
 /// when it is ready rather than accepting them when you have them; its read callback defers while
-/// nothing is buffered, and every write resumes the stream. That indirection is why this exists at
-/// all - <c>ioxide.http2</c> owns its own framing and writes a DATA frame the moment a chunk is
-/// staged, with nothing to defer and nothing to resume.
+/// nothing is buffered, and every write resumes the stream.
 ///
 /// The practical consequence: a flush here means "handed over", not "on the wire". nghttp2 decides
 /// frame boundaries and when to emit, and the connection's drain is what puts bytes on the socket.

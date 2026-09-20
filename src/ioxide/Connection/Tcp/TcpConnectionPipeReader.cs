@@ -224,15 +224,13 @@ public sealed unsafe class TcpConnectionPipeReader : PipeReader, IValueTaskSourc
             return;
         }
 
-        // GetOffset measures from the start *segment*, not the sequence's logical
-        // start. When the held sequence begins mid-segment (the head recv slice is
-        // partially consumed - e.g. a request whose header and body arrive in one
-        // recv: the body read advances after the header was already skipped),
-        // GetOffset over-counts by _headConsumed. Rebase by the sequence start so
-        // consumed/examined stay consistent with the relative _heldBytes/_examined
-        // counters below. Without this, _heldBytes underflows negative and the next
-        // ReadAsync parks forever waiting for bytes that already arrived (the hang
-        // seen on chunked request bodies, which read again for the terminating chunk).
+        // GetOffset measures from the start *segment*, not the sequence's logical start. When the
+        // held sequence begins mid-segment (the head recv slice is partially consumed - a request
+        // whose header and body arrive in one recv), GetOffset over-counts by _headConsumed. Rebase
+        // by the sequence start so consumed/examined stay consistent with the relative
+        // _heldBytes/_examined counters below. Without this, _heldBytes underflows negative and the
+        // next ReadAsync parks forever waiting for bytes that already arrived (the hang seen on
+        // chunked request bodies, which read again for the terminating chunk).
         long startOffset = _lastSequence.GetOffset(_lastSequence.Start);
         long consumedBytes = _lastSequence.GetOffset(consumed) - startOffset;
         long examinedBytes = _lastSequence.GetOffset(examined) - startOffset;
@@ -306,15 +304,12 @@ public sealed unsafe class TcpConnectionPipeReader : PipeReader, IValueTaskSourc
         // original leak, reintroduced by the fix for it. It is also the shape
         // TlsConnectionDualPipe.DisposeAsync produces on the kTLS RX column, and the shape a
         // read-timeout handler produces, since CancelPendingRead only sets a flag and never wakes a
-        // parked read.
-        //
-        // Staying registered costs one reference on a pooled connection until Clear() drops it, and
-        // makes the invariant simply "the last holder constructed in this life, cleared per life".
-        // Releasing twice is free because the chain is empty the second time.
+        // parked read. Staying registered costs one reference until Clear() drops it, and keeps the
+        // invariant at "the last holder constructed in this life, cleared per life".
         //
         // Terminal, on both paths. Without this a reader kept past its handler still reads as open,
         // and its next ReadAsync would arm against the recycled connection's NEXT tenant and hand
-        // out another peer's bytes. Failing loudly beats that.
+        // out another peer's bytes.
         _completed = true;
         _connectionClosed = true;
         _lastSequence = default;

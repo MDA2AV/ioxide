@@ -25,8 +25,6 @@ public sealed partial class Http2Connection
     /// silently inert - nothing was charged when sending, and a stream-level WINDOW_UPDATE
     /// credited nothing. Only the connection window was left, so any response past the peer's
     /// 65535-byte stream window overran it and was killed with FLOW_CONTROL_ERROR.
-    ///
-    /// Keyed by stream and tied to the response's lifetime, which is what flow control is about.
     /// </summary>
     private readonly Dictionary<int, int> _responseWindows = new();
     private readonly Dictionary<int, List<TaskCompletionSource>> _creditWaiters = new();

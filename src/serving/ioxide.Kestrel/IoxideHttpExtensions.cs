@@ -29,7 +29,7 @@ public static class IoxideHttpExtensions
 
         if (IoxideReactor.TryCurrent() == reactor)
         {
-            return work(reactor);   // already on the reactor - run inline
+            return work(reactor);
         }
 
         var tcs = new TaskCompletionSource<T>(TaskCreationOptions.RunContinuationsAsynchronously);

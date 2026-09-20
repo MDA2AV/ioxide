@@ -28,8 +28,7 @@ public sealed unsafe partial class Reactor
     private TcpConnection?[] _connections = new TcpConnection?[4096];
 
     // The response-send strategy from config (ZeroCopySend), copied per-connection at accept into
-    // TcpConnection.UseZc. The send hot path branches on that bool (predictable, inlinable) instead of
-    // dispatching through an indirect function pointer.
+    // TcpConnection.UseZc.
     private readonly bool _zeroCopySend;
     private readonly ushort _port;
     private readonly uint _ringEntries;
@@ -63,8 +62,6 @@ public sealed unsafe partial class Reactor
 
     // Transport settings resolved once. _tcp / _udp are always non-null so the sizing knobs stay
     // readable; the _enabled flags record whether the config actually asked for that transport.
-    // TCP off = no listener. UDP off = no raw datagram sockets, though QUIC still binds its own
-    // port and uses the resolved defaults.
     private readonly TcpOptions _tcp;
     private readonly bool _tcpEnabled;
     private readonly UdpOptions _udp;
@@ -110,8 +107,6 @@ public sealed unsafe partial class Reactor
         _id = id;
         _config = config;
 
-        // Tcp == null means "no TCP listener". The sizing knobs are still resolved from a default
-        // instance so the pools below stay valid; they simply go unused when TCP is off.
         _tcpEnabled = config.Tcp is not null;
         _tcp = config.Tcp ?? new TcpOptions();
         _udpEnabled = config.Udp is not null;
@@ -189,8 +184,8 @@ public sealed unsafe partial class Reactor
         }
 
         // SQ is full: flush queued SQEs to the kernel (which frees ring slots) and retry. A few
-        // submit rounds clear the transient fullness a large CQE batch can cause; only a genuinely
-        // stuck ring falls through to throw, instead of crashing the reactor on the first miss.
+        // rounds clear the transient fullness a large CQE batch causes; only a genuinely stuck ring
+        // falls through to throw.
         for (int attempt = 0; attempt < 16 && sqe == null; attempt++)
         {
             _ring.SubmitAndWait(0);

@@ -104,8 +104,7 @@ public sealed unsafe partial class Reactor
         // path marked the connection closed first, so by now the chain holds everything it ever will.
         //
         // Shared mode is where this matters: a stranded id is gone from the one group the reactor
-        // draws from. In incremental mode the per-connection ring is freed wholesale just below, so
-        // this is a no-op there by the time the table slot has been cleared.
+        // draws from. Incremental mode frees the per-connection ring wholesale just below.
         conn.ReleaseHeldRecvBuffers();
 
         if (_incremental)

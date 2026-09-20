@@ -14,8 +14,7 @@ namespace ioxide;
 /// this. Packet protection and the handshake live in the engine subclass of
 /// <see cref="QuicConnection"/>, produced by <see cref="QuicOptions.ConnectionFactory"/>; the
 /// engine registers the CIDs it mints via <see cref="QuicRegisterCid"/> as the handshake retires
-/// the client's initial DCID. Timer deadlines ride the reactor ticker (250 ms granularity - fine
-/// for handshake/idle deadlines; a finer loss-timer source can follow with the engine binding).
+/// the client's initial DCID.
 /// </summary>
 public sealed unsafe partial class Reactor
 {
@@ -89,13 +88,9 @@ public sealed unsafe partial class Reactor
     /// <c>QuicArmTimer</c> is the fine one, and it must run AFTER <c>OnDatagram</c>: that call
     /// (iq_conn_read) just rewrote the engine's deadlines - arriving ACKs cancelled retransmit
     /// timers and freed send-retention below the acked offset, and the handler may have resumed
-    /// inline and sent, arming fresh PTO deadlines for THAT data. Timers only ever guard data we
-    /// SENT and await the peer's ACK for (received data is already safe; ACKs themselves are
-    /// never acked, never retransmitted). GetNextTimeout samples the settled state and folds it
-    /// into the reactor-wide min that QuicFireDueTimers checks each loop pass; when it fires,
-    /// OnTimer/handle_expiry re-frames the unacked stream bytes from retention into NEW packets
-    /// (packet numbers are never reused - a spurious resend costs bandwidth only, the receiver
-    /// dedups by stream offset).
+    /// inline and sent, arming fresh PTO deadlines for THAT data. GetNextTimeout samples the
+    /// settled state and folds it into the reactor-wide min that QuicFireDueTimers checks each
+    /// loop pass.
     /// </summary>
     private void QuicDispatchDatagram(in UdpDatagram datagram)
     {
@@ -116,19 +111,12 @@ public sealed unsafe partial class Reactor
         if (!longHeader)
         {
             // A short header names a connection that must already exist, so reaching here means
-            // this reactor cannot serve this datagram. There are two very different reasons for
-            // that, and conflating them makes the count useless:
-            //
-            //   the id is not ours   - the datagram reached the WRONG reactor, which is the
-            //                          routing failing and the thing worth alarming on
-            //   the id IS ours       - routing worked and the id is simply gone: retired after a
-            //                          migration (ngtcp2 rotates ids when the path changes, so
-            //                          packets in flight still carry the old one), or stale, or
-            //                          hostile. Ordinary, and not a routing problem
-            //
-            // Telling them apart is only possible because a server-minted id carries its owner,
-            // and the first case is recoverable: hand the datagram to the reactor it names rather
-            // than dropping a live connection's traffic. See Reactor.Quic.Forward.cs.
+            // this reactor cannot serve this datagram, for two very different reasons - told apart
+            // only because a server-minted id carries its owner. The id is NOT ours: the datagram
+            // reached the WRONG reactor, which is the routing failing, and is recoverable - hand it
+            // to the reactor it names rather than dropping a live connection's traffic, see
+            // Reactor.Quic.Forward.cs. The id IS ours: routing worked and the id is simply gone,
+            // which is what the count below means (see QuicStaleDatagrams).
             if (QuicTryForward(in datagram, in dcid))
             {
                 return;
@@ -300,8 +288,7 @@ public sealed unsafe partial class Reactor
                 continue;
             }
 
-            // Claim a moved connection's new address, so its datagrams stop being forwarded. Here
-            // rather than at the path report, which fires repeatedly while ngtcp2 validates.
+            // Claim a moved connection's new address, so its datagrams stop being forwarded.
             QuicPinPeer(conn);
         }
     }
@@ -326,8 +313,7 @@ public sealed unsafe partial class Reactor
         {
             // One connection's fault must not take the loop down with it. This runs bare in both
             // loop bodies and nothing above it catches, so an exception out of a protocol engine
-            // killed the reactor thread and every connection on it. The recv path has been guarded
-            // since it existed; the timer path never was.
+            // would kill the reactor thread and every connection on it.
             //
             // The faulted connection is dropped rather than skipped, because its deadline is still
             // in the past: leaving it would re-fire the same fault on every single pass, turning a

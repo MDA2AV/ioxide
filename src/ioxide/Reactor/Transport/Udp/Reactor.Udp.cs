@@ -234,12 +234,9 @@ public sealed unsafe partial class Reactor
     /// 8 MiB quietly runs with about a fortieth of it and the only symptom is datagrams dropped
     /// under load, which looks like a bug anywhere but here. Reading the value back makes it visible.
     ///
-    /// It deliberately does NOT tell the operator to raise the cap. Measured here, granting the full
-    /// 8 MiB cost about 45% of h3 throughput at saturation on unmodified main: the drops stopped and
-    /// a deep standing queue took their place, so the reactor worked through stale datagrams while
-    /// peers timed out and retransmitted. A small buffer drops early and keeps the queue short,
-    /// which congestion control is built to read. Which is better depends on the deployment, so this
-    /// reports the fact and leaves the judgement.
+    /// It deliberately does NOT tell the operator to raise the cap: which is better depends on the
+    /// deployment (see <see cref="UdpOptions.SocketBufferBytes"/>), so this reports the fact and
+    /// leaves the judgement.
     ///
     /// getsockopt reports DOUBLE what was granted - the kernel's own bookkeeping overhead is
     /// included - so the comparison halves it.
@@ -628,8 +625,6 @@ public sealed unsafe partial class Reactor
 
     private void FreeUdpMemory()
     {
-        // Freed after the ring fd is closed (Teardown order), so the kernel holds no references into
-        // the buffer slab or the msghdr template - same discipline as the TCP buffer slab.
         if (_udpBufRing != null)
         {
             NativeMemory.AlignedFree(_udpBufRing);

@@ -365,7 +365,7 @@ public abstract class QuicConnection : IValueTaskSource<QuicRecvSnapshot>
     }
 
     // --- IValueTaskSource<QuicRecvSnapshot>: token = generation snapshot; the core's own Version
-    //     is passed through for the dispatch. Same shape as the TCP source, shared with nothing. ---
+    //     is passed through for the dispatch. ---
 
     QuicRecvSnapshot IValueTaskSource<QuicRecvSnapshot>.GetResult(short token)
     {
@@ -397,10 +397,8 @@ public abstract class QuicConnection : IValueTaskSource<QuicRecvSnapshot>
             return;
         }
 
-        // This source only completes on the owning reactor thread, so the continuation already runs
-        // where ReactorSynchronizationContext would post it. Strip the scheduling-context flag or
-        // MRVTSC posts every resume to the mailbox instead of invoking it inline
-        // (RunContinuationsAsynchronously=false only covers the null-context case).
+        // Completes on the reactor thread only - strip the context-post so resumes stay inline
+        // (see ReactorSynchronizationContext).
         _readSignal.OnCompleted(continuation, state, _readSignal.Version,
             flags & ~ValueTaskSourceOnCompletedFlags.UseSchedulingContext);
     }

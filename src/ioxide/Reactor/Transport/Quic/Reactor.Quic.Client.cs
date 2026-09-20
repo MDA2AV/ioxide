@@ -5,8 +5,7 @@ namespace ioxide;
 ///
 /// They run on the reactor that opened them, which is the whole point - a handler that awaits an
 /// outbound request is resumed inline on its own reactor thread, with no synchronization context
-/// and no cross-thread handoff. A client on a reactor of its own would have to post continuations
-/// back through the mailbox, which is exactly the cost ioxide exists to avoid.
+/// and no cross-thread handoff.
 ///
 /// Two shapes, one mechanism:
 ///

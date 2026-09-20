@@ -18,8 +18,7 @@ public sealed unsafe partial class Reactor
     /// </summary>
     public void AddTicker(Action ticker) => _tickers.Add(ticker);
 
-    // Allocate the interval timespec and arm the first tick, before the loop starts. The timespec
-    // is freed in Teardown, after the ring fd closes.
+    // Armed before the loop starts; the timespec is freed in Teardown, after the ring fd closes.
     private void StartTicker()
     {
         _timerTs = (__kernel_timespec*)NativeMemory.Alloc((nuint)sizeof(__kernel_timespec));

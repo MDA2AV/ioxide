@@ -391,8 +391,7 @@ public unsafe partial class QuicEngineConnection : QuicConnection
     /// <summary>
     /// The single way a connection ends. Three things have to happen, in this order and once: the
     /// peer hears why, the transport stops routing datagrams here, and the engine state is freed.
-    /// Routing every death through one place is what keeps them from drifting apart - the farewell
-    /// used to be missing from two of the three paths.
+    /// Routing every death through one place is what keeps them from drifting apart.
     /// </summary>
     /// <param name="farewellLength">Bytes of CONNECTION_CLOSE waiting in <see cref="_sendBuf"/>;
     /// 0 to say nothing.</param>

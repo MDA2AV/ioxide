@@ -288,7 +288,7 @@ public sealed partial class RedisConnection : IDisposable
         {
             // Only re-parse once enough bytes for the current sticking point have arrived; below that
             // threshold a re-scan can't make progress (examined-cursor). _need == 0 means "unknown" -
-            // parse eagerly, as before.
+            // parse eagerly.
             if (_received - _scan >= _need)
             {
                 if (TryParseReply(out RespValue reply, out int need))

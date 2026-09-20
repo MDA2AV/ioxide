@@ -65,7 +65,7 @@ typedef struct iq_callbacks {
      * ngtcp2 retains POINTERS into the app's buffers for retransmission until this fires - the
      * caller of iq_conn_write must keep stream bytes alive until then. May be NULL. */
     void (*on_acked_stream_data)(void *user, int64_t stream_id, uint64_t offset, uint64_t datalen);
-    /* ngtcp2 moved this connection to a new peer address - the connection's path moved. What this does NOT mean is that the new
+    /* ngtcp2 moved this connection to a new peer address. What this does NOT mean is that the new
      * address was validated first: ngtcp2 adopts the current path on the first non-probing 1-RTT
      * packet from a new address (conn_recv_non_probing_pkt_on_new_path) and starts validating
      * afterwards. What makes that safe is not ordering but ngtcp2's own anti-amplification limit -
@@ -331,9 +331,6 @@ static int iq_verify_certificate(ptls_verify_certificate_t *self, ptls_t *tls, c
     return rv;
 }
 
-/* ALPN. With an engine allowlist: pick the client's first offer that we accept, else fail the
- * handshake (RFC 9001 §8.1: no mutual protocol = no_application_protocol). Without one (empty
- * allowlist): accept whichever the client offered first - selection is the app's concern. */
 /* ASCII lowercase, which is all a DNS name can contain that has a case at all. */
 static char iq_lower(char c)
 {
@@ -355,14 +352,11 @@ static void iq_free_certificates(ptls_context_t *ctx)
 /* Loads a certificate chain and its key into a context, and installs the signer. Returns 0, or -1
  * with the reason on stderr; on failure the context is left exactly as it was found.
  *
- * One function because it was three, and the three had drifted: each had its own wording, its own
- * teardown, and the client's had none at all.
- *
- * The pair is checked against each other, which is the part worth keeping. OpenSSL does it for the
- * TCP side when the key is installed, and picotls does not - so without this a certificate and a
- * key that do not belong together load happily here and fail every real handshake afterwards. That
- * is exactly the state a half-finished renewal leaves on disk, and catching it at load is what lets
- * a failed renewal leave the server serving what it had. */
+ * The pair is checked against each other. OpenSSL does it for the TCP side when the key is
+ * installed, and picotls does not - so without this a certificate and a key that do not belong
+ * together load happily here and fail every real handshake afterwards. That is exactly the state a
+ * half-finished renewal leaves on disk, and catching it at load is what lets a failed renewal leave
+ * the server serving what it had. */
 static int iq_load_keypair(ptls_context_t *ctx, ptls_openssl_sign_certificate_t *sign,
                            const char *cert_pem_path, const char *key_pem_path, const char *who)
 {
@@ -624,8 +618,7 @@ static int iq_on_client_hello(ptls_on_client_hello_t *self, ptls_t *tls,
     /* The SERVER's order decides, which is why this walks the allowlist on the outside: the first
      * protocol this engine lists that the client also offered is the one negotiated. The TCP side
      * has always worked that way and both are documented as preference-ordered; walking the
-     * client's offers first would quietly let the client choose instead. No deployment can see the
-     * difference while only one protocol is listed, which is exactly why it would go unnoticed. */
+     * client's offers first would quietly let the client choose instead. */
     for (size_t off = 0; off < e->alpn_len;) {
         size_t len = e->alpn[off];
 
@@ -642,8 +635,6 @@ static int iq_on_client_hello(ptls_on_client_hello_t *self, ptls_t *tls,
     return PTLS_ALERT_NO_APPLICATION_PROTOCOL;
 }
 
-/* The verified client identity, or an empty string when the peer offered none. Returns the length
- * written, or 0. */
 /* The recorded subject, when the flag the caller is entitled to read is set. The flag is the whole
  * argument for the parameter: the two getters below differ in nothing else, and what separates
  * them is which claim the name carries rather than how it is copied. */
@@ -657,9 +648,7 @@ static size_t iq_copy_subject(iq_conn *c, char *out, size_t outlen, int allowed)
         /* No name beats a different one - the same rule iq_conn_peer_cn states below, and the rule
          * iq_record_subject already applies when the DN will not fit peer_subject at all. Handing
          * back a prefix is the one outcome an identity must never produce: a truncated DN is
-         * plausible, comparable, and can equal a DIFFERENT principal's prefix. Widening
-         * peer_subject to 1024 is what made this reachable - below that, strlen could not exceed
-         * a caller's buffer. */
+         * plausible, comparable, and can equal a DIFFERENT principal's prefix. */
         return 0;
     }
     memcpy(out, c->peer_subject, n);
@@ -667,6 +656,8 @@ static size_t iq_copy_subject(iq_conn *c, char *out, size_t outlen, int allowed)
     return n;
 }
 
+/* The verified client identity, or an empty string when the peer offered none. Returns the length
+ * written, or 0. */
 size_t iq_conn_peer_subject(iq_conn *c, char *out, size_t outlen)
 {
     return iq_copy_subject(c, out, outlen, c != NULL && c->peer_authenticated);
@@ -1291,8 +1282,7 @@ void iq_engine_free(iq_engine *e)
         certs = previous;
     }
 
-    /* The trust store the verifier took a reference to. Never released before, which only showed
-     * once an engine could be built and torn down repeatedly. */
+    /* The trust store the verifier took a reference to. */
     if (e->peer_verify.cb != NULL) {
         ptls_openssl_dispose_verify_certificate(&e->verify_cert);
     }
@@ -1477,19 +1467,6 @@ void iq_conn_free(iq_conn *c)
 }
 
 
-/* Tell the caller if the path in force has moved since we last said so.
- *
- * ngtcp2 changes conn->dcid.current in four places, and only three are inside read_pkt. The fourth
- * is conn_on_path_validation_failed, reached from conn_write_path_challenge - i.e. from INSIDE a
- * write - and it restores the previous, validated path when a probe times out. Watching only the
- * read path meant that recovery was invisible: the caller stayed pinned to an address that had
- * just failed validation, permanently, because ngtcp2 also rewrites our remote_addr on every write
- * so the next read compared equal and never fired again. A connection that would have survived
- * died at the idle sweep instead.
- *
- * ngtcp2 fills the path we hand to writev_stream with the destination it chose for THAT datagram,
- * which for a PATH_RESPONSE or a PATH_CHALLENGE probe is not the current path at all. Calling this
- * before the datagram is handed back is what lets the caller send it where ngtcp2 meant it to go. */
 /* ngtcp2's own sockaddr comparison lives in lib/ngtcp2_addr.h, which is INTERNAL - it is not
  * shipped under lib/includes, so calling it compiled only by implicit declaration and stops
  * building outright on GCC 14+, where that is an error rather than a warning. This mirrors it
@@ -1522,6 +1499,15 @@ static int iq_sockaddr_eq(const ngtcp2_sockaddr *a, const ngtcp2_sockaddr *b)
     }
 }
 
+/* Tell the caller if the path in force has moved since we last said so.
+ *
+ * ngtcp2 changes conn->dcid.current in four places, and only three are inside read_pkt. The fourth
+ * is conn_on_path_validation_failed, reached from conn_write_path_challenge - i.e. from INSIDE a
+ * write - and it restores the previous, validated path when a probe times out. Watching only the
+ * read path meant that recovery was invisible: the caller stayed pinned to an address that had
+ * just failed validation, permanently, because ngtcp2 also rewrites our remote_addr on every write
+ * so the next read compared equal and never fired again. A connection that would have survived
+ * died at the idle sweep instead. */
 static void iq_sync_path(iq_conn *c)
 {
     if (c->path.remote.addrlen == 0) {
@@ -1609,11 +1595,6 @@ ngtcp2_ssize iq_conn_write(iq_conn *c, uint8_t *dest, size_t destlen,
 
     *pconsumed = consumed;
 
-    /* writev_stream's path argument is an OUT parameter: ngtcp2 has just written the destination
-     * it chose for THIS datagram into c->path. For ordinary traffic that is the current path; for
-     * a PATH_RESPONSE it is the address the challenge arrived from, and for a probe it is the
-     * address being validated. Reporting it here is what stops those going to the wrong peer -
-     * RFC 9000 8.2.2 requires a PATH_RESPONSE on the path its challenge came in on. */
     /* writev_stream's path argument is an OUT parameter: ngtcp2 has just written the destination
      * it chose for THIS datagram into c->path. For ordinary traffic that is the current path; for
      * a PATH_RESPONSE it is the address the challenge arrived from, and for a probe it is the
@@ -1834,8 +1815,6 @@ void iq_client_engine_free(iq_client_engine *e)
         return;
     }
 
-    /* Was free(e) alone, so every client engine holding a certificate leaked it and the key with
-     * it. The server side has always released these; this side simply never did. */
     iq_dispose_keypair(&e->ptls_ctx, &e->sign_cert);
     free(e);
 }

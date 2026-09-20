@@ -83,9 +83,7 @@ public sealed unsafe partial class Reactor
     }
 
     // Recv completions, one method per loop mode - the single operation the two modes genuinely
-    // differ on (where buffers come from and who returns them). The skeleton both share - stale
-    // guard, EOF teardown, overflow teardown, re-arm - lives here and in the CloseFromRecv helpers,
-    // called from both dispatch switches like the UDP/send completions.
+    // differ on (where buffers come from and who returns them).
 
     private const int ENOBUFS = 105;
 
@@ -220,9 +218,8 @@ public sealed unsafe partial class Reactor
         }
     }
 
-    // Accept, both modes: NoDelay, pooled-or-fresh connection, table registration, first recv arm,
-    // fault-observed handler launch. The mode branch picks the buffer-ring wiring; _incremental is
-    // readonly for the reactor's lifetime, so it predicts perfectly.
+    // Accept, both modes. The mode branch picks the buffer-ring wiring; _incremental is readonly
+    // for the reactor's lifetime, so it predicts perfectly.
     private void OnTcpAcceptCompletion(int listenFd, int res, bool more)
     {
         if (res >= 0)
@@ -274,8 +271,7 @@ public sealed unsafe partial class Reactor
         }
     }
 
-    // Recv-side teardown, shared by both modes: detach from the table, mark closed, release the
-    // recv-side ref.
+    // Recv-side teardown, shared by both modes.
     private void CloseFromRecv(TcpConnection conn, int fd)
     {
         _connections[fd] = null;
@@ -295,7 +291,7 @@ public sealed unsafe partial class Reactor
 
     // Re-arm every recv parked on -ENOBUFS (#93). Runs once per loop iteration, but only when a
     // buffer actually came back since the last sweep - so a parked connection can't spin the loop
-    // (no return, no re-arm), and a connection that exhausts the group again simply parks again.
+    // (no return, no re-arm).
     private void RearmStarvedRecvs()
     {
         if (_recvStarved.Count == 0 || !_buffersReturned)

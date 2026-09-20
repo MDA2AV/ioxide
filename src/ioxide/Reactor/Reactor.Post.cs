@@ -2,10 +2,9 @@ using System.Collections.Concurrent;
 
 namespace ioxide;
 
-// Reactor-thread scheduling, mirroring reedz's IoUringPipeScheduler: a queue of continuations drained
-// each loop iteration, woken via the eventfd (coalesced) only when enqueued from off the reactor.
-// Generalizes the existing _remoteOps/WakeFdWrite machinery to carry arbitrary callbacks, so a Kestrel
-// transport built on BCL pipes can route their reader/writer continuations onto the reactor thread.
+// Reactor-thread scheduling: the _remoteOps/WakeFdWrite machinery generalized to carry arbitrary
+// callbacks, so a Kestrel transport built on BCL pipes can route their reader/writer continuations
+// onto the reactor thread.
 public sealed unsafe partial class Reactor
 {
     private readonly struct PostItem

@@ -62,7 +62,7 @@ public sealed unsafe partial class Reactor
             return;
         }
 
-        // Data fully sent: plain SEND recycles now; a ZC send waits for its outstanding notif(s).
+        // Data fully sent: a ZC send still waits for its outstanding notif(s).
         if (conn.ZcNotifPending == 0)
         {
             conn.CompleteFlush();

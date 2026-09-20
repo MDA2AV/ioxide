@@ -8,8 +8,7 @@ namespace ioxide;
 /// connection's queue no longer has it and <c>DrainRecv</c> at recycle walks straight past it. The
 /// buffer then comes back only if the holder is told to give it back - which, on the plaintext
 /// path, nothing enforced: <see cref="TcpConnectionDualPipe"/> has no disposal, unlike the TLS one.
-/// A handler that returned early stranded a buffer per connection, and in shared mode those are
-/// slots out of the single group the whole reactor draws from.
+/// A handler that returned early stranded a buffer per connection.
 ///
 /// Implemented by the two types that hold buffers across calls - <see cref="TcpConnectionPipeReader"/>
 /// and <see cref="TcpConnectionStream"/> - so recycle can reclaim from either without knowing which.

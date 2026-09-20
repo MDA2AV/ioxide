@@ -8,6 +8,9 @@ namespace ioxide.nghttp3;
 /// </summary>
 public sealed partial class Nghttp3Connection
 {
+    /// <summary>Buffered, synchronous: dispatch at end-of-stream with the whole body pre-assembled
+    /// into <see cref="Nghttp3Request.Body"/>; the handler computes and returns - it must not wait
+    /// for anything (blocking would stall the reactor). Owns the handler's connection ref.</summary>
     public async Task RunBufferedAsync(Func<Nghttp3Request, Nghttp3Response> handler)
     {
         try
@@ -47,8 +50,7 @@ public sealed partial class Nghttp3Connection
         finally
         {
             // Before letting go, because letting go is all the transport sees: DecRef neither
-            // closes nor unregisters, so a connection dropped without a code stays routable until
-            // the idle sweep while the client waits on a request that will never be answered.
+            // closes nor unregisters.
             CloseWithPeerCode();
 
             _quicConnection.DecRef();
@@ -56,6 +58,9 @@ public sealed partial class Nghttp3Connection
         }
     }
 
+    /// <summary>Buffered, asynchronous: same end-of-stream dispatch and pre-assembled
+    /// <see cref="Nghttp3Request.Body"/>, but the handler may await (a database, a cache - any
+    /// ioxide-native awaitable resumes inline on the reactor). Owns the handler's connection ref.</summary>
     public async Task RunBufferedAsync(Func<Nghttp3Request, ValueTask<Nghttp3Response>> handler)
     {
         try
@@ -95,8 +100,7 @@ public sealed partial class Nghttp3Connection
         finally
         {
             // Before letting go, because letting go is all the transport sees: DecRef neither
-            // closes nor unregisters, so a connection dropped without a code stays routable until
-            // the idle sweep while the client waits on a request that will never be answered.
+            // closes nor unregisters.
             CloseWithPeerCode();
 
             _quicConnection.DecRef();

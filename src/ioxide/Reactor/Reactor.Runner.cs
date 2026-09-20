@@ -110,8 +110,7 @@ public sealed unsafe partial class Reactor
         }
         _ring.Dispose();
 
-        // Shared provided-buffer ring (incremental mode allocates per connection instead). Freed after
-        // the ring fd is closed, so the kernel has dropped its references to the slab.
+        // Shared provided-buffer ring (incremental mode allocates per connection instead).
         if (_bufRing != null)
         {
             NativeMemory.AlignedFree(_bufRing);

@@ -345,8 +345,7 @@ public sealed class TlsClientStream : IDisposable
         // Not on a handshake that never finished, though. There is no session to end, and
         // SSL_shutdown says so by failing and leaving "shutdown while in init" on the error queue -
         // which belongs to the reactor, not to this connection, so it becomes the next pooled
-        // connection's fatal error. Every failed handshake disposes exactly here, so this was one
-        // poisoned connection per failure.
+        // connection's fatal error.
         if (!_peerClosed && OpenSsl.SSL_in_init(_ssl) == 0)
         {
             if (OpenSsl.SSL_shutdown(_ssl) < 0)

@@ -5,7 +5,7 @@ namespace ioxide;
 /// <summary>
 /// UDP/datagram ABI: datagram socket type, the GSO/GRO offload knobs, TOS/ECN delivery, and the
 /// control-message (cmsg) machinery RECVMSG completions are parsed with. The QUIC transport rides
-/// this layer; QUIC's own native engine binding will live in Native.Quic.cs when it lands.
+/// this layer.
 /// </summary>
 public static unsafe partial class Native {
     // SOL_UDP == IPPROTO_UDP; UDP_SEGMENT/UDP_GRO are the GSO/GRO offload knobs - GSO splits one

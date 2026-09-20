@@ -9,10 +9,9 @@ namespace ioxide.nghttp2;
 /// deposited in <c>_readyThisPass</c> and dispatched by the loop once the native call unwinds.
 ///
 /// Nothing here may throw either. These are <c>[UnmanagedCallersOnly]</c>, so an exception would
-/// cross native frames and take the process down rather than fail one request - that was stated
-/// here long before it was enforced, and prose does not stop an ArrayPool rent or a dictionary
-/// insert from throwing. Each body is guarded now, and the fault lands on _failed, which the loops
-/// already act on once the native call unwinds and which still sends GOAWAY on the way out.
+/// cross native frames and take the process down rather than fail one request. Each body is
+/// guarded, and the fault lands on _failed, which the loops act on once the native call unwinds
+/// and which still sends GOAWAY on the way out.
 /// </summary>
 public sealed partial class Nghttp2Connection
 {
@@ -20,9 +19,8 @@ public sealed partial class Nghttp2Connection
         => (Nghttp2Connection)GCHandle.FromIntPtr((nint)user).Target!;
 
     /// <summary>
-    /// Records a fault and fails the connection. Nothing may be thrown from here: this is the last
-    /// managed frame before native nghttp2, so an escaping exception aborts the process rather than
-    /// failing one request. Teardown cannot happen here either - the session is on the stack below.
+    /// Records a fault and fails the connection. Teardown cannot happen here - the session is on
+    /// the stack below.
     /// </summary>
     private static unsafe void Fault(void* user, Exception e)
     {
@@ -139,7 +137,6 @@ public sealed partial class Nghttp2Connection
             Nghttp2Connection connection = From(user);
             if (connection._pending.Remove(streamId, out PendingRequest? pending))
             {
-                // Record only. The loop dispatches this after ih2_read returns.
                 connection._readyThisPass.Add(pending);
             }
         }

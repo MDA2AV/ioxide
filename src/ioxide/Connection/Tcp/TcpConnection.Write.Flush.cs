@@ -45,12 +45,12 @@ public sealed unsafe partial class TcpConnection : IValueTaskSource
             return default;
         }
 
-        // One flush at a time, and not as a matter of taste: the parked caller waits on
-        // _flushSignal, a single ManualResetValueTaskSourceCore with room for exactly one
-        // continuation. A second flush would hand a second awaiter the same token and the source
-        // would throw on the second OnCompleted instead - deeper, and on the reactor thread.
-        // An application that flushes twice concurrently has a bug in its own write serialization,
-        // and hearing about it here is the point.
+        // One flush at a time: the parked caller waits on _flushSignal, a single
+        // ManualResetValueTaskSourceCore with room for exactly one continuation. A second flush
+        // would hand a second awaiter the same token and the source would throw on the second
+        // OnCompleted instead - deeper, and on the reactor thread. An application that flushes
+        // twice concurrently has a bug in its own write serialization, and hearing about it here
+        // is the point.
         if (Interlocked.Exchange(ref _flushInProgress, 1) == 1)
         {
             throw new InvalidOperationException("FlushAsync already in progress.");
@@ -65,17 +65,15 @@ public sealed unsafe partial class TcpConnection : IValueTaskSource
     /// </summary>
     /// <remarks>
     /// For the internal callers that flush on the application's behalf while tearing a connection
-    /// down - <see cref="ioxide.tls.TlsConnectionDualPipe.DisposeAsync"/> is the one that has to
-    /// have it. They flush unconditionally because a handler that wrote its response and never
-    /// flushed has nothing else to carry it out, and against a flush the application left in
-    /// flight that unconditional call threw out of a finally and faulted the connection handler
-    /// (#234).
+    /// down, <see cref="ioxide.tls.TlsConnectionDualPipe.DisposeAsync"/> above all. They flush
+    /// unconditionally because a handler that wrote its response and never flushed has nothing else
+    /// to carry it out, and against a flush the application left in flight that unconditional call
+    /// threw out of a finally and faulted the connection handler (#234).
     ///
-    /// Skipping loses nothing, and that is a property of the write path rather than a hope: while
-    /// _flushInProgress is set every GetSpan/GetMemory/Advance/Write is refused
-    /// (TcpConnection.Write.cs), so nothing can have entered the slab since the in-flight flush
-    /// armed, and that flush snapshotted everything that was already there. The slab holds exactly
-    /// what is on its way out. A second flush would compute target == 0 and return anyway.
+    /// Skipping loses nothing: while _flushInProgress is set every GetSpan/GetMemory/Advance/Write
+    /// is refused (TcpConnection.Write.cs), so nothing can have entered the slab since the
+    /// in-flight flush armed, and that flush snapshotted everything that was already there. A
+    /// second flush would compute target == 0 and return anyway.
     ///
     /// Not the same as relaxing the guard above. A caller that means "send my bytes" must still
     /// hear that they were not sent.
@@ -97,13 +95,10 @@ public sealed unsafe partial class TcpConnection : IValueTaskSource
         return FlushCore();
     }
 
-    // TcpConnection already torn down: complete immediately so the handler unwinds
-    // to its next ReadAsync, sees IsClosed, and exits.
-    //
-    // The staged bytes are dropped rather than kept. Nothing will ever send them, and leaving
-    // the tail where it was made made every later write append to a slab that only ever grew -
-    // a writer that keeps producing against a peer that has gone reaches gigabytes, because
-    // doubling the slab is the one thing that never fails.
+    // The connection is already torn down, so the staged bytes are dropped rather than kept:
+    // nothing will ever send them, and leaving the tail where it was made every later write append
+    // to a slab that only ever grew - a writer that keeps producing against a peer that has gone
+    // reaches gigabytes, because doubling the slab is the one thing that never fails.
     //
     // Segmented needs its own release, and zeroing the tail alone did nothing for it: once
     // _inOverflow is set every write is routed to overflow rather than to the slab, so the
@@ -181,11 +176,11 @@ public sealed unsafe partial class TcpConnection : IValueTaskSource
         ZcNotifPending = 0;
         Volatile.Write(ref _flushInProgress, 0);
 
-        // Guard against a double completion. During teardown MarkClosed() may have already disarmed and
-        // completed this flush (e.g. a TcpConnection: close response whose SEND CQE lands after the close),
-        // which Resets/invalidates the value-task source. Only the call that actually disarms the flush
-        // signals - mirroring MarkClosed and the recv path's _armed check. Without this, the late CQE's
-        // SetResult throws InvalidOperationException on the reactor thread and crashes the process.
+        // Guard against a double completion. During teardown MarkClosed() may have already disarmed
+        // and completed this flush (e.g. a close response whose SEND CQE lands after the close),
+        // which Resets/invalidates the value-task source. Only the call that actually disarms the
+        // flush signals. Without this, the late CQE's SetResult throws InvalidOperationException on
+        // the reactor thread and crashes the process.
         if (Interlocked.Exchange(ref _flushArmed, 0) == 1)
         {
             _flushSignal.SetResult(true);

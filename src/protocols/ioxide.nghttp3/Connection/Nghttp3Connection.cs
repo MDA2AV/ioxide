@@ -121,17 +121,6 @@ public sealed partial class Nghttp3Connection : IDisposable
         _quicConnection.OnSendCapacityAvailable = () => PumpEgress();
     }
 
-    /// <summary>Buffered, synchronous: dispatch at end-of-stream with the whole body pre-assembled
-    /// into <see cref="Nghttp3Request.Body"/>; the handler computes and returns - it must not wait
-    /// for anything (blocking would stall the reactor). Owns the handler's connection ref.</summary>
-    /// <summary>Buffered, asynchronous: same end-of-stream dispatch and pre-assembled
-    /// <see cref="Nghttp3Request.Body"/>, but the handler may await (a database, a cache - any
-    /// ioxide-native awaitable resumes inline on the reactor). Owns the handler's connection ref.</summary>
-    /// <summary>Streaming: dispatch at END-OF-HEADERS, body pulled through
-    /// <see cref="Nghttp3Request.BodyReader"/> while the request stream is flow-control paced - a slow
-    /// consumer freezes the peer's window instead of buffering (memory bound = one window, not the
-    /// body size). The handler must resume on the reactor (every ioxide await does). Owns the
-    /// handler's connection ref.</summary>
     /// <summary>
     /// Begin graceful shutdown: a GOAWAY rides out on the control stream, NEW request streams are
     /// rejected, in-flight requests complete normally, and once nghttp3 reports the connection

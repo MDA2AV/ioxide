@@ -5,8 +5,7 @@ namespace ioxide.http2;
 
 /// <summary>
 /// Frame parsing. Consumes as many complete frames as the accumulator holds, leaving any partial
-/// tail for the next recv - a frame boundary has nothing to do with a buffer boundary, so this has
-/// to be prepared to stop mid-stream at any point and resume.
+/// tail for the next recv.
 /// </summary>
 public sealed partial class Http2Connection
 {
@@ -236,7 +235,6 @@ public sealed partial class Http2Connection
 
     private void HandleContinuation(in FrameHeader header, ReadOnlySpan<byte> payload)
     {
-        // The block belongs to a stream we refused; keep decoding it so HPACK stays in step.
         if (header.StreamId == _discardingStream)
         {
             DiscardHeaderBlock(header, payload);
@@ -409,8 +407,6 @@ public sealed partial class Http2Connection
                     int delta = (int)value - _peerInitialStreamWindow;
                     _peerInitialStreamWindow = (int)value;
 
-                    // A response already writing is credited (or debited) the same as a request
-                    // still arriving: the setting retunes every open stream, not only new ones.
                     if (_responseWindows.Count > 0)
                     {
                         foreach (int streamId in _responseWindows.Keys.ToArray())
@@ -466,8 +462,7 @@ public sealed partial class Http2Connection
             pending.SendWindow += increment;
         }
 
-        // Credit arrived, so a streamed response parked on it can carry on. Stream 0 credits the
-        // connection and therefore unblocks every parked writer, not just one.
+        // Credit arrived, so a streamed response parked on it can carry on.
         ReleaseCreditWaiters(header.StreamId);
     }
 

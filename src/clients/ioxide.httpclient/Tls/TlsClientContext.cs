@@ -56,7 +56,7 @@ public sealed unsafe class TlsClientContext : IDisposable
         {
             // Checked, because ssl3_ctx_ctrl returns 0 for a version it will not accept and applies
             // NOTHING - silently, with no error queued. A caller pinning a floor got OpenSSL's
-            // default instead and no way to find out. The server side has always checked this.
+            // default instead and no way to find out.
             if (OpenSsl.SSL_CTX_ctrl(ctx, OpenSsl.SSL_CTRL_SET_MIN_PROTO_VERSION, options.MinimumVersion, 0) != 1)
             {
                 throw new IOException(

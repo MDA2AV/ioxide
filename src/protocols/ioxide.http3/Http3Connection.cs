@@ -20,8 +20,7 @@ public sealed partial class Http3Connection
     private readonly QuicConnection _quicConnection;
     private bool _fatal;
 
-    // RFC 9114 section 8.1. The code a protocol error closes the connection with; the peer is
-    // entitled to know WHY it was dropped, and until now it was told nothing at all.
+    // RFC 9114 section 8.1. The code a protocol error closes the connection with.
     private const ulong H3GeneralProtocolError = 0x0101;
     // RFC 9114 8.1 draws the line by WHY the frame is wrong, and the two are not interchangeable:
     // UNEXPECTED is a frame that is not permitted in this state or on this stream, ERROR is one

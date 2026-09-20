@@ -113,9 +113,8 @@ public sealed unsafe partial class Reactor : IRingHost
         int slot = AllocOpSlot(completion);
         EnsureTimespecCapacity();
 
-        // The kernel reads this while the op is in flight, so it lives with the slot and is
-        // still there when the CQE arrives. That is also why the deadline cannot be resolved
-        // before the slot is: the address the SQE carries is this slot's.
+        // The deadline cannot be resolved before the slot is: the address the SQE carries is
+        // this slot's.
         __kernel_timespec* ts = _opTimespecs + slot;
         long ns = nanoseconds < 1 ? 1 : nanoseconds;
         ts->tv_sec  = ns / 1_000_000_000L;
@@ -141,9 +140,8 @@ public sealed unsafe partial class Reactor : IRingHost
 
     /// <summary>
     /// The SQ has one issuer, so a caller on any other thread queues the op and wakes the reactor
-    /// to submit it on its own. Shared by every submission, and kept out of them: the thread test
-    /// is two comparisons and stays where it is, while this - an enqueue and a wake - is the cold
-    /// half and is marked so it does not get inlined back into a path that never runs it.
+    /// to submit it on its own. Kept out of the submitters - the thread test stays there, this is
+    /// the cold half and is marked so it does not get inlined back into a path that never runs it.
     /// </summary>
     [MethodImpl(MethodImplOptions.NoInlining)]
     private void HandOff(byte opcode, int fd, nint buffer, int length, long offset, IRingCompletion completion)
@@ -159,9 +157,9 @@ public sealed unsafe partial class Reactor : IRingHost
     }
 
     /// <summary>
-    /// Writes one SQE and tags it for the client dispatch. Every client op ends here, whatever
-    /// its fields mean: a buffer and a length for the fd ops, a deadline and a count of one for
-    /// a timeout. The callers differ in what they put in the fields, not in how they submit.
+    /// Writes one SQE and tags it for the client dispatch. Every client op ends here, whatever its
+    /// fields mean: a buffer and a length for the fd ops, a deadline and a count of one for a
+    /// timeout.
     /// </summary>
     private void Emit(byte opcode, int fd, ulong addr, uint len, ulong off, int slot)
     {
@@ -180,8 +178,8 @@ public sealed unsafe partial class Reactor : IRingHost
     {
         while (_remoteOps.TryDequeue(out RemoteOp op))
         {
-            // The only place the two submissions have to be told apart, and it is off the hot
-            // path: this runs once per cross-thread handover, not once per op.
+            // The only place the two submissions have to be told apart, and off the hot path:
+            // once per cross-thread handover, not once per op.
             if (op.Opcode == IORING_OP_TIMEOUT)
             {
                 SubmitTimeoutCore(op.Offset, op.Completion);

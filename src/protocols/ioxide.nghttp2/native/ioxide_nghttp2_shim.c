@@ -365,13 +365,10 @@ static ih2_stream *ih2_attach_body(const uint8_t *body, size_t body_len, int *er
     return s;
 }
 
-/* Answer one request. The stream id is the one the request arrived on. */
 /* ---- streamed responses ------------------------------------------------------------------
  *
  * The pull model, wrapped so C# can pretend it pushes. Submit opens the stream with a provider and
- * no bytes; ih2_stream_write appends and resumes; ih2_stream_close says there will be no more.
- * read_body defers whenever the window is dry, which is what keeps the stream open through a slow
- * producer instead of ending it. */
+ * no bytes; ih2_stream_write appends and resumes; ih2_stream_close says there will be no more. */
 
 int ih2_submit_response_stream(ih2_conn *c, int32_t stream_id,
                                const uint8_t *headers, size_t headers_len)
@@ -470,6 +467,7 @@ int ih2_stream_close(ih2_conn *c, int32_t stream_id)
     return rv == NGHTTP2_ERR_INVALID_ARGUMENT ? 0 : rv;
 }
 
+/* Answer one request. The stream id is the one the request arrived on. */
 int ih2_submit_response(ih2_conn *c, int32_t stream_id,
                         const uint8_t *headers, size_t headers_len,
                         const uint8_t *body, size_t body_len)

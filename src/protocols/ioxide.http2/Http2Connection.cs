@@ -15,8 +15,7 @@ namespace ioxide.http2;
 /// The default HTTP/2 here, and the one the features land on: streamed responses, streamed
 /// request bodies and non-blocking dispatch are all this side. <c>ioxide.nghttp2</c> remains as
 /// the battle-tested alternative - buffered only, and the reference implementation's coverage of
-/// the protocol's darker corners. Measured on this rig it runs 1.35x-1.39x the binding as a
-/// client; the same framing and HPACK drive <c>ioxide.httpclient</c>, pointed the other way round.
+/// the protocol's darker corners.
 ///
 /// It speaks to an <see cref="IDuplexPipe"/> and knows nothing about TLS: hand it a
 /// <c>TcpConnectionDualPipe</c> for h2c or a <c>TlsConnectionDualPipe</c> for h2 over TLS, and the
@@ -149,8 +148,7 @@ public sealed partial class Http2Connection : IDisposable
                 {
                     // A streamed writer that finishes inside this window needs no write of its own:
                     // the flush below carries it out together with every other response the pass
-                    // produced. That coalescing is the whole reason buffered h2 is fast, and there
-                    // is no reason a streamed response cannot share it.
+                    // produced.
                     _passFlushPending = true;
                     ParseAvailable();
                     await DispatchReadyAsync(handler);

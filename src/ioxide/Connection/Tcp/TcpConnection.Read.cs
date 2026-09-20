@@ -77,12 +77,10 @@ public sealed unsafe partial class TcpConnection : IValueTaskSource<RecvSnapshot
     /// The connection stops tracking the buffer here - it is out of the recv queue, so the teardown
     /// drain no longer sees it and nothing else will return it for you. In shared mode a buffer that
     /// is never handed back is a slot gone from the group the whole reactor draws from, for the life
-    /// of the process.
-    ///
-    /// The adapters that hide buffers from their caller - <see cref="TcpConnectionPipeReader"/> and
-    /// <see cref="TcpConnectionStream"/> - own that cleanup themselves and are reclaimed at recycle
-    /// even if the caller forgets to complete them (see <see cref="IRecvBufferHolder"/>). This is
-    /// the raw seam: it hands you the id, so returning it is yours.
+    /// of the process. The adapters that hide buffers from their caller -
+    /// <see cref="TcpConnectionPipeReader"/> and <see cref="TcpConnectionStream"/> - own that
+    /// cleanup themselves (see <see cref="IRecvBufferHolder"/>); this is the raw seam, so returning
+    /// the id is yours.
     /// </remarks>
     public bool TryGetItem(in RecvSnapshot snap, out SpscRecvRing.Item item)
         => _recv.TryDequeueUntil(snap.Tail, out item);

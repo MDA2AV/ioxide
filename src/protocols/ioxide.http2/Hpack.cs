@@ -188,8 +188,7 @@ internal sealed class HpackDecoder
 
     /// <summary>
     /// The decoder's half of the shared dynamic table: newest first, evicting from the tail until
-    /// the RFC's size accounting fits. Entry size is name + value + 32, which is not the bytes on
-    /// the wire but the number both peers agree to count.
+    /// the RFC's size accounting fits.
     /// </summary>
     private sealed class DynamicTable(int maxSize)
     {

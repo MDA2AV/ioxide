@@ -348,9 +348,8 @@ public sealed unsafe class TlsSession : IDisposable
         int total = 0;
         while (true)
         {
-            // A TLS record carries at most 2^14 bytes of plaintext (RFC 8446 section 5.1), so a
-            // larger request cannot be filled by one record and a smaller one only costs extra
-            // SSL_read calls. This is the protocol's own bound, not a tuning knob.
+            // A larger request cannot be filled by one record, and a smaller one only costs extra
+            // SSL_read calls.
             Span<byte> destination = writer.GetSpan(MaxRecordPlaintext);
 
             int n, error;
@@ -378,16 +377,6 @@ public sealed unsafe class TlsSession : IDisposable
     /// own bound, not a tuning knob.</summary>
     private const int MaxRecordPlaintext = 16 * 1024;
 
-    /// <summary>
-    /// Classify a non-positive SSL_read. False means stop and wait for more ciphertext; a genuine
-    /// protocol failure throws.
-    /// </summary>
-    /// <remarks>
-    /// The distinction this draws used to be missing: every error except ZERO_RETURN was treated as
-    /// "record incomplete", so a bad MAC or a malformed record was indistinguishable from needing
-    /// more bytes. A corrupted stream then looked like a connection that had simply gone quiet, and
-    /// a caller pumping a pipe would wait on it forever.
-    /// </remarks>
     /// <summary>
     /// How many COMPLETE TLS records are pending in the read BIO, and whether anything is left over
     /// beyond them. Inspects the BIO's buffer through BIO_CTRL_INFO rather than consuming it.
@@ -451,10 +440,6 @@ public sealed unsafe class TlsSession : IDisposable
             return;
         }
 
-        // With kTLS the kernel makes the records, so the plaintext goes straight into the slab;
-        // without it OpenSSL has to encrypt first. A handler that picks the wrong one either sends
-        // cleartext or double-encrypts, and which is wrong depends on a flag it probably did not
-        // set - so it should not have to pick.
         if (KernelTx)
         {
             connection.Write(plaintext);
@@ -508,6 +493,11 @@ public sealed unsafe class TlsSession : IDisposable
     /// <remarks>
     /// Takes the error the operation itself reported rather than asking again: the queue is shared
     /// by every connection on this reactor, so a second look can answer about somebody else.
+    ///
+    /// The distinction this draws used to be missing: every error except ZERO_RETURN was treated as
+    /// "record incomplete", so a bad MAC or a malformed record was indistinguishable from needing
+    /// more bytes. A corrupted stream then looked like a connection that had simply gone quiet, and
+    /// a caller pumping a pipe would wait on it forever.
     /// </remarks>
     private bool ShouldKeepReading(int err)
     {
@@ -637,7 +627,6 @@ public sealed unsafe class TlsSession : IDisposable
         // MSG_DONTWAIT because accepted sockets are BLOCKING - the accept SQE asks for no
         // SOCK_NONBLOCK and nothing sets it afterwards. Without it, a peer that has stopped reading
         // parks the REACTOR THREAD here during teardown and every other connection on it stops.
-        // The kTLS sibling has always passed it.
         byte* record = stackalloc byte[512];
         while (true)
         {

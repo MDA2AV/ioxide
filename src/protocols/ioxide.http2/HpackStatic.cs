@@ -104,7 +104,7 @@ internal static class HpackStatic
 
     // Table names are lowercase and a field name is case-insensitive, so a caller that kept the
     // canonical capitalisation - "Content-Type", "Vary" - still resolves to its index instead of
-    // being written out as a literal. The same comparison QPACK makes for the same reason.
+    // being written out as a literal.
     private static bool EqualsIgnoreCase(byte[] lowercase, ReadOnlySpan<byte> other)
     {
         if (lowercase.Length != other.Length)

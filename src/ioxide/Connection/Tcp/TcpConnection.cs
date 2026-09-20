@@ -16,15 +16,10 @@ public sealed unsafe partial class TcpConnection
     /// The reader currently holding recv buffers taken out of this connection's queue, if any.
     /// </summary>
     /// <remarks>
-    /// <see cref="TryGetItem"/> is a DEQUEUE: the moment a buffer is handed to a reader, the
-    /// connection's queue no longer has it, so <see cref="DrainRecv"/> at recycle walks past it and
-    /// the buffer comes back only if the reader is completed. Nothing enforced that - the plaintext
-    /// <see cref="TcpConnectionDualPipe"/> has no disposal, unlike the TLS one - so a handler that
-    /// returned early stranded a buffer per connection, and in shared mode those are slots out of
-    /// the one group the whole reactor draws from.
-    ///
     /// One reference, assigned once when a holder is constructed. Recycle asks it back through
-    /// <see cref="ReleaseHeldRecvBuffers"/>, so the leak cannot depend on the caller remembering.
+    /// <see cref="ReleaseHeldRecvBuffers"/>, so a buffer a handler stranded by returning early does
+    /// not depend on the caller remembering. See <see cref="IRecvBufferHolder"/> for why
+    /// <see cref="DrainRecv"/> cannot find those buffers itself.
     /// </remarks>
     internal IRecvBufferHolder? BufferHolder;
 
@@ -34,12 +29,10 @@ public sealed unsafe partial class TcpConnection
     /// common path.
     /// </summary>
     /// <remarks>
-    /// The slot is claimed rather than read so the reclaim runs at most once, which is all this
-    /// buys: the holder still walks its own chain on <c>Complete</c>, so it does not by itself make
-    /// a double return impossible. What rules that out is the refcount protocol - recycle runs at
-    /// refcount zero, so a conforming handler has finished with the connection before this is
-    /// reached, exactly as everywhere else that touches it. A handler that DecRefs and then keeps
-    /// using its reader is racing the reactor over the connection generally, not only here.
+    /// The slot is claimed rather than read so the reclaim runs at most once. That alone does not
+    /// make a double return impossible - the holder still walks its own chain on <c>Complete</c> -
+    /// what rules it out is the refcount protocol: recycle runs at refcount zero, so a conforming
+    /// handler has finished with the connection before this is reached.
     /// </remarks>
     internal void ReleaseHeldRecvBuffers()
         => Interlocked.Exchange(ref BufferHolder, null)?.ReleaseHeldBuffers();

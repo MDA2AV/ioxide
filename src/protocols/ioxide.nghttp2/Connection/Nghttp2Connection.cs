@@ -53,8 +53,7 @@ public sealed partial class Nghttp2Connection : IDisposable
     private readonly Dictionary<int, PendingRequest> _pending = new();
 
     // Requests whose streams ended during the current ih2_read. The callbacks only record them;
-    // the loop dispatches after mem_recv returns. Running a handler from inside the callback would
-    // let it submit a response and re-enter nghttp2 while it is still on the stack.
+    // the loop dispatches after mem_recv returns.
     private readonly List<PendingRequest> _readyThisPass = [];
 
     /// <summary>

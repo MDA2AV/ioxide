@@ -89,8 +89,6 @@ public sealed class TlsService
     // that it is set at all, and that it does not change between the contexts of one service.
     private static readonly byte[] SessionIdContext = "ioxide"u8.ToArray();
 
-    // A per-SSL ex_data slot holds a GCHandle to the TlsSession, so the static keylog callback can
-    // find the right session for an SSL without a process-global, recycled-pointer-keyed map.
     /// <summary>The one suite kTLS can derive kernel keys from; see <see cref="TlsOptions.KernelTx"/>.</summary>
     private const string KernelTlsSuite = "TLS_AES_128_GCM_SHA256";
 
@@ -285,8 +283,6 @@ public sealed class TlsService
                 "RequireClientCertificate needs trust anchors: set ClientCaPath or ClientCaPem.", nameof(options));
         }
 
-        // The ALPN protocol to select is handed to the (static) callback via its arg, so the
-        // configured TlsOptions.Alpn is honored instead of being hard-coded.
         byte[] alpnWire = BuildAlpnWire(options.Alpn);
         GCHandle alpnHandle = GCHandle.Alloc(alpnWire);
 
@@ -371,8 +367,6 @@ public sealed class TlsService
 
         lock (_rotation)
         {
-            // Built first, published second. Anything wrong with the new material throws here,
-            // before the service has stopped serving the old.
             _slot.Current = BuildCertificates(_options, defaultCertificate, certificatesByHost, _alpnHandle, _slotHandle);
         }
     }
@@ -397,8 +391,6 @@ public sealed class TlsService
         {
             ctx = NewContext(options, defaultCertificate, "", alpnHandle);
 
-            // The default is configured. SNI adds alternatives beside it, each a context of its own,
-            // and a callback that picks between them per handshake.
             byHost = BuildHostContexts(options, certificatesByHost, alpnHandle);
 
             if (byHost is not null)
@@ -908,7 +900,6 @@ public sealed class TlsService
 
             try
             {
-                // A bundle may hold several anchors; read until the BIO is exhausted.
                 while (true)
                 {
                     nint cert = OpenSsl.PEM_read_bio_X509(bio, 0, 0, 0);
@@ -1170,7 +1161,6 @@ public sealed class TlsService
                     throw new IOException($"TLS handshake failed: {OpenSsl.LastError()}");
                 }
 
-                // Need more ciphertext from the client.
                 RecvSnapshot snapshot = await conn.ReadAsync();
                 bool fed = FeedInbound(conn, rbio, snapshot);
                 conn.ResetRead();
@@ -1185,8 +1175,6 @@ public sealed class TlsService
             // decides which protocol loop to run.
             session.CaptureAlpn();
 
-            // Same moment, same reason: the peer identity exists only after the handshake, and a
-            // handler that authorises per route needs it before it reads a request.
             session.CapturePeerCertificate();
 
             // Count BEFORE draining: these are the records the handshake pulled off the socket, so
