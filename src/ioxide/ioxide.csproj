@@ -23,4 +23,39 @@
     <None Include="../../README.md" Pack="true" PackagePath="/" />
   </ItemGroup>
 
+  <!--
+    IoxideRuntime.Version is generated from the Version property above rather than written next to
+    it in C#. A second literal has to be remembered on every release and was not: it read "0.0.17"
+    against packages on 0.13.233, having gone untouched since the 0.0.x days (#224).
+
+    Generated rather than read back off the assembly at runtime, because reflection over assembly
+    attributes is exactly what Native AOT trims. This costs nothing at run time - it is a const, so
+    it inlines - and cannot disagree with the Version above, which is the only thing a release edits.
+
+    %3B is an escaped semicolon: MSBuild would otherwise read one as an item separator.
+  -->
+  <Target Name="GenerateVersionSource" BeforeTargets="BeforeCompile;CoreCompile">
+    <PropertyGroup>
+      <_IoxideVersionFile>$(IntermediateOutputPath)IoxideVersion.g.cs</_IoxideVersionFile>
+    </PropertyGroup>
+
+    <ItemGroup>
+      <_IoxideVersionLines Include="// &lt;auto-generated /&gt;" />
+      <_IoxideVersionLines Include="// Written by the GenerateVersionSource target in ioxide.csproj, from its Version property." />
+      <_IoxideVersionLines Include="// Do not edit, and do not commit: it lives under obj/." />
+      <_IoxideVersionLines Include="namespace ioxide%3B" />
+      <_IoxideVersionLines Include="internal static class IoxideVersion" />
+      <_IoxideVersionLines Include="{" />
+      <_IoxideVersionLines Include="    public const string Value = &quot;$(Version)&quot;%3B" />
+      <_IoxideVersionLines Include="}" />
+    </ItemGroup>
+
+    <WriteLinesToFile File="$(_IoxideVersionFile)" Lines="@(_IoxideVersionLines)"
+                      Overwrite="true" WriteOnlyWhenDifferent="true" />
+
+    <ItemGroup>
+      <Compile Include="$(_IoxideVersionFile)" />
+    </ItemGroup>
+  </Target>
+
 </Project>
