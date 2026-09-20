@@ -29,6 +29,9 @@ server does not start under it. The counter is **per uid**, not per process, so 
 shares one budget. A closed ring's memory is reclaimed asynchronously, so standing servers up and
 tearing them down in quick succession can hit `ENOMEM` while nothing is leaking; `Ring.Create`
 retries briefly before giving up, and names the errno when it does.
+>
+> Incremental mode charges a further page per live connection, so at the default `MaxConnections`
+> a reactor can want 16 MB on top of its ring.
 
 **[Documentation](https://mda2av.github.io/ioxide/)** - architecture, guides, and every example as
 runnable code side by side.

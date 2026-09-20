@@ -51,13 +51,18 @@ public sealed unsafe class Ring : IDisposable
     /// </remarks>
     private static int SetupWithMemlockRetry(uint entries, IoUringParams* parameters)
     {
+        // 5, 10, 20, 40, 80ms - about 155ms in total. Sized from the measured reclaim latency of a
+        // SINGLE ring, whose median is ~20ms and whose tail reaches 47ms under load. A shorter
+        // schedule looked sufficient against a BURST, where many rings are in flight and one is
+        // always coming back within a few ms, but the one-at-a-time case a restarting server
+        // produces is far slower and a 30ms budget still failed a fifth of the time.
         const int attempts = 6;
 
         int fd = io_uring_setup(entries, parameters);
 
-        for (int attempt = 1; fd == -ENOMEM && attempt < attempts; attempt++)
+        for (int attempt = 0, delay = 5; fd == -ENOMEM && attempt < attempts - 1; attempt++, delay *= 2)
         {
-            Thread.Sleep(attempt * 2);   // 2, 4, 6, 8, 10ms - ~30ms total, well past what we measured
+            Thread.Sleep(delay);
             fd = io_uring_setup(entries, parameters);
         }
 

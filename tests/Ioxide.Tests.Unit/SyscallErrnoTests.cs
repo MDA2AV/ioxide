@@ -21,9 +21,9 @@ namespace Ioxide.Tests;
 /// handler, a profiler's SIGPROF, anything the kernel routes to a reactor thread - ends that
 /// reactor, while the process carries on reporting healthy at reduced capacity.
 ///
-/// The three declarations sit next to each other in Native.IoUring.cs and only one of them,
-/// syscall4 for io_uring_register, is declared SetLastError = true. Its callers read
-/// Marshal.GetLastPInvokeError and work correctly; the other two are the bug.
+/// The three declarations sat next to each other in Native.IoUring.cs and only one of them,
+/// syscall4 for io_uring_register, was declared SetLastError = true - which is how the omission
+/// went unnoticed. All three now normalise to a negative errno.
 ///
 /// No sockets, no signals, no timing here: ask the kernel for something it must refuse and read
 /// what comes back.

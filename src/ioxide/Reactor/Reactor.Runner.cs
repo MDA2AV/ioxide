@@ -116,7 +116,12 @@ public sealed unsafe partial class Reactor
         CloseUdpFds();
         CloseAcceptedTcpSockets();
 
+        // Zeroed, not just closed: WakeFdWrite is called from any thread and guards only on
+        // _wakeFd > 0, so leaving the old number here writes into whatever fd reused it. Teardown
+        // used to follow an explicit Stop(); it can now also follow a fault, at any instant, while
+        // a host is still handing work in.
         close(_wakeFd);
+        _wakeFd = 0;
         if (_timerTs != null)
         {
             NativeMemory.Free(_timerTs);
