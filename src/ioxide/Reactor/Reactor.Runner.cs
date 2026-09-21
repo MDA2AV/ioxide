@@ -116,18 +116,23 @@ public sealed unsafe partial class Reactor
         CloseUdpFds();
         CloseAcceptedTcpSockets();
 
-        // Guarded because OpenWakeFd runs late in setup and Teardown now also follows a throw
-        // from anything before it, where _wakeFd is still its default 0 - stdin, not an eventfd.
+        // Taken away before it is closed, and the writers still holding it are waited out.
+        // WakeFdWrite runs on any thread, and Teardown now also follows a fault - at any instant,
+        // while a host is still handing work in. Closing under a writer would hand the number back
+        // to the process and let that writer's 8 bytes land in whatever socket took it next.
         //
-        // Zeroed rather than merely closed: WakeFdWrite is called from any thread and guards only
-        // on _wakeFd > 0, so leaving the old number here writes into whatever fd reused it.
-        // Teardown used to follow an explicit Stop(); it can now also follow a fault, at any
-        // instant, while a host is still handing work in.
-        if (_wakeFd > 0)
+        // Reading 0 covers the other half: OpenWakeFd runs late in setup, so a throw from anything
+        // before it arrives here with the field still at its default - stdin, not an eventfd.
+        int wakeFd = Interlocked.Exchange(ref _wakeFd, 0);
+        if (wakeFd > 0)
         {
-            close(_wakeFd);
+            SpinWait spin = default;
+            while (Volatile.Read(ref _wakeUsers) != 0)
+            {
+                spin.SpinOnce();
+            }
+            close(wakeFd);
         }
-        _wakeFd = 0;
         if (_timerTs != null)
         {
             NativeMemory.Free(_timerTs);
