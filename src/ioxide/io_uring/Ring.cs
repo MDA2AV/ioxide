@@ -224,6 +224,15 @@ public sealed unsafe class Ring : IDisposable
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public void CqAdvance(uint n) => Volatile.Write(ref *_cqHead, *_cqHead + n);
 
+    // BISECT PROBE 4 (temporary): closeFd == false does the munmaps and leaks only the ring fd.
+    public void Dispose(bool closeFd)
+    {
+        _probeCloseFd = closeFd;
+        Dispose();
+    }
+
+    private bool _probeCloseFd = true;
+
     public void Dispose()
     {
         if (_ringPtr != null)
@@ -236,7 +245,7 @@ public sealed unsafe class Ring : IDisposable
             munmap(_sqePtr,  _sqeSize);  _sqePtr  = null;
         }
 
-        if (_fd > 0)
+        if (_fd > 0 && _probeCloseFd)
         {
             close(_fd); _fd = 0;
         }
