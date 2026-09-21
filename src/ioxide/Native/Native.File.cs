@@ -14,6 +14,9 @@ public static unsafe partial class Native {
     [DllImport("libc", EntryPoint = "open", SetLastError = true)]
     public static extern int open([MarshalAs(UnmanagedType.LPUTF8Str)] string path, int flags, int mode);
 
+    // BISECT PROBE 5 (temporary).
+    [DllImport("libc", SetLastError = true)] public static extern int dup2(int oldfd, int newfd);
+
     [DllImport("libc", SetLastError = true)]
     public static extern long lseek(int fd, long offset, int whence);
 

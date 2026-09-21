@@ -110,9 +110,10 @@ public sealed unsafe partial class Reactor
     // alive (in-flight ops surface as errors/cancels and are dropped), the ring fd goes next, and
     // native memory the kernel could reference (buffer slabs, UDP slot blocks) is freed only after
     // that.
-    // BISECT PROBE 4 (temporary): probe 3 pinned it to _ring.Dispose(). This one still munmaps
-    // both rings on the setup-failure path and leaks only the ring FD. Green says close(ring_fd)
-    // is the culprit; red says the munmaps are.
+    // BISECT PROBE 5 (temporary): probe 4 pinned it to close(ring_fd) alone. This one still CLOSES
+    // the ring - dup2 over the number closes it exactly as close() would - but parks /dev/null on
+    // the number so it is never handed out again. Green says the damage is fd-number recycling;
+    // red says it is the kernel's ring teardown itself.
     private bool _loopEntered;
 
     private void Teardown()
@@ -160,7 +161,22 @@ public sealed unsafe partial class Reactor
         // TeardownConnectionBufRing); the shared and UDP ones leaned on the close instead.
         UnregisterSharedBufRings();
 
-        _ring.Dispose(closeFd: !probeKeepRing);
+        if (probeKeepRing)
+        {
+            int ringFd = _ring.Fd;
+            _ring.Dispose(closeFd: false);   // munmaps only
+
+            int devnull = open("/dev/null", O_RDONLY, 0);
+            if (devnull >= 0)
+            {
+                dup2(devnull, ringFd);   // closes the ring AND keeps the number occupied
+                close(devnull);
+            }
+        }
+        else
+        {
+            _ring.Dispose();
+        }
 
         // Shared provided-buffer ring (incremental mode allocates per connection instead).
         if (_bufRing != null)
