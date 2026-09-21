@@ -1,4 +1,4 @@
-﻿using System.Runtime.InteropServices;
+using System.Runtime.InteropServices;
 using static ioxide.Native;
 
 namespace ioxide;
@@ -54,17 +54,14 @@ public sealed unsafe partial class Reactor
             RearmStarvedRecvs();
             QuicFireDueTimers();
 
-            // These three are the transient ones and the loop simply carries on: EINTR is a signal,
-            // EAGAIN is the kernel short of resources, EBUSY means overflow entries could not be
-            // flushed - and the fall-through below drains the CQ, which is exactly what EBUSY wants.
-            // Until #220 this comparison could never match, because the wrapper returned -1 for
-            // every failure, so the first signal delivered to a reactor thread ended it.
+            // The transient three, which the loop carries on from: a signal, the kernel short of
+            // resources, and overflow entries it could not flush - the CQ drain below is what EBUSY
+            // wants anyway. Until #220 this could never match (the wrapper returned -1 for every
+            // failure), so the first signal delivered to a reactor thread ended it.
             //
-            // Anything else is a lifecycle or programming error (EBADF, EINVAL, ENXIO on a dying
-            // ring). Throwing rather than breaking, because a reactor that vanishes while the
-            // process keeps reporting healthy is the worst of both. Run's finally tears the ring
-            // down; whether the process then dies is the host's decision, via Reactor.OnFault -
-            // on a bare Thread with no handler, an unhandled exception ends the process.
+            // Anything else is a lifecycle or programming error. Throwing rather than breaking,
+            // because a reactor that vanishes while the process reports healthy is the worst of
+            // both; whether the process then dies is the host's call, via Reactor.OnFault.
             int rc = _ring.SubmitAndWait(1);
             if (rc < 0 && rc != -EINTR && rc != -EAGAIN && rc != -EBUSY)
             {

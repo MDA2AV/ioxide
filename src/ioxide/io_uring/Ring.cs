@@ -37,25 +37,19 @@ public sealed unsafe class Ring : IDisposable
     /// <summary>ENOMEM here is transient, so it is worth a few milliseconds before giving up.</summary>
     /// <remarks>
     /// A ring's memory is charged against RLIMIT_MEMLOCK and released ASYNCHRONOUSLY after close,
-    /// so a host that creates and drops reactors faster than the kernel reclaims them - a test
-    /// suite standing servers up and tearing them down is the usual shape - gets ENOMEM while
-    /// nothing is actually leaking. Measured: creating and immediately closing 30,000 rings failed
-    /// 14,788 times, and every failure cleared on a retry 5 ms later.
+    /// so a host cycling reactors faster than the kernel reclaims them gets ENOMEM while nothing
+    /// is leaking. Measured: 30,000 create-and-close rings failed 14,788 times, every failure
+    /// clearing on a retry 5 ms later. Only ENOMEM is retried - every other errno is a decision
+    /// the kernel has already made.
     ///
-    /// Only ENOMEM is retried. Every other errno is a decision the kernel has already made.
-    ///
-    /// This buys time against a reclaim backlog, not against a limit that is simply too small: with
-    /// an 8 MB RLIMIT_MEMLOCK and the default ring size, measured, a third of attempts still fail
-    /// first time and a few per thousand exhaust all six. There the answer is a bigger limit or a
-    /// smaller ring, and the message below says so.
+    /// This buys time against a reclaim backlog, not against a limit that is simply too small; for
+    /// that, the message below names the ring's cost.
     /// </remarks>
     private static int SetupWithMemlockRetry(uint entries, IoUringParams* parameters)
     {
-        // 5, 10, 20, 40, 80ms - about 155ms in total. Sized from the measured reclaim latency of a
-        // SINGLE ring, whose median is ~20ms and whose tail reaches 47ms under load. A shorter
-        // schedule looked sufficient against a BURST, where many rings are in flight and one is
-        // always coming back within a few ms, but the one-at-a-time case a restarting server
-        // produces is far slower and a 30ms budget still failed a fifth of the time.
+        // 5, 10, 20, 40, 80ms. Sized from the measured reclaim latency of a SINGLE ring - median
+        // ~20ms, tail 47ms under load - not from a burst, where one ring is always coming back
+        // within a few ms and a 30ms budget looked sufficient.
         const int attempts = 6;
 
         int fd = io_uring_setup(entries, parameters);
@@ -225,9 +219,8 @@ public sealed unsafe class Ring : IDisposable
     public void CqAdvance(uint n) => Volatile.Write(ref *_cqHead, *_cqHead + n);
 
     /// <summary>
-    /// Unmaps both rings and, unless <paramref name="closeFd"/> says otherwise, closes the ring
-    /// descriptor. Keeping it is for one case only - see Reactor.Teardown - and costs the ring's
-    /// RLIMIT_MEMLOCK charge until the process exits.
+    /// Unmaps both rings and, unless <paramref name="closeFd"/> says otherwise, closes the
+    /// descriptor. Keeping it is for one case only - see Reactor.Teardown.
     /// </summary>
     public void Dispose(bool closeFd)
     {

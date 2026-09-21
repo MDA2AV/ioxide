@@ -76,12 +76,11 @@ public static unsafe partial class Native {
     public const int MAP_SHARED   = 1;
     public const int MAP_POPULATE = 0x8000;
 
-    // All three go through glibc's syscall(), which reports failure as -1 with the code in errno -
-    // it never returns -errno. So every one of them needs SetLastError, and the wrappers below
-    // normalise to liburing's convention: a negative errno, which is what every caller compares
-    // against. Two of these were declared without it (#220), which made three branches dead code:
-    // Ring.Create's fallback for kernels without IORING_SETUP_NO_SQARRAY, and the EINTR/EAGAIN/EBUSY
-    // tolerance in both reactor loops - so one signal delivered to a reactor thread ended it.
+    // glibc's syscall() reports failure as -1 with the code in errno; it never returns -errno. So
+    // all three need SetLastError, and the wrappers below normalise to liburing's convention - a
+    // negative errno, which is what every caller compares against. Two were declared without it
+    // (#220), leaving three branches dead: Ring.Create's NO_SQARRAY fallback and the
+    // EINTR/EAGAIN/EBUSY tolerance in both loops, so one signal ended a reactor.
     [DllImport("libc", EntryPoint = "syscall", SetLastError = true)]
     private static extern long syscall3(long nr, uint a1, IoUringParams* a2);
 
@@ -91,8 +90,7 @@ public static unsafe partial class Native {
     [DllImport("libc", EntryPoint = "syscall", SetLastError = true)]
     private static extern long syscall4(long nr, uint a1, uint a2, void* a3, uint a4);
 
-    // Test the long before narrowing: a successful io_uring_enter returns a submission count, and
-    // errno is only meaningful on the failure branch.
+    // Test the long before narrowing: errno is only meaningful on the failure branch.
     public static int io_uring_setup(uint entries, IoUringParams* p)
     {
         long rc = syscall3(SYS_IO_URING_SETUP, entries, p);

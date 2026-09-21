@@ -9,14 +9,12 @@ namespace Ioxide.Tests;
 /// throw from the setup sequence itself, so the fd tables it closes may only be half filled.
 /// </summary>
 /// <remarks>
-/// The tables are <c>new int[n]</c>, so an unset slot reads as 0 - and 0 is stdin, not something
-/// this library ever opened. Closing it is not a leak but the opposite: the number goes back to
-/// the process and the next socket opened takes it, after which the next teardown to close 0
-/// shuts a live connection belonging to somebody else. The same holds for <c>_wakeFd</c>, which
-/// OpenWakeFd only sets near the end of setup.
+/// The tables are <c>new int[n]</c>, so an unset slot reads as 0 - stdin, not something this
+/// library opened. Closing it is the opposite of a leak: the number goes back to the process, the
+/// next socket opened takes it, and the next teardown to close 0 shuts somebody else's live
+/// connection. Same for <c>_wakeFd</c>, which OpenWakeFd sets only near the end of setup.
 ///
-/// /proc/self/fd/0 is the cheapest way to ask whether fd 0 is still open, and it needs no
-/// P/Invoke: the entry exists exactly while the descriptor does.
+/// /proc/self/fd/0 answers whether fd 0 is open without a P/Invoke: it exists while it does.
 /// </remarks>
 internal static class ReactorSetupTeardownTests
 {
@@ -26,11 +24,10 @@ internal static class ReactorSetupTeardownTests
         {
             Assert.True(File.Exists("/proc/self/fd/0"), "fd 0 must be open before the test says anything");
 
-            // A plain listener sets neither SO_REUSEADDR nor SO_REUSEPORT, and a SO_REUSEPORT bind
-            // is refused unless EVERY socket on the port asked for it. So the reactor's bind to
-            // this port fails with EADDRINUSE - deterministically, and without needing privilege
-            // or a race. That throw lands inside OpenTcpListeners, which runs before OpenWakeFd:
-            // both _listenFds[0] and _wakeFd are still 0 when the finally calls Teardown.
+            // A SO_REUSEPORT bind is refused unless EVERY socket on the port asked for it, and a
+            // plain listener asks for nothing - so this bind fails with EADDRINUSE, deterministically
+            // and without privilege. The throw lands in OpenTcpListeners, which runs before
+            // OpenWakeFd: _listenFds[0] and _wakeFd are both still 0 when the finally tears down.
             using var blocker = new TcpListener(IPAddress.Any, 0);
             blocker.Start();
             int port = ((IPEndPoint)blocker.LocalEndpoint).Port;

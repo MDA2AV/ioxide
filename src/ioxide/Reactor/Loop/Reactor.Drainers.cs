@@ -16,16 +16,12 @@ public sealed unsafe partial class Reactor
 
 #region Wake
 
-    // Writers currently holding the eventfd's number. Off-reactor callers only - every caller
-    // takes a direct path on the reactor thread - so these two interlocked operations sit next to
-    // a syscall and cost nothing measurable.
+    // Writers currently holding the eventfd's number, so Teardown can wait them out before it
+    // closes. Without the gate a writer that read the old number puts 8 bytes into whatever socket
+    // took it next. Off-reactor callers only, next to a syscall, so the two interlocks are free.
+    // Reading 0 means the reactor is gone and there is nothing to wake.
     private int _wakeUsers;
 
-    // The gate is what makes Teardown safe on a reactor that FAULTED. Teardown gives the eventfd's
-    // number back to the process, and a writer that had already read the old number would
-    // otherwise put 8 bytes into whatever socket took it next - somebody else's connection, not a
-    // wake-up. Teardown takes the fd away first, waits for the writers holding it to leave, and
-    // only then closes. Reading 0 here means exactly that: the reactor is gone, nothing to wake.
     private void WakeFdWrite()
     {
         Interlocked.Increment(ref _wakeUsers);

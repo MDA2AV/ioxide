@@ -632,14 +632,11 @@ public static class TestServer
     /// as unowned.
     /// </summary>
     /// <remarks>
-    /// Ordering, not speed, is what this fixes. A reactor whose OnStart throws faults `started`
-    /// immediately but is only recorded in StartupFailures once Run has fully unwound - and Run now
-    /// tears the ring down on the way out, which takes milliseconds. So the consumer below can look
-    /// before the producer writes, remove nothing, and the entry then lands with nobody left to
-    /// claim it. Marking the port closes the race whichever way round it goes.
-    ///
-    /// Ports are never reused within a run (ReserveFreePort only moves forward), so the port is a
-    /// sound key for one server's lifetime.
+    /// Ordering, not speed. A reactor whose OnStart throws faults `started` at once but reaches
+    /// StartupFailures only after Run unwinds - and Run now tears the ring down on the way, which
+    /// takes milliseconds. So the consumer can look before the producer writes, remove nothing,
+    /// and the entry lands with nobody left to claim it. Marking the port closes that either way.
+    /// ReserveFreePort only moves forward, so a port keys one server's lifetime.
     /// </remarks>
     private static readonly System.Collections.Concurrent.ConcurrentDictionary<int, byte> ObservedDeaths = new();
 

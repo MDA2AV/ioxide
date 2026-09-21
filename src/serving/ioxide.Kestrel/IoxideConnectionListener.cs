@@ -77,9 +77,8 @@ internal sealed class IoxideConnectionListener : IConnectionListener
                 }
                 onReactorStart?.Invoke(r);
             };
-            // A reactor is one shard of N. Losing one should not end the process, but it must not
-            // be silent either - without this, a fatal io_uring errno propagates off a bare Thread
-            // and aborts the host.
+            // One shard of N: losing it should not end the process, but it must not be silent
+            // either. Without this a fatal errno propagates off a bare Thread and aborts the host.
             reactor.OnFault = (r, e) =>
                 Console.Error.WriteLine($"[ioxide] reactor {r.ShardIndex} stopped: {e.Message}");
 

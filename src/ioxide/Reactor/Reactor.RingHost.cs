@@ -63,11 +63,9 @@ public sealed unsafe partial class Reactor : IRingHost
     /// the process down deliberately.
     /// </summary>
     /// <remarks>
-    /// Without a handler the exception propagates out of <see cref="Run"/>. On a bare
-    /// <c>new Thread(reactor.Run)</c> - which is how every sample and <c>ioxide.Kestrel</c> start
-    /// one - that terminates the process. Which of the two is right is the host's call, not this
-    /// library's: losing one shard of N silently is indefensible, and so is taking the whole server
-    /// down without being asked.
+    /// Without a handler the exception propagates out of <see cref="Run"/>, which on a bare
+    /// <c>new Thread(reactor.Run)</c> terminates the process. Which of the two is right is the
+    /// host's call: losing one shard of N silently is as bad as taking the server down unasked.
     /// </remarks>
     public Action<Reactor, Exception>? OnFault;
 

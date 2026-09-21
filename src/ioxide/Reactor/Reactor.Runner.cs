@@ -25,11 +25,9 @@ public sealed unsafe partial class Reactor
         BindReactorThread();
         _ring = Ring.Create(_ringEntries);
 
-        // The try opens HERE, not at the loop: setup is where the leak actually happens. OnStart is
-        // user code and the test harness deliberately throws from it, which leaked the ring fd, the
-        // listener and the eventfd - three descriptors and ~745 KiB of RLIMIT_MEMLOCK - on every
-        // failed start. Ring.Create itself is outside because there is nothing to tear down until
-        // it returns.
+        // Covers setup, not just the loop: OnStart is user code, and a throw from it used to leak
+        // the listener, the eventfd and both ring mappings. Ring.Create stays outside - nothing to
+        // tear down until it returns.
         try
         {
 
@@ -72,10 +70,7 @@ public sealed unsafe partial class Reactor
         }
         finally
         {
-            // Whatever happened - a fatal io_uring_enter, a throw from OnStart, GetSqeOrFlush
-            // giving up on a full SQ - the ring fd, both mmaps, the eventfd and the buffer slab go
-            // back. Ring memory is charged against RLIMIT_MEMLOCK, so leaking rings is how a
-            // long-lived host eventually cannot create one.
+            // Runs on every exit path: a fatal io_uring_enter, a throw from OnStart, a full SQ.
             Teardown();
         }
     }
@@ -106,17 +101,14 @@ public sealed unsafe partial class Reactor
                           $" (incremental={_incremental})");
     }
 
-    // Teardown, still on the reactor thread, in dependency order: sockets close while the ring is
-    // alive (in-flight ops surface as errors/cancels and are dropped), the ring fd goes next, and
-    // native memory the kernel could reference (buffer slabs, UDP slot blocks) is freed only after
-    // that.
     /// <summary>Set once the loop is entered, so Teardown can tell a failed start from a stop.</summary>
     private bool _ranLoop;
 
+    // Still on the reactor thread, in dependency order: sockets close while the ring is alive
+    // (in-flight ops surface as errors/cancels and are dropped), the ring fd goes next, and native
+    // memory the kernel could reference is freed only after that.
     private void Teardown()
     {
-        // Everything below runs either way. Only the ring DESCRIPTOR is treated differently, and
-        // only when setup failed - see where it is closed.
         bool startFailed = !_ranLoop;
 
         CloseTcpListeners();
@@ -124,13 +116,9 @@ public sealed unsafe partial class Reactor
         CloseUdpFds();
         CloseAcceptedTcpSockets();
 
-        // Taken away before it is closed, and the writers still holding it are waited out.
-        // WakeFdWrite runs on any thread, and Teardown now also follows a fault - at any instant,
-        // while a host is still handing work in. Closing under a writer would hand the number back
-        // to the process and let that writer's 8 bytes land in whatever socket took it next.
-        //
-        // Reading 0 covers the other half: OpenWakeFd runs late in setup, so a throw from anything
-        // before it arrives here with the field still at its default - stdin, not an eventfd.
+        // Taken away before it is closed, and its writers waited out: closing under one would
+        // free the number and let that writer's 8 bytes land in whatever socket took it next.
+        // The > 0 test also covers a throw before OpenWakeFd, where this is still 0 - stdin.
         int wakeFd = Interlocked.Exchange(ref _wakeFd, 0);
         if (wakeFd > 0)
         {
@@ -152,28 +140,16 @@ public sealed unsafe partial class Reactor
             _opTimespecs = null;
             _opTimespecCapacity = 0;
         }
-        // Before the ring fd goes, and this ordering is the whole point: unregistering is
-        // synchronous, closing is not. io_uring_release schedules the context's teardown onto a
-        // workqueue and returns, so after Dispose the kernel can still hold these rings registered
-        // - and the frees just below would hand their pages back to the allocator underneath it.
-        // The per-connection rings of the incremental path always did this (see
-        // TeardownConnectionBufRing); the shared and UDP ones leaned on the close instead.
+        // Before the fd goes: unregistering is synchronous, closing is not (io_uring_release
+        // defers to a workqueue), so without this the frees below could hand the kernel's pages
+        // back to the allocator while it still holds them.
         UnregisterSharedBufRings();
 
-        // Both mappings go back either way; the descriptor is kept when the start failed.
-        //
-        // Bisected on CI, one variable per run: with the ring fd closed here the Tls suite loses
-        // "identity: a 40 KB distinguished name" three runs out of three, and main is green five
-        // for five. Keeping the fd is green; so is closing it by dup2'ing /dev/null over the
-        // number, which tears the ring down exactly as close() does but never hands the NUMBER
-        // back. So the damage is fd-number recycling, not the ring teardown: something in this
-        // library acts on an fd number it no longer owns, and nothing frees a low number mid-run
-        // today, which is why main never shows it. That is #242 - not this PR's bug; closing the
-        // fd here only made it reachable.
-        //
-        // The cost of keeping it is the ring's RLIMIT_MEMLOCK charge, held until the process
-        // exits. That is what main already does on this path, so nothing regresses; the listener,
-        // the eventfd, both mappings and every allocation above are released, which main does not.
+        // Both mappings go back either way; the descriptor is kept when the start failed, because
+        // releasing its number mid-run kills an unrelated live connection - #242. Bisected: closing
+        // it by dup2'ing /dev/null over the number is green, so the damage is the number being
+        // reused, not the ring teardown. Costs the ring's memlock charge until exit, which is what
+        // this path already did before it tore anything down at all.
         _ring.Dispose(closeFd: !startFailed);
 
         // Shared provided-buffer ring (incremental mode allocates per connection instead).
@@ -190,9 +166,8 @@ public sealed unsafe partial class Reactor
         FreeUdpMemory();
     }
 
-    // Both are no-ops unless the corresponding ring was actually registered: incremental mode
-    // leaves _bufRing null (it registers one ring per connection instead), and a reactor with no
-    // datagram transport leaves _udpBufRing null.
+    // Both are no-ops unless that ring was registered: incremental mode leaves _bufRing null (one
+    // ring per connection instead), and a reactor with no datagram transport leaves _udpBufRing null.
     private void UnregisterSharedBufRings()
     {
         if (_bufRing != null)
