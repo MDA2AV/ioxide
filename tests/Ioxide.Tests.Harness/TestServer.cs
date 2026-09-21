@@ -628,6 +628,22 @@ public static class TestServer
     private static readonly System.Collections.Concurrent.ConcurrentDictionary<int, Exception> StartupFailures = new();
 
     /// <summary>
+    /// Ports whose death a test has already accounted for, so a late record cannot be re-reported
+    /// as unowned.
+    /// </summary>
+    /// <remarks>
+    /// Ordering, not speed, is what this fixes. A reactor whose OnStart throws faults `started`
+    /// immediately but is only recorded in StartupFailures once Run has fully unwound - and Run now
+    /// tears the ring down on the way out, which takes milliseconds. So the consumer below can look
+    /// before the producer writes, remove nothing, and the entry then lands with nobody left to
+    /// claim it. Marking the port closes the race whichever way round it goes.
+    ///
+    /// Ports are never reused within a run (ReserveFreePort only moves forward), so the port is a
+    /// sound key for one server's lifetime.
+    /// </remarks>
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<int, byte> ObservedDeaths = new();
+
+    /// <summary>
     /// Reactor.Run as a thread body, with the exception caught. Without this a bind or listen
     /// failure is unhandled on a background thread and .NET terminates the process - so a single
     /// unlucky port produces ZERO test results rather than one FAIL, which is the worst possible
@@ -641,7 +657,11 @@ public static class TestServer
         }
         catch (Exception e)
         {
-            StartupFailures[port] = e;
+            // Not recorded if a test already accounted for this death - see ObservedDeaths.
+            if (!ObservedDeaths.ContainsKey(port))
+            {
+                StartupFailures[port] = e;
+            }
 
             // ALWAYS print, even though WaitForListen may also report it. Only failures that happen
             // before the listener is up are ever consumed there, and Run opens the listener before
@@ -696,6 +716,7 @@ public static class TestServer
             // has to be looked for rather than waited on.
             if (StartupFailures.TryRemove(port, out Exception? failure))
             {
+                ObservedDeaths[port] = 1;
                 throw new Exception($"server on :{port} failed to start: {failure.Message}", failure);
             }
 
@@ -708,7 +729,10 @@ public static class TestServer
             }
             catch (AggregateException e) when (e.InnerException is not null)
             {
-                StartupFailures.TryRemove(port, out _);   // consumed here, so it is not also reported unowned
+                // Claimed BEFORE removing: the reactor may not have recorded it yet, because the
+                // throw still has to unwind through Run's teardown.
+                ObservedDeaths[port] = 1;
+                StartupFailures.TryRemove(port, out _);
                 throw new Exception($"server on :{port} failed to start: {e.InnerException.Message}", e.InnerException);
             }
         }
