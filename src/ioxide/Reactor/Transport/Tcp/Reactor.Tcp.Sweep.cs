@@ -26,7 +26,10 @@ public sealed unsafe partial class Reactor
     /// </summary>
     internal long NowMs = Environment.TickCount64;
 
-    private bool TcpSweepEnabled => _tcpEnabled && (_idleTimeoutMs > 0 || _sendTimeoutMs > 0);
+    // Registered whenever TCP is on, not only when a clock is configured: the deferred-send pass
+    // has to run regardless, or SendTimeoutMs = 0 leaves a stalled connection pinning an fd and a
+    // slab for the life of the process.
+    private bool TcpSweepEnabled => _tcpEnabled;
 
     /// <summary>
     /// One pass over the connection table. Runs on the reactor thread from the ticker, so it owns
@@ -34,6 +37,19 @@ public sealed unsafe partial class Reactor
     /// </summary>
     private void TcpSweep()
     {
+        // Deferred connections are off the table below, so they need their own pass.
+        if (_sendDraining.Count != 0)
+        {
+            SweepDrainingSends();
+        }
+
+        // With both clocks off there is nothing the walk below could decide, so it is skipped
+        // entirely - the registration exists only for the deferred pass above.
+        if (_idleTimeoutMs <= 0 && _sendTimeoutMs <= 0)
+        {
+            return;
+        }
+
         long now = Environment.TickCount64;
         TcpConnection?[] conns = _connections;
 

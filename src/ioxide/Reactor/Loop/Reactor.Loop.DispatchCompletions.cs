@@ -15,7 +15,24 @@ public sealed unsafe partial class Reactor
         TcpConnection? conn = ConnAt(fd, gen);
         if (conn == null)
         {
-            return;   // stale CQE - never touch the fd's new tenant
+            // Either a genuinely stale CQE from the fd's previous tenant, or the terminal
+            // completion of a send belonging to a connection that is torn down but deliberately
+            // NOT yet recycled - see FinishDrainingSend. Kept behind the count so the ordinary
+            // path is one predictable branch.
+            if (_sendDraining.Count != 0)
+            {
+                FinishDrainingSend(fd, gen, cqeFlags);
+            }
+
+            return;
+        }
+
+        // A send is outstanding until it posts a CQE with F_MORE clear: plain SEND and SENDMSG post
+        // exactly one, SEND_ZC posts a data CQE WITH F_MORE and then a notif without it. Decremented
+        // here, at the top, so the error path below cannot leak the count.
+        if ((cqeFlags & IORING_CQE_F_MORE) == 0)
+        {
+            conn.SendsInFlight--;
         }
 
         // Zero-copy buffer-release notification: the kernel is done with the slab. Recycle once the
@@ -32,6 +49,7 @@ public sealed unsafe partial class Reactor
         if (res <= 0)
         {
             _connections[fd] = null;
+            TrackDrainingSend(conn);
             SubmitCancel(Tag(KindTcpRecv, gen, fd));   // the multishot recv is still armed
             conn.MarkClosed();
             conn.DecRef();

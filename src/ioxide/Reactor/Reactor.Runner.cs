@@ -50,8 +50,9 @@ public sealed unsafe partial class Reactor
         ArmTcpAccepts();
         ArmWakePoll();
 
-        // After OnStart, so a reactor that serves no TCP - or has both clocks off - registers
-        // nothing and the sweep costs it not even a table walk.
+        // After OnStart, so a reactor serving no TCP registers nothing at all. With TCP on but
+        // both clocks off it still registers, for the deferred-send pass, and TcpSweep returns
+        // before the table walk.
         if (TcpSweepEnabled)
         {
             AddTicker(TcpSweep);
@@ -115,6 +116,7 @@ public sealed unsafe partial class Reactor
         TeardownQuic();
         CloseUdpFds();
         CloseAcceptedTcpSockets();
+        CloseDrainingSends();   // off the connection table, so nothing above sees them
 
         // Taken away before it is closed, and its writers waited out: closing under one would
         // free the number and let that writer's 8 bytes land in whatever socket took it next.
