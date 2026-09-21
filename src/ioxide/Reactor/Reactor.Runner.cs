@@ -25,14 +25,11 @@ public sealed unsafe partial class Reactor
         BindReactorThread();
         _ring = Ring.Create(_ringEntries);
 
-        // The try opens HERE, not at the loop: setup is where the leak actually happens. OnStart is
-        // user code and the test harness deliberately throws from it, which leaked the ring fd, the
-        // listener and the eventfd - three descriptors and ~745 KiB of RLIMIT_MEMLOCK - on every
-        // failed start. Ring.Create itself is outside because there is nothing to tear down until
-        // it returns.
-        try
-        {
-
+        // BISECT PROBE (temporary): setup is back OUTSIDE the try, so a throw from it skips
+        // Teardown exactly as it did before ac8e0a3. Everything else this branch added stays. If
+        // CI goes green with this, the Tls regression is the setup-failure teardown and nothing
+        // else in the commit.
+        //
         // Transports: TCP always; UDP sockets + the QUIC demux only when configured (no-ops otherwise).
         OpenTcpListeners();
         OpenUdpSockets();
@@ -61,6 +58,8 @@ public sealed unsafe partial class Reactor
 
         StartTicker();
 
+        try
+        {
             if (_incremental) LoopIncremental();
             else LoopSharedRing();
         }
