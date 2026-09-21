@@ -61,6 +61,7 @@ public sealed unsafe partial class Reactor
 
         StartTicker();
 
+            _loopEntered = true;
             if (_incremental) LoopIncremental();
             else LoopSharedRing();
         }
@@ -109,9 +110,19 @@ public sealed unsafe partial class Reactor
     // alive (in-flight ops surface as errors/cancels and are dropped), the ring fd goes next, and
     // native memory the kernel could reference (buffer slabs, UDP slot blocks) is freed only after
     // that.
+    // BISECT PROBE (temporary): on the setup-failure path only, leak the listener and the ring fd
+    // - exactly what main leaks - while still doing every memory free. Green says an fd close is
+    // what breaks the Tls suite; red says a free is.
+    private bool _loopEntered;
+
     private void Teardown()
     {
-        CloseTcpListeners();
+        bool probeKeepFds = !_loopEntered;
+
+        if (!probeKeepFds)
+        {
+            CloseTcpListeners();
+        }
         TeardownQuic();
         CloseUdpFds();
         CloseAcceptedTcpSockets();
@@ -152,7 +163,10 @@ public sealed unsafe partial class Reactor
         // TeardownConnectionBufRing); the shared and UDP ones leaned on the close instead.
         UnregisterSharedBufRings();
 
-        _ring.Dispose();
+        if (!probeKeepFds)
+        {
+            _ring.Dispose();
+        }
 
         // Shared provided-buffer ring (incremental mode allocates per connection instead).
         if (_bufRing != null)
