@@ -168,8 +168,8 @@ public sealed unsafe partial class Reactor
         // number, which tears the ring down exactly as close() does but never hands the NUMBER
         // back. So the damage is fd-number recycling, not the ring teardown: something in this
         // library acts on an fd number it no longer owns, and nothing frees a low number mid-run
-        // today, which is why main never shows it. Tracked separately - it is not this PR's bug,
-        // and closing the fd here only made it reachable.
+        // today, which is why main never shows it. That is #242 - not this PR's bug; closing the
+        // fd here only made it reachable.
         //
         // The cost of keeping it is the ring's RLIMIT_MEMLOCK charge, held until the process
         // exits. That is what main already does on this path, so nothing regresses; the listener,
