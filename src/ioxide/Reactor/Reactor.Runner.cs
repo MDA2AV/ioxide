@@ -25,11 +25,14 @@ public sealed unsafe partial class Reactor
         BindReactorThread();
         _ring = Ring.Create(_ringEntries);
 
-        // BISECT PROBE (temporary): setup is back OUTSIDE the try, so a throw from it skips
-        // Teardown exactly as it did before ac8e0a3. Everything else this branch added stays. If
-        // CI goes green with this, the Tls regression is the setup-failure teardown and nothing
-        // else in the commit.
-        //
+        // The try opens HERE, not at the loop: setup is where the leak actually happens. OnStart is
+        // user code and the test harness deliberately throws from it, which leaked the ring fd, the
+        // listener and the eventfd - three descriptors and ~745 KiB of RLIMIT_MEMLOCK - on every
+        // failed start. Ring.Create itself is outside because there is nothing to tear down until
+        // it returns.
+        try
+        {
+
         // Transports: TCP always; UDP sockets + the QUIC demux only when configured (no-ops otherwise).
         OpenTcpListeners();
         OpenUdpSockets();
@@ -58,8 +61,6 @@ public sealed unsafe partial class Reactor
 
         StartTicker();
 
-        try
-        {
             if (_incremental) LoopIncremental();
             else LoopSharedRing();
         }
@@ -143,6 +144,14 @@ public sealed unsafe partial class Reactor
             _opTimespecs = null;
             _opTimespecCapacity = 0;
         }
+        // Before the ring fd goes, and this ordering is the whole point: unregistering is
+        // synchronous, closing is not. io_uring_release schedules the context's teardown onto a
+        // workqueue and returns, so after Dispose the kernel can still hold these rings registered
+        // - and the frees just below would hand their pages back to the allocator underneath it.
+        // The per-connection rings of the incremental path always did this (see
+        // TeardownConnectionBufRing); the shared and UDP ones leaned on the close instead.
+        UnregisterSharedBufRings();
+
         _ring.Dispose();
 
         // Shared provided-buffer ring (incremental mode allocates per connection instead).
@@ -157,6 +166,24 @@ public sealed unsafe partial class Reactor
             _bufSlab = null;
         }
         FreeUdpMemory();
+    }
+
+    // Both are no-ops unless the corresponding ring was actually registered: incremental mode
+    // leaves _bufRing null (it registers one ring per connection instead), and a reactor with no
+    // datagram transport leaves _udpBufRing null.
+    private void UnregisterSharedBufRings()
+    {
+        if (_bufRing != null)
+        {
+            var reg = new io_uring_buf_reg { bgid = BgId };
+            io_uring_register(_ring.Fd, IORING_UNREGISTER_PBUF_RING, &reg, 1);
+        }
+
+        if (_udpBufRing != null)
+        {
+            var reg = new io_uring_buf_reg { bgid = UdpBgId };
+            io_uring_register(_ring.Fd, IORING_UNREGISTER_PBUF_RING, &reg, 1);
+        }
     }
 
     // Set cross-thread by Stop(); the loops check it at the top of each iteration and exit, after which
