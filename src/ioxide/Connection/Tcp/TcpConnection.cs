@@ -51,6 +51,9 @@ public sealed unsafe partial class TcpConnection
     /// </summary>
     internal bool RecycleDeferred;
 
+    /// <summary>Whether the send cancel has been re-issued from the ticker; see SweepDrainingSends.</summary>
+    internal bool CancelRetried;
+
     /// <summary>
     /// Hand back whatever a holder is still holding, before the buffers stop being reachable.
     /// Called from the reactor's recycle; a no-op when the holder completed normally, which is the
@@ -226,6 +229,7 @@ public sealed unsafe partial class TcpConnection
         BufferHolder = null;
         SendsInFlight = 0;
         RecycleDeferred = false;
+        CancelRetried = false;
         Volatile.Write(ref _handlerRefReleased, 0);
         IncrementalMode = false;
         SendOpFlags = 0x100;   // MSG_WAITALL; a kTLS connection re-sets this per handshake

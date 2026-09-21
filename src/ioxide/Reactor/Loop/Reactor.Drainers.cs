@@ -204,9 +204,9 @@ public sealed unsafe partial class Reactor
     /// Deliberately separate from <see cref="OnSendCompletion"/>'s normal path, and it must stay
     /// that way. A cancelled send reports the bytes it managed to transfer, not -ECANCELED - only a
     /// send with zero progress gives that - so to the normal path a cancelled send is
-    /// indistinguishable from a partial one, and the partial branch RESUBMITS the remainder. The fd
-    /// is closed by then and its number is immediately reusable, so that resubmit would send one
-    /// peer's bytes to an unrelated new connection: worse than the bug being fixed.
+    /// indistinguishable from a partial one, and the partial branch RESUBMITS the remainder - onto
+    /// a connection that is already torn down, with nobody left to wait for it, restarting the very
+    /// hold this exists to end.
     ///
     /// Nothing here inspects res. Success, error and -ECANCELED all mean the same thing - the
     /// kernel has finished with the slab.
@@ -247,8 +247,9 @@ public sealed unsafe partial class Reactor
     }
 
     /// <summary>
-    /// Connections whose recycle is waiting on a send the kernel has not finished with. Normally
-    /// empty; walked only when it is not.
+    /// Connections that have left the connection table with a send the kernel has not finished
+    /// with. Their handler may still be running, so being here does not imply a pending recycle -
+    /// RecycleDeferred is what says that. Normally empty; walked only when it is not.
     /// </summary>
     private readonly List<TcpConnection> _sendDraining = [];
 
@@ -261,10 +262,16 @@ public sealed unsafe partial class Reactor
     /// been removed from it by whichever path tore it down - so SendTimeoutMs cannot see exactly
     /// the connections it exists to bound. This is that clock, for the deferred set.
     ///
-    /// shutdown() rather than another cancel, because it is a syscall that takes effect now: it
-    /// completes the wedged send with whatever it managed to transfer and fails any retry with
-    /// EPIPE, which is what actually releases the slab. The cancel submitted at defer time is only
-    /// a hint and a peer that never reads can ignore it indefinitely.
+    /// Two things happen here, on different clocks. The cancel is re-issued on the FIRST pass,
+    /// because the one submitted at track time reliably answers -ENOENT: issued in the same loop
+    /// iteration as the FIN that tore the connection down, it does not find the send. One tick
+    /// later it answers -EALREADY and the send's CQE arrives in the same batch - the difference
+    /// between releasing the fd in 250ms and holding it for the whole deadline.
+    ///
+    /// shutdown() is the deadline's answer, a syscall that takes effect now rather than a request
+    /// the ring has to match: it completes a wedged plain send with whatever it transferred and
+    /// fails any retry with EPIPE. It does NOT bound a zero-copy send, whose notif waits on skb
+    /// release and which shutdown does not purge from the write queue - see #245.
     ///
     /// Never force-finishes. Recycling a connection whose send the kernel has not given back is
     /// precisely the defect this exists to prevent, so a connection that will not drain is held,
@@ -279,6 +286,12 @@ public sealed unsafe partial class Reactor
         for (int i = 0; i < _sendDraining.Count; i++)
         {
             TcpConnection conn = _sendDraining[i];
+
+            if (!conn.CancelRetried)
+            {
+                conn.CancelRetried = true;
+                SubmitCancel(Tag(KindTcpSend, (ushort)conn.Generation, conn.ClientFd));
+            }
 
             if (conn.SweepClosed || NowMs - conn.DrainingSince <= deadline)
             {

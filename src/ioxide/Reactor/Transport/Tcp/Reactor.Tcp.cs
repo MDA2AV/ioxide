@@ -38,8 +38,9 @@ public sealed unsafe partial class Reactor
 
         // After the SQE is written, not before: GetSqeOrFlush throws when the SQ will not drain, and
         // a count raised for a request that never existed can never be cleared - the connection
-        // would sit in _sendDraining for the life of the process. Safe here because nothing is
-        // submitted until the loop's next io_uring_enter, so no CQE can arrive in between.
+        // would sit in _sendDraining for the life of the process. Safe here even though
+        // GetSqeOrFlush can submit on a full SQ, because completions are only dispatched by the
+        // loop, after this returns.
         conn.SendsInFlight++;   // cleared by the terminal CQE; gates recycle (#221)
     }
 

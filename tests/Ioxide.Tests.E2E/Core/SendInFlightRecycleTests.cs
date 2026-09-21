@@ -23,7 +23,12 @@ internal static class SendInFlightRecycleTests
     /// <summary>First connection's body byte. Above ASCII, so no header byte can collide.</summary>
     private const byte FirstMarker = 0xA1;
 
-    /// <summary>Enough pipelined requests to outrun a 4 KB receive window by a wide margin.</summary>
+    /// <summary>
+    /// Enough pipelined responses to outrun the server's socket SEND queue - not the peer's 4 KB
+    /// receive window, which only stops the queue from draining. ~3.2 MB against a queue that
+    /// parks around 1.8 MB here; the assertion below checks it really parked rather than trusting
+    /// the margin, since tcp_wmem, BBR's sndbuf_expand and initcwnd all move that number.
+    /// </summary>
     private const int Requests = 400;
 
     public static void Register(Runner runner)
@@ -122,6 +127,14 @@ internal static class SendInFlightRecycleTests
 
             // Now let A drain what it was owed and inspect every byte of it.
             byte[] received = Drain(first, int.MaxValue);
+
+            // The precondition, asserted rather than assumed: if A got every response then the
+            // send never parked, there was no in-flight slab at teardown, and the byte check below
+            // would pass without exercising anything.
+            int whole = BuildResponse(FirstMarker).Length * Requests;
+            Assert.True(received.Length < whole,
+                $"the server's send never parked: A received {received.Length} bytes of {whole}, "
+                + "so nothing was in flight at the FIN and this test proved nothing");
 
             // Body bytes are >= FirstMarker, which no ASCII header byte can be - so anything in
             // that range that is not this connection's own marker came from another connection.
