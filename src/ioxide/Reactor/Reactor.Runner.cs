@@ -1,4 +1,4 @@
-﻿using System.Runtime.InteropServices;
+using System.Runtime.InteropServices;
 using static ioxide.Native;
 
 namespace ioxide;
@@ -24,6 +24,12 @@ public sealed unsafe partial class Reactor
     {
         BindReactorThread();
         _ring = Ring.Create(_ringEntries);
+
+        // Covers setup, not just the loop: OnStart is user code, and a throw from it used to leak
+        // the listener, the eventfd and both ring mappings. Ring.Create stays outside - nothing to
+        // tear down until it returns.
+        try
+        {
 
         // Transports: TCP always; UDP sockets + the QUIC demux only when configured (no-ops otherwise).
         OpenTcpListeners();
@@ -53,10 +59,20 @@ public sealed unsafe partial class Reactor
 
         StartTicker();
 
-        if (_incremental) LoopIncremental();
-        else LoopSharedRing();
-
-        Teardown();
+            _ranLoop = true;
+            if (_incremental) LoopIncremental();
+            else LoopSharedRing();
+        }
+        catch (Exception e) when (OnFault is not null)
+        {
+            // Handled by the host, so it does not escape to kill the process. Teardown still runs.
+            OnFault(this, e);
+        }
+        finally
+        {
+            // Runs on every exit path: a fatal io_uring_enter, a throw from OnStart, a full SQ.
+            Teardown();
+        }
     }
 
     // Record the owning thread (off-reactor callers detect themselves and go through the handoff
@@ -85,18 +101,34 @@ public sealed unsafe partial class Reactor
                           $" (incremental={_incremental})");
     }
 
-    // Teardown, still on the reactor thread, in dependency order: sockets close while the ring is
-    // alive (in-flight ops surface as errors/cancels and are dropped), the ring fd goes next, and
-    // native memory the kernel could reference (buffer slabs, UDP slot blocks) is freed only after
-    // that.
+    /// <summary>Set once the loop is entered, so Teardown can tell a failed start from a stop.</summary>
+    private bool _ranLoop;
+
+    // Still on the reactor thread, in dependency order: sockets close while the ring is alive
+    // (in-flight ops surface as errors/cancels and are dropped), the ring fd goes next, and native
+    // memory the kernel could reference is freed only after that.
     private void Teardown()
     {
+        bool startFailed = !_ranLoop;
+
         CloseTcpListeners();
         TeardownQuic();
         CloseUdpFds();
         CloseAcceptedTcpSockets();
 
-        close(_wakeFd);
+        // Taken away before it is closed, and its writers waited out: closing under one would
+        // free the number and let that writer's 8 bytes land in whatever socket took it next.
+        // The > 0 test also covers a throw before OpenWakeFd, where this is still 0 - stdin.
+        int wakeFd = Interlocked.Exchange(ref _wakeFd, 0);
+        if (wakeFd > 0)
+        {
+            SpinWait spin = default;
+            while (Volatile.Read(ref _wakeUsers) != 0)
+            {
+                spin.SpinOnce();
+            }
+            close(wakeFd);
+        }
         if (_timerTs != null)
         {
             NativeMemory.Free(_timerTs);
@@ -108,7 +140,17 @@ public sealed unsafe partial class Reactor
             _opTimespecs = null;
             _opTimespecCapacity = 0;
         }
-        _ring.Dispose();
+        // Before the fd goes: unregistering is synchronous, closing is not (io_uring_release
+        // defers to a workqueue), so without this the frees below could hand the kernel's pages
+        // back to the allocator while it still holds them.
+        UnregisterSharedBufRings();
+
+        // Both mappings go back either way; the descriptor is kept when the start failed, because
+        // releasing its number mid-run kills an unrelated live connection - #242. Bisected: closing
+        // it by dup2'ing /dev/null over the number is green, so the damage is the number being
+        // reused, not the ring teardown. Costs the ring's memlock charge until exit, which is what
+        // this path already did before it tore anything down at all.
+        _ring.Dispose(closeFd: !startFailed);
 
         // Shared provided-buffer ring (incremental mode allocates per connection instead).
         if (_bufRing != null)
@@ -122,6 +164,23 @@ public sealed unsafe partial class Reactor
             _bufSlab = null;
         }
         FreeUdpMemory();
+    }
+
+    // Both are no-ops unless that ring was registered: incremental mode leaves _bufRing null (one
+    // ring per connection instead), and a reactor with no datagram transport leaves _udpBufRing null.
+    private void UnregisterSharedBufRings()
+    {
+        if (_bufRing != null)
+        {
+            var reg = new io_uring_buf_reg { bgid = BgId };
+            io_uring_register(_ring.Fd, IORING_UNREGISTER_PBUF_RING, &reg, 1);
+        }
+
+        if (_udpBufRing != null)
+        {
+            var reg = new io_uring_buf_reg { bgid = UdpBgId };
+            io_uring_register(_ring.Fd, IORING_UNREGISTER_PBUF_RING, &reg, 1);
+        }
     }
 
     // Set cross-thread by Stop(); the loops check it at the top of each iteration and exit, after which

@@ -1,4 +1,4 @@
-﻿using System.Runtime.InteropServices;
+using System.Runtime.InteropServices;
 using static ioxide.Native;
 
 namespace ioxide;
@@ -26,9 +26,7 @@ public sealed unsafe partial class Reactor
         int ret = io_uring_register(_ring.Fd, IORING_REGISTER_PBUF_RING, &reg, 1);
         if (ret < 0)
         {
-            int err = Marshal.GetLastPInvokeError();
-
-            throw new InvalidOperationException($"register pbuf_ring failed: ret={ret} errno={err}");
+            throw new InvalidOperationException($"register pbuf_ring failed with errno {-ret}");
         }
 
         // Slot 0 overlaps the ring's tail field at offset 14; writing only addr/len/bid
@@ -56,11 +54,19 @@ public sealed unsafe partial class Reactor
             RearmStarvedRecvs();
             QuicFireDueTimers();
 
+            // The transient three, which the loop carries on from: a signal, the kernel short of
+            // resources, and overflow entries it could not flush - the CQ drain below is what EBUSY
+            // wants anyway. Until #220 this could never match (the wrapper returned -1 for every
+            // failure), so the first signal delivered to a reactor thread ended it.
+            //
+            // Anything else is a lifecycle or programming error. Throwing rather than breaking,
+            // because a reactor that vanishes while the process reports healthy is the worst of
+            // both; whether the process then dies is the host's call, via Reactor.OnFault.
             int rc = _ring.SubmitAndWait(1);
             if (rc < 0 && rc != -EINTR && rc != -EAGAIN && rc != -EBUSY)
             {
-                Console.Error.WriteLine($"[r{_id}] io_uring_enter failed: {rc}");
-                break;
+                throw new InvalidOperationException(
+                    $"[r{_id}] io_uring_enter failed with errno {-rc}; this reactor cannot continue");
             }
 
             NowMs = Environment.TickCount64;   // one read per batch; see Reactor.Tcp.Sweep.cs

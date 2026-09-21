@@ -100,6 +100,7 @@ public sealed unsafe partial class Reactor
 
         int ports = udpPorts.Length;
         _udpFds     = new int[ports];
+        Array.Fill(_udpFds, -1);   // unset slots must not read as fd 0; see OpenTcpListeners
         _udpFdPorts = new ushort[ports];
 
         InitUdpBufRing();
@@ -216,7 +217,7 @@ public sealed unsafe partial class Reactor
         int ret = io_uring_register(_ring.Fd, IORING_REGISTER_PBUF_RING, &reg, 1);
         if (ret < 0)
         {
-            throw new InvalidOperationException($"register udp pbuf_ring failed: ret={ret}");
+            throw new InvalidOperationException($"register udp pbuf_ring failed with errno {-ret}");
         }
 
         // Template: reserved name/control sizes only; iov unused (buffer comes from the ring).

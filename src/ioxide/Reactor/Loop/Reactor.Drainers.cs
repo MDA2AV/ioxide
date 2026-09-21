@@ -1,4 +1,4 @@
-﻿using System.Collections.Concurrent;
+using System.Collections.Concurrent;
 using System.Runtime.CompilerServices;
 using ioxide.utils;
 using static ioxide.Native;
@@ -16,10 +16,28 @@ public sealed unsafe partial class Reactor
 
 #region Wake
 
+    // Writers currently holding the eventfd's number, so Teardown can wait them out before it
+    // closes. Without the gate a writer that read the old number puts 8 bytes into whatever socket
+    // took it next. Off-reactor callers only, next to a syscall, so the two interlocks are free.
+    // Reading 0 means the reactor is gone and there is nothing to wake.
+    private int _wakeUsers;
+
     private void WakeFdWrite()
     {
-        ulong v = 1;
-        write(_wakeFd, &v, 8);   // eventfd becomes readable → multishot poll CQE wakes the loop
+        Interlocked.Increment(ref _wakeUsers);
+        try
+        {
+            int fd = Volatile.Read(ref _wakeFd);
+            if (fd > 0)
+            {
+                ulong v = 1;
+                write(fd, &v, 8);   // eventfd becomes readable → multishot poll CQE wakes the loop
+            }
+        }
+        finally
+        {
+            Interlocked.Decrement(ref _wakeUsers);
+        }
     }
 
     private void ArmWakePoll()
