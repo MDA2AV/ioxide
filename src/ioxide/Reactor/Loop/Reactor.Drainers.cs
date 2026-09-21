@@ -133,6 +133,57 @@ public sealed unsafe partial class Reactor
         {
             conn.DrainRecv();   // return leftover buffers to the shared ring
         }
+        // The kernel may still be reading the write slab. io_uring copies from user memory when the
+        // socket drains, not at submit, so closing the fd and handing this object back to the pool
+        // now is exactly how the previous peer ends up receiving the next connection's bytes (#221).
+        // Hold everything - fd, slab, object - until the send's terminal CQE lands.
+        //
+        // TrackDrainingSend already put this connection on _sendDraining, at the instant it left the
+        // connection table; all that is decided here is who finishes the recycle. Refs are gone, so
+        // if the kernel is done it is this call, and if it is not it is the completion.
+        if (conn.SendsInFlight > 0)
+        {
+            conn.RecycleDeferred = true;
+
+            // Best effort, and only a latency win: correctness comes from waiting for the CQE, not
+            // from the cancel landing. A send that already completed answers -ENOENT, which is the
+            // ordinary case and needs no handling.
+            SubmitCancel(Tag(KindTcpSend, (ushort)conn.Generation, fd));
+
+            return;
+        }
+
+        FinishRecycle(conn, fd);
+    }
+
+    /// <summary>
+    /// Start holding a connection that is leaving the connection table with a send the kernel has
+    /// not finished with. Called by every path that nulls the table slot.
+    /// </summary>
+    /// <remarks>
+    /// It has to happen HERE, not in <see cref="Recycle"/>. Recycle runs at refcount zero, which is
+    /// both refs - and the reactor's goes first, while the handler may still be parked on something
+    /// that is not this connection (a pg query, an upstream request, a delay). In that window the
+    /// connection is off the table and not yet draining, so a send completing in it found no owner
+    /// at all: the count was never decremented, and the connection then sat in _sendDraining for
+    /// the life of the process, never closing its fd and never returning to the pool.
+    /// </remarks>
+    private void TrackDrainingSend(TcpConnection conn)
+    {
+        if (conn.SendsInFlight > 0)
+        {
+            conn.DrainingSince = NowMs;
+            _sendDraining.Add(conn);
+        }
+    }
+
+    /// <summary>
+    /// The half of recycle that must wait for the kernel: close the fd, reset the connection and
+    /// pool it. Runs once, either inline from <see cref="Recycle"/> or later from the send's
+    /// terminal completion.
+    /// </summary>
+    private void FinishRecycle(TcpConnection conn, int fd)
+    {
         close(fd);
         conn.Clear();
 
@@ -144,6 +195,114 @@ public sealed unsafe partial class Reactor
         {
             conn.Dispose();
         }
+    }
+
+    /// <summary>
+    /// Terminal completion for a send on a connection that is torn down but not yet recycled.
+    /// </summary>
+    /// <remarks>
+    /// Deliberately separate from <see cref="OnSendCompletion"/>'s normal path, and it must stay
+    /// that way. A cancelled send reports the bytes it managed to transfer, not -ECANCELED - only a
+    /// send with zero progress gives that - so to the normal path a cancelled send is
+    /// indistinguishable from a partial one, and the partial branch RESUBMITS the remainder. The fd
+    /// is closed by then and its number is immediately reusable, so that resubmit would send one
+    /// peer's bytes to an unrelated new connection: worse than the bug being fixed.
+    ///
+    /// Nothing here inspects res. Success, error and -ECANCELED all mean the same thing - the
+    /// kernel has finished with the slab.
+    /// </remarks>
+    private void FinishDrainingSend(int fd, ushort gen, uint cqeFlags)
+    {
+        for (int i = 0; i < _sendDraining.Count; i++)
+        {
+            TcpConnection conn = _sendDraining[i];
+            if (conn.ClientFd != fd || (ushort)conn.Generation != gen)
+            {
+                continue;
+            }
+
+            // A ZC data CQE still has its notif to come; the slab is not free yet.
+            if ((cqeFlags & IORING_CQE_F_MORE) != 0)
+            {
+                return;
+            }
+
+            if (--conn.SendsInFlight > 0)
+            {
+                return;
+            }
+
+            // The kernel is done. Whether the connection can be recycled is a separate question:
+            // it is held here from the moment it left the table, which can be well before its
+            // handler let go. Recycle sets the flag when the refs have run out.
+            _sendDraining.RemoveAt(i);
+
+            if (conn.RecycleDeferred)
+            {
+                FinishRecycle(conn, fd);
+            }
+
+            return;
+        }
+    }
+
+    /// <summary>
+    /// Connections whose recycle is waiting on a send the kernel has not finished with. Normally
+    /// empty; walked only when it is not.
+    /// </summary>
+    private readonly List<TcpConnection> _sendDraining = [];
+
+    /// <summary>
+    /// Forces a decision on connections whose send has not completed. Called from the reactor's
+    /// ticker alongside <see cref="TcpSweep"/>.
+    /// </summary>
+    /// <remarks>
+    /// The idle and send sweeps walk the connection table, and a deferred connection has already
+    /// been removed from it by whichever path tore it down - so SendTimeoutMs cannot see exactly
+    /// the connections it exists to bound. This is that clock, for the deferred set.
+    ///
+    /// shutdown() rather than another cancel, because it is a syscall that takes effect now: it
+    /// completes the wedged send with whatever it managed to transfer and fails any retry with
+    /// EPIPE, which is what actually releases the slab. The cancel submitted at defer time is only
+    /// a hint and a peer that never reads can ignore it indefinitely.
+    ///
+    /// Never force-finishes. Recycling a connection whose send the kernel has not given back is
+    /// precisely the defect this exists to prevent, so a connection that will not drain is held,
+    /// not reclaimed.
+    /// </remarks>
+    private void SweepDrainingSends()
+    {
+        // The deferred set is the one case SendTimeoutMs = 0 must not leave unbounded: without a
+        // clock here, a peer that refuses to read pins an fd and a slab for the life of the process.
+        int deadline = _sendTimeoutMs > 0 ? _sendTimeoutMs : 60_000;
+
+        for (int i = 0; i < _sendDraining.Count; i++)
+        {
+            TcpConnection conn = _sendDraining[i];
+
+            if (conn.SweepClosed || NowMs - conn.DrainingSince <= deadline)
+            {
+                continue;
+            }
+
+            conn.SweepClosed = true;
+            shutdown(conn.ClientFd, SHUT_RDWR);
+            SubmitCancel(Tag(KindTcpSend, (ushort)conn.Generation, conn.ClientFd));
+        }
+    }
+
+    /// <summary>
+    /// Last resort at reactor shutdown: the ring is about to go, so no further CQE will arrive and
+    /// these fds have no other owner. Closing them releases the kernel's reference to the socket.
+    /// </summary>
+    private void CloseDrainingSends()
+    {
+        foreach (TcpConnection conn in _sendDraining)
+        {
+            close(conn.ClientFd);
+        }
+
+        _sendDraining.Clear();
     }
 
 #endregion

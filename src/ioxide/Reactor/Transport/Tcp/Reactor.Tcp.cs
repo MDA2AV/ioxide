@@ -35,6 +35,12 @@ public sealed unsafe partial class Reactor
         {
             SubmitSendImpl(this, IORING_OP_SEND, fd, gen, buf, len, opFlags);
         }
+
+        // After the SQE is written, not before: GetSqeOrFlush throws when the SQ will not drain, and
+        // a count raised for a request that never existed can never be cleared - the connection
+        // would sit in _sendDraining for the life of the process. Safe here because nothing is
+        // submitted until the loop's next io_uring_enter, so no CQE can arrive in between.
+        conn.SendsInFlight++;   // cleared by the terminal CQE; gates recycle (#221)
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
@@ -54,7 +60,7 @@ public sealed unsafe partial class Reactor
     // connection prepared in BuildIovec. Plain SENDMSG (no zero-copy) for the segmented path.
     private void SubmitSendMsg(TcpConnection conn, int fd, ushort gen)
     {
-        IoUringSqe* sqe = GetSqeOrFlush();
+        IoUringSqe* sqe = GetSqeOrFlush();   // before the count; see SubmitSend
         Unsafe.InitBlockUnaligned(sqe, 0, 64);
         sqe->opcode    = IORING_OP_SENDMSG;
         sqe->fd        = fd;
@@ -275,6 +281,7 @@ public sealed unsafe partial class Reactor
     private void CloseFromRecv(TcpConnection conn, int fd)
     {
         _connections[fd] = null;
+        TrackDrainingSend(conn);
         conn.MarkClosed();
         conn.DecRef();
     }
@@ -284,6 +291,7 @@ public sealed unsafe partial class Reactor
     private void CloseFromRecvOverflow(TcpConnection conn, int fd, ushort gen)
     {
         _connections[fd] = null;
+        TrackDrainingSend(conn);
         SubmitCancel(Tag(KindTcpRecv, gen, fd));
         conn.MarkClosed();
         conn.DecRef();

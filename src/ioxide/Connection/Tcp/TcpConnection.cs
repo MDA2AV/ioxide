@@ -24,6 +24,34 @@ public sealed unsafe partial class TcpConnection
     internal IRecvBufferHolder? BufferHolder;
 
     /// <summary>
+    /// io_uring send requests submitted for this connection that have not yet posted a terminal
+    /// completion. Non-zero means the kernel may still read the write slab.
+    /// </summary>
+    /// <remarks>
+    /// The rule is one line and covers all three send shapes: a request is outstanding until it
+    /// posts a CQE with IORING_CQE_F_MORE clear. Plain SEND and SENDMSG post one such CQE; SEND_ZC
+    /// posts a data CQE WITH F_MORE (the kernel still holds the pages) and then a notif without it.
+    ///
+    /// Recycle will not reset or free the slab while this is non-zero (#221). Without that, a
+    /// connection torn down from the recv side went back to the pool with a send still in flight,
+    /// the next accept wrote its response into the same slab, and the kernel - which copies from
+    /// user memory at retry time, not at submit - sent the new peer's bytes to the old one.
+    ///
+    /// Reactor-thread only at both ends, so a plain int: submits happen on the reactor (directly or
+    /// via the flush queue) and completions obviously do.
+    /// </remarks>
+    internal int SendsInFlight;
+
+    /// <summary>When this connection entered the deferred-recycle list, for the sweep's backstop.</summary>
+    internal long DrainingSince;
+
+    /// <summary>
+    /// Set by Recycle when the refs have run out but a send is still in flight, so the send's
+    /// terminal completion knows it now owns finishing the recycle.
+    /// </summary>
+    internal bool RecycleDeferred;
+
+    /// <summary>
     /// Hand back whatever a holder is still holding, before the buffers stop being reachable.
     /// Called from the reactor's recycle; a no-op when the holder completed normally, which is the
     /// common path.
@@ -196,6 +224,8 @@ public sealed unsafe partial class TcpConnection
 
         _recv.Reset();
         BufferHolder = null;
+        SendsInFlight = 0;
+        RecycleDeferred = false;
         Volatile.Write(ref _handlerRefReleased, 0);
         IncrementalMode = false;
         SendOpFlags = 0x100;   // MSG_WAITALL; a kTLS connection re-sets this per handshake
