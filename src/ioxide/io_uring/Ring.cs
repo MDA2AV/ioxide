@@ -224,14 +224,18 @@ public sealed unsafe class Ring : IDisposable
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public void CqAdvance(uint n) => Volatile.Write(ref *_cqHead, *_cqHead + n);
 
-    // BISECT PROBE 4 (temporary): closeFd == false does the munmaps and leaks only the ring fd.
+    /// <summary>
+    /// Unmaps both rings and, unless <paramref name="closeFd"/> says otherwise, closes the ring
+    /// descriptor. Keeping it is for one case only - see Reactor.Teardown - and costs the ring's
+    /// RLIMIT_MEMLOCK charge until the process exits.
+    /// </summary>
     public void Dispose(bool closeFd)
     {
-        _probeCloseFd = closeFd;
+        _closeFd = closeFd;
         Dispose();
     }
 
-    private bool _probeCloseFd = true;
+    private bool _closeFd = true;
 
     public void Dispose()
     {
@@ -245,7 +249,7 @@ public sealed unsafe class Ring : IDisposable
             munmap(_sqePtr,  _sqeSize);  _sqePtr  = null;
         }
 
-        if (_fd > 0 && _probeCloseFd)
+        if (_fd > 0 && _closeFd)
         {
             close(_fd); _fd = 0;
         }

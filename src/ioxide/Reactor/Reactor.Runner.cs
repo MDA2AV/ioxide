@@ -61,7 +61,7 @@ public sealed unsafe partial class Reactor
 
         StartTicker();
 
-            _loopEntered = true;
+            _ranLoop = true;
             if (_incremental) LoopIncremental();
             else LoopSharedRing();
         }
@@ -110,15 +110,14 @@ public sealed unsafe partial class Reactor
     // alive (in-flight ops surface as errors/cancels and are dropped), the ring fd goes next, and
     // native memory the kernel could reference (buffer slabs, UDP slot blocks) is freed only after
     // that.
-    // BISECT PROBE 5 (temporary): probe 4 pinned it to close(ring_fd) alone. This one still CLOSES
-    // the ring - dup2 over the number closes it exactly as close() would - but parks /dev/null on
-    // the number so it is never handed out again. Green says the damage is fd-number recycling;
-    // red says it is the kernel's ring teardown itself.
-    private bool _loopEntered;
+    /// <summary>Set once the loop is entered, so Teardown can tell a failed start from a stop.</summary>
+    private bool _ranLoop;
 
     private void Teardown()
     {
-        bool probeKeepRing = !_loopEntered;
+        // Everything below runs either way. Only the ring DESCRIPTOR is treated differently, and
+        // only when setup failed - see where it is closed.
+        bool startFailed = !_ranLoop;
 
         CloseTcpListeners();
         TeardownQuic();
@@ -161,22 +160,21 @@ public sealed unsafe partial class Reactor
         // TeardownConnectionBufRing); the shared and UDP ones leaned on the close instead.
         UnregisterSharedBufRings();
 
-        if (probeKeepRing)
-        {
-            int ringFd = _ring.Fd;
-            _ring.Dispose(closeFd: false);   // munmaps only
-
-            int devnull = open("/dev/null", O_RDONLY, 0);
-            if (devnull >= 0)
-            {
-                dup2(devnull, ringFd);   // closes the ring AND keeps the number occupied
-                close(devnull);
-            }
-        }
-        else
-        {
-            _ring.Dispose();
-        }
+        // Both mappings go back either way; the descriptor is kept when the start failed.
+        //
+        // Bisected on CI, one variable per run: with the ring fd closed here the Tls suite loses
+        // "identity: a 40 KB distinguished name" three runs out of three, and main is green five
+        // for five. Keeping the fd is green; so is closing it by dup2'ing /dev/null over the
+        // number, which tears the ring down exactly as close() does but never hands the NUMBER
+        // back. So the damage is fd-number recycling, not the ring teardown: something in this
+        // library acts on an fd number it no longer owns, and nothing frees a low number mid-run
+        // today, which is why main never shows it. Tracked separately - it is not this PR's bug,
+        // and closing the fd here only made it reachable.
+        //
+        // The cost of keeping it is the ring's RLIMIT_MEMLOCK charge, held until the process
+        // exits. That is what main already does on this path, so nothing regresses; the listener,
+        // the eventfd, both mappings and every allocation above are released, which main does not.
+        _ring.Dispose(closeFd: !startFailed);
 
         // Shared provided-buffer ring (incremental mode allocates per connection instead).
         if (_bufRing != null)
