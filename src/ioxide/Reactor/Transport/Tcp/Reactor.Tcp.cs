@@ -348,6 +348,12 @@ public sealed unsafe partial class Reactor
         }
 
         _listenFds = new int[1 + _tcp.ExtraPorts.Length];
+
+        // -1, not the default 0: OpenReusePortListener below can throw partway through, and
+        // Teardown runs on that path now. An unset slot left at 0 would have it close stdin,
+        // which hands the number 0 to the next socket the process opens - and the next teardown
+        // to close 0 then shuts a live connection belonging to somebody else.
+        Array.Fill(_listenFds, -1);
         _listenPorts = new ushort[_listenFds.Length];
         _listenPorts[0] = _port;
         for (int i = 0; i < _tcp.ExtraPorts.Length; i++)
@@ -364,7 +370,10 @@ public sealed unsafe partial class Reactor
     {
         foreach (int listenFd in _listenFds)
         {
-            close(listenFd);
+            if (listenFd >= 0)
+            {
+                close(listenFd);
+            }
         }
     }
 

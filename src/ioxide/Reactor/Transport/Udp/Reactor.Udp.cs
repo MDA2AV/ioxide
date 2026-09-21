@@ -100,6 +100,7 @@ public sealed unsafe partial class Reactor
 
         int ports = udpPorts.Length;
         _udpFds     = new int[ports];
+        Array.Fill(_udpFds, -1);   // unset slots must not read as fd 0; see OpenTcpListeners
         _udpFdPorts = new ushort[ports];
 
         InitUdpBufRing();

@@ -1,4 +1,4 @@
-﻿using System.Runtime.InteropServices;
+using System.Runtime.InteropServices;
 using static ioxide.Native;
 
 namespace ioxide;
@@ -116,11 +116,17 @@ public sealed unsafe partial class Reactor
         CloseUdpFds();
         CloseAcceptedTcpSockets();
 
-        // Zeroed, not just closed: WakeFdWrite is called from any thread and guards only on
-        // _wakeFd > 0, so leaving the old number here writes into whatever fd reused it. Teardown
-        // used to follow an explicit Stop(); it can now also follow a fault, at any instant, while
-        // a host is still handing work in.
-        close(_wakeFd);
+        // Guarded because OpenWakeFd runs late in setup and Teardown now also follows a throw
+        // from anything before it, where _wakeFd is still its default 0 - stdin, not an eventfd.
+        //
+        // Zeroed rather than merely closed: WakeFdWrite is called from any thread and guards only
+        // on _wakeFd > 0, so leaving the old number here writes into whatever fd reused it.
+        // Teardown used to follow an explicit Stop(); it can now also follow a fault, at any
+        // instant, while a host is still handing work in.
+        if (_wakeFd > 0)
+        {
+            close(_wakeFd);
+        }
         _wakeFd = 0;
         if (_timerTs != null)
         {
