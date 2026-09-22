@@ -69,6 +69,11 @@ public sealed unsafe partial class Reactor
         sqe->len       = 1;
         sqe->op_flags  = conn.SendOpFlags;   // MSG_WAITALL
         sqe->user_data = Tag(KindTcpSend, gen, fd);
+
+        // Counted exactly as in SubmitSend, after the SQE and for the same reason. The completion is
+        // decremented like any other send's, so without this the count went negative and a
+        // Segmented connection was recycled under the kernel exactly as before the fix.
+        conn.SendsInFlight++;   // cleared by the terminal CQE; gates recycle (#221)
     }
 
     private void SubmitAcceptMultishot(int listenFd)

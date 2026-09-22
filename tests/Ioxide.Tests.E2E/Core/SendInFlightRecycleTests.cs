@@ -33,7 +33,39 @@ internal static class SendInFlightRecycleTests
 
     public static void Register(Runner runner)
     {
-        runner.Test("send in flight: a recycled connection does not leak its slab to the next peer", () =>
+        // Both clocks off: this test is about teardown ordering, and a sweep firing mid-run would
+        // release the send by a different route and hide what is being measured.
+        var tcp = new TcpOptions
+        {
+            WriteSlabSize = 16 * 1024,
+            PoolMax = 64,
+            RecvQueueEntries = 64,
+            IdleTimeoutMs = 0,
+            SendTimeoutMs = 0,
+        };
+
+        // Once per send shape, because each is its own submit path and each has to count itself
+        // in. The vectored one did not, and recycled under the kernel exactly as before the fix:
+        // 1,294 foreign bytes, first at offset 1,795,945, on every run.
+        RegisterSlabLeak(runner, "plain SEND", tcp);
+
+        // A 4 KB slab under an 8 KB response: every response spills into an overflow segment, so
+        // every flush goes out as one SENDMSG.
+        RegisterSlabLeak(runner, "vectored SENDMSG", tcp with
+        {
+            WriteSlabSize = 4 * 1024,
+            WriteOverflow = WriteOverflowStrategy.Segmented,
+        });
+
+        // The kernel keeps the slab's pages past the data CQE, until a notif without F_MORE.
+        RegisterSlabLeak(runner, "SEND_ZC", tcp with { ZeroCopySend = true });
+
+        RegisterOffConnectionPark(runner);
+    }
+
+    private static void RegisterSlabLeak(Runner runner, string shape, TcpOptions tcp)
+    {
+        runner.Test($"send in flight ({shape}): a recycled connection does not leak its slab to the next peer", () =>
         {
             // Every connection answers with a body made only of its own marker byte, so a single
             // foreign byte in the stream is proof and needs no timing assertion to interpret.
@@ -88,17 +120,7 @@ internal static class SendInFlightRecycleTests
             {
                 RecvBufferSize = 16 * 1024,
                 RecvSlots = 256,
-                Tcp = new TcpOptions
-                {
-                    WriteSlabSize = 16 * 1024,
-                    PoolMax = 64,
-                    RecvQueueEntries = 64,
-
-                    // Off: this test is about teardown ordering, and a sweep firing mid-run would
-                    // release the send by a different route and hide what is being measured.
-                    IdleTimeoutMs = 0,
-                    SendTimeoutMs = 0,
-                },
+                Tcp = tcp,
             }).Port;
 
             // Connection A: a window too small to absorb the pipeline, then stop reading entirely so
@@ -157,8 +179,6 @@ internal static class SendInFlightRecycleTests
                 $"another connection's response bytes reached the first peer: {foreign} foreign "
                 + $"bytes, first at offset {firstAt} of {received.Length}");
         });
-
-        RegisterOffConnectionPark(runner);
     }
 
     /// <summary>Big enough to outrun the server's socket send buffer, so ONE send parks.</summary>
