@@ -43,7 +43,6 @@ internal static class Program
         H3ErrorCodeTests.Register(runner);
         H3AlpnTests.Register(runner);
         Http2BodyTests.Register(runner);
-        Http2ReadTimeoutTests.Register(runner);
         Http3BodyTests.Register(runner);
 
         return runner.Summary();

@@ -39,9 +39,6 @@ public sealed partial class Nghttp2Connection : IDisposable
     private readonly Nghttp2Options _options;
     private readonly byte[] _egress = new byte[EgressBufferSize];
 
-    private readonly TcpConnection? _connection;   // when the pipe names it (ITcpConnectionPipe)
-    private int _owed;                             // requests in whole and not yet answered
-
     private nint _handle;
     private GCHandle _self;
     private bool _disposed;
@@ -67,39 +64,7 @@ public sealed partial class Nghttp2Connection : IDisposable
     {
         _pipe = pipe;
         _options = options ?? new Nghttp2Options();
-        _connection = (pipe as ITcpConnectionPipe)?.Connection;
         Setup();
-    }
-
-    // While a response is owed the read loop's parked read is not waiting on the peer, so the read
-    // timeout is suspended; a slow request must not time out the connection it shares with others.
-    private void Owe(PendingRequest pending)
-    {
-        if (pending.Owed)
-        {
-            return;
-        }
-        pending.Owed = true;
-
-        if (_owed++ == 0)
-        {
-            _connection?.SuspendReadTimeout();
-        }
-    }
-
-    // Every end of a stream disposes its PendingRequest, which settles here.
-    private void Settle(PendingRequest pending)
-    {
-        if (!pending.Owed)
-        {
-            return;
-        }
-        pending.Owed = false;
-
-        if (--_owed == 0)
-        {
-            _connection?.ResumeReadTimeout();
-        }
     }
 
     /// <summary>Convenience for cleartext h2c: wraps the connection in its own duplex pipe.</summary>
@@ -173,9 +138,6 @@ public sealed partial class Nghttp2Connection : IDisposable
         private (int Offset, int Length) _body = (0, 0);
 
         public int StreamId;
-
-        public Nghttp2Connection? Owner;
-        public bool Owed;
 
         // Pseudo-header ranges, lifted out of the field list as they arrive.
         public (int Offset, int Length) Method;
@@ -255,8 +217,6 @@ public sealed partial class Nghttp2Connection : IDisposable
 
         public void Dispose()
         {
-            Owner?.Settle(this);
-
             _fields.Clear();
             if (_arena.Length > 0)
             {

@@ -28,9 +28,6 @@ public sealed partial class Http2Connection : IDisposable
     private readonly Http2Options _options;
     private readonly HpackDecoder _decoder;
 
-    private readonly TcpConnection? _connection;   // when the pipe names it (ITcpConnectionPipe)
-    private int _owed;                             // requests in whole and not yet answered
-
     // Inbound bytes accumulate here because a frame can straddle recv buffers - the ring hands out
     // whatever the kernel filled, which has nothing to do with frame boundaries.
     private byte[] _inbound = [];
@@ -71,7 +68,6 @@ public sealed partial class Http2Connection : IDisposable
         _pipe = pipe;
         _options = options ?? new Http2Options();
         _decoder = new HpackDecoder();
-        _connection = (pipe as ITcpConnectionPipe)?.Connection;
     }
 
     /// <summary>Convenience for cleartext h2c: wraps the connection in its own duplex pipe.</summary>
@@ -310,37 +306,6 @@ public sealed partial class Http2Connection : IDisposable
         {
             RetireStream(pending);
             await MaybeFlushAsync();
-        }
-    }
-
-    // While a response is owed the read loop's parked read is not waiting on the peer, so the read
-    // timeout is suspended; a slow request must not time out the connection it shares with others.
-    private void Owe(PendingRequest pending)
-    {
-        if (pending.Owed)
-        {
-            return;
-        }
-        pending.Owed = true;
-
-        if (_owed++ == 0)
-        {
-            _connection?.SuspendReadTimeout();
-        }
-    }
-
-    // Every end of a stream disposes its PendingRequest, which settles here.
-    private void Settle(PendingRequest pending)
-    {
-        if (!pending.Owed)
-        {
-            return;
-        }
-        pending.Owed = false;
-
-        if (--_owed == 0)
-        {
-            _connection?.ResumeReadTimeout();
         }
     }
 

@@ -156,7 +156,6 @@ public sealed partial class Http2Connection
             // still have its whole window. That stalls any response longer than 65535 bytes.
             pending = new PendingRequest
             {
-                Owner = this,
                 StreamId = header.StreamId,
                 SendWindow = _peerInitialStreamWindow,
             };
@@ -362,11 +361,6 @@ public sealed partial class Http2Connection
 
     private void TryComplete(PendingRequest pending)
     {
-        if (pending.HeadersDone && pending.RequestEnded)
-        {
-            Owe(pending);
-        }
-
         // A streamed request was handed over at its headers and is being served right now; its
         // stream is retired by whoever is serving it, not here.
         if (pending.BodyReader is not null)
@@ -516,9 +510,6 @@ public sealed partial class Http2Connection
         public bool HeadersDone;
         public bool RequestEnded;
 
-        public Http2Connection? Owner;   // null for the discard block, which is never owed
-        public bool Owed;
-
         /// <summary>Set only when the body is being streamed; the arena stays empty then.</summary>
         public Http2BodyReader? BodyReader;
 
@@ -641,8 +632,6 @@ public sealed partial class Http2Connection
 
         public void Dispose()
         {
-            Owner?.Settle(this);
-
             // Recycles any chunk still queued and wakes a handler parked on a body that will
             // never finish arriving.
             BodyReader?.Drop();

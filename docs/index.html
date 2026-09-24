@@ -2317,7 +2317,7 @@ for (int i = 0; i &lt; threads.Length; i++)
                 return;   // this sample only serves h2; see Playground/Http2/Tls for the fallback
             }
 
-            await new Http2Connection(new StreamDuplexPipe(ssl, conn)).RunBufferedAsync(
+            await new Http2Connection(new StreamDuplexPipe(ssl)).RunBufferedAsync(
                 _ =&gt; new Http2Response { Status = 200, Body = body });
         }
         catch (Exception e)
@@ -2347,11 +2347,10 @@ foreach (Thread thread in threads)
 /// Any Stream as an IDuplexPipe. The BCL already has the two halves - this only pairs them, which
 /// is the whole adapter needed to run ioxide&#x27;s HTTP/2 over something that is not a ring connection.
 /// &lt;/summary&gt;
-internal sealed class StreamDuplexPipe(Stream stream, TcpConnection connection) : ITcpConnectionPipe
+internal sealed class StreamDuplexPipe(Stream stream) : IDuplexPipe
 {
     public PipeReader Input { get; } = PipeReader.Create(stream, new StreamPipeReaderOptions(leaveOpen: true));
     public PipeWriter Output { get; } = PipeWriter.Create(stream, new StreamPipeWriterOptions(leaveOpen: true));
-    public TcpConnection Connection =&gt; connection;   // lets HTTP/2 pause the read timeout while it works
 }</code></pre>
     <p class="ex-foot">HTTP/2 over the BCL's <code>SslStream</code>, and the point is the ten-line <code>Stream</code>-to-<code>IDuplexPipe</code> adapter at the bottom. <code>Nghttp2Connection</code> takes a pipe, so the same HTTP/2 code runs over the ring directly, over ioxide's TLS, or over <code>SslStream</code> - the transport is a constructor argument, not a branch inside the protocol.</p>
   </div>

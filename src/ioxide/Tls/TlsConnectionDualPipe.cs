@@ -27,7 +27,7 @@ namespace ioxide.tls;
 /// reports the OUTCOME, which is what this reads.
 /// </summary>
 /// <remarks>Reactor thread only, like everything else that touches a connection.</remarks>
-public sealed class TlsConnectionDualPipe : ITcpConnectionPipe, IAsyncDisposable
+public sealed class TlsConnectionDualPipe : IDuplexPipe, IAsyncDisposable
 {
     private readonly TcpConnection _conn;
     private readonly TlsSession _tls;
@@ -88,8 +88,6 @@ public sealed class TlsConnectionDualPipe : ITcpConnectionPipe, IAsyncDisposable
 
     /// <summary>Response bytes. Plaintext under kTLS TX; encrypted here otherwise.</summary>
     public PipeWriter Output => _writer;
-
-    public TcpConnection Connection => _conn;
 
     public async ValueTask DisposeAsync()
     {
