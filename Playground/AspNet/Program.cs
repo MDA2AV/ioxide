@@ -1,5 +1,6 @@
 using System.Security.Cryptography;
 using System.Security.Cryptography.X509Certificates;
+using ioxide;
 using ioxide.Kestrel;
 using Microsoft.AspNetCore.Server.Kestrel.Core;
 using Microsoft.Extensions.Logging;
@@ -30,7 +31,18 @@ builder.WebHost.ConfigureKestrel(o => o.ListenAnyIP(8080));
 switch (transport)
 {
     case "ioxide":
-        builder.WebHost.UseIoxide(o => o.ReactorCount = 16);   // io_uring transport, 16 reactors (one ring per thread)
+        builder.WebHost.UseIoxide(o =>
+        {
+            o.ReactorCount = 16;   // io_uring transport, 16 reactors (one ring per thread)
+
+            // Kestrel times requests itself (KeepAliveTimeout, RequestHeadersTimeout), so ReadTimeoutMs
+            // only bounds a client that never closes after Kestrel is done; SendTimeoutMs bounds a
+            // response the client stopped reading. 0 = off.
+            o.ConfigureServer = c => c with
+            {
+                Tcp = (c.Tcp ?? new TcpOptions()) with { ReadTimeoutMs = 60_000, SendTimeoutMs = 60_000 },
+            };
+        });
         break;
 
     case "sockets":

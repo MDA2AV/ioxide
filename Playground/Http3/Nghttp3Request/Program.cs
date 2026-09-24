@@ -81,6 +81,8 @@ var config = new ServerConfig
         WriteOverflow    = WriteOverflowStrategy.Grow,  // grow the slab; Segmented chains pooled slabs
         ZeroCopySend     = false,                       // plain SEND; SEND_ZC only wins for large responses
         RecvQueueEntries = 64,                          // per-connection SPSC recv queue depth (power of two)
+        ReadTimeoutMs    = 60_000,                      // close a connection whose read waits this long on a silent peer; 0 = off
+        SendTimeoutMs    = 60_000,                      // close a connection whose flush takes this long to go out; 0 = off
     },
     Udp = new UdpOptions
     {
@@ -91,7 +93,7 @@ var config = new ServerConfig
     {
         Port              = quicPort,                // https://127.0.0.1:8443/ over UDP - h3 lives here
         LocalCidLength    = 8,                       // must match the engine's cidLength
-        ReadTimeoutMs     = 60_000,                  // close a connection whose peer is silent this long
+        ReadTimeoutMs     = 60_000,                  // close a connection whose peer is silent this long; 0 = off
         ConnectionFactory = engine.CreateFactory(),  // the engine adopts each new connection
         // Where a moved client's packets go when several reactors share the port. Forward costs
         // nothing until a client actually changes address; KernelFilter has the kernel route by
