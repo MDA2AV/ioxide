@@ -41,9 +41,13 @@ public sealed unsafe partial class TcpConnection
     // like FlushArmedMs - clearing it would cost the recv path a store.
     internal long ReadParkedMs;
 
+    // The last sweep that found a flush in flight. Nothing stamps a flush's completion - that is
+    // the send path's hottest point - so this is when the server was last seen sending.
+    internal long FlushSeenMs;
+
     private int _readTimeoutSuspensions;
     private long _readTimeoutResumedMs;
-    internal long HandlerReleasedMs;
+    private long _finSentMs;
     private int _finSent;
 
     /// <summary>
@@ -134,13 +138,9 @@ public sealed unsafe partial class TcpConnection
     {
         // Before the decrement, while our ref keeps the fd from being recycled. A FIN now would cut
         // a flush in flight short, so the sweep sends that one once it completes.
-        if (Volatile.Read(ref _refs) == 2)
+        if (Volatile.Read(ref _refs) == 2 && !FlushOutstanding)
         {
-            Volatile.Write(ref HandlerReleasedMs, _reactor.NowMs);
-            if (!FlushOutstanding)
-            {
-                SendFin();
-            }
+            SendFin();
         }
 
         ReleaseRef();
@@ -167,6 +167,7 @@ public sealed unsafe partial class TcpConnection
     {
         if (Interlocked.Exchange(ref _finSent, 1) == 0)
         {
+            Volatile.Write(ref _finSentMs, _reactor.NowMs);   // the peer's time to close starts now
             Native.shutdown(ClientFd, Native.SHUT_WR);
         }
     }
@@ -174,8 +175,9 @@ public sealed unsafe partial class TcpConnection
     internal bool FinSent => Volatile.Read(ref _finSent) != 0;
 
     /// <summary>
-    /// Pause the read timeout until <see cref="ResumeReadTimeout"/> - for a layer whose read stays
-    /// parked while the application is busy (a pump, a multiplexed protocol). Calls nest.
+    /// Pause the read timeout until <see cref="ResumeReadTimeout"/> - for a transport layer whose
+    /// read stays parked while the application is busy (a decrypting pump, an adapter to a server
+    /// that keeps its own clocks). Calls nest.
     /// </summary>
     public void SuspendReadTimeout() => Interlocked.Increment(ref _readTimeoutSuspensions);
 
@@ -186,13 +188,14 @@ public sealed unsafe partial class TcpConnection
         Interlocked.Decrement(ref _readTimeoutSuspensions);
     }
 
-    // A read is parked and not suspended, or the handler let go and the peer has yet to close.
+    // The peer owes the next move: a read is parked and not suspended, or the handler let go and
+    // its FIN is out. The server's own sends restart the clock; the sweep skips it during a flush.
     internal bool WaitingOnPeer(out long sinceMs)
     {
         if (HandlerReleased)
         {
-            sinceMs = Volatile.Read(ref HandlerReleasedMs);
-            return true;
+            sinceMs = Volatile.Read(ref _finSentMs);   // 0 until the FIN is out
+            return sinceMs != 0;
         }
 
         if (Volatile.Read(ref _armed) == 0 || Volatile.Read(ref _readTimeoutSuspensions) > 0)
@@ -201,7 +204,9 @@ public sealed unsafe partial class TcpConnection
             return false;
         }
 
-        sinceMs = Math.Max(Volatile.Read(ref ReadParkedMs), Volatile.Read(ref _readTimeoutResumedMs));
+        sinceMs = Math.Max(
+            Math.Max(Volatile.Read(ref ReadParkedMs), Volatile.Read(ref _readTimeoutResumedMs)),
+            Math.Max(Volatile.Read(ref FlushArmedMs), FlushSeenMs));
         return true;
     }
 
@@ -236,9 +241,10 @@ public sealed unsafe partial class TcpConnection
         Volatile.Write(ref _flushInProgress, 0);
         Volatile.Write(ref FlushArmedMs, 0);
         Volatile.Write(ref ReadParkedMs, 0);
+        FlushSeenMs = 0;
         Volatile.Write(ref _readTimeoutSuspensions, 0);
         Volatile.Write(ref _readTimeoutResumedMs, 0);
-        Volatile.Write(ref HandlerReleasedMs, 0);
+        Volatile.Write(ref _finSentMs, 0);
         Volatile.Write(ref _finSent, 0);
         SweepClosed = false;
 

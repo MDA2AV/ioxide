@@ -46,19 +46,22 @@ public sealed unsafe partial class Reactor
                 continue;
             }
 
-            // A handler that let go mid-flush left its FIN for later.
-            if (conn.HandlerReleased && !conn.FinSent && !conn.FlushOutstanding)
+            // Sending, so not waiting on the peer: only the send clock applies, and the read clock
+            // restarts once the flush is done.
+            if (conn.FlushOutstanding)
             {
-                conn.SendFin();
+                conn.FlushSeenMs = now;
+                if (_sendTimeoutMs > 0 && now - Volatile.Read(ref conn.FlushArmedMs) > _sendTimeoutMs)
+                {
+                    TcpSweepClose(conn);
+                }
+                continue;
             }
 
-            // Independent clocks - a duplex connection can wait on its peer both ways. A busy
-            // handler, with no read parked and nothing in flight, runs neither.
-            if (_sendTimeoutMs > 0 && conn.FlushOutstanding
-                && now - Volatile.Read(ref conn.FlushArmedMs) > _sendTimeoutMs)
+            // A handler that let go mid-flush left its FIN for now.
+            if (conn.HandlerReleased && !conn.FinSent)
             {
-                TcpSweepClose(conn);
-                continue;
+                conn.SendFin();
             }
 
             if (_readTimeoutMs > 0 && conn.WaitingOnPeer(out long sinceMs) && now - sinceMs > _readTimeoutMs)

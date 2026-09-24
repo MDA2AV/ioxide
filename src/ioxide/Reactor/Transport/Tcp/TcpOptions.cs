@@ -59,9 +59,11 @@ public sealed record TcpOptions
     /// </summary>
     /// <remarks>
     /// The clock runs only while a read is parked with nothing buffered, so a handler busy answering
-    /// a request is never timed out, and only the peer's bytes restart it: a protocol where only the
-    /// server talks has to hear from its client within this (a websocket pong counts), or set 0. It
-    /// also bounds how long a peer has to close after its handler returns.
+    /// a request is never timed out. Bytes in either direction restart it, and a flush in flight
+    /// holds it - <see cref="SendTimeoutMs"/> governs that. A protocol that keeps a read parked
+    /// while its handlers work, like HTTP/2's frame loop, is bounded as before: a response slower
+    /// than this, to a peer that sends nothing meanwhile, is cut. It also bounds how long a peer
+    /// has to close after its handler returns.
     /// </remarks>
     public int ReadTimeoutMs { get; init; } = 60_000;
 
