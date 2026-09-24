@@ -13,8 +13,8 @@ namespace Ioxide.Tests;
 /// The read timeout through TLS. The decrypting pump keeps a read parked on the connection whether
 /// or not the application wants bytes, so that read cannot be the clock: the pump suspends it and
 /// runs it only while the application waits on the pipe. A busy handler must never be timed out,
-/// and a silent peer still must be. kTLS RX has no pump - the application reads the connection
-/// itself - so the same two tests there are the control.
+/// and a silent peer still must be. Under kTLS there is no pump - the kernel decrypts and the
+/// application reads the connection itself - so the same two tests there are the control.
 /// </summary>
 internal static class ReadTimeoutTests
 {
@@ -25,7 +25,7 @@ internal static class ReadTimeoutTests
         foreach (bool kernelRx in new[] { false, true })
         {
             bool rx = kernelRx;
-            string mode = rx ? "kTLS RX" : "OpenSSL";
+            string mode = rx ? "kTLS" : "OpenSSL";
 
             runner.Test($"tls read timeout ({mode}): a handler busy for longer than the read timeout still answers", () =>
             {
@@ -130,7 +130,8 @@ internal static class ReadTimeoutTests
     private static int StartWith(bool kernelRx, Func<Reactor, TcpConnection, Task> handle)
     {
         (string certPath, string keyPath) = TestCert.Ensure();
-        var options = new TlsOptions { CertificatePath = certPath, KeyPath = keyPath, KernelRx = kernelRx };
+        // kTLS RX is programmed at the same handoff as TX, so it cannot be asked for alone.
+        var options = new TlsOptions { CertificatePath = certPath, KeyPath = keyPath, KernelRx = kernelRx, KernelTx = kernelRx };
 
         return TestServer.StartConfigured(handle, new ServerConfig
         {
