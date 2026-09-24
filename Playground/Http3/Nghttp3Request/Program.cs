@@ -91,7 +91,7 @@ var config = new ServerConfig
     {
         Port              = quicPort,                // https://127.0.0.1:8443/ over UDP - h3 lives here
         LocalCidLength    = 8,                       // must match the engine's cidLength
-        IdleTimeoutMs     = 60_000,                  // close a connection idle this long (no packets)
+        ReadTimeoutMs     = 60_000,                  // close a connection whose peer is silent this long
         ConnectionFactory = engine.CreateFactory(),  // the engine adopts each new connection
         // Where a moved client's packets go when several reactors share the port. Forward costs
         // nothing until a client actually changes address; KernelFilter has the kernel route by

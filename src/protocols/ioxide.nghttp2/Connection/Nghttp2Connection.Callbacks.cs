@@ -49,7 +49,7 @@ public sealed partial class Nghttp2Connection
             // the request we have rather than replacing it and losing everything accumulated.
             if (!connection._pending.ContainsKey(streamId))
             {
-                connection._pending[streamId] = new PendingRequest { StreamId = streamId };
+                connection._pending[streamId] = new PendingRequest { StreamId = streamId, Owner = connection };
             }
         }
         catch (Exception e)
@@ -137,6 +137,7 @@ public sealed partial class Nghttp2Connection
             Nghttp2Connection connection = From(user);
             if (connection._pending.Remove(streamId, out PendingRequest? pending))
             {
+                connection.Owe(pending);
                 connection._readyThisPass.Add(pending);
             }
         }

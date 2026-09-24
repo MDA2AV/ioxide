@@ -115,7 +115,7 @@ internal static class QuicTeardownWireTests
             (_, int udpPort) = TestServer.StartDatagram(
                 onDatagram: null,
                 quicFactory: engine.CreateFactory(),
-                quicIdleMs: 750,
+                quicReadMs: 750,
                 quicHandle: EchoThen(accepted, torndown, null));
 
             using var client = new TeardownWireClient(udpPort);
@@ -357,6 +357,21 @@ internal sealed unsafe class TeardownWireClient : IDisposable
             PumpIn();
         }
         return Encoding.ASCII.GetString(_echo.ToArray());
+    }
+
+    /// <summary>
+    /// Keeps the connection going both ways for <paramref name="ms"/>: every inbound datagram is fed
+    /// to the engine and whatever it owes back - ACKs above all - goes out. Starts nothing of its
+    /// own, so the connection stays quiet unless the server makes it talk.
+    /// </summary>
+    public void Converse(int ms)
+    {
+        long deadline = Environment.TickCount64 + ms;
+        while (Environment.TickCount64 < deadline)
+        {
+            FlushOut();
+            PumpIn();
+        }
     }
 
     /// <summary>

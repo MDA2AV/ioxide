@@ -29,8 +29,8 @@ public sealed unsafe partial class Reactor
     /// <summary>CID length a client with no QuicOptions mints - 8 bytes, matching the demux slice.</summary>
     private const int QuicClientDefaultCidLength = 8;
 
-    /// <summary>Idle eviction for a client-only reactor, which has no QuicOptions to read it from.</summary>
-    private const int QuicClientDefaultIdleMs = 30_000;
+    /// <summary>Read timeout for a client-only reactor, which has no QuicOptions to read it from.</summary>
+    private const int QuicClientDefaultReadMs = 30_000;
 
     /// <summary>
     /// Make this reactor able to open outbound QUIC connections and return the socket they send
@@ -67,8 +67,12 @@ public sealed unsafe partial class Reactor
     /// <summary>CID length this reactor's demux slices - a client's own CID must match it.</summary>
     public int QuicLocalCidLength => _quicOptions?.LocalCidLength ?? QuicClientDefaultCidLength;
 
-    // Idle timeout for the sweep, which now runs for client-only reactors too.
-    private int QuicIdleTimeoutMs => _quicOptions?.IdleTimeoutMs ?? QuicClientDefaultIdleMs;
+    /// <summary>
+    /// How long this reactor's QUIC sweep lets a peer stay silent (<see cref="QuicOptions.ReadTimeoutMs"/>,
+    /// or the client-only default) - public so an engine keeping a busy connection alive can ping
+    /// inside it.
+    /// </summary>
+    public int QuicReadTimeoutMs => _quicOptions?.ReadTimeoutMs ?? QuicClientDefaultReadMs;
 
     /// <summary>
     /// Adopt an outgoing connection the engine binding just created: route its replies by

@@ -25,6 +25,10 @@ public sealed class TlsDecryptingPipeReader : PipeReader, IAsyncDisposable
     private readonly Pipe _inbound;
     private readonly Task _pump;
 
+    // Whether the caller is parked on a read with nothing decrypted to give it - the one state in
+    // which this connection is waiting on its peer. See ReadAsync.
+    private bool _callerWaiting;
+
     public TlsDecryptingPipeReader(TcpConnection connection, TlsSession session, PipeOptions? options = null)
     {
         _conn = connection ?? throw new ArgumentNullException(nameof(connection));
@@ -50,11 +54,41 @@ public sealed class TlsDecryptingPipeReader : PipeReader, IAsyncDisposable
                 minimumSegmentSize: options.MinimumSegmentSize,
                 useSynchronizationContext: false));
 
+        // The pump keeps a read parked on the connection for as long as it runs, including while
+        // the caller is busy with a request, so that read says nothing about waiting on the peer.
+        // The read clock is suspended for the pump's life and runs only while the caller waits.
+        // Before the pump starts: it parks its first read synchronously.
+        _conn.SuspendReadTimeout();
+
         _pump = PumpInboundAsync();
     }
 
     public override ValueTask<ReadResult> ReadAsync(CancellationToken cancellationToken = default)
-        => _inbound.Reader.ReadAsync(cancellationToken);
+    {
+        ValueTask<ReadResult> read = _inbound.Reader.ReadAsync(cancellationToken);
+
+        // Nothing decrypted to hand over: the caller now waits on the peer, which is what the read
+        // clock measures. It stops again the moment the pump has plaintext for it (CallerServed).
+        if (!read.IsCompleted && !_callerWaiting)
+        {
+            _callerWaiting = true;
+            _conn.ResumeReadTimeout();
+        }
+
+        return read;
+    }
+
+    // The caller's wait is over - plaintext is on its way, or the read was cancelled. Called BEFORE
+    // the flush that delivers it: the reader resumes inline inside that flush and may park again
+    // straight away, and that new wait has to find the clock suspended so it can resume it.
+    private void CallerServed()
+    {
+        if (_callerWaiting)
+        {
+            _callerWaiting = false;
+            _conn.SuspendReadTimeout();
+        }
+    }
 
     public override bool TryRead(out ReadResult result) => _inbound.Reader.TryRead(out result);
 
@@ -63,7 +97,11 @@ public sealed class TlsDecryptingPipeReader : PipeReader, IAsyncDisposable
     public override void AdvanceTo(SequencePosition consumed, SequencePosition examined)
         => _inbound.Reader.AdvanceTo(consumed, examined);
 
-    public override void CancelPendingRead() => _inbound.Reader.CancelPendingRead();
+    public override void CancelPendingRead()
+    {
+        CallerServed();
+        _inbound.Reader.CancelPendingRead();
+    }
 
     public override void Complete(Exception? exception = null) => _inbound.Reader.Complete(exception);
 
@@ -119,6 +157,7 @@ public sealed class TlsDecryptingPipeReader : PipeReader, IAsyncDisposable
 
                 if (produced > 0)
                 {
+                    CallerServed();
                     FlushResult flush = await writer.FlushAsync();
                     if (flush.IsCompleted || flush.IsCanceled)
                     {

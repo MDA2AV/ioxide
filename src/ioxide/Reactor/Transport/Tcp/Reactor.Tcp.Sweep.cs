@@ -3,8 +3,8 @@ using static ioxide.Native;
 namespace ioxide;
 
 /// <summary>
-/// The clocks on a TCP connection's lifecycle: an idle connection is reaped, and so is one whose
-/// send the peer stopped draining.
+/// The clocks on a TCP connection's lifecycle: a connection whose read the peer never answers is
+/// reaped, and so is one whose send the peer stopped draining.
 /// </summary>
 /// <remarks>
 /// Rides the reactor's existing ~250 ms ticker rather than arming anything of its own, which is
@@ -13,7 +13,7 @@ namespace ioxide;
 /// </remarks>
 public sealed unsafe partial class Reactor
 {
-    private readonly int _idleTimeoutMs;
+    private readonly int _readTimeoutMs;
     private readonly int _sendTimeoutMs;
 
     /// <summary>
@@ -26,7 +26,9 @@ public sealed unsafe partial class Reactor
     /// </summary>
     internal long NowMs = Environment.TickCount64;
 
-    private bool TcpSweepEnabled => _tcpEnabled && (_idleTimeoutMs > 0 || _sendTimeoutMs > 0);
+    // Registered whenever TCP is on, not only when a clock is configured: the deferred FIN of a
+    // handler that let go mid-flush (see TcpConnection.DecRef) is sent from here, clocks or not.
+    private bool TcpSweepEnabled => _tcpEnabled;
 
     /// <summary>
     /// One pass over the connection table. Runs on the reactor thread from the ticker, so it owns
@@ -45,20 +47,24 @@ public sealed unsafe partial class Reactor
                 continue;
             }
 
-            // A connection with a flush outstanding is not idle, it is sending - so the send clock
-            // governs it and the idle one does not apply. Under MSG_WAITALL the whole flush is a
-            // single completion, so nothing refreshes the activity stamp for as long as the send
-            // legitimately takes.
-            if (conn.FlushOutstanding)
+            // A handler that let go with a flush in flight left its FIN for later, since sending
+            // it then would have cut that flush short. The flush is done now.
+            if (conn.HandlerReleased && !conn.FinSent && !conn.FlushOutstanding)
             {
-                if (_sendTimeoutMs > 0 && now - Volatile.Read(ref conn.FlushArmedMs) > _sendTimeoutMs)
-                {
-                    TcpSweepClose(conn);
-                }
+                conn.SendFin();
+            }
+
+            // The two clocks are independent: a duplex connection can be waiting on the peer to
+            // read and to write at once. Neither runs while the handler is simply busy - its read is
+            // not parked and it has nothing in flight - however long that takes.
+            if (_sendTimeoutMs > 0 && conn.FlushOutstanding
+                && now - Volatile.Read(ref conn.FlushArmedMs) > _sendTimeoutMs)
+            {
+                TcpSweepClose(conn);
                 continue;
             }
 
-            if (_idleTimeoutMs > 0 && now - conn.LastActivityMs > _idleTimeoutMs)
+            if (_readTimeoutMs > 0 && conn.WaitingOnPeer(out long sinceMs) && now - sinceMs > _readTimeoutMs)
             {
                 TcpSweepClose(conn);
             }
@@ -71,10 +77,10 @@ public sealed unsafe partial class Reactor
     /// <remarks>
     /// shutdown() is what the PEER sees, and it is also what releases the connection: a
     /// TcpConnection is held by two refs, the handler's and the reactor's, and the reactor's is
-    /// given up only when its outstanding operation completes. For an idle connection that is a
-    /// multishot recv against a peer saying nothing, which otherwise never completes; for a stalled
-    /// one it is a SEND the peer's closed window is holding, which otherwise never completes
-    /// either. Shutting the socket down ends both.
+    /// given up only when its outstanding operation completes. For a connection waiting on its peer
+    /// that is a multishot recv against a peer saying nothing, which otherwise never completes; for
+    /// a stalled one it is a SEND the peer's closed window is holding, which otherwise never
+    /// completes either. Shutting the socket down ends both.
     ///
     /// MarkClosed is what wakes the handler NOW - parked on a read, or on the very flush being
     /// timed out - with the closed state its loop already knows how to handle, rather than one
@@ -91,6 +97,7 @@ public sealed unsafe partial class Reactor
     {
         conn.SweepClosed = true;   // one shutdown per connection, not one per tick until it lands
 
+        conn.SuppressFin();        // this shutdown is the FIN; the handler letting go adds none
         shutdown(conn.ClientFd, SHUT_RDWR);
         conn.MarkClosed();
     }

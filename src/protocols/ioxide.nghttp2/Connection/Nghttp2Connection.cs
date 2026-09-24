@@ -39,6 +39,13 @@ public sealed partial class Nghttp2Connection : IDisposable
     private readonly Nghttp2Options _options;
     private readonly byte[] _egress = new byte[EgressBufferSize];
 
+    // The connection underneath, when the pipe can name it - for the read timeout, see Owe.
+    private readonly TcpConnection? _connection;
+
+    // Requests that have arrived whole and are not answered yet. While there are any, the
+    // connection is busy rather than waiting on its peer.
+    private int _owed;
+
     private nint _handle;
     private GCHandle _self;
     private bool _disposed;
@@ -64,7 +71,44 @@ public sealed partial class Nghttp2Connection : IDisposable
     {
         _pipe = pipe;
         _options = options ?? new Nghttp2Options();
+        _connection = (pipe as ITcpConnectionPipe)?.Connection;
         Setup();
+    }
+
+    /// <summary>
+    /// A request's stream ended, so this side owes its response. While any response is owed the
+    /// connection's read timeout is suspended: the read loop stays parked for the next frame the
+    /// whole time a handler works, and a slow answer to one request must not time out the
+    /// connection it shares with the others. Once nothing is owed, the connection is waiting on
+    /// its peer again and the clock resumes.
+    /// </summary>
+    private void Owe(PendingRequest pending)
+    {
+        if (pending.Owed)
+        {
+            return;
+        }
+        pending.Owed = true;
+
+        if (_owed++ == 0)
+        {
+            _connection?.SuspendReadTimeout();
+        }
+    }
+
+    /// <summary>The response is done, or will never be: every end of a request disposes it.</summary>
+    private void Settle(PendingRequest pending)
+    {
+        if (!pending.Owed)
+        {
+            return;
+        }
+        pending.Owed = false;
+
+        if (--_owed == 0)
+        {
+            _connection?.ResumeReadTimeout();
+        }
     }
 
     /// <summary>Convenience for cleartext h2c: wraps the connection in its own duplex pipe.</summary>
@@ -138,6 +182,10 @@ public sealed partial class Nghttp2Connection : IDisposable
         private (int Offset, int Length) _body = (0, 0);
 
         public int StreamId;
+
+        // The connection counting this request among those it owes an answer (Owe/Settle).
+        public Nghttp2Connection? Owner;
+        public bool Owed;
 
         // Pseudo-header ranges, lifted out of the field list as they arrive.
         public (int Offset, int Length) Method;
@@ -217,6 +265,8 @@ public sealed partial class Nghttp2Connection : IDisposable
 
         public void Dispose()
         {
+            Owner?.Settle(this);
+
             _fields.Clear();
             if (_arena.Length > 0)
             {

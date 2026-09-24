@@ -16,6 +16,9 @@ public static unsafe partial class Native {
     public const int SO_RCVBUF    = 8;
     public const int SO_REUSEPORT = 15;
 
+    /// <summary>shutdown(2) how: the write side only - a FIN behind whatever is already queued.</summary>
+    public const int SHUT_WR      = 1;
+
     /// <summary>shutdown(2) how: both directions.</summary>
     public const int SHUT_RDWR    = 2;
 

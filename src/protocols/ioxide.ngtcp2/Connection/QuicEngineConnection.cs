@@ -146,6 +146,11 @@ public unsafe partial class QuicEngineConnection : QuicConnection
     // Copy-and-enqueue only - the wake happens once, after the read unwinds.
     private void OnStreamData(long streamId, ReadOnlySpan<byte> data, bool fin)
     {
+        if (fin)
+        {
+            OweResponse(streamId);
+        }
+
         if (EnqueueStreamData(streamId, data, fin))
         {
             _recvEnqueued = true;
@@ -301,6 +306,7 @@ public unsafe partial class QuicEngineConnection : QuicConnection
     private void HandshakeCompletedOnce()
     {
         _handshakeDone = true;
+        ReapplyKeepAliveAfterHandshake();
         _handshakeSignalPending = HandshakeCompleted is not null;
 
         Span<byte> alpn = stackalloc byte[64];
@@ -421,6 +427,7 @@ public unsafe partial class QuicEngineConnection : QuicConnection
     private void Destroy()
     {
         _closed = true;
+        _owedStreams.Clear();
         foreach (OutStream os in _outStreams.Values)
         {
             while (os.Chunks.Count > 0)

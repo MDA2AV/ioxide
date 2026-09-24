@@ -1644,6 +1644,47 @@ int iq_conn_is_established(iq_conn *c)
     return ngtcp2_conn_get_handshake_completed(c->conn);
 }
 
+/* The tighter of two bounds where 0 means "none". */
+static uint64_t iq_tighter_bound(uint64_t a, uint64_t b)
+{
+    if (a == 0) {
+        return b;
+    }
+    if (b == 0) {
+        return a;
+    }
+    return a < b ? a : b;
+}
+
+/* Keep the peer answering while this side owes it a response. A request that takes minutes leaves
+ * both ends silent the whole time, and silence is what every idle bound measures: the peer's
+ * max_idle_timeout, which ngtcp2 honours here too, and the transport's own sweep (bound_ns, 0 when
+ * it has none). A PING at half the tighter of those draws an ACK well inside both. A peer that has
+ * actually gone answers nothing, so this never keeps a dead connection alive - its idle timer runs
+ * out as before. ngtcp2 sends the PING itself, from handle_expiry, once the connection has been
+ * quiet for the interval; off restores its default of never. */
+void iq_conn_set_keep_alive(iq_conn *c, int on, uint64_t bound_ns)
+{
+    if (c == NULL || c->conn == NULL) {
+        return;
+    }
+
+    ngtcp2_duration interval = UINT64_MAX;
+    if (on) {
+        const ngtcp2_transport_params *local = ngtcp2_conn_get_local_transport_params2(c->conn);
+        const ngtcp2_transport_params *remote = ngtcp2_conn_get_remote_transport_params2(c->conn);
+
+        uint64_t bound = bound_ns;
+        bound = iq_tighter_bound(bound, local != NULL ? local->max_idle_timeout : 0);
+        bound = iq_tighter_bound(bound, remote != NULL ? remote->max_idle_timeout : 0);
+        if (bound != 0) {
+            interval = bound / 2;
+        }
+    }
+
+    ngtcp2_conn_set_keep_alive_timeout(c->conn, interval);
+}
+
 
 /* Open a server-initiated unidirectional stream (H3 control / QPACK). Returns the stream id, or
  * a negative ngtcp2 error (e.g. STREAM_ID_BLOCKED when the peer's uni allowance is exhausted). */

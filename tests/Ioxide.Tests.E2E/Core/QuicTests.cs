@@ -119,7 +119,7 @@ internal static class QuicTests
             Assert.Equal(1, TestQuicConnection.Created);
         });
 
-        runner.Test("core: quic idle eviction drops the connection, re-adopts on new handshake", () =>
+        runner.Test("core: quic read-timeout eviction drops the connection, re-adopts on new handshake", () =>
         {
             TestQuicConnection.Reset();
             (_, int udpPort) = TestServer.StartDatagram(
@@ -131,7 +131,7 @@ internal static class QuicTests
                     r.QuicRegisterCid(conn, new QuicCid("srv-cidE"u8));
                     return conn;
                 },
-                quicIdleMs: 300);
+                quicReadMs: 300);
 
             using var client = NewClient(udpPort, out IPEndPoint server);
             IPEndPoint? from = null;
@@ -141,8 +141,8 @@ internal static class QuicTests
             client.Receive(ref from);
             Assert.Equal(1, TestQuicConnection.Created);
 
-            Thread.Sleep(900);   // idle 300 ms + 250 ms sweep granularity, with margin
-            Assert.Equal(QuicEvictReason.IdleTimeout, TestQuicConnection.Evicted);
+            Thread.Sleep(900);   // silent 300 ms + 250 ms sweep granularity, with margin
+            Assert.Equal(QuicEvictReason.ReadTimeout, TestQuicConnection.Evicted);
 
             client.Client.ReceiveTimeout = 500;
             ExpectDropped(client, server, ShortHeader("srv-cidE"u8, "stale"u8));   // routes died with it

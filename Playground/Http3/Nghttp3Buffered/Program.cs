@@ -52,7 +52,7 @@ uint cidLength = 8;                            // connection-id length this endp
 long maxSendRetentionBytes = 16L << 20;
 
 // ── QuicOptions: the listener ─────────────────────────────────────────────────────────────────
-int idleTimeoutMs = 60_000;                    // close a connection idle this long (no packets)
+int readTimeoutMs = 60_000;                    // close a connection whose peer is silent this long
 
 // ── UdpOptions: how datagrams are received ────────────────────────────────────────────────────
 int  udpRecvSlots = 16;                        // multishot recv slots per reactor - datagrams the ring can hold at once
@@ -97,7 +97,7 @@ var config = new ServerConfig
     {
         Port = quicPort,
         LocalCidLength = (int)cidLength,        // must match the engine's cidLength
-        IdleTimeoutMs = idleTimeoutMs,
+        ReadTimeoutMs = readTimeoutMs,
         ConnectionFactory = engine.CreateFactory(),
         // Where a moved client's packets go when several reactors share the port. Forward costs
         // nothing until a client actually changes address; KernelFilter has the kernel route by

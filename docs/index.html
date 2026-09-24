@@ -2317,7 +2317,7 @@ for (int i = 0; i &lt; threads.Length; i++)
                 return;   // this sample only serves h2; see Playground/Http2/Tls for the fallback
             }
 
-            await new Http2Connection(new StreamDuplexPipe(ssl)).RunBufferedAsync(
+            await new Http2Connection(new StreamDuplexPipe(ssl, conn)).RunBufferedAsync(
                 _ =&gt; new Http2Response { Status = 200, Body = body });
         }
         catch (Exception e)
@@ -2347,10 +2347,15 @@ foreach (Thread thread in threads)
 /// Any Stream as an IDuplexPipe. The BCL already has the two halves - this only pairs them, which
 /// is the whole adapter needed to run ioxide&#x27;s HTTP/2 over something that is not a ring connection.
 /// &lt;/summary&gt;
-internal sealed class StreamDuplexPipe(Stream stream) : IDuplexPipe
+/// &lt;remarks&gt;
+/// Naming the connection underneath (ITcpConnectionPipe) lets HTTP/2 pause the read timeout while
+/// it owes a response, so a slow handler is not timed out. A plain IDuplexPipe works too, without that.
+/// &lt;/remarks&gt;
+internal sealed class StreamDuplexPipe(Stream stream, TcpConnection connection) : ITcpConnectionPipe
 {
     public PipeReader Input { get; } = PipeReader.Create(stream, new StreamPipeReaderOptions(leaveOpen: true));
     public PipeWriter Output { get; } = PipeWriter.Create(stream, new StreamPipeWriterOptions(leaveOpen: true));
+    public TcpConnection Connection =&gt; connection;
 }</code></pre>
     <p class="ex-foot">HTTP/2 over the BCL's <code>SslStream</code>, and the point is the ten-line <code>Stream</code>-to-<code>IDuplexPipe</code> adapter at the bottom. <code>Nghttp2Connection</code> takes a pipe, so the same HTTP/2 code runs over the ring directly, over ioxide's TLS, or over <code>SslStream</code> - the transport is a constructor argument, not a branch inside the protocol.</p>
   </div>
@@ -3010,7 +3015,7 @@ uint cidLength = 8;                            // connection-id length this endp
 long maxSendRetentionBytes = 16L &lt;&lt; 20;
 
 // ── QuicOptions: the listener ─────────────────────────────────────────────────────────────────
-int idleTimeoutMs = 60_000;                    // close a connection idle this long (no packets)
+int readTimeoutMs = 60_000;                    // close a connection whose peer is silent this long
 
 // ── UdpOptions: how datagrams are received ────────────────────────────────────────────────────
 int  udpRecvSlots = 16;                        // multishot recv slots per reactor - datagrams the ring can hold at once
@@ -3053,7 +3058,7 @@ var config = new ServerConfig
     {
         Port = quicPort,
         LocalCidLength = (int)cidLength,        // must match the engine&#x27;s cidLength
-        IdleTimeoutMs = idleTimeoutMs,
+        ReadTimeoutMs = readTimeoutMs,
         ConnectionFactory = engine.CreateFactory(),
         // Where a moved client&#x27;s packets go when several reactors share the port. Forward costs
         // nothing until a client actually changes address; KernelFilter has the kernel route by
@@ -3221,7 +3226,7 @@ var config = new ServerConfig
     {
         Port              = quicPort,                // https://127.0.0.1:8443/ - UDP, not TCP
         LocalCidLength    = 8,                       // must match the engine&#x27;s cidLength
-        IdleTimeoutMs     = 60_000,                  // close a connection idle this long (no packets)
+        ReadTimeoutMs     = 60_000,                  // close a connection whose peer is silent this long
         ConnectionFactory = engine.CreateFactory(),  // the engine adopts each new connection
         // Where a moved client&#x27;s packets go when several reactors share the port. Forward costs
         // nothing until a client actually changes address; KernelFilter has the kernel route by
@@ -5790,7 +5795,7 @@ var config = new ServerConfig
         // nothing until a client actually changes address; KernelFilter has the kernel route by
         // connection id instead, which costs a little on every packet. See /how-ioxide-does-h3.
         Routing = QuicRouting.Forward,
-        IdleTimeoutMs     = 60_000,              // transport backstop; 0 disables the sweep
+        ReadTimeoutMs     = 60_000,              // close a connection whose peer is silent this long; 0 disables
     },
 };
 
@@ -5904,7 +5909,7 @@ var config = new ServerConfig
         // nothing until a client actually changes address; KernelFilter has the kernel route by
         // connection id instead, which costs a little on every packet. See /how-ioxide-does-h3.
         Routing = QuicRouting.Forward,
-        IdleTimeoutMs     = 60_000,              // transport backstop; 0 disables the sweep
+        ReadTimeoutMs     = 60_000,              // close a connection whose peer is silent this long; 0 disables
     },
 };
 
@@ -6018,7 +6023,7 @@ var config = new ServerConfig
     {
         Port              = quicPort,                // https://127.0.0.1:8443/ over UDP - h3 lives here
         LocalCidLength    = 8,                       // must match the engine&#x27;s cidLength
-        IdleTimeoutMs     = 60_000,                  // close a connection idle this long (no packets)
+        ReadTimeoutMs     = 60_000,                  // close a connection whose peer is silent this long
         ConnectionFactory = engine.CreateFactory(),  // the engine adopts each new connection
         // Where a moved client&#x27;s packets go when several reactors share the port. Forward costs
         // nothing until a client actually changes address; KernelFilter has the kernel route by
@@ -6667,7 +6672,7 @@ var config = new ServerConfig
     {
         Port              = quicPort,  // h3 over UDP - the QUIC listener
         LocalCidLength    = 8,                                       // CID bytes this endpoint mints (must match the engine)
-        IdleTimeoutMs     = 60_000,                                  // transport idle backstop; 0 disables sweep eviction
+        ReadTimeoutMs     = 60_000,                                  // close a connection whose peer is silent this long; 0 disables
         ConnectionFactory = engine.CreateFactory(),                  // adopts new connections into the engine
         // Where a moved client&#x27;s packets go when several reactors share the port. Forward costs
         // nothing until a client actually changes address; KernelFilter has the kernel route by

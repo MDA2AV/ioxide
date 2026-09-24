@@ -38,16 +38,29 @@ public sealed unsafe partial class TcpConnection
         => Interlocked.Exchange(ref BufferHolder, null)?.ReleaseHeldBuffers();
 
     /// <summary>
-    /// Environment.TickCount64 at the last completion this connection saw in either direction -
-    /// stamped at accept and on every recv and send completion, read by the reactor's sweep
-    /// (Reactor.Tcp.Sweep.cs) against <see cref="TcpOptions.IdleTimeoutMs"/>.
+    /// The reactor's coarse clock when the read now parked on this connection started waiting,
+    /// read by the sweep (Reactor.Tcp.Sweep.cs) against <see cref="TcpOptions.ReadTimeoutMs"/>.
     /// </summary>
     /// <remarks>
-    /// A coarse tick rather than a precise clock on purpose: the sweep runs at ~250 ms and the
-    /// timeouts it serves are second-scale, so the cheapest read that cannot fall back is enough.
-    /// Reactor thread only, like the rest of the connection.
+    /// Meaningful only while a read is parked - it is written each time one parks and never
+    /// cleared, because clearing it would put a store on the recv completion path to maintain a
+    /// value nothing reads in that state. The same shape as <see cref="FlushArmedMs"/>.
     /// </remarks>
-    internal long LastActivityMs;
+    internal long ReadParkedMs;
+
+    // Suspensions of the read clock (SuspendReadTimeout), and when the last one was lifted - the
+    // clock restarts from there, since the read may have been parked the whole time it was off.
+    private int _readTimeoutSuspensions;
+    private long _readTimeoutResumedMs;
+
+    /// <summary>
+    /// When the handler released the connection while the peer was still connected; the sweep
+    /// bounds how long the peer then has to close. Meaningful only while <see cref="HandlerReleased"/>.
+    /// </summary>
+    internal long HandlerReleasedMs;
+
+    // Whether the FIN that ends a released connection has gone out; see DecRef.
+    private int _finSent;
 
     /// <summary>
     /// Set once the sweep has shut this connection down, so the next tick skips it instead of
@@ -129,13 +142,117 @@ public sealed unsafe partial class TcpConnection
 
     internal void InitRefs() => Volatile.Write(ref _refs, 2);
 
-    /// <summary>Release one owner's ref; whoever hits 0 hands the connection to the reactor for recycle.</summary>
+    /// <summary>
+    /// The handler's release: it is done with the connection. Whichever of the two owners lets go
+    /// last hands the connection to the reactor for recycle.
+    /// </summary>
+    /// <remarks>
+    /// A handler that lets go while the peer is still connected ends the connection: nothing will
+    /// read or write it again, so the peer gets a FIN now, behind whatever the last flush left in
+    /// the socket. Without it the peer waited on a connection nobody served until it gave up. The
+    /// read side stays open until the peer's own FIN, so data it sends meanwhile is drained rather
+    /// than answered with a reset, and <see cref="TcpOptions.ReadTimeoutMs"/> bounds a peer that
+    /// never closes.
+    ///
+    /// The shutdown runs BEFORE the decrement, while this ref still keeps the fd open: after it,
+    /// the reactor may recycle the connection and the number can belong to someone else. A flush
+    /// still in flight defers the FIN to the sweep, since a FIN now would cut that send short.
+    /// </remarks>
     public void DecRef()
+    {
+        // Both refs held: the reactor has not seen the peer go, so the connection is still live.
+        if (Volatile.Read(ref _refs) == 2)
+        {
+            Volatile.Write(ref HandlerReleasedMs, _reactor.NowMs);
+            if (!FlushOutstanding)
+            {
+                SendFin();
+            }
+        }
+
+        ReleaseRef();
+    }
+
+    /// <summary>The reactor's release, from the paths that tore the connection down.</summary>
+    internal void ReleaseReactorRef() => ReleaseRef();
+
+    /// <summary>
+    /// The connection ended from the reactor's side - the peer closed, the socket failed, the recv
+    /// queue overflowed - so there is no one to send a FIN to. Called before the MarkClosed that
+    /// wakes the handler: it resumes inline and lets go while the reactor's ref is still held, and
+    /// would otherwise pay a shutdown() on every connection the peer closed.
+    /// </summary>
+    internal void SuppressFin() => Volatile.Write(ref _finSent, 1);
+
+    private void ReleaseRef()
     {
         if (Interlocked.Decrement(ref _refs) == 0)
         {
             _reactor.EnqueueRecycle(this);
         }
+    }
+
+    /// <summary>
+    /// Whether the handler has let go while the reactor still holds the connection - it is only
+    /// waiting for the peer to close. Meaningful only while the connection is in the reactor's
+    /// table, which is exactly while the reactor's ref is held.
+    /// </summary>
+    internal bool HandlerReleased => Volatile.Read(ref _refs) == 1;
+
+    /// <summary>Send the released connection's FIN, once. Safe from any thread while a ref is held.</summary>
+    internal void SendFin()
+    {
+        if (Interlocked.Exchange(ref _finSent, 1) == 0)
+        {
+            Native.shutdown(ClientFd, Native.SHUT_WR);
+        }
+    }
+
+    internal bool FinSent => Volatile.Read(ref _finSent) != 0;
+
+    /// <summary>
+    /// Stop the read clock (<see cref="TcpOptions.ReadTimeoutMs"/>) until the matching
+    /// <see cref="ResumeReadTimeout"/>: a read parked in the meantime is not the server waiting on
+    /// the peer.
+    /// </summary>
+    /// <remarks>
+    /// For a layer whose read stays parked while the application is busy. A pump that reads in the
+    /// background suspends it, and resumes only while the application actually waits on the pump.
+    /// A protocol answering several requests at once suspends it while it owes a response, so a
+    /// slow request does not time out the connection it shares with the others. Calls nest; the
+    /// clock runs again, from the moment of the last resume, once every suspension is lifted. The
+    /// count resets when the connection is recycled.
+    /// </remarks>
+    public void SuspendReadTimeout() => Interlocked.Increment(ref _readTimeoutSuspensions);
+
+    /// <summary>Lift one <see cref="SuspendReadTimeout"/>.</summary>
+    public void ResumeReadTimeout()
+    {
+        // Stamped before the count drops, so a sweep that sees no suspensions sees this time too.
+        Volatile.Write(ref _readTimeoutResumedMs, _reactor.NowMs);
+        Interlocked.Decrement(ref _readTimeoutSuspensions);
+    }
+
+    /// <summary>
+    /// Whether the server is waiting on the peer, and since when: a read is parked and nothing
+    /// suspends the clock, or the handler has let go and the peer has yet to close.
+    /// </summary>
+    internal bool WaitingOnPeer(out long sinceMs)
+    {
+        if (HandlerReleased)
+        {
+            sinceMs = Volatile.Read(ref HandlerReleasedMs);
+            return true;
+        }
+
+        if (Volatile.Read(ref _armed) == 0 || Volatile.Read(ref _readTimeoutSuspensions) > 0)
+        {
+            sinceMs = 0;
+            return false;
+        }
+
+        sinceMs = Math.Max(Volatile.Read(ref ReadParkedMs), Volatile.Read(ref _readTimeoutResumedMs));
+        return true;
     }
 
     // Guards the framework's fault-path release of the handler ref; reset per pool life (#94).
@@ -168,7 +285,11 @@ public sealed unsafe partial class TcpConnection
         Volatile.Write(ref _flushArmed, 0);
         Volatile.Write(ref _flushInProgress, 0);
         Volatile.Write(ref FlushArmedMs, 0);
-        LastActivityMs = _reactor.NowMs;
+        Volatile.Write(ref ReadParkedMs, 0);
+        Volatile.Write(ref _readTimeoutSuspensions, 0);
+        Volatile.Write(ref _readTimeoutResumedMs, 0);
+        Volatile.Write(ref HandlerReleasedMs, 0);
+        Volatile.Write(ref _finSent, 0);
         SweepClosed = false;
 
         WriteHead = 0;

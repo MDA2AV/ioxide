@@ -47,27 +47,34 @@ public sealed record TcpOptions
     public int RecvQueueEntries { get; init; } = 64;
 
     /// <summary>
-    /// Close a connection that has neither received nor sent anything for this long. 0 disables.
+    /// Close a connection whose read has waited this long for the peer. 0 disables.
     ///
-    /// What it defends: a peer that connects and goes quiet holds an fd, a pooled
-    /// <see cref="TcpConnection"/> with its native write slab, and a recv queue - and in
-    /// incremental mode a registered buffer ring plus a gid, which is capped, so an idle
-    /// connection at the cap converts directly into shed accepts.
+    /// The clock runs only while the server is waiting on the peer: from the moment a read parks
+    /// with nothing buffered until bytes arrive. A handler that spends minutes answering a request
+    /// is not waiting on anyone, so nothing times it out. What this defends: a peer that connects
+    /// and says nothing, a keep-alive connection left open between requests, and a request that
+    /// stops halfway - each holds an fd, a pooled <see cref="TcpConnection"/> with its native write
+    /// slab and a recv queue, and in incremental mode a capped gid, so at the cap they turn
+    /// directly into shed accepts.
     ///
     /// Enforced on the reactor's ticker, so the granularity is the tick (~250 ms) and a connection
     /// closes at the first tick after its deadline rather than exactly on it.
     /// </summary>
     /// <remarks>
-    /// A connection with a flush in flight is NOT idle - it is sending, and
-    /// <see cref="SendTimeoutMs"/> governs it instead. Otherwise a large response to a slow peer
-    /// would be reaped for making no INBOUND progress while it was working perfectly.
+    /// Only the peer's bytes stop it. Sending does not, so a protocol where only the server talks -
+    /// a websocket feed, a long-poll that the client holds silently - has to hear from its client
+    /// within this (a websocket pong counts), or set 0. <see cref="SendTimeoutMs"/> is the clock
+    /// for the other direction.
     ///
-    /// The shape to check before deploying this: a protocol that legitimately goes quiet for
-    /// longer than the timeout in both directions - an idle websocket, a long-poll - is closed by
-    /// it. Raise it past the protocol's own keep-alive interval, or set 0 and bound those
-    /// connections some other way.
+    /// A layer that keeps a read parked for its own reasons suspends the clock with
+    /// <see cref="TcpConnection.SuspendReadTimeout"/> - the TLS decrypting pump does, except while
+    /// the application waits on it; HTTP/2 does while it owes a response; the Kestrel transport
+    /// does for good, because Kestrel runs its own timeouts.
+    ///
+    /// It also bounds a peer that will not close. When the handler returns, the connection sends
+    /// its FIN and waits for the peer's; a peer that has not closed within this is shut down.
     /// </remarks>
-    public int IdleTimeoutMs { get; init; } = 60_000;
+    public int ReadTimeoutMs { get; init; } = 60_000;
 
     /// <summary>
     /// Close a connection whose flush has been in flight for this long. 0 disables.
@@ -84,11 +91,11 @@ public sealed record TcpOptions
     /// slowest legitimate full response, not against a stall - a large body over a slow link is
     /// the false positive to watch for.
     ///
-    /// It is deliberately not folded into <see cref="IdleTimeoutMs"/>: a peer that keeps SENDING
-    /// while it has stopped READING refreshes the idle stamp on every inbound completion, so an
-    /// idle sweep never fires while that connection's send is wedged. Duplex protocols - a
-    /// websocket written from a background task is the reported case - need this clock and are not
-    /// covered by the other one.
+    /// It is deliberately separate from <see cref="ReadTimeoutMs"/>: a peer that keeps SENDING
+    /// while it has stopped READING restarts the read clock on every inbound completion, so it
+    /// never fires while that connection's send is wedged. Duplex protocols - a websocket written
+    /// from a background task is the reported case - need this clock and are not covered by the
+    /// other one.
     /// </remarks>
     public int SendTimeoutMs { get; init; } = 60_000;
 }

@@ -25,10 +25,20 @@ public sealed record QuicOptions
     public QuicConnectionFactory? ConnectionFactory { get; init; }
 
     /// <summary>
-    /// Transport-level backstop for connections whose engine went quiet (the engine's own
-    /// idle_timeout is the real mechanism). 0 disables the sweep eviction.
+    /// Close a connection whose peer has sent nothing for this long. 0 disables.
+    ///
+    /// The QUIC side of <see cref="TcpOptions.ReadTimeoutMs"/>: it reaps a peer that went quiet - a
+    /// client that vanished without closing, a connection left open with nothing to say - and not
+    /// one that is quiet because the server is still working on a request. While a request has
+    /// arrived whole and its response is not finished, an engine that supports it keeps the peer
+    /// answering (ioxide.ngtcp2 sends keep-alive PINGs inside this bound and the negotiated idle
+    /// timeout), so a slow handler keeps its connection however long it takes, and a peer that has
+    /// actually gone stops answering and is reaped as before.
+    ///
+    /// Any datagram from the peer restarts the clock. Enforced on the reactor's ticker, so the
+    /// granularity is the tick (~250 ms).
     /// </summary>
-    public int IdleTimeoutMs { get; init; } = 60_000;
+    public int ReadTimeoutMs { get; init; } = 60_000;
 }
 
 /// <summary>

@@ -50,8 +50,8 @@ public sealed unsafe partial class Reactor
         ArmTcpAccepts();
         ArmWakePoll();
 
-        // After OnStart, so a reactor that serves no TCP - or has both clocks off - registers
-        // nothing and the sweep costs it not even a table walk.
+        // After OnStart, so a reactor that serves no TCP registers nothing and the sweep costs it
+        // not even a table walk.
         if (TcpSweepEnabled)
         {
             AddTicker(TcpSweep);

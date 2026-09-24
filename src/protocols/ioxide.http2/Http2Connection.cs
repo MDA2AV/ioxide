@@ -28,6 +28,13 @@ public sealed partial class Http2Connection : IDisposable
     private readonly Http2Options _options;
     private readonly HpackDecoder _decoder;
 
+    // The connection underneath, when the pipe can name it - for the read timeout, see Owe.
+    private readonly TcpConnection? _connection;
+
+    // Requests that have arrived whole and are not answered yet. While there are any, the
+    // connection is busy rather than waiting on its peer.
+    private int _owed;
+
     // Inbound bytes accumulate here because a frame can straddle recv buffers - the ring hands out
     // whatever the kernel filled, which has nothing to do with frame boundaries.
     private byte[] _inbound = [];
@@ -68,6 +75,7 @@ public sealed partial class Http2Connection : IDisposable
         _pipe = pipe;
         _options = options ?? new Http2Options();
         _decoder = new HpackDecoder();
+        _connection = (pipe as ITcpConnectionPipe)?.Connection;
     }
 
     /// <summary>Convenience for cleartext h2c: wraps the connection in its own duplex pipe.</summary>
@@ -306,6 +314,42 @@ public sealed partial class Http2Connection : IDisposable
         {
             RetireStream(pending);
             await MaybeFlushAsync();
+        }
+    }
+
+    /// <summary>
+    /// A request has arrived whole, so this side owes its response. While any response is owed the
+    /// connection's read timeout is suspended: the read loop stays parked for the next frame the
+    /// whole time a handler works, and a slow answer to one request must not time out the
+    /// connection it shares with the others. Once nothing is owed, the connection is waiting on
+    /// its peer again and the clock resumes.
+    /// </summary>
+    private void Owe(PendingRequest pending)
+    {
+        if (pending.Owed)
+        {
+            return;
+        }
+        pending.Owed = true;
+
+        if (_owed++ == 0)
+        {
+            _connection?.SuspendReadTimeout();
+        }
+    }
+
+    /// <summary>The response is done, or will never be: every end of a stream disposes it.</summary>
+    private void Settle(PendingRequest pending)
+    {
+        if (!pending.Owed)
+        {
+            return;
+        }
+        pending.Owed = false;
+
+        if (--_owed == 0)
+        {
+            _connection?.ResumeReadTimeout();
         }
     }
 

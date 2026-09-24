@@ -83,7 +83,7 @@ public sealed unsafe partial class Reactor
     /// Route one datagram by DCID. The known-connection hot path runs two independent clocks:
     ///
     /// <c>LastSeenMs</c> is the coarse one - a "peer said something" stamp the 250 ms sweep
-    /// compares against IdleTimeoutMs to garbage-collect vanished clients. Nothing else reads it.
+    /// compares against ReadTimeoutMs to garbage-collect vanished clients. Nothing else reads it.
     ///
     /// <c>QuicArmTimer</c> is the fine one, and it must run AFTER <c>OnDatagram</c>: that call
     /// (iq_conn_read) just rewrote the engine's deadlines - arriving ACKs cancelled retransmit
@@ -249,7 +249,7 @@ public sealed unsafe partial class Reactor
         conn.Cids.Clear();
 
         // The set membership doubles as the "transport still owns a ref" flag, so a second call
-        // (engine close racing the idle sweep) cannot double-release.
+        // (engine close racing the sweep) cannot double-release.
         if (_quicConnSet.Remove(conn))
         {
             QuicUnpinPeer(conn);   // give the descriptor back before the address it names is freed
@@ -269,22 +269,24 @@ public sealed unsafe partial class Reactor
         }
     }
 
-    // Ticker callback (~250 ms): evict quiet connections. Engine deadlines are fired by
+    // Ticker callback (~250 ms): evict connections whose peer went quiet. A connection still owed
+    // a response is not quiet - its engine keeps the peer answering (see QuicOptions.ReadTimeoutMs)
+    // - so what this reaps is a peer that has gone. Engine deadlines are fired by
     // QuicFireDueTimers at loop-pass granularity; this ticker's loop wake doubles as its floor.
     private void QuicSweep()
     {
         long now = Environment.TickCount64;
-        int idleMs = QuicIdleTimeoutMs;
+        int readMs = QuicReadTimeoutMs;
 
         _quicSweepScratch.Clear();
         _quicSweepScratch.AddRange(_quicConnSet);
 
         foreach (QuicConnection conn in _quicSweepScratch)
         {
-            if (idleMs > 0 && now - conn.LastSeenMs > idleMs)
+            if (readMs > 0 && now - conn.LastSeenMs > readMs)
             {
                 QuicRemoveConnection(conn);
-                conn.OnEvicted(QuicEvictReason.IdleTimeout);
+                conn.OnEvicted(QuicEvictReason.ReadTimeout);
                 continue;
             }
 
@@ -340,7 +342,7 @@ public sealed unsafe partial class Reactor
                 // the only caller of the engine binding's Destroy, which frees the retained send
                 // chunks, calls iq_conn_free (ngtcp2_conn_del and the picotls session) and releases
                 // the GCHandle. Worse, removal is what makes the leak permanent - the connection is
-                // out of _quicConnSet and every CID route, so neither the idle sweep nor teardown
+                // out of _quicConnSet and every CID route, so neither the sweep nor teardown
                 // can ever reach it again, and the GCHandle keeps the managed object rooted too.
                 QuicRemoveConnection(conn);
                 conn.OnEvicted(QuicEvictReason.TimerFault);

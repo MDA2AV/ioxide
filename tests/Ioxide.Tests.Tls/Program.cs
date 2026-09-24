@@ -31,6 +31,7 @@ internal static class Program
         RotationValidatingClientTests.Register(runner);
         PostureTests.Register(runner);
         FormatTests.Register(runner);
+        ReadTimeoutTests.Register(runner, ktls);
 
         // Areas reserved for the failing-test review pass; empty until one lands.
         IdentitySubjectTests.Register(runner);
