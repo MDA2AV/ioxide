@@ -27,7 +27,7 @@ public sealed class TlsDecryptingPipeReader : PipeReader, IAsyncDisposable
 
     private bool _callerWaiting;   // parked on the pipe with nothing decrypted for it
 
-    public TlsDecryptingPipeReader(TcpConnection connection, TlsSession session, PipeOptions? options = null)
+    public TlsDecryptingPipeReader(TcpConnection connection, TlsSession session)
     {
         _conn = connection ?? throw new ArgumentNullException(nameof(connection));
         _session = session ?? throw new ArgumentNullException(nameof(session));
@@ -35,22 +35,15 @@ public sealed class TlsDecryptingPipeReader : PipeReader, IAsyncDisposable
         // Inline schedulers, so a read resumes on the thread that completed the write - the
         // reactor. A Pipe defaults to PipeScheduler.ThreadPool, and combined with
         // useSynchronizationContext:false that hands the connection to a pool thread with a NULL
-        // SynchronizationContext, so nothing can post it back and the loop never returns. That is
-        // why caller options contribute only their BUFFERING: the schedulers are not theirs to
-        // choose, and honoring a PipeOptions built with the BCL defaults would wedge the connection.
-        _inbound = new Pipe(options is null
-            ? new PipeOptions(
-                readerScheduler: PipeScheduler.Inline,
-                writerScheduler: PipeScheduler.Inline,
-                useSynchronizationContext: false)
-            : new PipeOptions(
-                pool: options.Pool,
-                readerScheduler: PipeScheduler.Inline,
-                writerScheduler: PipeScheduler.Inline,
-                pauseWriterThreshold: options.PauseWriterThreshold,
-                resumeWriterThreshold: options.ResumeWriterThreshold,
-                minimumSegmentSize: options.MinimumSegmentSize,
-                useSynchronizationContext: false));
+        // SynchronizationContext, so nothing can post it back and the loop never returns. The
+        // thresholds are the listener's (TlsOptions.InboundPauseBytes / InboundResumeBytes); a
+        // Pipe with no pause threshold takes no resume threshold either.
+        _inbound = new Pipe(new PipeOptions(
+            readerScheduler: PipeScheduler.Inline,
+            writerScheduler: PipeScheduler.Inline,
+            pauseWriterThreshold: session.InboundPauseBytes,
+            resumeWriterThreshold: session.InboundPauseBytes == 0 ? 0 : session.InboundResumeBytes,
+            useSynchronizationContext: false));
 
         // The pump's read stays parked while the caller is busy, so the read clock runs only while
         // the caller waits. Before the pump starts: it parks its first read synchronously.

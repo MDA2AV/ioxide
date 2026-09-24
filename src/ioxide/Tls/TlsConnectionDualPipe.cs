@@ -41,19 +41,15 @@ public sealed class TlsConnectionDualPipe : IDuplexPipe, IAsyncDisposable
     /// <see cref="TlsService.AcceptAsync"/>).
     /// </summary>
     /// <param name="connection">The accepted connection, post-handshake.</param>
-    /// <param name="session">The session that handshake produced.</param>
-    /// <param name="options">
-    /// Buffering for the inbound pipe, when there is one - pool, thresholds and segment size.
-    /// Schedulers are NOT taken from it: the pipe forces Inline both ways, because anything else
-    /// hands the connection to a pool thread the reactor never gets back. Ignored under kTLS RX,
-    /// which needs no buffer of its own: its pause threshold is the ring.
+    /// <param name="session">
+    /// The session that handshake produced. Its listener's <see cref="TlsOptions.InboundPauseBytes"/>
+    /// and <see cref="TlsOptions.InboundResumeBytes"/> bound the inbound pipe, when there is one.
     /// </param>
     /// <param name="ownsSession">
     /// When true (the default) disposing this also disposes <paramref name="session"/>, which is
     /// what sends the closing close_notify.
     /// </param>
-    public TlsConnectionDualPipe(TcpConnection connection, TlsSession session,
-        PipeOptions? options = null, bool ownsSession = true)
+    public TlsConnectionDualPipe(TcpConnection connection, TlsSession session, bool ownsSession = true)
     {
         ArgumentNullException.ThrowIfNull(connection);
         ArgumentNullException.ThrowIfNull(session);
@@ -72,7 +68,7 @@ public sealed class TlsConnectionDualPipe : IDuplexPipe, IAsyncDisposable
         }
         else
         {
-            _pump = new TlsDecryptingPipeReader(connection, session, options);
+            _pump = new TlsDecryptingPipeReader(connection, session);
             Input = _pump;
         }
 

@@ -284,12 +284,19 @@ public sealed unsafe class TlsSession : IDisposable
         }
     }
 
-    internal TlsSession(nint ssl, nint rbio, nint wbio)
+    internal TlsSession(nint ssl, nint rbio, nint wbio, int inboundPauseBytes, int inboundResumeBytes)
     {
         _ssl = ssl;
         _rbio = rbio;
         _wbio = wbio;
+        InboundPauseBytes = inboundPauseBytes;
+        InboundResumeBytes = inboundResumeBytes;
     }
+
+    // The read pump's thresholds (TlsOptions.InboundPauseBytes / InboundResumeBytes), from the
+    // service that accepted this session.
+    internal int InboundPauseBytes { get; }
+    internal int InboundResumeBytes { get; }
 
     internal void AttachHandle(GCHandle handle) => _handle = handle;
 

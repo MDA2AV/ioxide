@@ -170,6 +170,29 @@ internal static class ContextBuildTests
                 + "4 s later: a negative value silently disables the sweep, which TlsOptions says "
                 + "only zero does");
         });
+
+        runner.Test("ctx: inbound thresholds a Pipe would refuse are refused at Start, not on every accept", () =>
+        {
+            // Each connection's read pump builds a Pipe from these, and a Pipe throws on either being
+            // negative or on a resume threshold above its pause threshold - inside the handler, once
+            // per accept, where it reads as connections failing rather than as the configuration.
+            (string cert, string key) = TestCert.Ensure();
+
+            foreach ((int pause, int resume) in new[] { (8192, 16384), (-1, 0), (8192, -1) })
+            {
+                Built built = Build(new TlsOptions
+                {
+                    CertificatePath = cert,
+                    KeyPath = key,
+                    InboundPauseBytes = pause,
+                    InboundResumeBytes = resume,
+                });
+
+                Assert.True(built.Refusal?.Contains("InboundPauseBytes") == true,
+                    $"InboundPauseBytes = {pause}, InboundResumeBytes = {resume} was not refused at "
+                    + $"Start: {built.Refusal ?? "it started"}");
+            }
+        });
     }
 
     /// <summary>What became of a configuration: the port it built, or why it was refused.</summary>

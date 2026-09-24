@@ -226,6 +226,17 @@ public sealed class TlsService
                 + "arriving at by accident.", nameof(options));
         }
 
+        // Each connection's read pump builds a Pipe from these, and a Pipe refuses them - inside
+        // the handler, on every accept. Refused once here instead.
+        if (options.InboundPauseBytes < 0 || options.InboundResumeBytes < 0
+            || (options.InboundPauseBytes > 0 && options.InboundResumeBytes > options.InboundPauseBytes))
+        {
+            throw new ArgumentException(
+                $"InboundPauseBytes is {options.InboundPauseBytes} and InboundResumeBytes is "
+                + $"{options.InboundResumeBytes}. Neither may be negative, and the pump cannot start "
+                + "again above the level it stops at.", nameof(options));
+        }
+
         // RX alone cannot be programmed: the handoff shares the TCP_ULP that EnableTx installs.
         // Refuse loudly rather than silently serving the userspace path the caller opted out of.
         if (options.KernelRx && !options.KernelTx)
@@ -1123,7 +1134,7 @@ public sealed class TlsService
         OpenSsl.SSL_set_bio(ssl, rbio, wbio);   // ssl owns both BIOs now
         OpenSsl.SSL_set_accept_state(ssl);
 
-        var session = new TlsSession(ssl, rbio, wbio);
+        var session = new TlsSession(ssl, rbio, wbio, _options.InboundPauseBytes, _options.InboundResumeBytes);
 
         // Associate the session with this SSL so the keylog callback writes the secret onto it
         // directly (no global map). The handle is freed in TlsSession.Dispose.
