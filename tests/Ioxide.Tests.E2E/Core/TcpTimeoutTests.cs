@@ -6,7 +6,7 @@ using ioxide.utils;
 namespace Ioxide.Tests;
 
 /// <summary>
-/// The two clocks on a TCP connection: <see cref="TcpOptions.IdleTimeoutMs"/> reaps one that has
+/// The two clocks on a TCP connection: <see cref="TcpOptions.ReadTimeoutMs"/> reaps one that has
 /// gone quiet, <see cref="TcpOptions.SendTimeoutMs"/> reaps one whose peer stopped draining.
 /// Before these there was no clock anywhere in the TCP connection lifecycle, so both shapes held
 /// an fd, a pooled connection and its native write slab for as long as the peer cared to.
@@ -24,11 +24,11 @@ internal static class TcpTimeoutTests
 
     public static void Register(Runner runner)
     {
-        runner.Test("tcp/idle: a connection that goes quiet is closed at the idle timeout", () =>
+        runner.Test("tcp/read: a read the peer never answers is closed at the read timeout", () =>
         {
             var closed = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
 
-            int port = StartWith(idleMs: 500, sendMs: 0, async (_, conn) =>
+            int port = StartWith(readMs: 500, sendMs: 0, async (_, conn) =>
             {
                 try
                 {
@@ -66,12 +66,12 @@ internal static class TcpTimeoutTests
             Assert.True(closed.Task.Result, "the handler woke, but not with a closed snapshot");
         });
 
-        runner.Test("tcp/idle: a connection still talking is left alone", () =>
+        runner.Test("tcp/read: a connection still talking is left alone", () =>
         {
             // The false positive that would make the whole feature unusable. Same timeout as the
             // test above, driven for well over three times its length - if activity did not refresh
             // the stamp, this closes long before the loop finishes.
-            int port = StartWith(idleMs: 500, sendMs: 0, EchoHandler);
+            int port = StartWith(readMs: 500, sendMs: 0, EchoHandler);
 
             using var client = new TcpClient();
             client.Connect("127.0.0.1", port);
@@ -91,9 +91,9 @@ internal static class TcpTimeoutTests
             Assert.Equal(2, stream.Read(reply, 0, 2));
         });
 
-        runner.Test("tcp/idle: 0 disables the sweep", () =>
+        runner.Test("tcp/read: 0 disables the clock", () =>
         {
-            int port = StartWith(idleMs: 0, sendMs: 0, EchoHandler);
+            int port = StartWith(readMs: 0, sendMs: 0, EchoHandler);
 
             using var client = new TcpClient();
             client.Connect("127.0.0.1", port);
@@ -109,6 +109,194 @@ internal static class TcpTimeoutTests
             Assert.Equal(2, stream.Read(reply, 0, 2));
         });
 
+        runner.Test("tcp/read: a handler busy for longer than the read timeout still answers", () =>
+        {
+            // A slow answer with nothing on the wire meanwhile: the server is not waiting on the peer.
+            int port = StartWith(readMs: 500, sendMs: 0, async (_, conn) =>
+            {
+                try
+                {
+                    if (!await IsThisTestsConnection(conn))
+                    {
+                        return;
+                    }
+
+                    await Task.Delay(2_000);   // four read timeouts
+
+                    conn.Write("done"u8);
+                    await conn.FlushAsync();
+
+                    conn.ResetRead();
+                    await conn.ReadAsync();    // park until the client hangs up
+                }
+                finally
+                {
+                    conn.DecRef();
+                }
+            });
+
+            using var client = new TcpClient();
+            client.Connect("127.0.0.1", port);
+            client.ReceiveTimeout = 6_000;
+            NetworkStream stream = client.GetStream();
+            stream.Write("hi"u8);
+
+            Assert.Equal("done", ReadExactly(stream, 4));
+        });
+
+        runner.Test("tcp/read: a server that keeps sending is not waiting on its peer", () =>
+        {
+            // A push feed: a read parked throughout and a peer that never answers. The server's own
+            // sends restart the clock, so four read timeouts of pushing go through.
+            int port = StartWith(readMs: 500, sendMs: 0, async (_, conn) =>
+            {
+                try
+                {
+                    if (!await IsThisTestsConnection(conn))
+                    {
+                        return;
+                    }
+
+                    conn.ResetRead();
+                    ValueTask<RecvSnapshot> parked = conn.ReadAsync();
+
+                    for (int i = 0; i < 16; i++)   // 16 x 150 ms
+                    {
+                        await Task.Delay(150);
+                        conn.Write("tick"u8);
+                        await conn.FlushAsync();
+                    }
+
+                    await parked;   // until the client hangs up
+                }
+                finally
+                {
+                    conn.DecRef();
+                }
+            });
+
+            using var client = new TcpClient();
+            client.Connect("127.0.0.1", port);
+            client.ReceiveTimeout = 4_000;
+            NetworkStream stream = client.GetStream();
+            stream.Write("hi"u8);
+
+            Assert.Equal(string.Concat(Enumerable.Repeat("tick", 16)), ReadExactly(stream, 64));
+        });
+
+        runner.Test("tcp/exit: a handler that lets go sends its peer a FIN", () =>
+        {
+            // Both clocks off, so only the handler letting go can produce the EOF.
+            int port = StartWith(readMs: 0, sendMs: 0, async (_, conn) =>
+            {
+                try
+                {
+                    if (!await IsThisTestsConnection(conn))
+                    {
+                        return;
+                    }
+
+                    conn.Write("bye"u8);
+                    await conn.FlushAsync();
+                }
+                finally
+                {
+                    conn.DecRef();
+                }
+            });
+
+            using var client = new TcpClient();
+            client.Connect("127.0.0.1", port);
+            client.ReceiveTimeout = 2_000;
+            NetworkStream stream = client.GetStream();
+            stream.Write("hi"u8);
+
+            Assert.Equal("bye", ReadExactly(stream, 3));
+            Assert.Equal(0, stream.Read(new byte[16], 0, 16));
+        });
+
+        runner.Test("tcp/exit: a peer that ignores the FIN is shut down at the read timeout", () =>
+        {
+            int port = StartWith(readMs: 500, sendMs: 0, async (_, conn) =>
+            {
+                try
+                {
+                    await IsThisTestsConnection(conn);
+                }
+                finally
+                {
+                    conn.DecRef();
+                }
+            });
+
+            using var client = new TcpClient();
+            client.Connect("127.0.0.1", port);
+            client.ReceiveTimeout = 2_000;
+            NetworkStream stream = client.GetStream();
+            stream.Write("hi"u8);
+            Assert.Equal(0, stream.Read(new byte[16], 0, 16));   // the FIN
+
+            // Past the deadline, the server's socket is gone: a write draws a reset, which only the next
+            // write can see (after a FIN, reads return 0 regardless).
+            Thread.Sleep(SweepGraceMs / 2);
+
+            string outcome = "both writes accepted - the server is still holding the connection";
+            try
+            {
+                stream.Write("still here"u8);
+                Thread.Sleep(300);
+                stream.Write("still here"u8);
+            }
+            catch (IOException)
+            {
+                outcome = "reset";
+            }
+            Assert.Equal("reset", outcome);
+        });
+
+        runner.Test("tcp/exit: a handler that lets go mid-flush gets the whole flush out before the FIN", () =>
+        {
+            // The FIN waits for the flush, so the peer's time to close must too: a read timeout far
+            // shorter than the send takes may not cut the send short.
+            byte[] body = new byte[6 * 1024 * 1024];
+
+            int port = StartWith(readMs: 500, sendMs: 10_000, async (_, conn) =>
+            {
+                try
+                {
+                    if (!await IsThisTestsConnection(conn))
+                    {
+                        return;
+                    }
+
+                    conn.Write(body);
+                    ValueTask inFlight = conn.FlushAsync();   // let go with it still in flight
+                }
+                finally
+                {
+                    conn.DecRef();
+                }
+            });
+
+            using var client = new TcpClient();
+            client.ReceiveBufferSize = 4096;   // a slow reader: the flush outlives the read timeout
+            client.Connect("127.0.0.1", port);
+            client.ReceiveTimeout = 5_000;
+            NetworkStream stream = client.GetStream();
+            stream.Write("hi"u8);
+
+            var buffer = new byte[16 * 1024];
+            long total = 0;
+            int n;
+            while ((n = stream.Read(buffer, 0, buffer.Length)) > 0)
+            {
+                total += n;
+                Thread.Sleep(5);
+            }
+
+            Assert.Equal((long)body.Length, total);
+        });
+
         runner.Test("tcp/send: a flush the peer stopped draining is released, not parked forever", () =>
         {
             // The reported shape (#234's workload, and the reason the idle clock alone is not
@@ -116,7 +304,7 @@ internal static class TcpTimeoutTests
             // shuts, the SEND never completes, and FlushAsync parks with no bound at all.
             var report = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
 
-            int port = StartWith(idleMs: 0, sendMs: 700, StalledFlushHandler(report));
+            int port = StartWith(readMs: 0, sendMs: 700, StalledFlushHandler(report));
 
             using var client = new TcpClient();
 
@@ -137,7 +325,7 @@ internal static class TcpTimeoutTests
             // other teardown: with the clock off, the same reproduction must NOT come back.
             var report = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
 
-            int port = StartWith(idleMs: 0, sendMs: 0, StalledFlushHandler(report));
+            int port = StartWith(readMs: 0, sendMs: 0, StalledFlushHandler(report));
 
             using var client = new TcpClient();
             client.ReceiveBufferSize = 4096;
@@ -187,6 +375,23 @@ internal static class TcpTimeoutTests
             }
             conn.ResetRead();
         }
+    }
+
+    /// <summary>Reads exactly <paramref name="count"/> bytes as ASCII, or throws on EOF or timeout.</summary>
+    private static string ReadExactly(NetworkStream stream, int count)
+    {
+        var buffer = new byte[count];
+        int got = 0;
+        while (got < count)
+        {
+            int n = stream.Read(buffer, got, count - got);
+            if (n == 0)
+            {
+                throw new IOException($"EOF after {got} of {count} bytes");
+            }
+            got += n;
+        }
+        return Encoding.ASCII.GetString(buffer);
     }
 
     /// <summary>Answers every read with two bytes, so a test can keep a connection demonstrably alive.</summary>
@@ -280,7 +485,7 @@ internal static class TcpTimeoutTests
             }
         };
 
-    private static int StartWith(int idleMs, int sendMs, Func<Reactor, TcpConnection, Task> handle)
+    private static int StartWith(int readMs, int sendMs, Func<Reactor, TcpConnection, Task> handle)
         => TestServer.StartConfigured(handle, new ServerConfig
         {
             RecvBufferSize = 4096,
@@ -290,7 +495,7 @@ internal static class TcpTimeoutTests
                 WriteSlabSize = 256 * 1024,
                 PoolMax = 64,
                 RecvQueueEntries = 64,
-                IdleTimeoutMs = idleMs,
+                ReadTimeoutMs = readMs,
                 SendTimeoutMs = sendMs,
             },
         }).Port;

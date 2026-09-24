@@ -73,7 +73,7 @@ var config = new ServerConfig
     {
         Port              = quicPort,  // h3 over UDP - the QUIC listener
         LocalCidLength    = 8,                                       // CID bytes this endpoint mints (must match the engine)
-        IdleTimeoutMs     = 60_000,                                  // transport idle backstop; 0 disables sweep eviction
+        ReadTimeoutMs     = 60_000,                                  // close a connection whose peer is silent this long; 0 disables
         ConnectionFactory = engine.CreateFactory(),                  // adopts new connections into the engine
         // Where a moved client's packets go when several reactors share the port. Forward costs
         // nothing until a client actually changes address; KernelFilter has the kernel route by

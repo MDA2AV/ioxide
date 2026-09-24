@@ -48,6 +48,8 @@ public sealed unsafe partial class TcpConnection : IValueTaskSource<RecvSnapshot
             return new ValueTask<RecvSnapshot>(RecvSnapshot.Closed());
         }
 
+        ReadParkedMs = _reactor.NowMs;   // the read clock; before arming, so the sweep sees both
+
         if (Interlocked.Exchange(ref _armed, 1) == 1)
         {
             throw new InvalidOperationException("ReadAsync already armed.");

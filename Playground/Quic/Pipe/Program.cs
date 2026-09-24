@@ -76,7 +76,7 @@ var config = new ServerConfig
         // nothing until a client actually changes address; KernelFilter has the kernel route by
         // connection id instead, which costs a little on every packet. See /how-ioxide-does-h3.
         Routing = QuicRouting.Forward,
-        IdleTimeoutMs     = 60_000,              // transport backstop; 0 disables the sweep
+        ReadTimeoutMs     = 60_000,              // close a connection whose peer is silent this long; 0 disables
     },
 };
 

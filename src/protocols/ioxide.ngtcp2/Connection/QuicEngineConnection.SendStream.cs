@@ -57,6 +57,15 @@ public unsafe partial class QuicEngineConnection
             return;
         }
 
+        if (fin)
+        {
+            SettleResponse(streamId);
+            if (!_inEngineCycle)
+            {
+                ApplyKeepAlive();
+            }
+        }
+
         if (!_outStreams.TryGetValue(streamId, out OutStream? os))
         {
             os = new OutStream();

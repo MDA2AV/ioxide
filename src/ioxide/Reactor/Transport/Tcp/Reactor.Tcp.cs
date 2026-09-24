@@ -110,7 +110,7 @@ public sealed unsafe partial class Reactor
             // return to the group.
             if (conn != null)
             {
-                conn.LastActivityMs = NowMs;
+                conn.ReadParkedMs = NowMs;   // the peer sent; the wait is ours, so the clock restarts
                 _recvStarved.Add(((ulong)gen << 32) | (uint)fd);
             }
             return;
@@ -140,7 +140,6 @@ public sealed unsafe partial class Reactor
             return;
         }
 
-        conn.LastActivityMs = NowMs;
 
         byte* ptr = hasBuf ? _bufSlab + (nuint)bid * (nuint)_recvBufferSize : null;
         if (!conn.Complete(res, bid, hasBuf, ptr))
@@ -173,7 +172,7 @@ public sealed unsafe partial class Reactor
             // still holds buffers (#93). Park; the loop re-arms once a buffer recycles.
             if (conn != null)
             {
-                conn.LastActivityMs = NowMs;
+                conn.ReadParkedMs = NowMs;   // the peer sent; the wait is ours, so the clock restarts
                 _recvStarved.Add(((ulong)gen << 32) | (uint)fd);
             }
             return;
@@ -194,7 +193,6 @@ public sealed unsafe partial class Reactor
             return;   // stale CQE; its ring is already gone
         }
 
-        conn.LastActivityMs = NowMs;
 
         // Data lands at the buffer's running offset; the kernel keeps appending
         // to this bid until the buffer is full (F_BUF_MORE clear).
@@ -246,7 +244,6 @@ public sealed unsafe partial class Reactor
             Track(clientFd, conn);
             conn.InitRefs();
             conn.ListenerPort = PortOf(listenFd);
-            conn.LastActivityMs = NowMs;   // the idle clock starts at accept
 
             if (_incremental)
             {
@@ -275,8 +272,9 @@ public sealed unsafe partial class Reactor
     private void CloseFromRecv(TcpConnection conn, int fd)
     {
         _connections[fd] = null;
+        conn.SuppressFin();
         conn.MarkClosed();
-        conn.DecRef();
+        conn.ReleaseReactorRef();
     }
 
     // Recv-queue overflow - tear down rather than zombify. The multishot recv is still armed
@@ -285,8 +283,9 @@ public sealed unsafe partial class Reactor
     {
         _connections[fd] = null;
         SubmitCancel(Tag(KindTcpRecv, gen, fd));
+        conn.SuppressFin();
         conn.MarkClosed();
-        conn.DecRef();
+        conn.ReleaseReactorRef();
     }
 
     // Re-arm every recv parked on -ENOBUFS (#93). Runs once per loop iteration, but only when a

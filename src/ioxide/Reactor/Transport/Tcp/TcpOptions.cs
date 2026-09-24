@@ -47,7 +47,7 @@ public sealed record TcpOptions
     public int RecvQueueEntries { get; init; } = 64;
 
     /// <summary>
-    /// Close a connection that has neither received nor sent anything for this long. 0 disables.
+    /// Close a connection whose read has waited this long for the peer. 0 disables.
     ///
     /// What it defends: a peer that connects and goes quiet holds an fd, a pooled
     /// <see cref="TcpConnection"/> with its native write slab, and a recv queue - and in
@@ -58,16 +58,14 @@ public sealed record TcpOptions
     /// closes at the first tick after its deadline rather than exactly on it.
     /// </summary>
     /// <remarks>
-    /// A connection with a flush in flight is NOT idle - it is sending, and
-    /// <see cref="SendTimeoutMs"/> governs it instead. Otherwise a large response to a slow peer
-    /// would be reaped for making no INBOUND progress while it was working perfectly.
-    ///
-    /// The shape to check before deploying this: a protocol that legitimately goes quiet for
-    /// longer than the timeout in both directions - an idle websocket, a long-poll - is closed by
-    /// it. Raise it past the protocol's own keep-alive interval, or set 0 and bound those
-    /// connections some other way.
+    /// The clock runs only while a read is parked with nothing buffered, so a handler busy answering
+    /// a request is never timed out. Bytes in either direction restart it, and a flush in flight
+    /// holds it - <see cref="SendTimeoutMs"/> governs that. A protocol that keeps a read parked
+    /// while its handlers work, like HTTP/2's frame loop, is bounded as before: a response slower
+    /// than this, to a peer that sends nothing meanwhile, is cut. It also bounds how long a peer
+    /// has to close after its handler returns.
     /// </remarks>
-    public int IdleTimeoutMs { get; init; } = 60_000;
+    public int ReadTimeoutMs { get; init; } = 60_000;
 
     /// <summary>
     /// Close a connection whose flush has been in flight for this long. 0 disables.
@@ -84,11 +82,11 @@ public sealed record TcpOptions
     /// slowest legitimate full response, not against a stall - a large body over a slow link is
     /// the false positive to watch for.
     ///
-    /// It is deliberately not folded into <see cref="IdleTimeoutMs"/>: a peer that keeps SENDING
-    /// while it has stopped READING refreshes the idle stamp on every inbound completion, so an
-    /// idle sweep never fires while that connection's send is wedged. Duplex protocols - a
-    /// websocket written from a background task is the reported case - need this clock and are not
-    /// covered by the other one.
+    /// It is deliberately not folded into <see cref="ReadTimeoutMs"/>: a peer that keeps SENDING
+    /// while it has stopped READING restarts the read clock on every inbound completion, so it
+    /// never fires while that connection's send is wedged. Duplex protocols - a websocket written
+    /// from a background task is the reported case - need this clock and are not covered by the
+    /// other one.
     /// </remarks>
     public int SendTimeoutMs { get; init; } = 60_000;
 }

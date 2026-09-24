@@ -19,20 +19,20 @@ public sealed unsafe partial class TcpConnection : IValueTaskSource
     private int _flushInProgress;
 
     /// <summary>
-    /// The reactor's cached clock at the moment a flush was handed over, read by the sweep against
-    /// <see cref="TcpOptions.SendTimeoutMs"/>.
+    /// The reactor's cached clock at the moment a flush was handed over. The sweep reads it against
+    /// <see cref="TcpOptions.SendTimeoutMs"/> while the flush is outstanding, and afterwards as the
+    /// last time the server sent, which restarts the read clock.
     ///
-    /// Only meaningful while <see cref="FlushOutstanding"/> - it is written on every arm and never
-    /// cleared, because clearing it would put a store on CompleteFlush, which is the hottest path
-    /// in the server, to maintain a value nothing reads in that state.
+    /// Written on every arm and never cleared, because clearing it would put a store on
+    /// CompleteFlush, which is the hottest path in the server.
     /// </summary>
     internal long FlushArmedMs;
 
     /// <summary>
     /// Whether a flush is outstanding - which is what tells the reactor's sweep that this
-    /// connection is sending rather than idle, so the send clock governs it and the idle one does
-    /// not. Read rather than <see cref="FlushArmedMs"/> being non-zero, so the stamp never has to
-    /// double as a flag.
+    /// connection is sending rather than waiting on its peer, so the send clock governs it and the
+    /// read one does not. Read rather than <see cref="FlushArmedMs"/> being non-zero, so the stamp
+    /// never has to double as a flag.
     /// </summary>
     internal bool FlushOutstanding => Volatile.Read(ref _flushInProgress) != 0;
 

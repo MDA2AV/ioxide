@@ -72,7 +72,8 @@ A number with nothing to compare against cannot catch a regression, which is the
 | `echo` | `Playground/Clients/Quic` - the QUIC echo servers speak no HTTP, so nothing off the shelf can drive them. The driver is itself a sample, not a bench-only artifact |
 
 `Bench.Clients` drives ioxide's own HTTP clients (`h1`/`h2`/`h3`) against an external server, for
-the rows where the thing under test is our client rather than our server.
+the rows where the thing under test is our client rather than our server. With `BENCH_TLS=1` it
+also drives the `h1s` samples, which is how `ab.sh` measures where `wrk` is not installed.
 
 Anything missing **skips with a note** instead of failing the run.
 
@@ -91,6 +92,11 @@ deliberately does not.
   single-reactor method measures 22%.
 - **`h2-matrix.sh`** - nghttp2 versus the pure-C# HTTP/2, with and without TLS, on one load
   generator, interleaved so drift hits both arms equally.
+- **`ab.sh`** - one sample, two git refs: each built in its own worktree under `bench/.work/ab/`,
+  runs interleaved a, b, a, b so drift hits both, and requests/s plus the server's CPU per request
+  from `/proc`. The driver is `Bench.Clients`, built once from the current tree, so it needs no
+  `wrk` - and its numbers compare only with each other, never with `wrk`'s:
+  `bash bench/ab.sh origin/main HEAD Tls/OpenSslPipes`.
 
 ## A caution the HTTP/2 matrix earned
 

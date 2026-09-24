@@ -1644,6 +1644,42 @@ int iq_conn_is_established(iq_conn *c)
     return ngtcp2_conn_get_handshake_completed(c->conn);
 }
 
+/* The tighter of two bounds where 0 means "none". */
+static uint64_t iq_tighter_bound(uint64_t a, uint64_t b)
+{
+    if (a == 0) {
+        return b;
+    }
+    if (b == 0) {
+        return a;
+    }
+    return a < b ? a : b;
+}
+
+/* Keep-alive while this side owes a response: a PING at half the tightest of the transport's bound
+ * (bound_ns, 0 = none) and both idle timeouts, so the peer's ACK lands inside all of them. */
+void iq_conn_set_keep_alive(iq_conn *c, int on, uint64_t bound_ns)
+{
+    if (c == NULL || c->conn == NULL) {
+        return;
+    }
+
+    ngtcp2_duration interval = UINT64_MAX;
+    if (on) {
+        const ngtcp2_transport_params *local = ngtcp2_conn_get_local_transport_params2(c->conn);
+        const ngtcp2_transport_params *remote = ngtcp2_conn_get_remote_transport_params2(c->conn);
+
+        uint64_t bound = bound_ns;
+        bound = iq_tighter_bound(bound, local != NULL ? local->max_idle_timeout : 0);
+        bound = iq_tighter_bound(bound, remote != NULL ? remote->max_idle_timeout : 0);
+        if (bound != 0) {
+            interval = bound / 2;
+        }
+    }
+
+    ngtcp2_conn_set_keep_alive_timeout(c->conn, interval);
+}
+
 
 /* Open a server-initiated unidirectional stream (H3 control / QPACK). Returns the stream id, or
  * a negative ngtcp2 error (e.g. STREAM_ID_BLOCKED when the peer's uni allowance is exhausted). */

@@ -75,6 +75,10 @@ internal sealed class HopDuplexPipe : IDuplexPipe, IAsyncDisposable
         {
             return;
         }
+
+        // The pump's read is always parked, and Kestrel runs its own timeouts.
+        _conn.DisableReadTimeout();
+
         _recvPump = RecvPumpAsync();
         _sendPump = SendPumpAsync();
     }
@@ -232,9 +236,9 @@ internal sealed class HopDuplexPipe : IDuplexPipe, IAsyncDisposable
         if (_tls is null)
         {
             // Plaintext: half-close the write side so EOF-delimited clients (TcpConnection: close / upgrade)
-            // see the end of the response - ioxide's refcounted teardown does not FIN a server-initiated
-            // close on its own. Then wake and unwind the recv side (MarkClosed wakes a recv parked in
-            // conn.ReadAsync - schedule it on the reactor so the continuation runs there, not the dispose thread).
+            // see the end of the response now, not when the listener lets go. Then wake and unwind the recv side
+            // (MarkClosed wakes a recv parked in conn.ReadAsync - schedule it on the reactor so the
+            // continuation runs there, not the dispose thread).
             Shutdown(_conn.ClientFd, ShutWr);
             _reactor.ScheduleOnReactor(static c => ((TcpConnection)c!).MarkClosed(), _conn);
             _inbound.Writer.CancelPendingFlush();
