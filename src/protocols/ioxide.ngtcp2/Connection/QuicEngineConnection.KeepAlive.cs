@@ -36,8 +36,11 @@ public unsafe partial class QuicEngineConnection
         _keepAliveOn = want;
         _keepAliveStale = false;
 
-        ulong boundNs = (ulong)Math.Max(0, _reactor.QuicReadTimeoutMs) * 1_000_000UL;
-        Ngtcp2.iq_conn_set_keep_alive(_conn, want ? 1 : 0, boundNs);
+        // The sweep reaps on a tick, and an idle reactor sends the ping - and the ACK before it,
+        // which restarts ngtcp2's keep-alive clock - only on a tick. Keep two ticks clear.
+        int readMs = Math.Max(0, _reactor.QuicReadTimeoutMs);
+        int boundMs = readMs - Math.Min(2 * Reactor.TickMs, readMs / 2);
+        Ngtcp2.iq_conn_set_keep_alive(_conn, want ? 1 : 0, (ulong)boundMs * 1_000_000UL);
     }
 
     private void ReapplyKeepAliveAfterHandshake() => _keepAliveStale = true;
