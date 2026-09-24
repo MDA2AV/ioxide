@@ -164,25 +164,6 @@ public sealed class TlsOptions
     public bool RequireClientCertificate { get; init; }
 
     /// <summary>
-    /// How much decrypted data a handler may leave unread before the OpenSSL read pump stops
-    /// decrypting, in bytes. 0 removes the bound. Once the pump stops, what the peer sends waits as
-    /// ciphertext in the connection's recv queue - <see cref="TcpOptions.RecvQueueEntries"/> deep,
-    /// and a queue that fills closes the connection - until the handler reads its way down to
-    /// <see cref="InboundResumeBytes"/>.
-    ///
-    /// Userspace decryption only: with <see cref="KernelRx"/> there is no pump, and the handler
-    /// reads the recv queue directly.
-    /// </summary>
-    public int InboundPauseBytes { get; init; } = 64 * 1024;
-
-    /// <summary>
-    /// Unread decrypted bytes at which a stopped read pump starts again. At or below
-    /// <see cref="InboundPauseBytes"/>, so the pump does not flap around one value; ignored when
-    /// that is 0.
-    /// </summary>
-    public int InboundResumeBytes { get; init; } = 32 * 1024;
-
-    /// <summary>
     /// Let the kernel decrypt inbound records too. Off by default, experimental, and it requires
     /// <see cref="KernelTx"/>: RX is programmed at the same handoff as TX and shares the TCP_ULP
     /// that EnableTx installs, so asking for RX alone is refused at

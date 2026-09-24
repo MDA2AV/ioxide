@@ -77,7 +77,7 @@ internal sealed class HopDuplexPipe : IDuplexPipe, IAsyncDisposable
         }
 
         // The pump's read is always parked, and Kestrel runs its own timeouts.
-        _conn.SuspendReadTimeout();
+        _conn.DisableReadTimeout();
 
         _recvPump = RecvPumpAsync();
         _sendPump = SendPumpAsync();

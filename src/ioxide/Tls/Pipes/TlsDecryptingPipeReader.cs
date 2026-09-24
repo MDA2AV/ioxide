@@ -1,206 +1,235 @@
 using System.Buffers;
+using System.Diagnostics;
 using System.IO.Pipelines;
+using System.Runtime.CompilerServices;
 using ioxide.utils;
 
 namespace ioxide.tls;
 
 /// <summary>
-/// The read half when OpenSSL decrypts: a pump reads ciphertext off the ring, decrypts into a Pipe
-/// this owns, and the caller reads that Pipe.
+/// The read half when OpenSSL decrypts. Nothing runs in the background: a read decrypts whatever
+/// ciphertext the ring has queued for this connection, and when that is not enough it parks on the
+/// connection and decrypts what arrives. The connection therefore has a read armed only while the
+/// caller is waiting, exactly as with <see cref="TcpConnectionPipeReader"/>.
 ///
-/// The counterpart is <see cref="TcpConnectionPipeReader"/>, which is what a kTLS-RX connection
-/// uses - there the kernel has already decrypted, so plaintext is in ring memory and no owned
-/// buffer is needed at all. This class is the entire difference between the two worlds on the read
-/// side.
-///
-/// Why a Pipe rather than decrypting in place: plaintext does not exist in ring memory, so the
-/// zero-copy reader has nothing to hand out. It has to land somewhere ioxide owns, and the Pipe
-/// supplies the destination, the backpressure and the consumed/examined bookkeeping.
+/// That class is what a kTLS-RX connection uses - there the kernel has already decrypted, so
+/// plaintext is in ring memory and no owned buffer is needed at all. Here plaintext does not exist in
+/// ring memory, so it lands in a Pipe this owns, used purely as a buffer: pooled segments and the
+/// consumed/examined bookkeeping a PipeReader owes its caller. The caller's read IS that Pipe's
+/// read; this class only feeds it.
 /// </summary>
 /// <remarks>Reactor thread only.</remarks>
 public sealed class TlsDecryptingPipeReader : PipeReader, IAsyncDisposable
 {
     private readonly TcpConnection _conn;
     private readonly TlsSession _session;
-    private readonly Pipe _inbound;
-    private readonly Task _pump;
+    private readonly Pipe _plain;
 
-    private bool _callerWaiting;   // parked on the pipe with nothing decrypted for it
+    // A parked connection read chains onto the connection's value-task source, as in
+    // TcpConnectionPipeReader, so a read that waits allocates nothing.
+    private ValueTaskAwaiter<RecvSnapshot> _pendingRecv;
+    private readonly Action _onRecvReady;
+
+    private bool _recvArmed;       // a connection read is parked with OnRecvReady behind it
+    private bool _callerWaiting;   // the caller has a read on the buffer that nothing has completed yet
+    private bool _ended;           // the buffer is complete: close_notify, a closed connection or a fault
+    private bool _completed;       // the caller is done with this reader
 
     public TlsDecryptingPipeReader(TcpConnection connection, TlsSession session)
     {
         _conn = connection ?? throw new ArgumentNullException(nameof(connection));
         _session = session ?? throw new ArgumentNullException(nameof(session));
+        _onRecvReady = OnRecvReady;
 
-        // Inline schedulers, so a read resumes on the thread that completed the write - the
-        // reactor. A Pipe defaults to PipeScheduler.ThreadPool, and combined with
-        // useSynchronizationContext:false that hands the connection to a pool thread with a NULL
-        // SynchronizationContext, so nothing can post it back and the loop never returns. The
-        // thresholds are the listener's (TlsOptions.InboundPauseBytes / InboundResumeBytes); a
-        // Pipe with no pause threshold takes no resume threshold either.
-        _inbound = new Pipe(new PipeOptions(
+        // A buffer, not a channel: no pause threshold, because nothing is decrypted beyond what a
+        // read asks for, and nothing is decrypted anywhere but on the reactor. Inline schedulers so
+        // the flush that delivers resumes the caller right there - a Pipe defaults to
+        // PipeScheduler.ThreadPool, and with useSynchronizationContext:false that would hand the
+        // connection to a pool thread nothing can post back from.
+        _plain = new Pipe(new PipeOptions(
             readerScheduler: PipeScheduler.Inline,
             writerScheduler: PipeScheduler.Inline,
-            pauseWriterThreshold: session.InboundPauseBytes,
-            resumeWriterThreshold: session.InboundPauseBytes == 0 ? 0 : session.InboundResumeBytes,
+            pauseWriterThreshold: 0,
+            resumeWriterThreshold: 0,
             useSynchronizationContext: false));
 
-        // The pump's read stays parked while the caller is busy, so the read clock runs only while
-        // the caller waits. Before the pump starts: it parks its first read synchronously.
-        _conn.SuspendReadTimeout();
-
-        _pump = PumpInboundAsync();
+        // The client's first request usually rides in with its Finished flight, so the handshake has
+        // already decrypted it. Miss this and the first request is silently dropped, and the first
+        // read waits for bytes that arrived before this reader existed.
+        ReadOnlySpan<byte> initial = _session.DrainPlaintext();
+        if (!initial.IsEmpty)
+        {
+            _plain.Writer.Write(initial);
+            Publish();
+        }
     }
 
     public override ValueTask<ReadResult> ReadAsync(CancellationToken cancellationToken = default)
     {
-        ValueTask<ReadResult> read = _inbound.Reader.ReadAsync(cancellationToken);
+        ValueTask<ReadResult> read = _plain.Reader.ReadAsync(cancellationToken);
 
-        if (!read.IsCompleted && !_callerWaiting)
+        // Everything decrypted so far has been examined: decrypt more. The read completes inside
+        // the flush that delivers, which may already have happened by the time this returns.
+        if (!read.IsCompleted)
         {
             _callerWaiting = true;
-            _conn.ResumeReadTimeout();
+            Fill();
         }
 
         return read;
     }
 
-    // Before the flush that delivers: the caller resumes inline inside it and may park again.
-    private void CallerServed()
-    {
-        if (_callerWaiting)
-        {
-            _callerWaiting = false;
-            _conn.SuspendReadTimeout();
-        }
-    }
+    /// <remarks>
+    /// Returns what has been decrypted already; like <see cref="TcpConnectionPipeReader"/>, it never
+    /// takes anything off the connection.
+    /// </remarks>
+    public override bool TryRead(out ReadResult result) => _plain.Reader.TryRead(out result);
 
-    public override bool TryRead(out ReadResult result) => _inbound.Reader.TryRead(out result);
-
-    public override void AdvanceTo(SequencePosition consumed) => _inbound.Reader.AdvanceTo(consumed);
+    public override void AdvanceTo(SequencePosition consumed) => _plain.Reader.AdvanceTo(consumed);
 
     public override void AdvanceTo(SequencePosition consumed, SequencePosition examined)
-        => _inbound.Reader.AdvanceTo(consumed, examined);
+        => _plain.Reader.AdvanceTo(consumed, examined);
 
+    // Completes a waiting read now, or the next one, with IsCanceled. A connection read it left
+    // parked stays armed, and whatever that brings is kept for the next read.
     public override void CancelPendingRead()
     {
-        CallerServed();
-        _inbound.Reader.CancelPendingRead();
+        _callerWaiting = false;
+        _plain.Reader.CancelPendingRead();
     }
 
-    public override void Complete(Exception? exception = null) => _inbound.Reader.Complete(exception);
+    public override void Complete(Exception? exception = null)
+    {
+        _completed = true;
+        _plain.Reader.Complete(exception);
+    }
 
     /// <summary>
-    /// Stops the pump and waits for it. This CLOSES the connection's I/O: a pump parked in
-    /// <c>ReadAsync</c> has nothing else that will ever release it - the peer may stay open and
-    /// quiet forever - so disposal marks the connection closed to wake it. Complete and flush the
-    /// write side first; a flush after this point is a no-op.
+    /// Ends the buffer and releases a connection read the caller left parked, if any - against a
+    /// peer that stays quiet nothing else ever would. With no read parked the connection is left as
+    /// it is: the handler letting go of it is what ends it.
     /// </summary>
-    public async ValueTask DisposeAsync()
+    public ValueTask DisposeAsync()
     {
-        // Two ways a pump can be parked, and each needs its own release.
-        //
-        // Completing the reader releases one parked in the pipe's FlushAsync. Cancelling does NOT:
-        // CancelPendingRead cancels a pending READ, and a writer held at the pause threshold is
-        // waiting for the reader to consume, which only completion promises it never will. A
-        // handler that stopped draining a large body and closed - an ordinary shape - parked the
-        // pump there forever, so the await below never returned, the handler's DecRef never ran,
-        // and the connection, its SSL and both BIOs were leaked for the life of the process.
-        //
-        // MarkClosed releases one parked in the connection's ReadAsync with a closed snapshot,
-        // which is what a server-initiated close against a quiet peer needs.
-        _inbound.Reader.Complete();
-        _conn.MarkClosed();
+        _completed = true;
+        End(null);                   // a read still waiting on the buffer sees the end of the stream
+        _plain.Reader.Complete();
 
-        try
+        if (_recvArmed)
         {
-            await _pump;
+            _conn.MarkClosed();      // completes the parked read; OnRecvReady finds the reader done
         }
-        catch
-        {
-            // The pump reports faults through the pipe, so anything here is teardown noise.
-        }
+
+        return default;
     }
 
-    private async Task PumpInboundAsync()
+    // The caller is waiting on the buffer: decrypt what the ring has queued, and while that yields
+    // nothing - none queued, or half a record - park on the connection until it does.
+    private void Fill()
     {
-        PipeWriter writer = _inbound.Writer;
-        Exception? failure = null;
-
-        try
+        while (!_recvArmed)
         {
-            if (!await WriteHandshakePlaintextAsync(writer))
+            ValueTask<RecvSnapshot> recv = _conn.ReadAsync();
+
+            if (!recv.IsCompletedSuccessfully)
             {
+                _recvArmed = true;
+                _pendingRecv = recv.GetAwaiter();
+                _pendingRecv.UnsafeOnCompleted(_onRecvReady);
                 return;
             }
 
-            while (true)
+            if (Ingest(recv.Result))
             {
-                RecvSnapshot snapshot = await _conn.ReadAsync();
-                int produced = DecryptAvailable(snapshot, writer);
-                _conn.ResetRead();
-
-                if (produced > 0)
-                {
-                    CallerServed();
-                    FlushResult flush = await writer.FlushAsync();
-                    if (flush.IsCompleted || flush.IsCanceled)
-                    {
-                        return;   // the reader is gone
-                    }
-                }
-
-                // close_notify is a clean end of stream; a closed snapshot without one is the peer
-                // vanishing. Both stop the pump, and the difference is left to the caller, which
-                // can still read TlsSession.Closed.
-                if (_session.Closed || snapshot.IsClosed)
-                {
-                    return;
-                }
+                return;
             }
+        }
+    }
+
+    // Completion of a parked connection read - runs inline on the reactor, inside the recv
+    // completion that brought the bytes.
+    private void OnRecvReady()
+    {
+        _recvArmed = false;
+
+        if (!Ingest(_pendingRecv.GetResult()) && _callerWaiting)
+        {
+            Fill();   // half a record: wait for the rest
+        }
+    }
+
+    // Decrypt every buffer the snapshot carries into the buffer and publish it. Returns whether the
+    // caller's read has been completed - by plaintext, by the end of the stream, or because nobody
+    // is reading any more.
+    //
+    // A TLS fault ends the buffer WITH the exception, so every read from then on reports it:
+    // completing cleanly would make a bad MAC or a truncated stream indistinguishable from the peer
+    // hanging up politely, which is exactly what a truncation attack wants. close_notify is a clean
+    // end of stream and a closed snapshot without one is the peer vanishing; both end it cleanly, and
+    // the difference is left to the caller, which can still read TlsSession.Closed.
+    private bool Ingest(in RecvSnapshot snapshot)
+    {
+        if (_ended || _completed)
+        {
+            _conn.ResetRead();   // what is still queued goes back to the ring at recycle
+            return true;
+        }
+
+        int produced;
+        try
+        {
+            produced = DecryptAvailable(snapshot, _plain.Writer);
         }
         catch (Exception e)
         {
-            // Deliberately kept, not swallowed. Completing the pipe cleanly on a TLS fault would
-            // make a bad MAC or a truncated stream indistinguishable from the peer hanging up
-            // politely - which is exactly what a truncation attack wants it to look like.
-            failure = e;
-        }
-        finally
-        {
-            await writer.CompleteAsync(failure);
-        }
-    }
-
-    /// <summary>
-    /// The client's first request usually rides in with its Finished flight, so the handshake has
-    /// already decrypted it. Miss this and the first request is silently dropped, then the pump
-    /// parks waiting for bytes that arrived before it started.
-    /// </summary>
-    private async ValueTask<bool> WriteHandshakePlaintextAsync(PipeWriter writer)
-    {
-        if (!WriteInitialPlaintext(writer))
-        {
-            return true;   // nothing rode in with the handshake
+            _conn.ResetRead();
+            End(e);
+            return true;
         }
 
-        FlushResult flush = await writer.FlushAsync();
-        return !flush.IsCompleted && !flush.IsCanceled;
-    }
+        // Before publishing: the caller resumes inline inside the flush and may read, and so arm the
+        // connection, again straight away.
+        _conn.ResetRead();
 
-    private bool WriteInitialPlaintext(PipeWriter writer)
-    {
-        ReadOnlySpan<byte> initial = _session.DrainPlaintext();
-        if (initial.IsEmpty)
+        bool closed = _session.Closed || snapshot.IsClosed;
+        if (produced == 0 && !closed)
         {
             return false;
         }
 
-        writer.Write(initial);
+        _callerWaiting = false;
+        if (produced > 0)
+        {
+            Publish();
+        }
+        if (closed)
+        {
+            End(null);
+        }
         return true;
     }
 
-    // Decrypt every buffer this snapshot carries, straight into the pipe. Each one is returned to
+    // Make what was just decrypted readable. With no pause threshold this never waits.
+    private void Publish()
+    {
+        ValueTask<FlushResult> flush = _plain.Writer.FlushAsync();
+        Debug.Assert(flush.IsCompleted, "a buffer with no pause threshold flushed asynchronously");
+        flush.GetAwaiter().GetResult();
+    }
+
+    private void End(Exception? fault)
+    {
+        if (_ended)
+        {
+            return;
+        }
+
+        _ended = true;
+        _callerWaiting = false;
+        _plain.Writer.Complete(fault);
+    }
+
+    // Decrypt every buffer this snapshot carries, straight into the buffer. Each one is returned to
     // the ring whatever happens: a decrypt that throws must not strand the kernel's buffer.
     private unsafe int DecryptAvailable(in RecvSnapshot snapshot, PipeWriter writer)
     {
@@ -226,5 +255,4 @@ public sealed class TlsDecryptingPipeReader : PipeReader, IAsyncDisposable
 
         return produced;
     }
-
 }

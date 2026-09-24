@@ -72,12 +72,8 @@ internal static class TlsPipeTests
         runner.Test("tls pipe: a handler that stops draining a large body can still be disposed", () =>
         {
             // The shape: a client uploads a body, the handler answers from the headers alone and
-            // returns without reading the rest. The inbound pipe is then above its pause threshold
-            // with the pump parked in FlushAsync - and a writer held there is released by the
-            // READER COMPLETING, never by CancelPendingRead, which cancels a pending read and says
-            // nothing about a blocked flush. Get that wrong and DisposeAsync awaits a pump that can
-            // never finish: the handler's finally never returns, the connection is never released,
-            // and the reactor leaks one per occurrence.
+            // returns without reading the rest - a rejected upload, an early 401. Disposal has to
+            // return with the body still unread: nothing may be left waiting on it.
             //
             // The assertion has to be on the SERVER side. An earlier version of this test uploaded
             // a body and checked that a SECOND request was answered, which passes either way - the
@@ -85,52 +81,37 @@ internal static class TlsPipeTests
             // one handler task sits abandoned. No client-visible signal separates the two cases. So
             // the handler reports the moment DisposeAsync RETURNS, which is the actual claim.
             (string certPath, string keyPath) = TestCert.Ensure();
-            var options = new TlsOptions
-            {
-                CertificatePath = certPath,
-                KeyPath = keyPath,
-                InboundPauseBytes = PausedInboundThreshold,
-                InboundResumeBytes = PausedInboundThreshold / 2,
-            };
+            var options = new TlsOptions { CertificatePath = certPath, KeyPath = keyPath };
 
-            var disposed = new TaskCompletionSource<int>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var disposed = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
             int port = TestServer.Start(HeadersOnlyHandler(disposed), r => TlsService.Start(r, options));
 
             Assert.True(PostBody(port, kilobytes: 32).Contains("headers-only"),
                 "the upload was not answered");
 
-            // Generous on purpose, and the generosity costs nothing: the failure this catches is a
-            // pump parked forever, which does not complete at ANY deadline. Ten seconds turned out
-            // to be a statement about machine load rather than about the code - it failed one run in
-            // four with a dozen suites running at once, which is a bug in the test, not a wedge.
-            Assert.True(disposed.Task.Wait(TimeSpan.FromSeconds(60)),
-                "DisposeAsync never returned: the pump is parked in FlushAsync and nothing released it");
-
-            // Non-vacuous. The pipe must have been PAST its pause threshold when disposal ran,
-            // because that is the only state in which the pump is parked in FlushAsync at all.
-            Assert.True(disposed.Task.Result > PausedInboundThreshold,
-                $"the pump was never parked: only {disposed.Task.Result} B were unconsumed");
+            // Generous on purpose: the failure this catches is a disposal that never returns, which
+            // does not complete at ANY deadline.
+            Assert.True(disposed.Task.Wait(TimeSpan.FromSeconds(60)), "DisposeAsync never returned");
         });
 
-        runner.Test("tls pipe: the pump stops decrypting at TlsOptions.InboundPauseBytes", () =>
+        runner.Test("tls pipe: nothing is decrypted until the handler reads", () =>
         {
-            // The handler reads the head and nothing more, so the pump decrypts until the pipe holds
-            // the listener's threshold and stops; the rest of the body waits as ciphertext. At the
-            // pipe's own 64 KiB default it would have decrypted four records instead of one.
-            long unread = UnreadAfterUpload(PausedInboundThreshold, PausedInboundThreshold / 2);
+            // The body lands while the handler reads nothing, so it waits as ciphertext and the
+            // connection has no read armed for it - a background pump would have decrypted it into
+            // the pipe as it arrived. Then the handler reads, and gets all of it.
+            (string certPath, string keyPath) = TestCert.Ensure();
+            var options = new TlsOptions { CertificatePath = certPath, KeyPath = keyPath };
 
-            Assert.True(unread >= PausedInboundThreshold && unread < 48 * 1024,
-                $"{unread} B were decrypted and left unread: the pump did not stop at "
-                + $"InboundPauseBytes = {PausedInboundThreshold}");
-        });
+            const int bodyKilobytes = 96;
+            var report = new TaskCompletionSource<(long Held, long Body)>(TaskCreationOptions.RunContinuationsAsynchronously);
+            int port = TestServer.Start(OnDemandHandler(report, bodyKilobytes * 1024), r => TlsService.Start(r, options));
 
-        runner.Test("tls pipe: InboundPauseBytes = 0 lets the pump decrypt the whole upload", () =>
-        {
-            // No bound, whatever InboundResumeBytes says. A Pipe refuses a resume threshold above a
-            // pause threshold of zero, so this also covers the reader not passing the default on.
-            long unread = UnreadAfterUpload(0, 32 * 1024);
+            Assert.True(UploadAfterContinue(port, bodyKilobytes).Contains("done"), "the upload was not answered");
+            Assert.True(report.Task.Wait(TimeSpan.FromSeconds(30)), "the handler never reported");
 
-            Assert.Equal((long)UnreadUploadKilobytes * 1024, unread);
+            (long held, long body) = report.Task.Result;
+            Assert.True(held == 0, $"{held} B of the body were decrypted before the handler read any of it");
+            Assert.Equal((long)bodyKilobytes * 1024, body);
         });
 
         runner.Test("tls pipe: serving never leaves the reactor thread", () =>
@@ -297,35 +278,23 @@ internal static class TlsPipeTests
     }
 
     /// <summary>
-    /// The inbound pipe's pause threshold for this test, stated explicitly. The default is 64 KB,
-    /// which takes a far larger upload to cross and makes "the pump is parked" a matter of timing
-    /// rather than something the test can wait for.
+    /// Answers from the request headers and returns WITHOUT draining the body - an ordinary thing for
+    /// a handler to do - and signals once <c>DisposeAsync</c> has RETURNED. A disposal that wedges
+    /// never signals at all, which is what the test waits on.
     /// </summary>
-    private const int PausedInboundThreshold = 8192;
-
-    /// <summary>
-    /// Answers from the request headers and returns WITHOUT draining the body, which is an ordinary
-    /// thing for a handler to do (a rejected upload, an early 401) and the case that leaves the
-    /// inbound pump parked at the pipe's pause threshold.
-    ///
-    /// Reports how many bytes were sitting unconsumed once <c>DisposeAsync</c> has RETURNED. A
-    /// wedged disposal never completes the task at all, which is what the test waits on.
-    /// </summary>
-    private static Func<Reactor, TcpConnection, Task> HeadersOnlyHandler(TaskCompletionSource<int> disposed)
+    private static Func<Reactor, TcpConnection, Task> HeadersOnlyHandler(TaskCompletionSource disposed)
         => async (reactor, connection) =>
         {
             TlsSession? session = null;
             TlsConnectionDualPipe? pipe = null;
 
-            // Nonzero only on the path that actually parked the pump. The harness's liveness probe
-            // opens a raw TCP connection and fails the handshake, so an unguarded signal below
-            // would complete the task from a connection that never uploaded anything.
-            int parked = 0;
+            // Set only on the connection that uploaded. The harness's liveness probe opens a raw TCP
+            // connection and fails the handshake, so an unguarded signal would come from it.
+            bool answered = false;
 
             try
             {
                 session = await reactor.GetService<TlsService>()!.AcceptAsync(connection);
-
                 pipe = new TlsConnectionDualPipe(connection, session);
 
                 while (true)
@@ -334,7 +303,6 @@ internal static class TlsPipeTests
 
                     if (Terminated(read.Buffer))
                     {
-                        // Consume the head only. The body stays in the pipe on purpose.
                         pipe.Input.AdvanceTo(read.Buffer.End);
 
                         const string body = "headers-only";
@@ -342,8 +310,8 @@ internal static class TlsPipeTests
                             $"HTTP/1.1 200 OK\r\nContent-Length: {body.Length}\r\n\r\n{body}"));
                         await pipe.Output.FlushAsync();
 
-                        parked = await FillPastPauseThresholdAsync(pipe.Input);
-                        return;
+                        answered = true;
+                        return;   // the rest of the body stays unread on purpose
                     }
 
                     pipe.Input.AdvanceTo(read.Buffer.Start, read.Buffer.End);
@@ -370,46 +338,16 @@ internal static class TlsPipeTests
                 }
                 connection.DecRef();
 
-                if (parked > 0)
+                if (answered)
                 {
-                    disposed.TrySetResult(parked);
+                    disposed.TrySetResult();
                 }
             }
         };
 
     /// <summary>
-    /// Stops consuming and waits until the pipe holds MORE than its pause threshold - the exact
-    /// state in which the pump's FlushAsync has parked - then reports that count. Reading without
-    /// consuming is what puts it there: every flush wakes this loop, and none of them frees a byte.
-    /// </summary>
-    private static async Task<int> FillPastPauseThresholdAsync(PipeReader input)
-    {
-        while (true)
-        {
-            ReadResult read = await input.ReadAsync();
-            long buffered = read.Buffer.Length;
-
-            // Examine everything, consume nothing: the next read then waits for bytes the pump has
-            // yet to write instead of handing the same buffer straight back.
-            input.AdvanceTo(read.Buffer.Start, read.Buffer.End);
-
-            if (buffered > PausedInboundThreshold)
-            {
-                return (int)buffered;
-            }
-
-            if (read.IsCompleted || read.IsCanceled)
-            {
-                return 0;   // the stream ended before the pipe filled, so nothing is parked
-            }
-        }
-    }
-
-    /// <summary>
-    /// Sends a head plus a body several times the pipe's pause threshold and returns whatever came
-    /// back. The body stays small enough to sit in the kernel's receive queue, so the write does not
-    /// block once the server stops draining - the point is to park the server's pump, not to
-    /// exercise the client.
+    /// Sends a head plus a body in one go and returns whatever came back. The body stays small enough
+    /// to sit in the server's recv queue, so the write does not block once the handler stops reading.
     /// </summary>
     private static string PostBody(int port, int kilobytes)
     {
@@ -432,37 +370,45 @@ internal static class TlsPipeTests
         return n > 0 ? Encoding.ASCII.GetString(buf, 0, n) : "";
     }
 
-    /// <summary>The upload the unread-body tests send: six 16 KiB records after the head.</summary>
-    private const int UnreadUploadKilobytes = 96;
-
     /// <summary>
-    /// Uploads <see cref="UnreadUploadKilobytes"/> to a handler that reads the head and nothing more,
-    /// and returns how much decrypted body the pipe held once the pump had gone as far as it would.
+    /// Sends the head, waits for the server's 100 Continue, and only then the body - so the body can
+    /// only arrive after the handler has taken the head. Returns the final response.
     /// </summary>
-    private static long UnreadAfterUpload(int pauseBytes, int resumeBytes)
+    private static string UploadAfterContinue(int port, int kilobytes)
     {
-        (string certPath, string keyPath) = TestCert.Ensure();
-        var options = new TlsOptions
+        using var sock = new System.Net.Sockets.TcpClient();
+        sock.Connect("127.0.0.1", port);
+        sock.SendTimeout = 10_000;
+        sock.ReceiveTimeout = 10_000;
+
+        using var ssl = new System.Net.Security.SslStream(sock.GetStream(), false, (_, _, _, _) => true);
+        ssl.AuthenticateAsClient("localhost");
+
+        int length = kilobytes * 1024;
+        ssl.Write(Encoding.ASCII.GetBytes(
+            $"POST /upload HTTP/1.1\r\nhost: localhost\r\ncontent-length: {length}\r\nexpect: 100-continue\r\n\r\n"));
+        ssl.Flush();
+
+        var buf = new byte[256];
+        int n = ssl.Read(buf, 0, buf.Length);
+        if (n <= 0 || !Encoding.ASCII.GetString(buf, 0, n).Contains(" 100 "))
         {
-            CertificatePath = certPath,
-            KeyPath = keyPath,
-            InboundPauseBytes = pauseBytes,
-            InboundResumeBytes = resumeBytes,
-        };
+            return "";
+        }
 
-        var unread = new TaskCompletionSource<long>(TaskCreationOptions.RunContinuationsAsynchronously);
-        int port = TestServer.Start(UnreadBodyHandler(unread), r => TlsService.Start(r, options));
+        ssl.Write(new byte[length]);
+        ssl.Flush();
 
-        Assert.True(PostBody(port, UnreadUploadKilobytes).Contains("measured"), "the upload was not answered");
-        Assert.True(unread.Task.Wait(TimeSpan.FromSeconds(30)), "the handler never reported");
-        return unread.Task.Result;
+        n = ssl.Read(buf, 0, buf.Length);
+        return n > 0 ? Encoding.ASCII.GetString(buf, 0, n) : "";
     }
 
     /// <summary>
-    /// Reads the request head and nothing after it, waits for the pump to stop, then reports how much
-    /// decrypted body the pipe held - which is where the pump stopped.
+    /// Takes the head, answers 100 Continue, and reads nothing while the body lands. Reports how much
+    /// of it had been decrypted by then, and how much it then read.
     /// </summary>
-    private static Func<Reactor, TcpConnection, Task> UnreadBodyHandler(TaskCompletionSource<long> unread)
+    private static Func<Reactor, TcpConnection, Task> OnDemandHandler(
+        TaskCompletionSource<(long Held, long Body)> report, int bodyBytes)
         => async (reactor, connection) =>
         {
             TlsSession? session = null;
@@ -490,23 +436,39 @@ internal static class TlsPipeTests
                     }
                 }
 
-                // The body is one write on loopback, so it is all here within milliseconds; this is
-                // a backstop for the pump to run as far as it is going to, not a measurement.
+                pipe.Output.Write("HTTP/1.1 100 Continue\r\n\r\n"u8);
+                await pipe.Output.FlushAsync();
+
+                // The client sends the whole body on the 100 Continue, on loopback: it is here within
+                // milliseconds, and this is the backstop for that, not a measurement.
                 await Task.Delay(500);
 
                 long held = 0;
-                if (pipe.Input.TryRead(out ReadResult rest))
+                if (pipe.Input.TryRead(out ReadResult waiting))
                 {
-                    held = rest.Buffer.Length;
-                    pipe.Input.AdvanceTo(rest.Buffer.Start);
+                    held = waiting.Buffer.Length;
+                    pipe.Input.AdvanceTo(waiting.Buffer.Start);
                 }
 
-                const string body = "measured";
+                long body = 0;
+                while (body < bodyBytes)
+                {
+                    ReadResult read = await pipe.Input.ReadAsync();
+                    body += read.Buffer.Length;
+                    pipe.Input.AdvanceTo(read.Buffer.End);
+
+                    if (read.IsCompleted)
+                    {
+                        break;
+                    }
+                }
+
+                const string done = "done";
                 pipe.Output.Write(Encoding.ASCII.GetBytes(
-                    $"HTTP/1.1 200 OK\r\nContent-Length: {body.Length}\r\n\r\n{body}"));
+                    $"HTTP/1.1 200 OK\r\nContent-Length: {done.Length}\r\n\r\n{done}"));
                 await pipe.Output.FlushAsync();
 
-                unread.TrySetResult(held);
+                report.TrySetResult((held, body));
             }
             catch
             {
@@ -516,7 +478,7 @@ internal static class TlsPipeTests
             {
                 if (pipe is not null)
                 {
-                    await pipe.DisposeAsync();   // releases the pump parked at the threshold
+                    await pipe.DisposeAsync();
                 }
                 else
                 {

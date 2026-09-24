@@ -33,7 +33,7 @@ public sealed class TlsConnectionDualPipe : IDuplexPipe, IAsyncDisposable
     private readonly TlsSession _tls;
     private readonly bool _ownsSession;
 
-    private readonly TlsDecryptingPipeReader? _pump;      // only when OpenSSL decrypts
+    private readonly TlsDecryptingPipeReader? _decrypting;   // only when OpenSSL decrypts
     private readonly PipeWriter _writer;
 
     /// <summary>
@@ -41,10 +41,7 @@ public sealed class TlsConnectionDualPipe : IDuplexPipe, IAsyncDisposable
     /// <see cref="TlsService.AcceptAsync"/>).
     /// </summary>
     /// <param name="connection">The accepted connection, post-handshake.</param>
-    /// <param name="session">
-    /// The session that handshake produced. Its listener's <see cref="TlsOptions.InboundPauseBytes"/>
-    /// and <see cref="TlsOptions.InboundResumeBytes"/> bound the inbound pipe, when there is one.
-    /// </param>
+    /// <param name="session">The session that handshake produced.</param>
     /// <param name="ownsSession">
     /// When true (the default) disposing this also disposes <paramref name="session"/>, which is
     /// what sends the closing close_notify.
@@ -68,8 +65,8 @@ public sealed class TlsConnectionDualPipe : IDuplexPipe, IAsyncDisposable
         }
         else
         {
-            _pump = new TlsDecryptingPipeReader(connection, session);
-            Input = _pump;
+            _decrypting = new TlsDecryptingPipeReader(connection, session);
+            Input = _decrypting;
         }
 
         // Default is OpenSSL: encrypt before the bytes reach the slab. With kTLS opted in the
@@ -89,8 +86,8 @@ public sealed class TlsConnectionDualPipe : IDuplexPipe, IAsyncDisposable
     {
         // Write side first, while the connection still sends: Complete() commits any advanced-but-
         // unflushed plaintext into the slab, and the flush carries it out. The read side's disposal
-        // marks the connection closed (nothing else releases a pump parked on a quiet peer), and
-        // after that a flush is a no-op - so this order is load-bearing, not stylistic.
+        // marks the connection closed when a read was left parked on a quiet peer (nothing else
+        // would release it), and after that a flush is a no-op - so this order is load-bearing.
         //
         // FlushIfIdleAsync rather than FlushAsync, because this flush is the connection's, not the
         // application's. A handler that left a flush in flight - wrote, stopped waiting on a peer
@@ -107,10 +104,10 @@ public sealed class TlsConnectionDualPipe : IDuplexPipe, IAsyncDisposable
         {
             // Releasing the connection is not conditional on the write side having gone well. It
             // used to be: a decrypt fault leaves the session unable to encrypt, Complete threw from
-            // the first line, and everything below - the pump, the session, the fd - was skipped.
-            if (_pump is not null)
+            // the first line, and everything below - the reader, the session, the fd - was skipped.
+            if (_decrypting is not null)
             {
-                await _pump.DisposeAsync();
+                await _decrypting.DisposeAsync();
             }
             else
             {

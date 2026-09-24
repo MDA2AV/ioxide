@@ -45,8 +45,7 @@ public sealed unsafe partial class TcpConnection
     // the send path's hottest point - so this is when the server was last seen sending.
     internal long FlushSeenMs;
 
-    private int _readTimeoutSuspensions;
-    private long _readTimeoutResumedMs;
+    private int _readTimeoutDisabled;
     private long _finSentMs;
     private int _finSent;
 
@@ -175,21 +174,15 @@ public sealed unsafe partial class TcpConnection
     internal bool FinSent => Volatile.Read(ref _finSent) != 0;
 
     /// <summary>
-    /// Pause the read timeout until <see cref="ResumeReadTimeout"/> - for a transport layer whose
-    /// read stays parked while the application is busy (a decrypting pump, an adapter to a server
-    /// that keeps its own clocks). Calls nest.
+    /// Take this connection off the read timeout for the rest of its life - for an adapter whose
+    /// read stays parked while its server works, to a server that keeps its own clocks (Kestrel).
+    /// The bound on a peer that never closes once the handler has let go still applies.
     /// </summary>
-    public void SuspendReadTimeout() => Interlocked.Increment(ref _readTimeoutSuspensions);
+    public void DisableReadTimeout() => Volatile.Write(ref _readTimeoutDisabled, 1);
 
-    /// <summary>Lift one <see cref="SuspendReadTimeout"/>; the clock restarts from now.</summary>
-    public void ResumeReadTimeout()
-    {
-        Volatile.Write(ref _readTimeoutResumedMs, _reactor.NowMs);   // before the count drops
-        Interlocked.Decrement(ref _readTimeoutSuspensions);
-    }
-
-    // The peer owes the next move: a read is parked and not suspended, or the handler let go and
-    // its FIN is out. The server's own sends restart the clock; the sweep skips it during a flush.
+    // The peer owes the next move: a read is parked on a connection still on the read timeout, or
+    // the handler let go and its FIN is out. The server's own sends restart the clock; the sweep
+    // skips it during a flush.
     internal bool WaitingOnPeer(out long sinceMs)
     {
         if (HandlerReleased)
@@ -198,15 +191,13 @@ public sealed unsafe partial class TcpConnection
             return sinceMs != 0;
         }
 
-        if (Volatile.Read(ref _armed) == 0 || Volatile.Read(ref _readTimeoutSuspensions) > 0)
+        if (Volatile.Read(ref _armed) == 0 || Volatile.Read(ref _readTimeoutDisabled) != 0)
         {
             sinceMs = 0;
             return false;
         }
 
-        sinceMs = Math.Max(
-            Math.Max(Volatile.Read(ref ReadParkedMs), Volatile.Read(ref _readTimeoutResumedMs)),
-            Math.Max(Volatile.Read(ref FlushArmedMs), FlushSeenMs));
+        sinceMs = Math.Max(Volatile.Read(ref ReadParkedMs), Math.Max(Volatile.Read(ref FlushArmedMs), FlushSeenMs));
         return true;
     }
 
@@ -242,8 +233,7 @@ public sealed unsafe partial class TcpConnection
         Volatile.Write(ref FlushArmedMs, 0);
         Volatile.Write(ref ReadParkedMs, 0);
         FlushSeenMs = 0;
-        Volatile.Write(ref _readTimeoutSuspensions, 0);
-        Volatile.Write(ref _readTimeoutResumedMs, 0);
+        Volatile.Write(ref _readTimeoutDisabled, 0);
         Volatile.Write(ref _finSentMs, 0);
         Volatile.Write(ref _finSent, 0);
         SweepClosed = false;

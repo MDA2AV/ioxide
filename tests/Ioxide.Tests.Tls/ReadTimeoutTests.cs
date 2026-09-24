@@ -9,7 +9,7 @@ using ioxide.tls;
 
 namespace Ioxide.Tests;
 
-/// <summary>The read timeout through TLS: the OpenSSL pump, and kTLS (no pump) as the control.</summary>
+/// <summary>The read timeout through TLS, OpenSSL decrypting on demand and kTLS alike.</summary>
 internal static class ReadTimeoutTests
 {
     private const int ReadTimeoutMs = 500;
