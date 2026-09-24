@@ -3,19 +3,11 @@ using ioxide.ngtcp2;
 
 namespace Ioxide.Tests;
 
-/// <summary>
-/// The read timeout over QUIC, against the real ngtcp2 engine. The transport reaps a connection
-/// whose peer has been silent for <see cref="QuicOptions.ReadTimeoutMs"/>, which is right when the
-/// connection waits on its peer and wrong when the peer waits on us: a request that takes a while
-/// to answer leaves both ends silent. While a response is owed, the engine pings the peer, whose
-/// ACKs keep the connection seen; once it is answered the pings stop, and a peer with nothing more
-/// to say is reaped as before.
-/// </summary>
+/// <summary>The read timeout over QUIC: keep-alive while a response is owed, and only then.</summary>
 internal static class QuicReadTimeoutTests
 {
     private const int ReadTimeoutMs = 500;
 
-    // Deadlines, not measurements (see tests/README.md).
     private const int ExchangeMs = 10_000;
 
     public static void Register(Runner runner)
@@ -35,7 +27,6 @@ internal static class QuicReadTimeoutTests
             using var client = new TeardownWireClient(udpPort);
             Assert.True(client.CompleteHandshake(ExchangeMs), "handshake did not complete");
 
-            // The client says nothing more after its request - it only acknowledges what arrives.
             client.SendRequest("slow-but-here"u8.ToArray());
             Assert.Equal("slow-but-here", client.WaitForEcho(ExchangeMs));
             Assert.True(!torndown.Task.IsCompleted, "the connection was torn down while its request was being answered");
@@ -43,8 +34,7 @@ internal static class QuicReadTimeoutTests
 
         runner.Test("quic read timeout: once answered, a peer that only acknowledges is reaped", () =>
         {
-            // The pings must stop with the response. The client here answers anything the server
-            // sends, so a keep-alive left running would keep this connection alive indefinitely.
+            // The client ACKs whatever arrives, so pings that never stopped would keep it alive.
             (string certPath, string keyPath) = TestCert.Ensure();
             using var engine = new QuicEngine(certPath, keyPath, cidLength: 8);
             var torndown = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -67,10 +57,7 @@ internal static class QuicReadTimeoutTests
         });
     }
 
-    /// <summary>
-    /// Echoes each request once its stream has finished arriving, but only after
-    /// <paramref name="delayMs"/> - a handler that is busy, with nothing crossing the wire.
-    /// </summary>
+    // Echoes each request once its stream has finished arriving, after delayMs.
     private static Func<Reactor, QuicConnection, Task> SlowEcho(int delayMs, TaskCompletionSource torndown)
         => async (_, conn) =>
         {

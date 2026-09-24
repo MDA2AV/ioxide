@@ -359,11 +359,7 @@ internal sealed unsafe class TeardownWireClient : IDisposable
         return Encoding.ASCII.GetString(_echo.ToArray());
     }
 
-    /// <summary>
-    /// Keeps the connection going both ways for <paramref name="ms"/>: every inbound datagram is fed
-    /// to the engine and whatever it owes back - ACKs above all - goes out. Starts nothing of its
-    /// own, so the connection stays quiet unless the server makes it talk.
-    /// </summary>
+    /// <summary>Pumps both ways for <paramref name="ms"/> - ACKs what arrives, starts nothing.</summary>
     public void Converse(int ms)
     {
         long deadline = Environment.TickCount64 + ms;

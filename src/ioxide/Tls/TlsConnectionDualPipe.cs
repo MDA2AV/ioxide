@@ -89,7 +89,6 @@ public sealed class TlsConnectionDualPipe : ITcpConnectionPipe, IAsyncDisposable
     /// <summary>Response bytes. Plaintext under kTLS TX; encrypted here otherwise.</summary>
     public PipeWriter Output => _writer;
 
-    /// <summary>The connection underneath, carrying ciphertext.</summary>
     public TcpConnection Connection => _conn;
 
     public async ValueTask DisposeAsync()

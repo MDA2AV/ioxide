@@ -6,13 +6,7 @@ using ioxide.nghttp2;
 
 namespace Ioxide.Tests;
 
-/// <summary>
-/// The read timeout under HTTP/2, for both engines. The connection's read loop stays parked for the
-/// next frame the whole time a handler works, so the loop's read says nothing about waiting on the
-/// peer: each engine suspends the clock while it owes a response and resumes it once it owes none.
-/// A slow request must get its answer, and a connection left with nothing owed must still be
-/// closed once its peer has been silent past the timeout.
-/// </summary>
+/// <summary>The read timeout under HTTP/2, both engines: suspended while a response is owed.</summary>
 internal static class Http2ReadTimeoutTests
 {
     private const int ReadTimeoutMs = 500;
@@ -38,9 +32,7 @@ internal static class Http2ReadTimeoutTests
             {
                 (int port, Task ended) = StartServer(ng, answerAfterMs: 0);
 
-                // One request, answered, and then the client keeps the connection open and says
-                // nothing - SocketsHttpHandler sends no PINGs unless asked. Nothing is owed any more,
-                // so the clock is back on and the server has to end the connection itself.
+                // SocketsHttpHandler sends no PINGs, so after the answer the client is silent.
                 using HttpClient client = H2Client();
                 using HttpResponseMessage response = client.GetAsync($"http://127.0.0.1:{port}/").Result;
                 Assert.Equal(HttpStatusCode.OK, response.StatusCode);
@@ -51,11 +43,7 @@ internal static class Http2ReadTimeoutTests
         }
     }
 
-    /// <summary>
-    /// A server answering every request with <c>slow-but-here</c> after
-    /// <paramref name="answerAfterMs"/>. The task completes when a connection that served a request
-    /// ends - the listen probe serves none, so it cannot complete it early.
-    /// </summary>
+    // Ended completes when a connection that served a request ends (the listen probe serves none).
     private static (int Port, Task Ended) StartServer(bool nghttp2, int answerAfterMs)
     {
         var ended = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -108,10 +96,8 @@ internal static class Http2ReadTimeoutTests
         return (port, ended.Task);
     }
 
-    // Nothing crosses the wire while this runs - no data, no PING - which is the whole point.
     private static Task Answer(int afterMs) => afterMs > 0 ? Task.Delay(afterMs) : Task.CompletedTask;
 
-    // Cleartext HTTP/2 with prior knowledge: no upgrade dance, exactly what an h2c peer sends.
     private static HttpClient H2Client() => new(new SocketsHttpHandler())
     {
         DefaultRequestVersion = HttpVersion.Version20,

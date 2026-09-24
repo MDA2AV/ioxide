@@ -25,9 +25,7 @@ public sealed class TlsDecryptingPipeReader : PipeReader, IAsyncDisposable
     private readonly Pipe _inbound;
     private readonly Task _pump;
 
-    // Whether the caller is parked on a read with nothing decrypted to give it - the one state in
-    // which this connection is waiting on its peer. See ReadAsync.
-    private bool _callerWaiting;
+    private bool _callerWaiting;   // parked on the pipe with nothing decrypted for it
 
     public TlsDecryptingPipeReader(TcpConnection connection, TlsSession session, PipeOptions? options = null)
     {
@@ -54,10 +52,8 @@ public sealed class TlsDecryptingPipeReader : PipeReader, IAsyncDisposable
                 minimumSegmentSize: options.MinimumSegmentSize,
                 useSynchronizationContext: false));
 
-        // The pump keeps a read parked on the connection for as long as it runs, including while
-        // the caller is busy with a request, so that read says nothing about waiting on the peer.
-        // The read clock is suspended for the pump's life and runs only while the caller waits.
-        // Before the pump starts: it parks its first read synchronously.
+        // The pump's read stays parked while the caller is busy, so the read clock runs only while
+        // the caller waits. Before the pump starts: it parks its first read synchronously.
         _conn.SuspendReadTimeout();
 
         _pump = PumpInboundAsync();
@@ -67,8 +63,6 @@ public sealed class TlsDecryptingPipeReader : PipeReader, IAsyncDisposable
     {
         ValueTask<ReadResult> read = _inbound.Reader.ReadAsync(cancellationToken);
 
-        // Nothing decrypted to hand over: the caller now waits on the peer, which is what the read
-        // clock measures. It stops again the moment the pump has plaintext for it (CallerServed).
         if (!read.IsCompleted && !_callerWaiting)
         {
             _callerWaiting = true;
@@ -78,9 +72,7 @@ public sealed class TlsDecryptingPipeReader : PipeReader, IAsyncDisposable
         return read;
     }
 
-    // The caller's wait is over - plaintext is on its way, or the read was cancelled. Called BEFORE
-    // the flush that delivers it: the reader resumes inline inside that flush and may park again
-    // straight away, and that new wait has to find the clock suspended so it can resume it.
+    // Before the flush that delivers: the caller resumes inline inside it and may park again.
     private void CallerServed()
     {
         if (_callerWaiting)

@@ -6,12 +6,10 @@ using ioxide.utils;
 namespace Ioxide.Tests;
 
 /// <summary>
-/// The two clocks on a TCP connection: <see cref="TcpOptions.ReadTimeoutMs"/> reaps one whose read
-/// the peer never answers, <see cref="TcpOptions.SendTimeoutMs"/> reaps one whose peer stopped
-/// draining. Before these there was no clock anywhere in the TCP connection lifecycle, so both
-/// shapes held an fd, a pooled connection and its native write slab for as long as the peer cared
-/// to. Neither may fire on a handler that is simply busy, and a handler that lets go ends the
-/// connection instead of leaving it to either clock.
+/// The two clocks on a TCP connection: <see cref="TcpOptions.ReadTimeoutMs"/> reaps one that has
+/// gone quiet, <see cref="TcpOptions.SendTimeoutMs"/> reaps one whose peer stopped draining.
+/// Before these there was no clock anywhere in the TCP connection lifecycle, so both shapes held
+/// an fd, a pooled connection and its native write slab for as long as the peer cared to.
 /// </summary>
 /// <remarks>
 /// Timeouts here are hundreds of milliseconds rather than the second-scale defaults, because the
@@ -71,8 +69,8 @@ internal static class TcpTimeoutTests
         runner.Test("tcp/read: a connection still talking is left alone", () =>
         {
             // The false positive that would make the whole feature unusable. Same timeout as the
-            // test above, driven for well over three times its length - if arriving bytes did not
-            // restart the clock, this closes long before the loop finishes.
+            // test above, driven for well over three times its length - if activity did not refresh
+            // the stamp, this closes long before the loop finishes.
             int port = StartWith(readMs: 500, sendMs: 0, EchoHandler);
 
             using var client = new TcpClient();
@@ -113,10 +111,7 @@ internal static class TcpTimeoutTests
 
         runner.Test("tcp/read: a handler busy for longer than the read timeout still answers", () =>
         {
-            // The reported shape: a request that takes a long time to answer - a slow query, an
-            // upstream - with nothing crossing the wire meanwhile. The server is not waiting on the
-            // peer, so the read timeout has nothing to say about it. The idle timeout this replaced
-            // counted any silence, and shut this connection down mid-request.
+            // A slow answer with nothing on the wire meanwhile: the server is not waiting on the peer.
             int port = StartWith(readMs: 500, sendMs: 0, async (_, conn) =>
             {
                 try
@@ -126,7 +121,7 @@ internal static class TcpTimeoutTests
                         return;
                     }
 
-                    await Task.Delay(2_000);   // four read timeouts, and eight sweep ticks
+                    await Task.Delay(2_000);   // four read timeouts
 
                     conn.Write("done"u8);
                     await conn.FlushAsync();
@@ -151,10 +146,7 @@ internal static class TcpTimeoutTests
 
         runner.Test("tcp/exit: a handler that lets go sends its peer a FIN", () =>
         {
-            // Nothing will read or write this connection again once its handler returns, so the peer
-            // is told at once. It used to be left open - the peer waiting on a connection nobody
-            // served until it gave up, or a timeout found it. Both clocks are off here, so nothing
-            // but the handler letting go can produce the EOF this waits for.
+            // Both clocks off, so only the handler letting go can produce the EOF.
             int port = StartWith(readMs: 0, sendMs: 0, async (_, conn) =>
             {
                 try
@@ -179,16 +171,12 @@ internal static class TcpTimeoutTests
             NetworkStream stream = client.GetStream();
             stream.Write("hi"u8);
 
-            // The response first, whole: the FIN goes out behind it, never instead of it.
             Assert.Equal("bye", ReadExactly(stream, 3));
             Assert.Equal(0, stream.Read(new byte[16], 0, 16));
         });
 
         runner.Test("tcp/exit: a peer that ignores the FIN is shut down at the read timeout", () =>
         {
-            // The read timeout's other job. After its handler lets go the connection only waits for
-            // the peer to close; a peer that never does would otherwise hold the fd and the pooled
-            // connection forever, since no read is parked for the clock to measure.
             int port = StartWith(readMs: 500, sendMs: 0, async (_, conn) =>
             {
                 try
@@ -208,10 +196,8 @@ internal static class TcpTimeoutTests
             stream.Write("hi"u8);
             Assert.Equal(0, stream.Read(new byte[16], 0, 16));   // the FIN
 
-            // Keep the socket open well past the deadline, then speak. A server still holding the
-            // connection takes the bytes in silence; one that has shut it answers with a reset. A
-            // read cannot see that reset - a socket that has had its FIN reads 0 whatever follows -
-            // so it shows as the write after the one that drew it.
+            // Past the deadline, the server's socket is gone: a write draws a reset, which only the next
+            // write can see (after a FIN, reads return 0 regardless).
             Thread.Sleep(SweepGraceMs / 2);
 
             string outcome = "both writes accepted - the server is still holding the connection";

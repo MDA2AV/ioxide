@@ -120,13 +120,9 @@ foreach (Thread thread in threads)
 /// Any Stream as an IDuplexPipe. The BCL already has the two halves - this only pairs them, which
 /// is the whole adapter needed to run ioxide's HTTP/2 over something that is not a ring connection.
 /// </summary>
-/// <remarks>
-/// Naming the connection underneath (ITcpConnectionPipe) lets HTTP/2 pause the read timeout while
-/// it owes a response, so a slow handler is not timed out. A plain IDuplexPipe works too, without that.
-/// </remarks>
 internal sealed class StreamDuplexPipe(Stream stream, TcpConnection connection) : ITcpConnectionPipe
 {
     public PipeReader Input { get; } = PipeReader.Create(stream, new StreamPipeReaderOptions(leaveOpen: true));
     public PipeWriter Output { get; } = PipeWriter.Create(stream, new StreamPipeWriterOptions(leaveOpen: true));
-    public TcpConnection Connection => connection;
+    public TcpConnection Connection => connection;   // lets HTTP/2 pause the read timeout while it works
 }

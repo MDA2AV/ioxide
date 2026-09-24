@@ -76,10 +76,7 @@ internal sealed class HopDuplexPipe : IDuplexPipe, IAsyncDisposable
             return;
         }
 
-        // The recv pump keeps a read parked for the connection's whole life - through a long
-        // request and a long download alike - so ioxide's read clock would time out Kestrel's
-        // requests rather than its idle connections. Kestrel runs its own clocks for that
-        // (KeepAliveTimeout, RequestHeadersTimeout, the minimum data rates), so ours stays off.
+        // The pump's read is always parked, and Kestrel runs its own timeouts.
         _conn.SuspendReadTimeout();
 
         _recvPump = RecvPumpAsync();
@@ -239,8 +236,7 @@ internal sealed class HopDuplexPipe : IDuplexPipe, IAsyncDisposable
         if (_tls is null)
         {
             // Plaintext: half-close the write side so EOF-delimited clients (TcpConnection: close / upgrade)
-            // see the end of the response now - ioxide sends its own FIN only when the listener lets go
-            // of the connection, after the pumps below have unwound. Then wake and unwind the recv side
+            // see the end of the response now, not when the listener lets go. Then wake and unwind the recv side
             // (MarkClosed wakes a recv parked in conn.ReadAsync - schedule it on the reactor so the
             // continuation runs there, not the dispose thread).
             Shutdown(_conn.ClientFd, ShutWr);

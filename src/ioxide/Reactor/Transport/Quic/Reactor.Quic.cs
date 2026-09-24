@@ -249,7 +249,7 @@ public sealed unsafe partial class Reactor
         conn.Cids.Clear();
 
         // The set membership doubles as the "transport still owns a ref" flag, so a second call
-        // (engine close racing the sweep) cannot double-release.
+        // (engine close racing the idle sweep) cannot double-release.
         if (_quicConnSet.Remove(conn))
         {
             QuicUnpinPeer(conn);   // give the descriptor back before the address it names is freed
@@ -269,9 +269,7 @@ public sealed unsafe partial class Reactor
         }
     }
 
-    // Ticker callback (~250 ms): evict connections whose peer went quiet. A connection still owed
-    // a response is not quiet - its engine keeps the peer answering (see QuicOptions.ReadTimeoutMs)
-    // - so what this reaps is a peer that has gone. Engine deadlines are fired by
+    // Ticker callback (~250 ms): evict quiet connections. Engine deadlines are fired by
     // QuicFireDueTimers at loop-pass granularity; this ticker's loop wake doubles as its floor.
     private void QuicSweep()
     {
@@ -342,7 +340,7 @@ public sealed unsafe partial class Reactor
                 // the only caller of the engine binding's Destroy, which frees the retained send
                 // chunks, calls iq_conn_free (ngtcp2_conn_del and the picotls session) and releases
                 // the GCHandle. Worse, removal is what makes the leak permanent - the connection is
-                // out of _quicConnSet and every CID route, so neither the sweep nor teardown
+                // out of _quicConnSet and every CID route, so neither the idle sweep nor teardown
                 // can ever reach it again, and the GCHandle keeps the managed object rooted too.
                 QuicRemoveConnection(conn);
                 conn.OnEvicted(QuicEvictReason.TimerFault);

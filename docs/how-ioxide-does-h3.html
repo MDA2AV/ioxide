@@ -537,11 +537,9 @@ reactor.QuicHandle = async (r, conn) =>
       sweep only when it's due. Under load the loop spins on completions, so timers fire at
       completion-batch granularity (~RTT). Dispatch re-arms the minimum after every datagram.</li>
       <li><b>Read timeout</b> - stays on the 250&nbsp;ms ticker, which doubles as the wake floor
-      when the reactor is otherwise asleep. A connection whose peer has been silent for
-      <code>ReadTimeoutMs</code> - an abandoned one, a killed benchmark client - is reaped and
-      unrouted through the same teardown funnel. A connection still owed a response is never
-      silent: the engine pings the peer until it is answered, so a slow handler keeps its
-      connection.</li>
+      when the reactor is otherwise asleep. Abandoned connections (a killed benchmark client) are
+      reaped and unrouted through the same teardown funnel; one still owed a response is kept
+      alive with PINGs.</li>
     </ul>
 
     <h2>Rules learned the hard way</h2>

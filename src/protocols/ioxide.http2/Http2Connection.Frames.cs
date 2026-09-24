@@ -362,7 +362,6 @@ public sealed partial class Http2Connection
 
     private void TryComplete(PendingRequest pending)
     {
-        // Headers and body both in: the peer is done with this request, and the answer is ours.
         if (pending.HeadersDone && pending.RequestEnded)
         {
             Owe(pending);
@@ -517,9 +516,7 @@ public sealed partial class Http2Connection
         public bool HeadersDone;
         public bool RequestEnded;
 
-        // The connection counting this request among those it owes an answer (Owe/Settle). Null
-        // for the discard block, which is never owed.
-        public Http2Connection? Owner;
+        public Http2Connection? Owner;   // null for the discard block, which is never owed
         public bool Owed;
 
         /// <summary>Set only when the body is being streamed; the arena stays empty then.</summary>

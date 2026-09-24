@@ -39,12 +39,8 @@ public sealed partial class Nghttp2Connection : IDisposable
     private readonly Nghttp2Options _options;
     private readonly byte[] _egress = new byte[EgressBufferSize];
 
-    // The connection underneath, when the pipe can name it - for the read timeout, see Owe.
-    private readonly TcpConnection? _connection;
-
-    // Requests that have arrived whole and are not answered yet. While there are any, the
-    // connection is busy rather than waiting on its peer.
-    private int _owed;
+    private readonly TcpConnection? _connection;   // when the pipe names it (ITcpConnectionPipe)
+    private int _owed;                             // requests in whole and not yet answered
 
     private nint _handle;
     private GCHandle _self;
@@ -75,13 +71,8 @@ public sealed partial class Nghttp2Connection : IDisposable
         Setup();
     }
 
-    /// <summary>
-    /// A request's stream ended, so this side owes its response. While any response is owed the
-    /// connection's read timeout is suspended: the read loop stays parked for the next frame the
-    /// whole time a handler works, and a slow answer to one request must not time out the
-    /// connection it shares with the others. Once nothing is owed, the connection is waiting on
-    /// its peer again and the clock resumes.
-    /// </summary>
+    // While a response is owed the read loop's parked read is not waiting on the peer, so the read
+    // timeout is suspended; a slow request must not time out the connection it shares with others.
     private void Owe(PendingRequest pending)
     {
         if (pending.Owed)
@@ -96,7 +87,7 @@ public sealed partial class Nghttp2Connection : IDisposable
         }
     }
 
-    /// <summary>The response is done, or will never be: every end of a request disposes it.</summary>
+    // Every end of a stream disposes its PendingRequest, which settles here.
     private void Settle(PendingRequest pending)
     {
         if (!pending.Owed)
@@ -183,7 +174,6 @@ public sealed partial class Nghttp2Connection : IDisposable
 
         public int StreamId;
 
-        // The connection counting this request among those it owes an answer (Owe/Settle).
         public Nghttp2Connection? Owner;
         public bool Owed;
 

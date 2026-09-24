@@ -49,30 +49,19 @@ public sealed record TcpOptions
     /// <summary>
     /// Close a connection whose read has waited this long for the peer. 0 disables.
     ///
-    /// The clock runs only while the server is waiting on the peer: from the moment a read parks
-    /// with nothing buffered until bytes arrive. A handler that spends minutes answering a request
-    /// is not waiting on anyone, so nothing times it out. What this defends: a peer that connects
-    /// and says nothing, a keep-alive connection left open between requests, and a request that
-    /// stops halfway - each holds an fd, a pooled <see cref="TcpConnection"/> with its native write
-    /// slab and a recv queue, and in incremental mode a capped gid, so at the cap they turn
-    /// directly into shed accepts.
+    /// What it defends: a peer that connects and goes quiet holds an fd, a pooled
+    /// <see cref="TcpConnection"/> with its native write slab, and a recv queue - and in
+    /// incremental mode a registered buffer ring plus a gid, which is capped, so an idle
+    /// connection at the cap converts directly into shed accepts.
     ///
     /// Enforced on the reactor's ticker, so the granularity is the tick (~250 ms) and a connection
     /// closes at the first tick after its deadline rather than exactly on it.
     /// </summary>
     /// <remarks>
-    /// Only the peer's bytes stop it. Sending does not, so a protocol where only the server talks -
-    /// a websocket feed, a long-poll that the client holds silently - has to hear from its client
-    /// within this (a websocket pong counts), or set 0. <see cref="SendTimeoutMs"/> is the clock
-    /// for the other direction.
-    ///
-    /// A layer that keeps a read parked for its own reasons suspends the clock with
-    /// <see cref="TcpConnection.SuspendReadTimeout"/> - the TLS decrypting pump does, except while
-    /// the application waits on it; HTTP/2 does while it owes a response; the Kestrel transport
-    /// does for good, because Kestrel runs its own timeouts.
-    ///
-    /// It also bounds a peer that will not close. When the handler returns, the connection sends
-    /// its FIN and waits for the peer's; a peer that has not closed within this is shut down.
+    /// The clock runs only while a read is parked with nothing buffered, so a handler busy answering
+    /// a request is never timed out, and only the peer's bytes restart it: a protocol where only the
+    /// server talks has to hear from its client within this (a websocket pong counts), or set 0. It
+    /// also bounds how long a peer has to close after its handler returns.
     /// </remarks>
     public int ReadTimeoutMs { get; init; } = 60_000;
 
@@ -91,7 +80,7 @@ public sealed record TcpOptions
     /// slowest legitimate full response, not against a stall - a large body over a slow link is
     /// the false positive to watch for.
     ///
-    /// It is deliberately separate from <see cref="ReadTimeoutMs"/>: a peer that keeps SENDING
+    /// It is deliberately not folded into <see cref="ReadTimeoutMs"/>: a peer that keeps SENDING
     /// while it has stopped READING restarts the read clock on every inbound completion, so it
     /// never fires while that connection's send is wedged. Duplex protocols - a websocket written
     /// from a background task is the reported case - need this clock and are not covered by the

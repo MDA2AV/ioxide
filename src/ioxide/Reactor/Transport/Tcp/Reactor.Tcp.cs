@@ -110,9 +110,7 @@ public sealed unsafe partial class Reactor
             // return to the group.
             if (conn != null)
             {
-                // The peer sent; it is our buffers that ran out. Whatever read is parked is not
-                // waiting on the peer, so its clock starts over rather than counting our shortage.
-                conn.ReadParkedMs = NowMs;
+                conn.ReadParkedMs = NowMs;   // the peer sent; the wait is ours, so the clock restarts
                 _recvStarved.Add(((ulong)gen << 32) | (uint)fd);
             }
             return;
@@ -174,9 +172,7 @@ public sealed unsafe partial class Reactor
             // still holds buffers (#93). Park; the loop re-arms once a buffer recycles.
             if (conn != null)
             {
-                // The peer sent; it is our buffers that ran out. Whatever read is parked is not
-                // waiting on the peer, so its clock starts over rather than counting our shortage.
-                conn.ReadParkedMs = NowMs;
+                conn.ReadParkedMs = NowMs;   // the peer sent; the wait is ours, so the clock restarts
                 _recvStarved.Add(((ulong)gen << 32) | (uint)fd);
             }
             return;

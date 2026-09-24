@@ -48,9 +48,7 @@ public sealed unsafe partial class TcpConnection : IValueTaskSource<RecvSnapshot
             return new ValueTask<RecvSnapshot>(RecvSnapshot.Closed());
         }
 
-        // The read clock starts here (TcpOptions.ReadTimeoutMs). Stamped before arming, so a sweep
-        // that sees the read parked also sees when it parked.
-        ReadParkedMs = _reactor.NowMs;
+        ReadParkedMs = _reactor.NowMs;   // the read clock; before arming, so the sweep sees both
 
         if (Interlocked.Exchange(ref _armed, 1) == 1)
         {

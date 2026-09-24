@@ -9,13 +9,7 @@ using ioxide.tls;
 
 namespace Ioxide.Tests;
 
-/// <summary>
-/// The read timeout through TLS. The decrypting pump keeps a read parked on the connection whether
-/// or not the application wants bytes, so that read cannot be the clock: the pump suspends it and
-/// runs it only while the application waits on the pipe. A busy handler must never be timed out,
-/// and a silent peer still must be. Under kTLS there is no pump - the kernel decrypts and the
-/// application reads the connection itself - so the same two tests there are the control.
-/// </summary>
+/// <summary>The read timeout through TLS: the OpenSSL pump, and kTLS (no pump) as the control.</summary>
 internal static class ReadTimeoutTests
 {
     private const int ReadTimeoutMs = 500;
@@ -51,15 +45,12 @@ internal static class ReadTimeoutTests
                     EnabledSslProtocols = SslProtocols.Tls13,
                 });
 
-                // Handshake done, and then nothing. The handler is parked on the pipe waiting for a
-                // request that is never coming - the one state the clock exists for.
                 Assert.True(woke.Task.Wait(4_000), "the handler's read was never ended - nothing timed out the silent peer");
                 Assert.True(woke.Task.Result, "the handler woke, but not to the end of the stream");
             }, skip: rx && !ktls);
         }
     }
 
-    // Takes the request, then spends four read timeouts on it with nothing crossing the wire.
     private static async Task BusyHandler(Reactor reactor, TcpConnection connection)
     {
         TlsSession? session = null;
@@ -89,7 +80,6 @@ internal static class ReadTimeoutTests
         }
     }
 
-    // Parks on the pipe and reports whether the read ended as a closed stream.
     private static Func<Reactor, TcpConnection, Task> WaitingHandler(TaskCompletionSource<bool> woke)
         => async (reactor, connection) =>
         {
@@ -130,7 +120,6 @@ internal static class ReadTimeoutTests
     private static int StartWith(bool kernelRx, Func<Reactor, TcpConnection, Task> handle)
     {
         (string certPath, string keyPath) = TestCert.Ensure();
-        // kTLS RX is programmed at the same handoff as TX, so it cannot be asked for alone.
         var options = new TlsOptions { CertificatePath = certPath, KeyPath = keyPath, KernelRx = kernelRx, KernelTx = kernelRx };
 
         return TestServer.StartConfigured(handle, new ServerConfig

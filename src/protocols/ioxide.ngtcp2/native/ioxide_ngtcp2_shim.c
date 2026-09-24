@@ -1656,13 +1656,8 @@ static uint64_t iq_tighter_bound(uint64_t a, uint64_t b)
     return a < b ? a : b;
 }
 
-/* Keep the peer answering while this side owes it a response. A request that takes minutes leaves
- * both ends silent the whole time, and silence is what every idle bound measures: the peer's
- * max_idle_timeout, which ngtcp2 honours here too, and the transport's own sweep (bound_ns, 0 when
- * it has none). A PING at half the tighter of those draws an ACK well inside both. A peer that has
- * actually gone answers nothing, so this never keeps a dead connection alive - its idle timer runs
- * out as before. ngtcp2 sends the PING itself, from handle_expiry, once the connection has been
- * quiet for the interval; off restores its default of never. */
+/* Keep-alive while this side owes a response: a PING at half the tightest of the transport's bound
+ * (bound_ns, 0 = none) and both idle timeouts, so the peer's ACK lands inside all of them. */
 void iq_conn_set_keep_alive(iq_conn *c, int on, uint64_t bound_ns)
 {
     if (c == NULL || c->conn == NULL) {

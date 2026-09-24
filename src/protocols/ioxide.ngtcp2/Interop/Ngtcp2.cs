@@ -155,7 +155,6 @@ internal static unsafe class Ngtcp2
     [DllImport(Lib)] internal static extern ulong iq_conn_expiry(nint conn);
     [DllImport(Lib)] internal static extern int   iq_conn_handle_expiry(nint conn, ulong ts);
 
-    /// <summary>Keep-alive PINGs on or off; boundNs is the transport's silence bound, 0 for none.</summary>
     [DllImport(Lib)] internal static extern void  iq_conn_set_keep_alive(nint conn, int on, ulong boundNs);
 
     [DllImport(Lib)] internal static extern int   iq_conn_is_established(nint conn);

@@ -57,8 +57,6 @@ public unsafe partial class QuicEngineConnection
             return;
         }
 
-        // The response is finished: nothing owed on this stream any more. Inside a cycle the cycle
-        // end applies it; a handler resumed from elsewhere has no cycle around it.
         if (fin)
         {
             SettleResponse(streamId);

@@ -67,11 +67,7 @@ public sealed unsafe partial class Reactor
     /// <summary>CID length this reactor's demux slices - a client's own CID must match it.</summary>
     public int QuicLocalCidLength => _quicOptions?.LocalCidLength ?? QuicClientDefaultCidLength;
 
-    /// <summary>
-    /// How long this reactor's QUIC sweep lets a peer stay silent (<see cref="QuicOptions.ReadTimeoutMs"/>,
-    /// or the client-only default) - public so an engine keeping a busy connection alive can ping
-    /// inside it.
-    /// </summary>
+    /// <summary>The sweep's read timeout; public so an engine can keep a busy connection inside it.</summary>
     public int QuicReadTimeoutMs => _quicOptions?.ReadTimeoutMs ?? QuicClientDefaultReadMs;
 
     /// <summary>
