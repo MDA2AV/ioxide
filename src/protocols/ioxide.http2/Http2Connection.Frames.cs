@@ -329,6 +329,7 @@ public sealed partial class Http2Connection
             if (pending.BodyLength + body.Length > _options.MaxRequestBytes)
             {
                 ResetStream(header.StreamId, Http2Error.EnhanceYourCalm);
+                WriteWindowUpdate(0, payload.Length);   // the stream is gone; the connection is still owed this frame
                 return;
             }
             pending.AppendBody(body);
@@ -341,13 +342,15 @@ public sealed partial class Http2Connection
         // A STREAMED body is the exception, and the reason the option exists: its credit is
         // returned as the handler reads (Http2BodyReader.ReadAsync), so a consumer that falls
         // behind stops replenishing and the peer stops sending. Crediting here as well would hand
-        // the window back before the bytes were consumed and put the bound back on memory.
-        if (payload.Length > 0 && pending?.BodyReader is null)
+        // the window back before the bytes were consumed and put the bound back on memory. Its
+        // padding never reaches the handler, though, so that much is still credited here.
+        int credit = pending?.BodyReader is null ? payload.Length : payload.Length - body.Length;
+        if (credit > 0)
         {
-            WriteWindowUpdate(0, payload.Length);
+            WriteWindowUpdate(0, credit);
             if (header.StreamId != 0)
             {
-                WriteWindowUpdate(header.StreamId, payload.Length);
+                WriteWindowUpdate(header.StreamId, credit);
             }
         }
 
@@ -390,6 +393,8 @@ public sealed partial class Http2Connection
             return;
         }
 
+        bool windowGrew = false;
+
         for (int offset = 0; offset + 6 <= payload.Length; offset += 6)
         {
             ushort id = BinaryPrimitives.ReadUInt16BigEndian(payload[offset..]);
@@ -418,6 +423,7 @@ public sealed partial class Http2Connection
                     {
                         stream.SendWindow += delta;
                     }
+                    windowGrew |= delta > 0;
                     break;
 
                 case Http2Setting.MaxFrameSize:
@@ -429,6 +435,13 @@ public sealed partial class Http2Connection
                     _peerMaxFrameSize = (int)value;
                     break;
             }
+        }
+
+        // A larger window is credit like a WINDOW_UPDATE, and parked writers wake on nothing else.
+        // Released after the loop, so a woken writer sees every setting in this frame applied.
+        if (windowGrew)
+        {
+            ReleaseCreditWaiters(0);
         }
 
         WriteSettingsAck();

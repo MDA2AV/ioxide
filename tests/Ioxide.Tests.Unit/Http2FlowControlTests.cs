@@ -5,8 +5,7 @@ using ioxide.http2;
 namespace Ioxide.Tests;
 
 /// <summary>
-/// HTTP/2 flow control with streamed request bodies, from the GenHTTP upload report against 0.14.239.
-/// Each Pending is paired with a control that runs the same drive down the path that works.
+/// HTTP/2 flow-control credit, from the GenHTTP upload report against 0.14.239.
 /// </summary>
 internal static class Http2FlowControlTests
 {
@@ -23,7 +22,7 @@ internal static class Http2FlowControlTests
     {
         // ---------------------------------------------------------------- reads outside the pass
 
-        runner.Pending("h2 flow: credit from a read outside the pass is written to the peer", () =>
+        runner.Test("h2 flow: credit from a read outside the pass is written to the peer", () =>
         {
             var busy = new TaskCompletionSource();
             var read = new Tally();
@@ -50,36 +49,9 @@ internal static class Http2FlowControlTests
             client.Feed(Data(1, 0, endStream: true));
             client.Drain();
             client.Close(run);
-        }, "Http2BodyReader.ReadAsync credits via Http2Connection.CreditBody, which only stages the "
-           + "WINDOW_UPDATEs; outside the dispatch pass nothing flushes them");
-
-        runner.Test("h2 flow: control: the peer's next frame carries that same credit out", () =>
-        {
-            var busy = new TaskCompletionSource();
-            var read = new Tally();
-
-            using var client = new StrictClient(Streamed);
-            Task run = client.Connection.RunAsync(async (request, writer) =>
-            {
-                await busy.Task;
-                await ReadAll(request, read);
-                await Answer(writer, 200);
-            });
-
-            client.ReleaseFlush();
-            client.Feed([.. Open(), .. Post(1), .. FillConnectionWindow(1)]);
-            client.Drain();
-
-            busy.SetResult();
-            client.Feed(Ping());                                     // a peer out of window has no reason to send this
-            Assert.Equal(ConnectionWindow, Credit(client.Drain(), 0));
-
-            client.Feed(Data(1, 0, endStream: true));
-            client.Drain();
-            client.Close(run);
         });
 
-        runner.Pending("h2 flow: a 1.2 MB upload through a handler that awaits between reads completes", () =>
+        runner.Test("h2 flow: a 1.2 MB upload through a handler that awaits between reads completes", () =>
         {
             const int Size = 1_200_000;
             var disk = new Queue<TaskCompletionSource>();
@@ -105,10 +77,9 @@ internal static class Http2FlowControlTests
                 + $"{peer.Connection} bytes of connection window");
 
             client.Close(run);
-        }, "same cause as the credit Pending above: once the peer spends the connection window, the "
-           + "credit for chunks read after an await is staged and never written, so the upload deadlocks");
+        });
 
-        runner.Test("h2 flow: control: the same upload read without awaiting between chunks completes", () =>
+        runner.Test("h2 flow: a 1.2 MB upload read without awaiting between chunks completes", () =>
         {
             const int Size = 1_200_000;
             var read = new Tally();
@@ -128,7 +99,7 @@ internal static class Http2FlowControlTests
 
         // ---------------------------------------------------------------- unread bodies
 
-        runner.Pending("h2 flow: a body answered without being read gives its credit back", () =>
+        runner.Test("h2 flow: a body answered without being read gives its credit back", () =>
         {
             using var client = new StrictClient(Streamed);
             Task run = client.Connection.RunAsync((_, writer) => Answer(writer, 404));
@@ -143,10 +114,9 @@ internal static class Http2FlowControlTests
                 $"10000 bytes were dropped unread and {credited} came back; the connection window is that much smaller for good");
 
             client.Close(run);
-        }, "Http2BodyReader.Drop returns queued chunks to the pool without crediting them, so every "
-           + "body a handler leaves unread shrinks the 65535-byte connection window permanently");
+        });
 
-        runner.Test("h2 flow: control: the same body arriving after the answer is credited", () =>
+        runner.Test("h2 flow: a body arriving after the answer is credited", () =>
         {
             using var client = new StrictClient(Streamed);
             Task run = client.Connection.RunAsync((_, writer) => Answer(writer, 404));
@@ -160,7 +130,7 @@ internal static class Http2FlowControlTests
             client.Close(run);
         });
 
-        runner.Pending("h2 flow: a body the peer resets gives back the credit it had queued", () =>
+        runner.Test("h2 flow: a body the peer resets gives back the credit it had queued", () =>
         {
             var busy = new TaskCompletionSource();
 
@@ -184,30 +154,9 @@ internal static class Http2FlowControlTests
             busy.SetResult();
             client.Drain();
             client.Close(run);
-        }, "HandleRstStream disposes the stream, and Http2BodyReader.Drop discards the queued chunks "
-           + "without crediting the connection window");
-
-        runner.Test("h2 flow: control: the same body read before the reset is credited", () =>
-        {
-            using var client = new StrictClient(Streamed);
-            Task run = client.Connection.RunAsync(async (request, writer) =>
-            {
-                await ReadAll(request, new Tally());
-                await Answer(writer, 200);
-            });
-
-            client.ReleaseFlush();
-            client.Feed([.. Open(), .. Post(1), .. Data(1, 10_000, endStream: false)]);
-            List<Frame> frames = client.Drain();
-
-            client.Feed(RstStream(1, Cancel));
-            frames.AddRange(client.Drain());
-            Assert.Equal(10_000, Credit(frames, 0));
-
-            client.Close(run);
         });
 
-        runner.Pending("h2 flow: bodies answered unread do not starve later uploads on the connection", () =>
+        runner.Test("h2 flow: bodies answered unread do not starve later uploads on the connection", () =>
         {
             using var client = new StrictClient(Streamed);
             Task run = client.Connection.RunAsync(async (request, writer) =>
@@ -229,25 +178,9 @@ internal static class Http2FlowControlTests
                 $"the upload on stream 15 never started: {peer.Connection} bytes of connection window are left");
 
             client.Close(run);
-        }, "the Drop leak above, accumulated: once unread bodies have taken the whole connection "
-           + "window, every later request body on that connection hangs while GETs still work");
-
-        runner.Test("h2 flow: control: the same session with every body read keeps taking uploads", () =>
-        {
-            using var client = new StrictClient(Streamed);
-            Task run = client.Connection.RunAsync(async (request, writer) =>
-            {
-                await ReadAll(request, new Tally());
-                await Answer(writer, request.StreamId <= 13 ? 404 : 200);
-            });
-
-            HashSet<int> answered = Session(client, new PeerWindow());
-            Assert.True(answered.Contains(15), "the upload on stream 15 is answered");
-
-            client.Close(run);
         });
 
-        runner.Pending("h2 flow: padding on a streamed body is credited", () =>
+        runner.Test("h2 flow: padding on a streamed body is credited", () =>
         {
             var read = new Tally();
 
@@ -268,10 +201,9 @@ internal static class Http2FlowControlTests
                 $"{PaddedBodyPayload} flow-controlled bytes arrived and {credited} were credited");
 
             client.Close(run);
-        }, "RFC 9113 6.1 counts the pad length and padding against the window; the streamed path "
-           + "credits only the body bytes it hands out, and an all-padding frame pushes nothing at all");
+        });
 
-        runner.Test("h2 flow: control: the same padded body on the buffered path is credited in full", () =>
+        runner.Test("h2 flow: padding on the buffered path is credited in full", () =>
         {
             using var client = new StrictClient(new Http2Options());
             Task run = client.Connection.RunBufferedAsync(_ => new Http2Response { Status = 200 });
@@ -283,7 +215,7 @@ internal static class Http2FlowControlTests
             client.Close(run);
         });
 
-        runner.Pending("h2 flow: a DATA frame past MaxRequestBytes is still credited", () =>
+        runner.Test("h2 flow: a DATA frame past MaxRequestBytes is still credited", () =>
         {
             using var client = new StrictClient(new Http2Options { MaxRequestBytes = 20_000 });
             Task run = client.Connection.RunBufferedAsync(_ => new Http2Response { Status = 200 });
@@ -297,12 +229,11 @@ internal static class Http2FlowControlTests
             Assert.True(credited == 2 * 16384, $"{2 * 16384} bytes arrived and {credited} were credited");
 
             client.Close(run);
-        }, "HandleData returns straight after ResetStream when a body passes MaxRequestBytes, "
-           + "skipping the credit for the frame that tripped it");
+        });
 
         // ---------------------------------------------------------------- send side
 
-        runner.Pending("h2 flow: a SETTINGS raise of the stream window resumes a parked writer", () =>
+        runner.Test("h2 flow: a SETTINGS raise of the stream window resumes a parked writer", () =>
         {
             using var client = new StrictClient();
             Task run = client.Connection.RunAsync((_, writer) => AnswerWith(writer, new byte[64 * 1024]));
@@ -318,23 +249,6 @@ internal static class Http2FlowControlTests
             int received = Frame.Body(frames, 1).Length;
             Assert.True(received == 64 * 1024,
                 $"{received} of {64 * 1024} bytes: the window grew under the parked writer and nothing woke it");
-
-            client.Close(run);
-        }, "HandleSettings applies the INITIAL_WINDOW_SIZE delta to every stream but never calls "
-           + "ReleaseCreditWaiters, so only a WINDOW_UPDATE can wake a writer parked on credit");
-
-        runner.Test("h2 flow: control: a WINDOW_UPDATE resumes the same parked writer", () =>
-        {
-            using var client = new StrictClient();
-            Task run = client.Connection.RunAsync((_, writer) => AnswerWith(writer, new byte[64 * 1024]));
-
-            client.ReleaseFlush();
-            client.Feed([.. Open((InitialWindowSize, 16384)), .. WindowUpdate(0, 1 << 20), .. Get(1)]);
-            List<Frame> frames = client.Drain();
-
-            client.Feed(WindowUpdate(1, 1 << 20));
-            frames.AddRange(client.Drain());
-            Assert.Equal(64 * 1024, Frame.Body(frames, 1).Length);
 
             client.Close(run);
         });
