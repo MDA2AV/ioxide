@@ -64,6 +64,142 @@ internal static class Http2StreamedRequestTests
             peer.Close(run);
         });
 
+        runner.Test("h2 streamed request: a read outside the pass still sends its credit", () =>
+        {
+            var gate = new TaskCompletionSource();
+            int read = 0;
+
+            using var peer = new Peer(new Http2Options { StreamRequestBodies = true });
+            Task run = peer.Connection.RunBufferedAsync(async request =>
+            {
+                await gate.Task;
+
+                while (true)
+                {
+                    ReadOnlyMemory<byte> chunk = await request.BodyReader!.ReadAsync();
+                    if (chunk.IsEmpty)
+                    {
+                        break;
+                    }
+                    read += chunk.Length;
+                }
+
+                return Http2Response.Text("done");
+            });
+
+            peer.OpenRequest(streamId: 1, endStream: false);
+            peer.SendData(streamId: 1, bytes: 400, endStream: false);
+            peer.SendData(streamId: 1, bytes: 600, endStream: false);   // more to come
+
+            // The handler resumes on its own - a disk write, a database, a timer - with no inbound
+            // frame to start a pass. The peer is out of window by now and sends nothing until it is
+            // credited, so a WINDOW_UPDATE that waits for the next pass flush waits forever. This is
+            // the upload that stalled after its first connection window.
+            gate.SetResult();
+
+            Assert.Equal(1000, read);
+            Assert.Equal(1000, peer.CreditFor(streamId: 1));
+            Assert.Equal(1000, peer.CreditFor(streamId: 0));
+
+            peer.SendData(streamId: 1, bytes: 1, endStream: true);
+            peer.Close(run);
+        });
+
+        runner.Test("h2 streamed request: a body the handler never reads is credited to the connection", () =>
+        {
+            using var peer = new Peer(new Http2Options { StreamRequestBodies = true });
+            var gate = new TaskCompletionSource();
+
+            // Answers without touching the body - an auth failure, a 404, a validation error.
+            Task run = peer.Connection.RunBufferedAsync(async _ =>
+            {
+                await gate.Task;
+                return Http2Response.Text("no");
+            });
+
+            peer.OpenRequest(streamId: 1, endStream: false);
+            peer.SendData(streamId: 1, bytes: 400, endStream: false);
+            peer.SendData(streamId: 1, bytes: 600, endStream: true);
+
+            gate.SetResult();
+
+            // Those bytes still count against the window every other stream shares. Without this a
+            // long-lived browser connection loses a little per such request until no body on it
+            // can move - every POST from then on hangs.
+            Assert.Equal(1000, peer.CreditFor(streamId: 0));
+
+            peer.Close(run);
+        });
+
+        runner.Test("h2 streamed request: a body larger than the connection window arrives whole", () =>
+        {
+            const int Total = 1_200_000;
+            int read = 0;
+            var resume = new TaskCompletionSource();
+
+            using var peer = new Peer(new Http2Options { StreamRequestBodies = true });
+            Task run = peer.Connection.RunBufferedAsync(async request =>
+            {
+                while (true)
+                {
+                    ReadOnlyMemory<byte> chunk = await request.BodyReader!.ReadAsync();
+                    if (chunk.IsEmpty)
+                    {
+                        break;
+                    }
+                    read += chunk.Length;
+
+                    // An upload handler writes each chunk somewhere, and comes back when that is
+                    // done - outside whatever pass delivered the chunk.
+                    resume = new TaskCompletionSource();
+                    await resume.Task;
+                }
+
+                return Http2Response.Text("done");
+            });
+
+            peer.OpenRequest(streamId: 1, endStream: false);
+
+            // A well-behaved client: never more than the windows allow, and when both are spent it
+            // waits for credit. The connection window starts at 65535 whatever SETTINGS say.
+            int sent = 0;
+            int connectionWindow = 65535;
+            int streamWindow = new Http2Options().InitialWindowSize;
+            int creditSeen = 0;
+            DateTime deadline = DateTime.UtcNow.AddSeconds(5);
+
+            while (sent < Total && DateTime.UtcNow < deadline)
+            {
+                int credit = peer.CreditFor(streamId: 0);
+                connectionWindow += credit - creditSeen;
+                creditSeen = credit;
+                streamWindow = new Http2Options().InitialWindowSize + peer.CreditFor(streamId: 1) - sent;
+
+                int chunk = Math.Min(16384, Math.Min(Total - sent, Math.Min(connectionWindow, streamWindow)));
+                if (chunk <= 0)
+                {
+                    resume.TrySetResult();   // the "disk write" finishes; still single-threaded
+                    Thread.Sleep(1);
+                    continue;
+                }
+
+                peer.SendData(streamId: 1, bytes: chunk, endStream: sent + chunk == Total);
+                sent += chunk;
+                connectionWindow -= chunk;
+            }
+
+            Assert.Equal(Total, sent);
+
+            while (read < Total && DateTime.UtcNow < deadline)
+            {
+                resume.TrySetResult();
+                Thread.Sleep(1);
+            }
+            Assert.Equal(Total, read);
+
+            peer.Close(run);
+        });
+
         runner.Test("h2 streamed request: a request with no body reads empty at once", () =>
         {
             bool sawEmpty = false;

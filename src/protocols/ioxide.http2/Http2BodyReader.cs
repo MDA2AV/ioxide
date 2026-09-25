@@ -133,10 +133,18 @@ public sealed class Http2BodyReader : IValueTaskSource<ReadOnlyMemory<byte>>
     {
         ReleaseHandedOut();
 
+        int unread = 0;
         while (_chunks.TryDequeue(out (byte[] Buffer, int Length) chunk))
         {
+            unread += chunk.Length;
             ArrayPool<byte>.Shared.Return(chunk.Buffer);
         }
+
+        // Unread bytes still count against the CONNECTION window, which every other stream shares.
+        // Dropping them without credit shrinks it for good - a handler that answers without reading
+        // its body, or a fetch the browser cancels, each takes a bite - until no request body on
+        // this connection can move at all. The stream is closing, so only the connection is owed.
+        _owner.CreditBody(0, unread);
 
         // Drained first, so the wake below reports end-of-body rather than handing out a chunk
         // whose stream is already gone. Woken directly rather than through the connection's

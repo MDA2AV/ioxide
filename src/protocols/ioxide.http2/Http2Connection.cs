@@ -320,7 +320,10 @@ public sealed partial class Http2Connection : IDisposable
         pending.Dispose();
     }
 
-    /// <summary>Return a consumed chunk's credit to the peer, on both windows it was charged to.</summary>
+    /// <summary>
+    /// Return a consumed chunk's credit to the peer, on both windows it was charged to - or on the
+    /// connection window alone when <paramref name="streamId"/> is 0, for a stream that is gone.
+    /// </summary>
     internal void CreditBody(int streamId, int length)
     {
         if (length <= 0 || IsBroken)
@@ -329,7 +332,32 @@ public sealed partial class Http2Connection : IDisposable
         }
 
         WriteWindowUpdate(0, length);
-        WriteWindowUpdate(streamId, length);
+        if (streamId != 0)
+        {
+            WriteWindowUpdate(streamId, length);
+        }
+
+        // Inside a pass the pass flush carries this. Outside one - a handler that read after its
+        // own await, a disk write or a database - nothing else is coming: the peer is out of window
+        // and sends nothing until it sees this credit, so staging it and waiting for the next frame
+        // stalls the upload for good. That was the h2 upload hanging after its first 64 KiB.
+        if (!_passFlushPending)
+        {
+            _ = FlushCreditAsync();
+        }
+    }
+
+    // Detached, because a read cannot wait on a write. A faulted flush has already marked the
+    // connection dead, which the read loop picks up; there is nobody here to tell.
+    private async Task FlushCreditAsync()
+    {
+        try
+        {
+            await FlushAsync();
+        }
+        catch
+        {
+        }
     }
 
     /// <summary>A reader has something for a parked ReadAsync; wake it once the parser is done.</summary>
