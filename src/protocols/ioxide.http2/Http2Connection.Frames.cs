@@ -418,6 +418,13 @@ public sealed partial class Http2Connection
                     {
                         stream.SendWindow += delta;
                     }
+
+                    // A larger window is credit like any WINDOW_UPDATE, and a writer parked on its
+                    // stream window has no other wake coming.
+                    if (delta > 0)
+                    {
+                        ReleaseCreditWaiters(0);
+                    }
                     break;
 
                 case Http2Setting.MaxFrameSize:
