@@ -271,9 +271,17 @@ public sealed unsafe partial class Reactor
         }
     }
 
-    // Recv-side teardown, shared by both modes.
+    // Recv-side teardown, shared by both modes. With a send in the kernel the reactor keeps its ref
+    // and the table slot, so the slab cannot be recycled under it; FinishSend lets go (#221).
     private void CloseFromRecv(TcpConnection conn, int fd)
     {
+        if (conn.FlushSubmitted)
+        {
+            conn.CloseAfterSend = true;
+            conn.MarkClosed();
+            return;
+        }
+
         _connections[fd] = null;
         conn.MarkClosed();
         conn.DecRef();
@@ -283,10 +291,8 @@ public sealed unsafe partial class Reactor
     // (F_MORE was set), so it is also cancelled by exact user_data.
     private void CloseFromRecvOverflow(TcpConnection conn, int fd, ushort gen)
     {
-        _connections[fd] = null;
         SubmitCancel(Tag(KindTcpRecv, gen, fd));
-        conn.MarkClosed();
-        conn.DecRef();
+        CloseFromRecv(conn, fd);
     }
 
     // Re-arm every recv parked on -ENOBUFS (#93). Runs once per loop iteration, but only when a

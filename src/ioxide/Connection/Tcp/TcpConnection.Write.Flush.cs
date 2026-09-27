@@ -15,8 +15,12 @@ public sealed unsafe partial class TcpConnection : IValueTaskSource
     {
         RunContinuationsAsynchronously = false,
     };
+    // 0 idle, 1 armed (queued for the reactor), 2 with the kernel - which may read the slab until the
+    // send's final completion, so only that completion may end a flush in state 2 (#221, #244).
     private int _flushArmed;
     private int _flushInProgress;
+
+    internal bool FlushSubmitted => Volatile.Read(ref _flushArmed) == 2;
 
     /// <summary>
     /// The reactor's cached clock at the moment a flush was handed over, read by the sweep against
@@ -40,7 +44,10 @@ public sealed unsafe partial class TcpConnection : IValueTaskSource
     {
         if (Volatile.Read(ref _closed) == 1)
         {
-            DropStaged();
+            if (!FlushSubmitted)
+            {
+                DropStaged();
+            }
 
             return default;
         }
@@ -82,7 +89,10 @@ public sealed unsafe partial class TcpConnection : IValueTaskSource
     {
         if (Volatile.Read(ref _closed) == 1)
         {
-            DropStaged();
+            if (!FlushSubmitted)
+            {
+                DropStaged();
+            }
 
             return default;
         }
@@ -129,7 +139,7 @@ public sealed unsafe partial class TcpConnection : IValueTaskSource
             return default;
         }
 
-        if (Interlocked.Exchange(ref _flushArmed, 1) == 1)
+        if (Interlocked.CompareExchange(ref _flushArmed, 1, 0) != 0)
         {
             throw new InvalidOperationException("FlushAsync already armed.");
         }
@@ -153,13 +163,25 @@ public sealed unsafe partial class TcpConnection : IValueTaskSource
 
         // Race recovery: if close raced in after the entry guard, self-complete so we
         // don't hang on a send the reactor will never make.
-        if (Volatile.Read(ref _closed) == 1 && Interlocked.Exchange(ref _flushArmed, 0) == 1)
+        if (Volatile.Read(ref _closed) == 1)
+        {
+            ReleaseParkedFlush();
+        }
+
+        return new ValueTask(this, (short)gen);
+    }
+
+    // The reactor takes a queued flush to the kernel. Fails if it was released first.
+    internal bool TryClaimFlush() => Interlocked.CompareExchange(ref _flushArmed, 2, 1) == 1;
+
+    // Frees a caller parked on a flush the kernel does not have. One it has completes with the send.
+    private void ReleaseParkedFlush()
+    {
+        if (Interlocked.CompareExchange(ref _flushArmed, 0, 1) == 1)
         {
             Volatile.Write(ref _flushInProgress, 0);
             _flushSignal.SetResult(true);
         }
-
-        return new ValueTask(this, (short)gen);
     }
 
     // Called by the reactor's send-completion path.
@@ -176,12 +198,9 @@ public sealed unsafe partial class TcpConnection : IValueTaskSource
         ZcNotifPending = 0;
         Volatile.Write(ref _flushInProgress, 0);
 
-        // Guard against a double completion. During teardown MarkClosed() may have already disarmed
-        // and completed this flush (e.g. a close response whose SEND CQE lands after the close),
-        // which Resets/invalidates the value-task source. Only the call that actually disarms the
-        // flush signals. Without this, the late CQE's SetResult throws InvalidOperationException on
-        // the reactor thread and crashes the process.
-        if (Interlocked.Exchange(ref _flushArmed, 0) == 1)
+        // Only the call that actually disarms the flush signals: a second SetResult throws on the
+        // reactor thread and crashes the process.
+        if (Interlocked.Exchange(ref _flushArmed, 0) != 0)
         {
             _flushSignal.SetResult(true);
         }

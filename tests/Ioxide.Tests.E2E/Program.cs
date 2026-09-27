@@ -16,6 +16,7 @@ internal static class Program
         AffinityTests.Register(runner);
         HardeningTests.Register(runner);
         RecvBufferReclaimTests.Register(runner);
+        SendInFlightRecycleTests.Register(runner);
         PipeReaderContractTests.Register(runner);
         TcpTimeoutTests.Register(runner);
         ReactorSetupTeardownTests.Register(runner);
