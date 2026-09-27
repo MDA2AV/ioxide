@@ -34,6 +34,7 @@ public sealed class TlsDecryptingPipeReader : PipeReader, IAsyncDisposable
     private bool _callerWaiting;   // the caller has a read on the buffer that nothing has completed yet
     private bool _ended;           // the buffer is complete: close_notify, a closed connection or a fault
     private bool _completed;       // the caller is done with this reader
+    private bool _cancelRequested; // CancelPendingRead: the next read returns canceled
 
     public TlsDecryptingPipeReader(TcpConnection connection, TlsSession session)
     {
@@ -64,9 +65,17 @@ public sealed class TlsDecryptingPipeReader : PipeReader, IAsyncDisposable
         }
     }
 
+    // The token is ignored, as on TcpConnectionPipeReader: it would wake the caller on the token's
+    // thread, where disposing frees the session under a decrypt still running on the reactor.
     public override ValueTask<ReadResult> ReadAsync(CancellationToken cancellationToken = default)
     {
-        ValueTask<ReadResult> read = _plain.Reader.ReadAsync(cancellationToken);
+        if (_cancelRequested)
+        {
+            _cancelRequested = false;
+            _plain.Reader.CancelPendingRead();   // nothing is waiting, so the read below returns canceled
+        }
+
+        ValueTask<ReadResult> read = _plain.Reader.ReadAsync();
 
         // Everything decrypted so far has been examined: decrypt more. The read completes inside
         // the flush that delivers, which may already have happened by the time this returns.
@@ -90,13 +99,9 @@ public sealed class TlsDecryptingPipeReader : PipeReader, IAsyncDisposable
     public override void AdvanceTo(SequencePosition consumed, SequencePosition examined)
         => _plain.Reader.AdvanceTo(consumed, examined);
 
-    // Completes a waiting read now, or the next one, with IsCanceled. A connection read it left
-    // parked stays armed, and whatever that brings is kept for the next read.
-    public override void CancelPendingRead()
-    {
-        _callerWaiting = false;
-        _plain.Reader.CancelPendingRead();
-    }
+    // Cancels the next read, never one already waiting, as on TcpConnectionPipeReader - so only the
+    // reactor ever wakes the caller.
+    public override void CancelPendingRead() => _cancelRequested = true;
 
     public override void Complete(Exception? exception = null)
     {

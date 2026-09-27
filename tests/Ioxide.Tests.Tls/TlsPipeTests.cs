@@ -1,5 +1,7 @@
 using System.Buffers;
 using System.IO.Pipelines;
+using System.Net.Security;
+using System.Net.Sockets;
 using System.Text;
 using ioxide;
 using ioxide.tls;
@@ -147,6 +149,36 @@ internal static class TlsPipeTests
                 "ioxide moved the handler off its reactor: " + string.Join("; ", affinity.Drift));
         });
 
+        foreach (bool byToken in new[] { true, false })
+        {
+            bool token = byToken;
+            string how = token ? "its token" : "CancelPendingRead from another thread";
+            runner.Test($"tls pipe: a read cancelled by {how} does not wake the handler off its reactor", () =>
+            {
+                // Waking it on the canceller's thread let a dispose there free the session under a
+                // decrypt still running on the reactor. Like TcpConnectionPipeReader, the read waits.
+                (string certPath, string keyPath) = TestCert.Ensure();
+                var options = new TlsOptions { CertificatePath = certPath, KeyPath = keyPath };
+
+                var affinity = new ReactorAffinity();
+                var outcome = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
+                int port = TestServer.Start(CancelledReadHandler(token, affinity, outcome), r => TlsService.Start(r, options));
+
+                using var client = new TcpClient();
+                client.Connect("127.0.0.1", port);
+                using var ssl = new SslStream(client.GetStream(), leaveInnerStreamOpen: false, (_, _, _, _) => true);
+                ssl.AuthenticateAsClient(new SslClientAuthenticationOptions { TargetHost = "localhost" });
+
+                Thread.Sleep(600);   // past the cancel
+                ssl.Write("hello"u8);
+
+                Assert.True(outcome.Task.Wait(TimeSpan.FromSeconds(10)), "the handler's read never completed");
+                Assert.Equal("hello", outcome.Task.Result);
+                Assert.True(affinity.Drift.Count == 0,
+                    "the cancel woke the handler off its reactor: " + string.Join("; ", affinity.Drift));
+            });
+        }
+
         runner.Test("tls pipe: garbage after the handshake faults the reader, not a clean EOF", () =>
         {
             // The property both hand-rolled pumps get wrong. A TLS protocol error must reach the
@@ -201,6 +233,60 @@ internal static class TlsPipeTests
             {
                 // The client hung up, or the handshake failed - the harness probes the port with a
                 // raw TCP connection, so this fires once per run and is not a test failure.
+            }
+            finally
+            {
+                if (pipe is not null)
+                {
+                    await pipe.DisposeAsync();
+                }
+                else
+                {
+                    session?.Dispose();
+                }
+                connection.DecRef();
+            }
+        };
+
+    // Parks a read, cancels it 200 ms later from another thread, and reports what the read returned.
+    private static Func<Reactor, TcpConnection, Task> CancelledReadHandler(
+        bool byToken, ReactorAffinity affinity, TaskCompletionSource<string> outcome)
+        => async (reactor, connection) =>
+        {
+            TlsSession? session = null;
+            TlsConnectionDualPipe? pipe = null;
+            try
+            {
+                session = await reactor.GetService<TlsService>()!.AcceptAsync(connection);
+                pipe = new TlsConnectionDualPipe(connection, session);
+                PipeReader input = pipe.Input;
+
+                using var cts = new CancellationTokenSource();
+                if (byToken)
+                {
+                    cts.CancelAfter(200);   // fires on a timer thread
+                }
+                else
+                {
+                    _ = Task.Delay(200).ContinueWith(_ => input.CancelPendingRead(), TaskScheduler.Default);
+                }
+
+                try
+                {
+                    ReadResult read = await input.ReadAsync(cts.Token);
+                    affinity.Check(reactor, "after the cancelled read");
+                    outcome.TrySetResult(read.IsCanceled ? "canceled" : Encoding.ASCII.GetString(read.Buffer.ToArray()));
+                    input.AdvanceTo(read.Buffer.End);
+                }
+                catch (OperationCanceledException)
+                {
+                    affinity.Check(reactor, "after the cancelled read");
+                    outcome.TrySetResult("canceled");
+                }
+            }
+            catch
+            {
+                // Harness port probes fail the handshake; not this test's concern.
             }
             finally
             {
