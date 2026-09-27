@@ -96,7 +96,7 @@ internal static unsafe class Ngtcp2
     [DllImport(Lib)] internal static extern uint iq_abi();
 
     /// <summary>What this managed binding was written against. Bump both together.</summary>
-    internal const uint Abi = 2;
+    internal const uint Abi = 3;
 
     /// <summary>
     /// Refuse to run against a native library this binding was not built for.
