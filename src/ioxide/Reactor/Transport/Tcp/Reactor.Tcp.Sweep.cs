@@ -76,9 +76,9 @@ public sealed unsafe partial class Reactor
     /// one it is a SEND the peer's closed window is holding, which otherwise never completes
     /// either. Shutting the socket down ends both.
     ///
-    /// MarkClosed is what wakes the handler NOW - parked on a read, or on the very flush being
-    /// timed out - with the closed state its loop already knows how to handle, rather than one
-    /// io_uring round trip later.
+    /// MarkClosed is what wakes a handler parked on a read NOW, with the closed state its loop
+    /// already knows how to handle, rather than one io_uring round trip later. One parked on the
+    /// flush being timed out wakes when shutdown() fails that send: the slab is the kernel's until then.
     ///
     /// What this deliberately does NOT do is clear the table slot, cancel, or DecRef. The teardown
     /// those completions already run (CloseFromRecv, and the send path's res &lt;= 0 branch) is the

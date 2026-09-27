@@ -89,6 +89,9 @@ public sealed record TcpOptions
     /// idle sweep never fires while that connection's send is wedged. Duplex protocols - a
     /// websocket written from a background task is the reported case - need this clock and are not
     /// covered by the other one.
+    ///
+    /// It also bounds a flush still draining when the peer closes: that connection is held, fd and
+    /// slab, until its send completes, exactly like a live one - so with 0 nothing bounds that either.
     /// </remarks>
     public int SendTimeoutMs { get; init; } = 60_000;
 }
