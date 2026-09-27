@@ -330,6 +330,41 @@ public sealed partial class Http2Connection : IDisposable
 
         WriteWindowUpdate(0, length);
         WriteWindowUpdate(streamId, length);
+        FlushCredit();
+    }
+
+    /// <summary>Return the connection's share of body bytes that will never be read.</summary>
+    internal void CreditConnection(int length)
+    {
+        if (length <= 0 || IsBroken)
+        {
+            return;
+        }
+
+        WriteWindowUpdate(0, length);
+        FlushCredit();
+    }
+
+    // Outside a pass nothing else writes this credit, and a peer out of window sends nothing that
+    // would start one. A flush already running carries whatever was queued behind it.
+    private void FlushCredit()
+    {
+        if (!_passFlushPending && !_flushing)
+        {
+            _ = FlushDetachedAsync();
+        }
+    }
+
+    private async Task FlushDetachedAsync()
+    {
+        try
+        {
+            await FlushAsync();
+        }
+        catch
+        {
+            // FlushAsync has already marked the connection broken; the read loop sees it.
+        }
     }
 
     /// <summary>A reader has something for a parked ReadAsync; wake it once the parser is done.</summary>

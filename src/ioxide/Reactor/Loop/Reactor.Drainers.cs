@@ -191,6 +191,11 @@ public sealed unsafe partial class Reactor
     // response, or the plain contiguous SEND for everything else (incl. the fast path and Grow mode).
     private void SubmitFlush(TcpConnection conn, int fd, ushort gen)
     {
+        if (!conn.TryClaimFlush())
+        {
+            return;   // released before it reached the kernel
+        }
+
         if (conn.FlushVectored)
         {
             SubmitSendMsg(conn, fd, gen);

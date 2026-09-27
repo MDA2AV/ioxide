@@ -24,19 +24,21 @@ public sealed unsafe partial class Reactor
         {
             if (--conn.ZcNotifPending == 0 && conn.WriteHead >= conn.WriteInFlight)
             {
-                conn.CompleteFlush();
+                FinishSend(conn, fd);
             }
             return;
         }
 
         if (res <= 0)
         {
-            _connections[fd] = null;
+            // Failed: nothing more goes out. A zero-copy send still posts its notif, so the
+            // teardown runs from FinishSend once the kernel has let go of the slab.
             SubmitCancel(Tag(KindTcpRecv, gen, fd));   // the multishot recv is still armed
+            conn.CloseAfterSend = true;
             conn.SuppressFin();
             conn.MarkClosed();
-            conn.ReleaseReactorRef();
-            return;
+            conn.WriteInFlight = conn.WriteHead;
+            res = 0;
         }
         conn.WriteHead += res;
 
@@ -65,7 +67,19 @@ public sealed unsafe partial class Reactor
         // Data fully sent: a ZC send still waits for its outstanding notif(s).
         if (conn.ZcNotifPending == 0)
         {
-            conn.CompleteFlush();
+            FinishSend(conn, fd);
+        }
+    }
+
+    // The kernel is done with the slab: complete the flush, then any teardown that waited for it.
+    private void FinishSend(TcpConnection conn, int fd)
+    {
+        conn.CompleteFlush();
+
+        if (conn.CloseAfterSend)
+        {
+            _connections[fd] = null;
+            conn.ReleaseReactorRef();
         }
     }
 

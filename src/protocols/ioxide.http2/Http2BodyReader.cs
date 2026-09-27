@@ -133,10 +133,15 @@ public sealed class Http2BodyReader : IValueTaskSource<ReadOnlyMemory<byte>>
     {
         ReleaseHandedOut();
 
+        int unread = 0;
         while (_chunks.TryDequeue(out (byte[] Buffer, int Length) chunk))
         {
+            unread += chunk.Length;
             ArrayPool<byte>.Shared.Return(chunk.Buffer);
         }
+
+        // Every stream shares the connection window, so bytes dropped unread still owe it credit.
+        _owner.CreditConnection(unread);
 
         // Drained first, so the wake below reports end-of-body rather than handing out a chunk
         // whose stream is already gone. Woken directly rather than through the connection's

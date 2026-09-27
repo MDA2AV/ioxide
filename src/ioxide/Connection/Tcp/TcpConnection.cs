@@ -93,6 +93,9 @@ public sealed unsafe partial class TcpConnection
     // runs only at 0, so a connection is never recycled under a live handler.
     private int _refs;
 
+    // Reactor thread only: torn down while the kernel had a send; the reactor lets go when it completes.
+    internal bool CloseAfterSend;
+
     public TcpConnection(Reactor reactor, int fd, int writeSlabSize = 1024 * 16, int recvQueueEntries = 64, WriteOverflowStrategy overflow = WriteOverflowStrategy.Grow)
     {
         _reactor = reactor;
@@ -120,11 +123,7 @@ public sealed unsafe partial class TcpConnection
             Volatile.Write(ref _pending, 1);
         }
 
-        if (Interlocked.Exchange(ref _flushArmed, 0) == 1)
-        {
-            Volatile.Write(ref _flushInProgress, 0);
-            _flushSignal.SetResult(true);
-        }
+        ReleaseParkedFlush();
     }
 
     internal void InitRefs() => Volatile.Write(ref _refs, 2);
@@ -237,6 +236,7 @@ public sealed unsafe partial class TcpConnection
         Volatile.Write(ref _finSentMs, 0);
         Volatile.Write(ref _finSent, 0);
         SweepClosed = false;
+        CloseAfterSend = false;
 
         WriteHead = 0;
         WriteTail = 0;
