@@ -389,6 +389,8 @@ public sealed unsafe partial class Reactor
         {
             if (_connections[fd] != null)
             {
+                // A handler letting go later must not shut down whatever socket gets the number next.
+                _connections[fd]!.SuppressFin();
                 close(fd);
                 _connections[fd] = null;
             }
