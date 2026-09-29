@@ -25,10 +25,12 @@ internal sealed class HopDuplexPipe : IDuplexPipe, IAsyncDisposable
     private Task _recvPump = Task.CompletedTask;
     private Task _sendPump = Task.CompletedTask;
     private int _started;
+    private int _disposing;   // from here on the connection may be recycled, so Abort leaves it alone
 
     [System.Runtime.InteropServices.DllImport("libc", EntryPoint = "shutdown")]
     private static extern int Shutdown(int sockfd, int how);
-    private const int ShutWr = 1;   // SHUT_WR
+    private const int ShutWr = 1;     // SHUT_WR
+    private const int ShutRdWr = 2;   // SHUT_RDWR
 
     // Pipe backpressure thresholds (bytes). Inbound (recv -> Kestrel's parser) is given a megabyte of
     // slack so a fast peer is not throttled mid-request; outbound (Kestrel's response -> the send
@@ -221,8 +223,22 @@ internal sealed class HopDuplexPipe : IDuplexPipe, IAsyncDisposable
         }
     }
 
+    // Kestrel's Abort. Its socket transport shuts the socket down both ways, so the read Kestrel is parked on
+    // completes and it disposes the connection; nothing else would, with the read timeout off for Kestrel.
+    // On the reactor, which owns the fd, and only while this pipe still owns the connection.
+    public void Abort() => _reactor.ScheduleOnReactor(static s =>
+    {
+        var hop = (HopDuplexPipe)s!;
+        if (Volatile.Read(ref hop._disposing) == 0 && !hop._conn.IsClosed)
+        {
+            Shutdown(hop._conn.ClientFd, ShutRdWr);
+        }
+    }, this);
+
     public async ValueTask DisposeAsync()
     {
+        Volatile.Write(ref _disposing, 1);
+
         // Quiesce the send side BEFORE closing. Wake the send pump if it's parked on the output reader and
         // await it, so any in-flight SEND completes normally and the full response is flushed. Draining here
         // - rather than concurrently with MarkClosed - is what makes the response reliably reach the client
