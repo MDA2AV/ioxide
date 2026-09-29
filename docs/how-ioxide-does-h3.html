@@ -341,7 +341,7 @@ var config = new ServerConfig
     {
         Port = 8443,                   // UDP port, bound automatically on every reactor
         LocalCidLength = 8,            // must match the engine's cidLength
-        IdleTimeoutMs = 60_000,        // close a connection idle this long
+        ReadTimeoutMs = 60_000,        // close a connection whose peer is silent this long
         ConnectionFactory = engine.CreateFactory(),
     },
 };
@@ -536,9 +536,10 @@ reactor.QuicHandle = async (r, conn) =>
       pass: one cheap comparison against the earliest deadline across live connections, and a full
       sweep only when it's due. Under load the loop spins on completions, so timers fire at
       completion-batch granularity (~RTT). Dispatch re-arms the minimum after every datagram.</li>
-      <li><b>Idle eviction</b> - stays on the 250&nbsp;ms ticker, which doubles as the wake floor
+      <li><b>Read timeout</b> - stays on the 250&nbsp;ms ticker, which doubles as the wake floor
       when the reactor is otherwise asleep. Abandoned connections (a killed benchmark client) are
-      reaped by ngtcp2's idle timeout and unrouted through the same teardown funnel.</li>
+      reaped and unrouted through the same teardown funnel; one still owed a response is kept
+      alive with PINGs.</li>
     </ul>
 
     <h2>Rules learned the hard way</h2>

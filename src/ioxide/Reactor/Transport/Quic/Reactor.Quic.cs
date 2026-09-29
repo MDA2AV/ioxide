@@ -83,7 +83,7 @@ public sealed unsafe partial class Reactor
     /// Route one datagram by DCID. The known-connection hot path runs two independent clocks:
     ///
     /// <c>LastSeenMs</c> is the coarse one - a "peer said something" stamp the 250 ms sweep
-    /// compares against IdleTimeoutMs to garbage-collect vanished clients. Nothing else reads it.
+    /// compares against ReadTimeoutMs to garbage-collect vanished clients. Nothing else reads it.
     ///
     /// <c>QuicArmTimer</c> is the fine one, and it must run AFTER <c>OnDatagram</c>: that call
     /// (iq_conn_read) just rewrote the engine's deadlines - arriving ACKs cancelled retransmit
@@ -274,17 +274,17 @@ public sealed unsafe partial class Reactor
     private void QuicSweep()
     {
         long now = Environment.TickCount64;
-        int idleMs = QuicIdleTimeoutMs;
+        int readMs = QuicReadTimeoutMs;
 
         _quicSweepScratch.Clear();
         _quicSweepScratch.AddRange(_quicConnSet);
 
         foreach (QuicConnection conn in _quicSweepScratch)
         {
-            if (idleMs > 0 && now - conn.LastSeenMs > idleMs)
+            if (readMs > 0 && now - conn.LastSeenMs > readMs)
             {
                 QuicRemoveConnection(conn);
-                conn.OnEvicted(QuicEvictReason.IdleTimeout);
+                conn.OnEvicted(QuicEvictReason.ReadTimeout);
                 continue;
             }
 

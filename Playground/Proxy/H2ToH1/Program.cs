@@ -84,6 +84,8 @@ var config = new ServerConfig
         WriteOverflow    = WriteOverflowStrategy.Grow,         // Grow = realloc one slab; Segmented = chain + vectored SENDMSG
         ZeroCopySend     = false,                              // SEND_ZC: kernel copies less, wins on large writes
         RecvQueueEntries = 64,                                 // per-connection recv completion queue depth
+        ReadTimeoutMs    = 60_000,                             // close a connection whose read waits this long on a silent peer; 0 = off
+        SendTimeoutMs    = 60_000,                             // close a connection whose flush takes this long to go out; 0 = off
     },
 };
 string upstreamName = upstreamSni;    // sent as SNI, checked against the cert

@@ -25,10 +25,11 @@ public sealed record QuicOptions
     public QuicConnectionFactory? ConnectionFactory { get; init; }
 
     /// <summary>
-    /// Transport-level backstop for connections whose engine went quiet (the engine's own
-    /// idle_timeout is the real mechanism). 0 disables the sweep eviction.
+    /// Close a connection whose peer has sent nothing for this long. 0 disables. While a response is
+    /// owed, the engine keeps the peer answering (ioxide.ngtcp2 sends keep-alive PINGs), so a slow
+    /// handler is not timed out.
     /// </summary>
-    public int IdleTimeoutMs { get; init; } = 60_000;
+    public int ReadTimeoutMs { get; init; } = 60_000;
 }
 
 /// <summary>

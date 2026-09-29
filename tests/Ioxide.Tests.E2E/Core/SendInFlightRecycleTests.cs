@@ -35,7 +35,7 @@ internal static class SendInFlightRecycleTests
             WriteSlabSize = 16 * 1024,
             PoolMax = 64,
             RecvQueueEntries = 64,
-            IdleTimeoutMs = 0,
+            ReadTimeoutMs = 0,
             SendTimeoutMs = 0,
         };
 

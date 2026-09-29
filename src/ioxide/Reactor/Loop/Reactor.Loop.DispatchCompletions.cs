@@ -35,12 +35,12 @@ public sealed unsafe partial class Reactor
             // teardown runs from FinishSend once the kernel has let go of the slab.
             SubmitCancel(Tag(KindTcpRecv, gen, fd));   // the multishot recv is still armed
             conn.CloseAfterSend = true;
+            conn.SuppressFin();
             conn.MarkClosed();
             conn.WriteInFlight = conn.WriteHead;
             res = 0;
         }
         conn.WriteHead += res;
-        conn.LastActivityMs = NowMs;
 
         // A zero-copy send posts its data CQE with F_MORE and a notif will follow; hold the slab until
         // that notif arrives. Plain SEND never sets F_MORE, so this is a no-op for it.
@@ -79,7 +79,7 @@ public sealed unsafe partial class Reactor
         if (conn.CloseAfterSend)
         {
             _connections[fd] = null;
-            conn.DecRef();
+            conn.ReleaseReactorRef();
         }
     }
 

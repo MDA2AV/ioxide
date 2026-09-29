@@ -9,8 +9,14 @@ public sealed unsafe partial class Reactor
     // Periodic timer driving registered tickers (per-command timeout sweeps, pool replenishment).
     // Single-shot, re-armed each fire. One timer in flight per reactor.
     private __kernel_timespec* _timerTs;
-    private const long TimerIntervalNs = 250_000_000;   // 250 ms
+    private const long TimerIntervalNs = TickMs * 1_000_000L;
     private readonly List<Action> _tickers = [];
+
+    /// <summary>
+    /// The ticker's interval: the granularity of every sweep, and on an otherwise idle reactor of
+    /// QUIC engine timers too, which fire only when the loop wakes.
+    /// </summary>
+    public const int TickMs = 250;
 
     /// <summary>
     /// Register a callback invoked on the reactor thread every timer interval (~250 ms). Call from

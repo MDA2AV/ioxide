@@ -56,6 +56,7 @@ public unsafe partial class QuicEngineConnection
     {
         _inEngineCycle = false;
         FlushGso();
+        ApplyKeepAlive();
 
         if (_deferredFault is null || _closed)
         {

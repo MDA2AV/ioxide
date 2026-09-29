@@ -94,7 +94,7 @@ internal static class UdpTests
             // multishot to terminate on -ENOBUFS and re-arm. All datagrams must still round-trip.
             (_, int udpPort) = TestServer.StartDatagramConfigured(
                 static (Reactor r, in UdpDatagram d) => r.UdpSendTo(d.SocketFd, d.PeerAddr, d.PeerAddrLen, d.Payload),
-                quicFactory: null, quicIdleMs: 60_000, udpRecvSlots: 4);
+                quicFactory: null, quicReadMs: 60_000, udpRecvSlots: 4);
 
             using var client = new UdpClient();
             client.Client.ReceiveTimeout = 4000;

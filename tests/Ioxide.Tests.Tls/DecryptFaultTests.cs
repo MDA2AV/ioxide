@@ -20,7 +20,7 @@ internal static class DecryptFaultTests
             // Every non-ZERO_RETURN result used to be treated as "record incomplete, wait for more
             // bytes", so SSL_ERROR_SSL - a bad MAC, a malformed record - was indistinguishable from
             // a connection that had simply gone quiet. A handler would then wait forever on a
-            // stream that was never going to recover, and a pipe pump would never complete.
+            // stream that was never going to recover, and a read on the pipe would never complete.
             (string certPath, string keyPath) = TestCert.Ensure();
             var options = new TlsOptions { CertificatePath = certPath, KeyPath = keyPath };
 

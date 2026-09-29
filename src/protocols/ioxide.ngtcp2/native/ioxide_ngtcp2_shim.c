@@ -40,8 +40,9 @@
 /* Exported-surface revision. Bump on any change to an exported signature or a struct crossing the
  * boundary; iq_abi() hands it to the managed side, which refuses to start on a mismatch.
  *   1 - iq_callbacks gained struct_size and on_path_change
- *   2 - iq_accept gained shard / shard_count for connection-id steering */
-#define IQ_ABI 2
+ *   2 - iq_accept gained shard / shard_count for connection-id steering
+ *   3 - iq_conn_set_keep_alive added */
+#define IQ_ABI 3
 
 /* ---- callback table into C# ------------------------------------------------------------- */
 
@@ -1642,6 +1643,48 @@ int iq_conn_handle_expiry(iq_conn *c, uint64_t ts)
 int iq_conn_is_established(iq_conn *c)
 {
     return ngtcp2_conn_get_handshake_completed(c->conn);
+}
+
+/* The tighter of two bounds where 0 means "none". */
+static uint64_t iq_tighter_bound(uint64_t a, uint64_t b)
+{
+    if (a == 0) {
+        return b;
+    }
+    if (b == 0) {
+        return a;
+    }
+    return a < b ? a : b;
+}
+
+/* Keep-alive while this side owes a response: a PING at half the tightest of the transport's bound
+ * (bound_ns, 0 = none) and both idle timeouts, so the peer's ACK lands inside all of them. */
+void iq_conn_set_keep_alive(iq_conn *c, int on, uint64_t bound_ns)
+{
+    if (c == NULL || c->conn == NULL) {
+        return;
+    }
+
+    ngtcp2_duration interval = UINT64_MAX;
+    if (on) {
+        const ngtcp2_transport_params *local = ngtcp2_conn_get_local_transport_params2(c->conn);
+        const ngtcp2_transport_params *remote = ngtcp2_conn_get_remote_transport_params2(c->conn);
+
+        /* The peer sets its idle timeout, down to 1 ms: taken as is, half of it is a PING flood. */
+        uint64_t peer_idle = remote != NULL ? remote->max_idle_timeout : 0;
+        if (peer_idle != 0 && peer_idle < NGTCP2_SECONDS) {
+            peer_idle = NGTCP2_SECONDS;
+        }
+
+        uint64_t bound = bound_ns;
+        bound = iq_tighter_bound(bound, local != NULL ? local->max_idle_timeout : 0);
+        bound = iq_tighter_bound(bound, peer_idle);
+        if (bound != 0) {
+            interval = bound / 2;
+        }
+    }
+
+    ngtcp2_conn_set_keep_alive_timeout(c->conn, interval);
 }
 
 

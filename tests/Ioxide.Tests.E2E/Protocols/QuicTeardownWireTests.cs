@@ -115,7 +115,7 @@ internal static class QuicTeardownWireTests
             (_, int udpPort) = TestServer.StartDatagram(
                 onDatagram: null,
                 quicFactory: engine.CreateFactory(),
-                quicIdleMs: 750,
+                quicReadMs: 750,
                 quicHandle: EchoThen(accepted, torndown, null));
 
             using var client = new TeardownWireClient(udpPort);
@@ -357,6 +357,17 @@ internal sealed unsafe class TeardownWireClient : IDisposable
             PumpIn();
         }
         return Encoding.ASCII.GetString(_echo.ToArray());
+    }
+
+    /// <summary>Pumps both ways for <paramref name="ms"/> - ACKs what arrives, starts nothing.</summary>
+    public void Converse(int ms)
+    {
+        long deadline = Environment.TickCount64 + ms;
+        while (Environment.TickCount64 < deadline)
+        {
+            FlushOut();
+            PumpIn();
+        }
     }
 
     /// <summary>

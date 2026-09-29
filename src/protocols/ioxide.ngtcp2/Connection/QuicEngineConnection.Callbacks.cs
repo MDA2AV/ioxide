@@ -60,6 +60,7 @@ public unsafe partial class QuicEngineConnection
 
         try
         {
+            c.SettleResponse(streamId);
             c.PurgeOutStream(streamId);
             c.EnqueueLifecycle(streamId, QuicStreamEvent.Closed, appError);
             c.OnStreamClosed(streamId, appError);
@@ -83,7 +84,11 @@ public unsafe partial class QuicEngineConnection
         QuicEngineConnection? c = From(user);
         if (c is null) return;
 
-        try { c.EnqueueLifecycle(streamId, QuicStreamEvent.Reset, appError); }
+        try
+        {
+            c.SettleResponse(streamId);
+            c.EnqueueLifecycle(streamId, QuicStreamEvent.Reset, appError);
+        }
         catch (Exception e) { c.OnCallbackFault(e, nameof(CbStreamReset)); }
     }
 
@@ -95,6 +100,7 @@ public unsafe partial class QuicEngineConnection
 
         try
         {
+            c.SettleResponse(streamId);
             c.MarkOutStreamDead(streamId);
             c.EnqueueLifecycle(streamId, QuicStreamEvent.StopSending, appError);
         }

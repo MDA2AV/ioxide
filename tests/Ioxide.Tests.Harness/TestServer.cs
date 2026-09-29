@@ -392,7 +392,7 @@ public static class TestServer
     /// </returns>
     public static (int Port, Reactor[] Reactors) StartQuicSharded(int reactorCount,
         QuicConnectionFactory quicFactory,
-        Func<Reactor, QuicConnection, Task>? quicHandle = null, int quicIdleMs = 60_000,
+        Func<Reactor, QuicConnection, Task>? quicHandle = null, int quicReadMs = 60_000,
         QuicRouting routing = QuicRouting.Forward)
     {
         int tcpPort = ReserveFreePort();
@@ -416,7 +416,7 @@ public static class TestServer
                 Port = (ushort)udpPort,
                 LocalCidLength = 8,
                 ConnectionFactory = quicFactory,
-                IdleTimeoutMs = quicIdleMs,
+                ReadTimeoutMs = quicReadMs,
                 Routing = routing,
             },
         };
@@ -470,15 +470,15 @@ public static class TestServer
     public static (int TcpPort, int UdpPort) StartDatagram(
         UdpDatagramHandler? onDatagram,
         QuicConnectionFactory? quicFactory = null,
-        int quicIdleMs = 60_000,
+        int quicReadMs = 60_000,
         Func<Reactor, QuicConnection, Task>? quicHandle = null)
-        => StartDatagramConfigured(onDatagram, quicFactory, quicIdleMs, udpRecvSlots: 16, quicHandle);
+        => StartDatagramConfigured(onDatagram, quicFactory, quicReadMs, udpRecvSlots: 16, quicHandle);
 
     /// <summary>StartDatagram with a tunable UDP ring depth (for the -ENOBUFS re-arm burst test).</summary>
     public static (int TcpPort, int UdpPort) StartDatagramConfigured(
         UdpDatagramHandler? onDatagram,
         QuicConnectionFactory? quicFactory = null,
-        int quicIdleMs = 60_000,
+        int quicReadMs = 60_000,
         int udpRecvSlots = 16,
         Func<Reactor, QuicConnection, Task>? quicHandle = null)
     {
@@ -507,7 +507,7 @@ public static class TestServer
                 Port = (ushort)udpPort,
                 LocalCidLength = 8,
                 ConnectionFactory = quicFactory,
-                IdleTimeoutMs = quicIdleMs,
+                ReadTimeoutMs = quicReadMs,
             },
         };
 
