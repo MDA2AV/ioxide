@@ -46,6 +46,9 @@ typedef struct ih3_callbacks {
      * Leaving *len 0 with *fin 0 means "nothing yet" - the stream is deferred until the app calls
      * ih3_resume_stream. Optional (may be NULL); without it no stream can be submitted streamed. */
     void (*on_read_body)(void *user, int64_t stream_id, const uint8_t **buf, size_t *len, int *fin);
+    /* nghttp3 wants a stream aborted with an h3 code (a request it rejects after our GOAWAY, an
+     * unknown uni stream). Its stop_sending and reset_stream both land here. Optional (may be NULL). */
+    void (*on_abort_stream)(void *user, int64_t stream_id, uint64_t app_error_code);
 } ih3_callbacks;
 
 /* ---- objects ---------------------------------------------------------------------------- */
@@ -150,6 +153,17 @@ static int ih3_cb_stream_close(nghttp3_conn *conn, int64_t stream_id, uint64_t a
     return 0;
 }
 
+static int ih3_cb_abort_stream(nghttp3_conn *conn, int64_t stream_id, uint64_t app_error_code,
+                               void *conn_user_data, void *stream_user_data)
+{
+    (void)conn; (void)stream_user_data;
+    ih3_conn *c = conn_user_data;
+    if (c->cbs.on_abort_stream) {
+        c->cbs.on_abort_stream(c->user, stream_id, app_error_code);
+    }
+    return 0;
+}
+
 static int ih3_cb_deferred_consume(nghttp3_conn *conn, int64_t stream_id, size_t nconsumed,
                                    void *conn_user_data, void *stream_user_data)
 {
@@ -248,6 +262,8 @@ static ih3_conn *ih3_new(ih3_callbacks cbs, void *user, int server,
     callbacks.stream_close      = ih3_cb_stream_close;
     callbacks.deferred_consume  = ih3_cb_deferred_consume;
     callbacks.acked_stream_data = ih3_cb_acked_stream_data;
+    callbacks.stop_sending      = ih3_cb_abort_stream;
+    callbacks.reset_stream      = ih3_cb_abort_stream;
 
     nghttp3_settings settings;
     nghttp3_settings_default(&settings);

@@ -32,6 +32,9 @@ internal static unsafe class Nghttp3
         /// chunk. Reporting nothing (len 0, fin 0) defers the stream until ih3_resume_stream.
         /// </summary>
         public delegate* unmanaged<void*, long, byte**, nuint*, int*, void>    OnReadBody;
+
+        /// <summary>nghttp3 wants a stream aborted (STOP_SENDING and/or RESET_STREAM) with this h3 code.</summary>
+        public delegate* unmanaged<void*, long, ulong, void>                   OnAbortStream;
     }
 
     /// <summary>Create the server-side nghttp3 connection; request events fire through

@@ -212,6 +212,7 @@ public sealed partial class Nghttp3Connection : IDisposable
             OnEndStream       = &CallbackEndStream,
             OnDeferredConsume = &CallbackDeferredConsume,
             OnReadBody = &CallbackReadBody,
+            OnAbortStream = &CallbackAbortStream,
         };
 
         _nghttp3Handle = Nghttp3.ih3_server_new(callbacks, (void*)GCHandle.ToIntPtr(_self),

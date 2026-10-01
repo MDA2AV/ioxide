@@ -246,6 +246,7 @@ internal sealed unsafe class TeardownWireClient : IDisposable
     private GCHandle _self;
     private bool _echoFin;
     private readonly List<(long StreamId, ulong Code)> _resets = [];
+    private readonly HashSet<long> _fins = [];
 
     /// <summary>True once the server's CONNECTION_CLOSE has been fed to ngtcp2. Sticky: the answer
     /// can arrive coalesced with the response the test was waiting for.</summary>
@@ -258,7 +259,7 @@ internal sealed unsafe class TeardownWireClient : IDisposable
     private static ulong NowNs() => (ulong)(System.Diagnostics.Stopwatch.GetTimestamp() *
                                             (1_000_000_000.0 / System.Diagnostics.Stopwatch.Frequency));
 
-    public TeardownWireClient(int serverPort, string alpn = "echo")
+    public TeardownWireClient(int serverPort, string alpn = "echo", ulong idleTimeoutNs = 0)
     {
         _udp = new UdpClient();
         _udp.Client.ReceiveTimeout = 100;
@@ -272,6 +273,7 @@ internal sealed unsafe class TeardownWireClient : IDisposable
         };
         _engine = iq_client_engine_new_mtls(alpn, null, null, cbs);
         Assert.True(_engine != 0, "client engine init failed");
+        iq_client_engine_set_idle_timeout(_engine, idleTimeoutNs);   // advertised; 0 = none
 
         _self = GCHandle.Alloc(this);
 
@@ -366,6 +368,18 @@ internal sealed unsafe class TeardownWireClient : IDisposable
         return Encoding.ASCII.GetString(_echo.ToArray());
     }
 
+    /// <summary>Pumps both ways until <paramref name="done"/> holds or the time is up; whether it held.</summary>
+    public bool ConverseUntil(Func<bool> done, int timeoutMs)
+    {
+        long deadline = Environment.TickCount64 + timeoutMs;
+        while (!done() && Environment.TickCount64 < deadline)
+        {
+            FlushOut();
+            PumpIn();
+        }
+        return done();
+    }
+
     /// <summary>Pumps both ways for <paramref name="ms"/> - ACKs what arrives, starts nothing.</summary>
     public void Converse(int ms)
     {
@@ -442,6 +456,9 @@ internal sealed unsafe class TeardownWireClient : IDisposable
         IPAddress.Loopback.GetAddressBytes().CopyTo(sa[4..]);
     }
 
+    /// <summary>Whether the server ended this stream cleanly (fin).</summary>
+    public bool SawFin(long streamId) => _fins.Contains(streamId);
+
     /// <summary>Whether the server reset this stream, and with which application error code.</summary>
     public bool SawReset(long streamId, out ulong code)
     {
@@ -472,6 +489,7 @@ internal sealed unsafe class TeardownWireClient : IDisposable
         if (fin != 0)
         {
             self._echoFin = true;
+            self._fins.Add(streamId);
         }
     }
 
@@ -517,6 +535,7 @@ internal sealed unsafe class TeardownWireClient : IDisposable
         [MarshalAs(UnmanagedType.LPUTF8Str)] string? certPath,
         [MarshalAs(UnmanagedType.LPUTF8Str)] string? keyPath, IqCallbacks cbs);
     [DllImport(Lib)] private static extern void iq_client_engine_free(nint e);
+    [DllImport(Lib)] private static extern void iq_client_engine_set_idle_timeout(nint e, ulong ns);
     [DllImport(Lib)] private static extern nint iq_client_connect(nint e, byte* localSa, nuint localLen,
         byte* remoteSa, nuint remoteLen, [MarshalAs(UnmanagedType.LPUTF8Str)] string serverName,
         [MarshalAs(UnmanagedType.LPUTF8Str)] string alpn, nuint scidLen, ulong ts, void* user, byte* scidOut);

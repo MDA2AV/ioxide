@@ -76,7 +76,7 @@ public sealed partial class Http3Connection
         catch (Exception exception)
         {
             Console.Error.WriteLine($"[ioxide.http3] request handler faulted: {exception.GetBaseException().Message}");
-            await writer.CompleteAsync();
+            await writer.FailAsync();
         }
         finally
         {

@@ -87,20 +87,31 @@ for (int id = 0; id < threads.Length; id++)
 
     reactor.QuicHandle = async (r, conn) =>
     {
-        while (true)
+        try
         {
-            QuicRecvSnapshot snapshot = await conn.ReadAsync();
-
-            // Each delivery names its stream, so echoing back on delivery.StreamId keeps every
-            // stream independent - which is exactly what a multi-stream protocol needs.
-            while (conn.TryGetDelivery(in snapshot, out QuicRecvRing.Delivery delivery))
+            while (true)
             {
-                conn.SendStream(delivery.StreamId, delivery.AsSpan(), fin: false);
-                conn.ReturnBuffer(in delivery);
-            }
+                QuicRecvSnapshot snapshot = await conn.ReadAsync();
 
-            if (snapshot.IsClosed) return;
-            conn.ResetRead();
+                // Each delivery names its stream, so echoing back on delivery.StreamId keeps every
+                // stream independent - which is exactly what a multi-stream protocol needs. The
+                // peer's fin ends the echo too, so a finished stream gets a finished answer.
+                while (conn.TryGetDelivery(in snapshot, out QuicRecvRing.Delivery delivery))
+                {
+                    if (delivery.Kind == QuicStreamEvent.Data)
+                    {
+                        conn.SendStream(delivery.StreamId, delivery.AsSpan(), fin: delivery.Fin);
+                    }
+                    conn.ReturnBuffer(in delivery);
+                }
+
+                if (snapshot.IsClosed) return;
+                conn.ResetRead();
+            }
+        }
+        finally
+        {
+            conn.DecRef();   // the handler's ref - without it the connection is never recycled
         }
     };
 
