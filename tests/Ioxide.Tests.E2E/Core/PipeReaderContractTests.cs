@@ -239,6 +239,76 @@ internal static class PipeReaderContractTests
             // Many times the slot count, so the group must have been recycled repeatedly.
             Assert.Equal($"served {rounds}", report.Task.Result);
         });
+
+        runner.Test("pipereader: a recv-queue overflow ends the read with an error, not a clean end", () =>
+        {
+            // The overflow dropped data, so the close after it is not the peer's: reported as a clean end,
+            // a handler takes a truncated stream for a whole one.
+            var parked = new TaskCompletionSource<TcpConnection>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var gate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var outcome = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
+
+            (int port, _, _) = TestServer.StartConfigured(async (_, conn) =>
+            {
+                var reader = new TcpConnectionPipeReader(conn);
+                try
+                {
+                    ReadResult first = await reader.ReadAsync();
+                    reader.AdvanceTo(first.Buffer.End);
+                    if (first.IsCompleted)
+                    {
+                        return;   // the harness's listen probe
+                    }
+                    parked.TrySetResult(conn);
+                    await gate.Task;   // not reading while the flood arrives
+
+                    while (true)
+                    {
+                        ReadResult read = await reader.ReadAsync();
+                        reader.AdvanceTo(read.Buffer.End);
+                        if (read.IsCompleted)
+                        {
+                            outcome.TrySetResult("a clean end");
+                            return;
+                        }
+                    }
+                }
+                catch (IOException e)
+                {
+                    outcome.TrySetResult("an error: " + e.Message);
+                }
+                finally
+                {
+                    reader.Complete();
+                    conn.DecRef();
+                }
+            }, new ServerConfig
+            {
+                RecvBufferSize = 64,
+                RecvSlots = 256,
+                Tcp = new TcpOptions { WriteSlabSize = 4096, PoolMax = 8, RecvQueueEntries = 8 },
+            });
+
+            using var client = new TcpClient();
+            client.Connect("127.0.0.1", port);
+            NetworkStream stream = client.GetStream();
+            stream.Write(new byte[64]);
+            Assert.True(parked.Task.Wait(TimeSpan.FromSeconds(10)), "the handler never parked");
+            TcpConnection conn = parked.Task.Result;
+
+            stream.Write(new byte[4096]);   // 64-byte buffers: 64 deliveries into an 8-slot queue
+            var clock = System.Diagnostics.Stopwatch.StartNew();
+            while (!conn.RecvOverflowed && clock.ElapsedMilliseconds < 10_000)
+            {
+                Thread.Sleep(10);
+            }
+            Assert.True(conn.RecvOverflowed, "the queue never overflowed");
+            gate.SetResult();
+
+            Assert.True(outcome.Task.Wait(TimeSpan.FromSeconds(10)), "the handler never finished reading");
+            Assert.True(outcome.Task.Result.StartsWith("an error", StringComparison.Ordinal),
+                $"the overflow reached the handler as {outcome.Task.Result}");
+        });
     }
 
     private static string Text(in ReadOnlySequence<byte> buffer) => Encoding.ASCII.GetString(buffer.ToArray());

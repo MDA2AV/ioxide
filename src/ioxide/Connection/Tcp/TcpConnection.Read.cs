@@ -34,6 +34,18 @@ public sealed unsafe partial class TcpConnection : IValueTaskSource<RecvSnapshot
     /// </summary>
     public bool IsClosed => Volatile.Read(ref _closed) == 1;
 
+    /// <summary>
+    /// Whether a receive-queue overflow closed this connection (<see cref="TcpOptions.RecvQueueEntries"/>):
+    /// the delivery that did not fit was dropped, so the closed snapshot that follows is not the peer's clean
+    /// end. The pipe readers report it as an <see cref="System.IO.IOException"/>.
+    /// </summary>
+    public bool RecvOverflowed => Volatile.Read(ref _recvOverflowed) != 0;
+
+    private int _recvOverflowed;
+
+    internal static IOException RecvOverflowError()
+        => new("The connection's receive queue overflowed (TcpOptions.RecvQueueEntries): data was dropped and the connection closed.");
+
     public ValueTask<RecvSnapshot> ReadAsync()
     {
         if (!_recv.IsEmpty() || Volatile.Read(ref _pending) == 1)
@@ -150,6 +162,7 @@ public sealed unsafe partial class TcpConnection : IValueTaskSource<RecvSnapshot
                  }))
         {
             Console.Error.WriteLine("[conn] recv queue overflow; closing connection.");
+            Volatile.Write(ref _recvOverflowed, 1);
             if (hasBuffer && !IncrementalMode)
             {
                 _reactor.ReturnBufferDirect(bid);   // per-conn rings are freed wholesale instead

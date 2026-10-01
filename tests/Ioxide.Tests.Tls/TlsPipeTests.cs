@@ -203,7 +203,99 @@ internal static class TlsPipeTests
             Assert.True(reason.Contains("TLS decrypt failed"),
                 $"expected the decrypt to fault, got: {reason}");
         });
+
+        runner.Test("tls pipe: a recv-queue overflow ends the read with an error, not a clean end", () =>
+        {
+            // The overflow dropped ciphertext - a truncation, which TLS must not report as a clean end.
+            (string certPath, string keyPath) = TestCert.Ensure();
+            var options = new TlsOptions { CertificatePath = certPath, KeyPath = keyPath };
+
+            var parked = new TaskCompletionSource<TcpConnection>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var gate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var outcome = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
+
+            int port = TestServer.StartConfigured(OverflowHandler(parked, gate, outcome), new ServerConfig
+            {
+                RecvBufferSize = 64,
+                RecvSlots = 256,
+                Tcp = new TcpOptions { WriteSlabSize = 16 * 1024, PoolMax = 8, RecvQueueEntries = 16 },
+            }, r => TlsService.Start(r, options)).Port;
+
+            using var client = new TcpClient();
+            client.Connect("127.0.0.1", port);
+            using var ssl = new SslStream(client.GetStream(), leaveInnerStreamOpen: false, (_, _, _, _) => true);
+            ssl.AuthenticateAsClient(new SslClientAuthenticationOptions { TargetHost = "localhost" });
+            ssl.Write("hi"u8);
+            Assert.True(parked.Task.Wait(TimeSpan.FromSeconds(10)), "the handler never parked");
+            TcpConnection conn = parked.Task.Result;
+
+            ssl.Write(new byte[4096]);   // 64-byte buffers: 65 deliveries into a 16-slot queue
+            var clock = System.Diagnostics.Stopwatch.StartNew();
+            while (!conn.RecvOverflowed && clock.ElapsedMilliseconds < 10_000)
+            {
+                Thread.Sleep(10);
+            }
+            Assert.True(conn.RecvOverflowed, "the queue never overflowed");
+            gate.SetResult();
+
+            Assert.True(outcome.Task.Wait(TimeSpan.FromSeconds(10)), "the handler never finished reading");
+            Assert.True(outcome.Task.Result.StartsWith("an error", StringComparison.Ordinal),
+                $"the overflow reached the handler as {outcome.Task.Result}");
+        });
     }
+
+    // Reads one message, stops reading until the gate opens, then reads to the end and says how it ended.
+    private static Func<Reactor, TcpConnection, Task> OverflowHandler(
+        TaskCompletionSource<TcpConnection> parked, TaskCompletionSource gate, TaskCompletionSource<string> outcome)
+        => async (reactor, connection) =>
+        {
+            TlsSession? session = null;
+            TlsConnectionDualPipe? pipe = null;
+            try
+            {
+                session = await reactor.GetService<TlsService>()!.AcceptAsync(connection);
+                pipe = new TlsConnectionDualPipe(connection, session);
+
+                ReadResult first = await pipe.Input.ReadAsync();
+                pipe.Input.AdvanceTo(first.Buffer.End);
+                parked.TrySetResult(connection);
+                await gate.Task;
+
+                try
+                {
+                    while (true)
+                    {
+                        ReadResult read = await pipe.Input.ReadAsync();
+                        pipe.Input.AdvanceTo(read.Buffer.End);
+                        if (read.IsCompleted)
+                        {
+                            outcome.TrySetResult("a clean end");
+                            return;
+                        }
+                    }
+                }
+                catch (IOException e)
+                {
+                    outcome.TrySetResult("an error: " + e.Message);
+                }
+            }
+            catch
+            {
+                // Harness port probes fail the handshake; not this test's concern.
+            }
+            finally
+            {
+                if (pipe is not null)
+                {
+                    await pipe.DisposeAsync();
+                }
+                else
+                {
+                    session?.Dispose();
+                }
+                connection.DecRef();
+            }
+        };
 
     // Same shape as PipeHandler, with an affinity observation on either side of the await that
     // matters: the one on the TLS pipe's reader.

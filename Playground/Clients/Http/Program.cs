@@ -64,7 +64,7 @@ var config = new ServerConfig
         PoolMax          = 1024,                 // connection objects recycled per reactor
         WriteOverflow    = WriteOverflowStrategy.Grow,   // Segmented = chained slabs, one SENDMSG
         ZeroCopySend     = false,                // SEND_ZC; only pays off on large responses
-        RecvQueueEntries = 64,                   // per-connection SPSC queue, power of two
+        RecvQueueEntries = 4096,                 // per-connection SPSC queue, power of two
         ReadTimeoutMs    = 60_000,               // close a connection whose read waits this long on a silent peer; 0 = off
         SendTimeoutMs    = 60_000,               // close a connection whose flush takes this long to go out; 0 = off
     },
