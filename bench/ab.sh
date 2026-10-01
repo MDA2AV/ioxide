@@ -3,7 +3,7 @@
 # driver - so it runs where wrk and h2load are not installed.
 #
 #     bash bench/ab.sh <ref-a> <ref-b> [sample]      # sample defaults to Tls/OpenSslPipes
-#     bash bench/ab.sh origin/main HEAD Tcp/Raw      # TLS=0 for a plain-http sample
+#     TLS=0 bash bench/ab.sh origin/main HEAD Tcp/Raw   # a plain-http sample
 #
 # Each ref is checked out into its own worktree under bench/.work/ab/ and built in Release. The
 # driver (bench/Bench.Clients) is built once, from THIS tree, so both sides are measured by the
@@ -22,7 +22,7 @@
 #   CLIENT_CPUS=        driver pinning (default: every CPU after SERVER_CPUS)
 #   CONNS=64            connections, spread over DRIVER_REACTORS, one request in flight on each
 #   DRIVER_REACTORS=4   driver reactors
-#   PORT=8443           the sample's port
+#   PORT=8443           the port the sample is told to listen on (PLAYGROUND_PORT)
 #   TLS=1               1 for an https sample, 0 for plain http
 set -uo pipefail
 cd "$(dirname "$0")/.."
@@ -62,7 +62,8 @@ cleanup() {
   [ -n "$SERVER_PID" ] && kill "$SERVER_PID" 2>/dev/null
   wait 2>/dev/null
 }
-trap cleanup EXIT INT TERM
+trap cleanup EXIT
+trap 'exit 130' INT TERM   # Ctrl-C ends the script; the EXIT trap still takes the server down
 
 listening() { (exec 3<>"/dev/tcp/127.0.0.1/$PORT") 2>/dev/null; }
 ticks() { awk '{print $14 + $15}' "/proc/$1/stat"; }
@@ -87,10 +88,15 @@ tree_for() {
   printf '%s' "$dir"
 }
 
-if listening; then
-  echo "something already listens on :$PORT - a leaked server would be measured too" >&2
-  exit 1
-fi
+# Before every run, not only the first: a server that outlived its kill would share the port
+# (SO_REUSEPORT) with the next one, and both would be measured.
+require_free_port() {
+  if listening; then
+    echo "something already listens on :$PORT - a leaked server would be measured too" >&2
+    exit 1
+  fi
+}
+require_free_port
 
 TREE_A=$(tree_for "$REF_A") || { echo "cannot check out $REF_A" >&2; exit 2; }
 TREE_B=$(tree_for "$REF_B") || { echo "cannot check out $REF_B" >&2; exit 2; }
@@ -109,7 +115,8 @@ DRIVER=bench/Bench.Clients/bin/Release/net11.0/Bench.Clients
 # in a subshell, so the trap above can always reach the server and the driver.
 run() {   # <tree>
   local bin="$1/$(dirname "$PROJECT")/bin/Release/net11.0/$NAME" t0 t1 line ok
-  PLAYGROUND_REACTORS=$REACTORS taskset -c "$SERVER_CPUS" "$bin" >"$WORK/server.log" 2>&1 &
+  require_free_port
+  PLAYGROUND_PORT=$PORT PLAYGROUND_REACTORS=$REACTORS taskset -c "$SERVER_CPUS" "$bin" >"$WORK/server.log" 2>&1 &
   SERVER_PID=$!
   for _ in $(seq 100); do listening && break; sleep 0.1; done
 
