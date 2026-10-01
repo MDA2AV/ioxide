@@ -48,6 +48,13 @@ public sealed unsafe partial class TcpConnection : IValueTaskSource<RecvSnapshot
             return new ValueTask<RecvSnapshot>(RecvSnapshot.Closed());
         }
 
+        // Refused before the clock, which belongs to the read already armed: restamping it here would
+        // keep a peer that never answers alive for as long as the caller kept asking.
+        if (Volatile.Read(ref _armed) == 1)
+        {
+            throw new InvalidOperationException("ReadAsync already armed.");
+        }
+
         ReadParkedMs = _reactor.NowMs;   // the read clock; before arming, so the sweep sees both
 
         if (Interlocked.Exchange(ref _armed, 1) == 1)

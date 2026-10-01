@@ -2,6 +2,7 @@ using System.Net;
 using System.Net.Sockets;
 using System.Text;
 using ioxide;
+using ioxide.timer;
 using ioxide.utils;
 
 namespace Ioxide.Tests;
@@ -65,6 +66,66 @@ internal static class TcpTimeoutTests
             Assert.Equal(0, n);
             Assert.True(closed.Task.Wait(SweepGraceMs), "the handler was never woken by the sweep");
             Assert.True(closed.Task.Result, "the handler woke, but not with a closed snapshot");
+        });
+
+        runner.Test("tcp/read: a second ReadAsync refused while one is armed leaves the clock alone", () =>
+        {
+            // A handler that keeps asking for the read it already has. Each call throws - and must
+            // not restart the clock of the read that IS armed, or a peer that never answers is
+            // kept for as long as the handler keeps asking.
+            var closed = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+
+            int port = StartWith(readMs: 500, sendMs: 0, async (r, conn) =>
+            {
+                try
+                {
+                    if (!await IsThisTestsConnection(conn))
+                    {
+                        return;
+                    }
+
+                    conn.ResetRead();
+                    ValueTask<RecvSnapshot> read = conn.ReadAsync();
+
+                    var timer = new RingTimer(r);
+                    while (!read.IsCompleted)
+                    {
+                        await timer.DelayAsync(100);
+                        try
+                        {
+                            _ = conn.ReadAsync();
+                        }
+                        catch (InvalidOperationException)
+                        {
+                            // Refused: a read is already armed. The call under test.
+                        }
+                    }
+                    closed.TrySetResult((await read).IsClosed);
+                }
+                finally
+                {
+                    conn.DecRef();
+                }
+            });
+
+            using var client = new TcpClient();
+            client.Connect("127.0.0.1", port);
+            client.ReceiveTimeout = SweepGraceMs;
+            client.GetStream().Write("hi"u8);
+
+            int n;
+            try
+            {
+                n = client.GetStream().Read(new byte[16], 0, 16);
+            }
+            catch (IOException)
+            {
+                n = -1;   // still open when the grace ran out
+            }
+
+            Assert.True(n == 0, "the peer was never reaped: each refused ReadAsync restarted the read clock");
+            Assert.True(closed.Task.Wait(SweepGraceMs) && closed.Task.Result,
+                "the armed read did not wake with a closed snapshot");
         });
 
         runner.Test("tcp/read: a connection still talking is left alone", () =>
