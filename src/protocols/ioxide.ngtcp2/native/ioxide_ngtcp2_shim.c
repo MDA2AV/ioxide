@@ -41,8 +41,9 @@
  * boundary; iq_abi() hands it to the managed side, which refuses to start on a mismatch.
  *   1 - iq_callbacks gained struct_size and on_path_change
  *   2 - iq_accept gained shard / shard_count for connection-id steering
- *   3 - iq_conn_set_keep_alive added */
-#define IQ_ABI 3
+ *   3 - iq_conn_set_keep_alive added
+ *   4 - iq_conn_shutdown_stream added */
+#define IQ_ABI 4
 
 /* ---- callback table into C# ------------------------------------------------------------- */
 
@@ -2011,6 +2012,16 @@ int64_t iq_client_open_bidi(iq_conn *c)
         return -1;
     }
     return sid;
+}
+
+/* Abort a stream both ways - RESET_STREAM and STOP_SENDING - with an application error code: a
+ * stream nothing will answer. Reactor thread only. */
+int iq_conn_shutdown_stream(iq_conn *c, int64_t stream_id, uint64_t app_error_code)
+{
+    if (c == NULL || c->conn == NULL) {
+        return -1;
+    }
+    return ngtcp2_conn_shutdown_stream(c->conn, 0, stream_id, app_error_code);
 }
 
 /* ---- app-paced receive windows ----------------------------------------------------------- */
