@@ -47,7 +47,7 @@ public sealed unsafe partial class TcpConnection
 
     private int _readTimeoutDisabled;
     private long _finSentMs;
-    private int _finSent;
+    private int _finSent;   // 0, 1 sent (or suppressed), 2 asked for behind a flush - the sweep sends it
 
     /// <summary>
     /// Set once the sweep has shut this connection down, so the next tick skips it instead of
@@ -163,14 +163,35 @@ public sealed unsafe partial class TcpConnection
 
     internal void SendFin()
     {
-        if (Interlocked.Exchange(ref _finSent, 1) == 0)
+        if (Interlocked.Exchange(ref _finSent, 1) != 1)
         {
             Volatile.Write(ref _finSentMs, _reactor.NowMs);   // the peer's time to close starts now
             Native.shutdown(ClientFd, Native.SHUT_WR);
         }
     }
 
-    internal bool FinSent => Volatile.Read(ref _finSent) != 0;
+    internal bool FinSent => Volatile.Read(ref _finSent) == 1;
+
+    internal bool FinWanted => Volatile.Read(ref _finSent) == 2;
+
+    /// <summary>
+    /// Half-close: the peer gets a FIN once what has been flushed is out, and the connection stays -
+    /// its read side open, its descriptor still released by <see cref="DecRef"/>. For a protocol layer
+    /// that is done sending (HTTP's <c>Connection: close</c>). Nothing may be written after it.
+    /// A flush still in flight keeps the FIN until it is done; a connection the reactor already tore
+    /// down gets none. Reactor thread only (#211).
+    /// </summary>
+    public void ShutdownWrite()
+    {
+        if (!FlushOutstanding)
+        {
+            SendFin();
+        }
+        else
+        {
+            Interlocked.CompareExchange(ref _finSent, 2, 0);
+        }
+    }
 
     /// <summary>
     /// Take this connection off the read timeout for the rest of its life - for an adapter whose
