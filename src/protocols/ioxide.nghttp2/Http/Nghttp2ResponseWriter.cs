@@ -115,6 +115,31 @@ public sealed class Nghttp2ResponseWriter : IBufferWriter<byte>
         await _connection.FlushStreamedAsync();
     }
 
+    /// <summary>
+    /// End a response its handler failed to finish. Before the headers that is a 500 - not the 200
+    /// a handler that merely wrote nothing gets; after them only RST_STREAM is honest, since
+    /// END_STREAM would pass a truncated body off as whole.
+    /// </summary>
+    internal async ValueTask FailAsync()
+    {
+        if (_completed)
+        {
+            return;
+        }
+
+        if (!_headersSent)
+        {
+            WriteHeaders(new Nghttp2Response { Status = 500 });
+            await CompleteAsync();
+            return;
+        }
+
+        _completed = true;
+        _staged = 0;
+        _connection.ResetStreamed(StreamId);
+        await _connection.FlushStreamedAsync();
+    }
+
     private void EnsureStaging(int sizeHint)
     {
         int needed = _staged + Math.Max(sizeHint, 1);
