@@ -2,6 +2,7 @@ using System.Buffers;
 using System.IO.Pipelines;
 using System.Net.Security;
 using System.Net.Sockets;
+using System.Security.Authentication;
 using System.Text;
 using ioxide;
 using ioxide.tls;
@@ -204,6 +205,39 @@ internal static class TlsPipeTests
                 $"expected the decrypt to fault, got: {reason}");
         });
 
+        runner.Test("tls pipe: one-byte records share segments instead of taking 16 KiB each", () =>
+        {
+            // The peer picks the record size, so a 16 KiB segment per record let a handler still
+            // looking for the end of a message hold ~700x what the peer sent.
+            (string certPath, string keyPath) = TestCert.Ensure();
+            var options = new TlsOptions { CertificatePath = certPath, KeyPath = keyPath };
+
+            var held = new TaskCompletionSource<(long Bytes, int Segments)>(TaskCreationOptions.RunContinuationsAsynchronously);
+            int port = TestServer.Start(ExamineOnlyHandler(held), r => TlsService.Start(r, options));
+
+            const int records = 4_000;
+            using var client = new TcpClient();
+            client.Connect("127.0.0.1", port);
+            using var ssl = new SslStream(client.GetStream(), leaveInnerStreamOpen: false, (_, _, _, _) => true);
+            ssl.AuthenticateAsClient(new SslClientAuthenticationOptions
+            {
+                TargetHost = "localhost",
+                EnabledSslProtocols = SslProtocols.Tls13,
+            });
+
+            byte[] one = "x"u8.ToArray();
+            for (int i = 0; i < records; i++)
+            {
+                ssl.Write(one);   // SslStream seals each write as its own record
+            }
+            ssl.ShutdownAsync().GetAwaiter().GetResult();
+
+            Assert.True(held.Task.Wait(TimeSpan.FromSeconds(30)), "the handler never reached the end of the stream");
+            (long bytes, int segments) = held.Task.Result;
+            Assert.Equal((long)records, bytes);
+            Assert.True(segments <= 8, $"{records} one-byte records took {segments} segments");
+        });
+
         runner.Test("tls pipe: a recv-queue overflow ends the read with an error, not a clean end", () =>
         {
             // The overflow dropped ciphertext - a truncation, which TLS must not report as a clean end.
@@ -243,6 +277,52 @@ internal static class TlsPipeTests
                 $"the overflow reached the handler as {outcome.Task.Result}");
         });
     }
+
+    // Reads to the end of the stream without consuming a byte, then reports what the reader held.
+    private static Func<Reactor, TcpConnection, Task> ExamineOnlyHandler(TaskCompletionSource<(long Bytes, int Segments)> held)
+        => async (reactor, connection) =>
+        {
+            TlsSession? session = null;
+            TlsConnectionDualPipe? pipe = null;
+            try
+            {
+                session = await reactor.GetService<TlsService>()!.AcceptAsync(connection);
+                pipe = new TlsConnectionDualPipe(connection, session);
+
+                while (true)
+                {
+                    ReadResult read = await pipe.Input.ReadAsync();
+                    if (read.IsCompleted)
+                    {
+                        int segments = 0;
+                        foreach (ReadOnlyMemory<byte> _ in read.Buffer)
+                        {
+                            segments++;
+                        }
+                        held.TrySetResult((read.Buffer.Length, segments));
+                        pipe.Input.AdvanceTo(read.Buffer.End);
+                        return;
+                    }
+                    pipe.Input.AdvanceTo(read.Buffer.Start, read.Buffer.End);
+                }
+            }
+            catch
+            {
+                // Harness port probes fail the handshake; not this test's concern.
+            }
+            finally
+            {
+                if (pipe is not null)
+                {
+                    await pipe.DisposeAsync();
+                }
+                else
+                {
+                    session?.Dispose();
+                }
+                connection.DecRef();
+            }
+        };
 
     // Reads one message, stops reading until the gate opens, then reads to the end and says how it ended.
     private static Func<Reactor, TcpConnection, Task> OverflowHandler(

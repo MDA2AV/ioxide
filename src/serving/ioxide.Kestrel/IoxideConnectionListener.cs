@@ -127,17 +127,19 @@ internal sealed class IoxideConnectionListener : IConnectionListener
 
         if (!_accepted.Writer.TryWrite(ctx))
         {
-            // Listener is shutting down: nobody will dequeue this. Release immediately.
+            // Listener is shutting down: nobody will dequeue this. Release it (see below).
             await ctx.DisposeAsync().ConfigureAwait(false);
-            conn.DecRef();
+            reactor.ScheduleOnReactor(static c => ((TcpConnection)c!).DecRef(), conn);
             return;
         }
 
         ctx.StartPumps();
 
-        // Park until Kestrel disposes the connection, then release the handler-side ref (-> recycle).
+        // Park until Kestrel disposes the connection, then release the handler-side ref (-> recycle) through the
+        // reactor's queue, behind the MarkClosed the pipe posted on dispose: released straight from a pool thread,
+        // the connection could be recycled first and that MarkClosed would close its next tenant.
         await ctx.Completion.ConfigureAwait(false);
-        conn.DecRef();
+        reactor.ScheduleOnReactor(static c => ((TcpConnection)c!).DecRef(), conn);
     }
 
     public async ValueTask<ConnectionContext?> AcceptAsync(CancellationToken cancellationToken = default)

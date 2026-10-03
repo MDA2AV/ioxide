@@ -1130,7 +1130,7 @@ public sealed class TlsService
         GCHandle handle = GCHandle.Alloc(session);
         OpenSsl.SSL_set_ex_data(ssl, SslSessionIndex, GCHandle.ToIntPtr(handle));
         session.AttachHandle(handle);
-        session.AttachFd(conn.ClientFd);   // the teardown close_notify goes out on it, both modes
+        session.AttachConnection(conn);   // the teardown close_notify goes out on it, both modes
 
         // Under the sweep from here until the handshake settles, either way.
         PendingHandshake? pending = null;

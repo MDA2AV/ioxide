@@ -3,7 +3,8 @@ namespace ioxide.ngtcp2;
 /// <summary>
 /// While a request has arrived whole and is unanswered - a peer-opened bidi stream with the peer's
 /// FIN and not ours - keep-alive PINGs keep the peer answering, so neither the transport's read
-/// timeout nor the peer's own idle timer reaps a connection whose handler is just slow.
+/// timeout nor the peer's own idle timer reaps a connection whose handler is just slow. Once the
+/// handler has let go nothing will answer, so the pings stop and the read timeout applies.
 /// </summary>
 public unsafe partial class QuicEngineConnection
 {
@@ -28,7 +29,7 @@ public unsafe partial class QuicEngineConnection
     // Outside ngtcp2's callbacks: at every engine cycle's end, and after a SendStream made outside one.
     private void ApplyKeepAlive()
     {
-        bool want = _owedStreams.Count > 0 && !_closed && _conn != 0;
+        bool want = _owedStreams.Count > 0 && !HandlerReleased && !_closed && _conn != 0;
         if (want == _keepAliveOn && !(want && _keepAliveStale))
         {
             return;
