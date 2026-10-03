@@ -44,7 +44,6 @@ public sealed unsafe partial class Reactor
     private const byte KindWake      = 4;
     private const byte KindClient    = 5;   // low 32 bits = op slot (Reactor.RingHost.cs)
     private const byte KindCancel    = 6;
-    private const byte KindTimer     = 7;
     private const byte KindUdpRecv   = 8;   // low 32 bits = recv-slot index (Reactor.Udp.cs)
     private const byte KindUdpSend   = 9;   // low 32 bits = send-slot index (Reactor.Udp.cs)
 
@@ -97,10 +96,11 @@ public sealed unsafe partial class Reactor
     private readonly int  _connBufRingEntries;
     private readonly uint _incRecvBufferSize;
 
-    // Transient io_uring_enter errnos.
+    // Transient io_uring_enter errnos, and ETIME: a bounded wait that ran out.
     private const int EINTR  = 4;
     private const int EAGAIN = 11;
     private const int EBUSY  = 16;
+    private const int ETIME  = 62;
 
     public Reactor(int id, ServerConfig config)
     {

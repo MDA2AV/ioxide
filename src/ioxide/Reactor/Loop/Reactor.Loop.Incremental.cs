@@ -185,8 +185,10 @@ public sealed unsafe partial class Reactor
             // Anything else is a lifecycle or programming error. Throwing rather than breaking,
             // because a reactor that vanishes while the process reports healthy is the worst of
             // both; whether the process then dies is the host's call, via Reactor.OnFault.
-            int rc = _ring.SubmitAndWait(1);
-            if (rc < 0 && rc != -EINTR && rc != -EAGAIN && rc != -EBUSY)
+            //
+            // ETIME is not an error at all: the wait's own bound ran out (WaitForCompletions).
+            int rc = WaitForCompletions();
+            if (rc < 0 && rc != -EINTR && rc != -EAGAIN && rc != -EBUSY && rc != -ETIME)
             {
                 throw new InvalidOperationException(
                     $"[r{_id}] io_uring_enter failed with errno {-rc}; this reactor cannot continue");
@@ -200,6 +202,8 @@ public sealed unsafe partial class Reactor
                 DispatchIncremental(in _ring.CqeAt(i));
             }
             _ring.CqAdvance(ready);
+
+            RunDueTickers();
         }
     }
 
@@ -238,10 +242,6 @@ public sealed unsafe partial class Reactor
 
             case KindWake:
                 OnWakeCompletion(more);
-                return;
-
-            case KindTimer:
-                OnTimerTick();
                 return;
 
             case KindCancel:

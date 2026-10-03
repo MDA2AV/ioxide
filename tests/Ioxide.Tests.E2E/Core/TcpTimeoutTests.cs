@@ -92,6 +92,68 @@ internal static class TcpTimeoutTests
             Assert.Equal(2, stream.Read(reply, 0, 2));
         });
 
+        runner.Test("tcp/read: a quiet connection is reaped while another keeps the reactor busy", () =>
+        {
+            // A busy reactor's wait never runs out - a completion always ends it first - so a sweep
+            // that waited for an idle moment would leave every quiet connection open for as long as
+            // anyone else was talking.
+            int accepted = 0;
+            var quietClosed = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+
+            int port = StartWith(readMs: 500, sendMs: 0, async (reactor, conn) =>
+            {
+                if (!await IsThisTestsConnection(conn))
+                {
+                    conn.DecRef();
+                    return;
+                }
+
+                if (Interlocked.Increment(ref accepted) > 1)
+                {
+                    conn.Write("ok"u8);
+                    await conn.FlushAsync();
+                    conn.ResetRead();
+                    await EchoHandler(reactor, conn);   // the busy one; releases its own ref
+                    return;
+                }
+
+                try
+                {
+                    conn.ResetRead();
+                    RecvSnapshot snapshot = await conn.ReadAsync();
+                    quietClosed.TrySetResult(snapshot.IsClosed);
+                }
+                finally
+                {
+                    conn.DecRef();
+                }
+            });
+
+            using var quiet = new TcpClient();
+            quiet.Connect("127.0.0.1", port);
+            quiet.GetStream().Write("hi"u8);
+            SpinWait.SpinUntil(() => Volatile.Read(ref accepted) == 1, 2_000);
+
+            using var busy = new TcpClient();
+            busy.Connect("127.0.0.1", port);
+            busy.ReceiveTimeout = 2_000;
+            NetworkStream stream = busy.GetStream();
+            var reply = new byte[2];
+            int exchanges = 0;
+            long until = Environment.TickCount64 + SweepGraceMs;
+            while (!quietClosed.Task.IsCompleted && Environment.TickCount64 < until)
+            {
+                stream.Write("ping"u8);
+                Assert.Equal(2, stream.Read(reply, 0, 2));
+                exchanges++;
+            }
+
+            Assert.True(quietClosed.Task.IsCompleted,
+                $"the quiet connection outlived its 500 ms read timeout by {SweepGraceMs} ms while another "
+                + $"made {exchanges} exchanges: the sweep never ran on the busy reactor");
+            Assert.True(quietClosed.Task.Result, "the handler woke, but not with a closed snapshot");
+        });
+
         runner.Test("tcp/read: 0 disables the clock", () =>
         {
             int port = StartWith(readMs: 0, sendMs: 0, EchoHandler);

@@ -270,7 +270,7 @@ public sealed unsafe partial class Reactor
     }
 
     // Ticker callback (~250 ms): evict quiet connections. Engine deadlines are fired by
-    // QuicFireDueTimers at loop-pass granularity; this ticker's loop wake doubles as its floor.
+    // QuicFireDueTimers, and bound the loop's wait (WaitForCompletions).
     private void QuicSweep()
     {
         long now = Environment.TickCount64;
@@ -294,8 +294,8 @@ public sealed unsafe partial class Reactor
     }
 
     // Earliest engine deadline across live conns; long.MaxValue = none. Checked at the top of every
-    // loop pass, so loss/PTO timers fire at completion-batch granularity (~RTT under load) instead
-    // of the 250 ms ticker - a retransmit that waits 250 ms per loss makes storms self-sustaining.
+    // loop pass and bounding the wait, so loss/PTO timers fire when due instead of on the 250 ms
+    // ticker - a retransmit that waits 250 ms per loss makes storms self-sustaining.
     private long _quicNextTimeoutMs = long.MaxValue;
 
     private void QuicFireDueTimers()
