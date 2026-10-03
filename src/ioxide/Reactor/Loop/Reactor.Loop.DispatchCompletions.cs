@@ -101,26 +101,6 @@ public sealed unsafe partial class Reactor
 
 #endregion
 
-#region Timer
-
-    private void OnTimerTick()
-    {
-        for (int i = 0; i < _tickers.Count; i++)
-        {
-            try
-            {
-                _tickers[i]();
-            }
-            catch (Exception e)
-            {
-                Console.Error.WriteLine($"[r{_id}] ticker faulted: {e.Message}");
-            }
-        }
-        ArmTimer();   // single-shot timer; re-arm for the next interval
-    }
-
-#endregion
-
 #region Client
 
     private void OnClientCompletion(int slot, int result)

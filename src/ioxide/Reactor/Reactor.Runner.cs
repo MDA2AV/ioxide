@@ -129,11 +129,6 @@ public sealed unsafe partial class Reactor
             }
             close(wakeFd);
         }
-        if (_timerTs != null)
-        {
-            NativeMemory.Free(_timerTs);
-            _timerTs = null;
-        }
         if (_opTimespecs != null)
         {
             NativeMemory.Free(_opTimespecs);
