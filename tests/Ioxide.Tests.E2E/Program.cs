@@ -33,6 +33,7 @@ internal static class Program
         QuicIdentityCapTests.Register(runner);
         QuicTeardownWireTests.Register(runner);
         QuicReadTimeoutTests.Register(runner);
+        QuicUnansweredStreamTests.Register(runner);
         QuicDeferredFaultTests.Register(runner);
         QuicStreamAllowanceTests.Register(runner);
         QuicTimerTests.Register(runner);

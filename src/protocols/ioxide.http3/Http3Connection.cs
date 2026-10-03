@@ -28,6 +28,7 @@ public sealed partial class Http3Connection
     private const ulong H3FrameUnexpected = 0x0105;
     private const ulong H3FrameError = 0x0106;
     private const ulong H3ExcessiveLoad = 0x0107;
+    private const ulong H3RequestIncomplete = 0x010d;
     private const ulong QpackDecompressionFailed = 0x0200;
 
     private ulong _fatalCode = H3GeneralProtocolError;
@@ -247,7 +248,9 @@ public sealed partial class Http3Connection
         {
             if (item.Fin && item.Len == 0)
             {
-                return;   // empty stream - nothing ever to answer
+                // Empty: nothing ever to answer, so abort it rather than leave it owed (RFC 9114 4.1).
+                _quicConnection.ResetStream(item.StreamId, H3RequestIncomplete);
+                return;
             }
             rs = new ReqStream();
             rs.Request.StreamId = item.StreamId;
@@ -414,6 +417,15 @@ public sealed partial class Http3Connection
                 return;
             }
             rs.Finished = true;
+
+            if (!rs.HeadersDone)
+            {
+                // Ended without a request (grease, say): nothing will answer it (RFC 9114 4.1).
+                _requests.Remove(sid);
+                ReleaseParseBuffers(rs);
+                _quicConnection.ResetStream(sid, H3RequestIncomplete);
+                return;
+            }
 
             if (_streaming)
             {

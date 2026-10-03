@@ -133,6 +133,12 @@ public abstract class QuicConnection : IValueTaskSource<QuicRecvSnapshot>
     /// </summary>
     public virtual void Close(ulong applicationErrorCode) { }
 
+    /// <summary>
+    /// Abort one stream both ways (RESET_STREAM and STOP_SENDING) with an application error code - for
+    /// a stream nothing will answer. The peer is told, and the stream no longer counts as owed.
+    /// </summary>
+    public virtual void ResetStream(long streamId, ulong applicationErrorCode) { }
+
     /// <summary>Send one datagram (or a GSO batch) to the connection's current peer address.</summary>
     protected void Send(ReadOnlySpan<byte> payload, int gsoSegmentSize = 0)
     {

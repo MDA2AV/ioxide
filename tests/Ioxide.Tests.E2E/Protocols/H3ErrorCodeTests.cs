@@ -38,6 +38,7 @@ internal static class H3ErrorCodeTests
     private const ulong H3FrameUnexpected        = 0x0105;
     private const ulong H3FrameError             = 0x0106;
     private const ulong H3ExcessiveLoad          = 0x0107;
+    private const ulong H3RequestIncomplete      = 0x010d;
     private const ulong QpackDecompressionFailed = 0x0200;
 
     // A GET framed by hand: HEADERS(len 6), field-section prefix 00 00 (Required Insert Count 0,
@@ -53,6 +54,7 @@ internal static class H3ErrorCodeTests
     {
         RegisterCodeSeam(runner);
         RegisterCriticalStream(runner);
+        RegisterIncompleteRequest(runner);
         RegisterWire(runner);
         RegisterNghttp3(runner);
     }
@@ -198,6 +200,63 @@ internal static class H3ErrorCodeTests
          + "a RESET of the control stream is swallowed the same way by Feed's lifecycle branch");
     }
 
+    // --- RFC 9114 section 4.1: a request stream that ends without a request ---------------------
+
+    private static void RegisterIncompleteRequest(Runner runner)
+    {
+        runner.Test("http3/codes: an empty request stream is aborted with H3_REQUEST_INCOMPLETE and the connection serves on", () =>
+        {
+            // Nothing will ever answer it, so it is reset rather than left open: an open stream the
+            // peer has finished counts as owed, and keeps the connection alive past its read timeout.
+            var quic = new RecordingQuic();
+            Task run = StartPure(quic, out Served served, closeTransport: true,
+                (0, Array.Empty<byte>(), true),
+                (4, WellFormedGet, true));
+
+            Assert.True(run.IsCompleted, "the run loop should complete inline once the transport closes");
+            Assert.Equal(1, served.Count);
+            Assert.True(quic.ClosedWith is null,
+                $"a stream error must not close the connection, got 0x{quic.ClosedWith:x}");
+            AssertResetIncomplete(quic, 0);
+        });
+
+        runner.Test("http3/codes: a request stream that ends before its HEADERS is aborted with H3_REQUEST_INCOMPLETE", () =>
+        {
+            // Reserved frame types (0x1f * N + 0x21) are skipped on a request stream, so a stream of
+            // nothing else ends with no request in it.
+            var quic = new RecordingQuic();
+            Task run = StartPure(quic, out Served served, closeTransport: true,
+                (0, new byte[] { 0x21, 0x00 }, true),               // reserved frame, no payload
+                (4, new byte[] { 0x21, 0x02, 0xAA, 0xBB }, true),   // reserved frame, payload skipped
+                (8, WellFormedGet, true));
+
+            Assert.True(run.IsCompleted, "the run loop should complete inline once the transport closes");
+            Assert.Equal(1, served.Count);
+            Assert.True(quic.ClosedWith is null,
+                $"a stream error must not close the connection, got 0x{quic.ClosedWith:x}");
+            AssertResetIncomplete(quic, 0, 4);
+        });
+
+        runner.Test("h3/codes: nghttp3 - a request stream that ends before its HEADERS ends the connection", () =>
+        {
+            // The other stack refuses the same streams as a connection error, so it never leaves one
+            // owed either. Pinned: were it to reset them instead, the request would go through the
+            // shim's reset_stream callback, which is not wired, and the stream would stay owed.
+            foreach (byte[] bytes in new[] { Array.Empty<byte>(), new byte[] { 0x21, 0x00 } })
+            {
+                var quic = new RecordingQuic();
+                Assert.True(quic.EnqueueStreamData(0, bytes, true), "the recv ring rejected the item");
+
+                Task run = new Nghttp3Connection(quic).RunBufferedAsync(static _ => Nghttp3Response.Text("ok"));
+
+                Assert.True(run.IsCompleted,
+                    $"nghttp3 kept serving after a {bytes.Length}-byte request stream ended: it is left owed");
+                Assert.True(quic.ClosedWith is ulong code && code != H3NoError,
+                    $"expected an h3 error on the close, got " + (quic.ClosedWith is ulong c ? $"0x{c:x}" : "no Close at all"));
+            }
+        });
+    }
+
     // --- the wire seam: does the close actually reach a real peer, and when ----------------------
 
     private static void RegisterWire(Runner runner)
@@ -325,6 +384,15 @@ internal static class H3ErrorCodeTests
         });
     }
 
+    private static void AssertResetIncomplete(RecordingQuic quic, params long[] streams)
+    {
+        string got = string.Join(", ", quic.Resets.Select(r => $"{r.StreamId}:0x{r.Code:x}"));
+        Assert.True(quic.Resets.Count == streams.Length
+                    && streams.All(s => quic.Resets.Contains((s, H3RequestIncomplete))),
+            $"expected stream(s) {string.Join(", ", streams)} reset with H3_REQUEST_INCOMPLETE "
+            + $"(0x{H3RequestIncomplete:x}) and nothing else, got [{got}]");
+    }
+
     private static void AssertClosedWith(RecordingQuic quic, ulong code, string name)
         => Assert.True(quic.ClosedWith == code,
             $"expected the connection to close with {name} (0x{code:x}), got "
@@ -332,13 +400,14 @@ internal static class H3ErrorCodeTests
 
     /// <summary>
     /// A <see cref="QuicConnection"/> that records what the h3 layer asks of its transport -
-    /// SendStream payloads and, above all, the application error code passed to Close. The read
+    /// SendStream payloads, stream resets and, above all, the application error code passed to Close. The read
     /// surface (EnqueueStreamData / MarkClosed / ReadAsync) is the real base implementation, so
     /// the run loop under test is the production one; only the engine underneath is absent.
     /// </summary>
     private sealed class RecordingQuic : QuicConnection
     {
         public readonly List<(long StreamId, byte[] Bytes, bool Fin)> Sent = [];
+        public readonly List<(long StreamId, ulong Code)> Resets = [];
         public ulong? ClosedWith;
         public int CloseCalls;
         private long _nextUni = 3;   // server-initiated uni ids: 3, 7, 11, ...
@@ -355,6 +424,9 @@ internal static class H3ErrorCodeTests
 
         public override void SendStream(long streamId, ReadOnlySpan<byte> data, bool fin)
             => Sent.Add((streamId, data.ToArray(), fin));
+
+        public override void ResetStream(long streamId, ulong applicationErrorCode)
+            => Resets.Add((streamId, applicationErrorCode));
 
         public override long OpenUniStream()
         {
