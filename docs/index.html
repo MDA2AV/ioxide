@@ -6636,7 +6636,7 @@ for (int i = 0; i &lt; threads.Length; i++)
         {
             tls = await r.GetService&lt;TlsService&gt;().AcceptAsync(conn);
 
-            // The decrypt pump lives in the pipe, so everything below is the cleartext sample -
+            // The pipe decrypts as it is read, so everything below is the cleartext sample -
             // and the pipe resumes inline on this reactor, so the upstream call below does too.
             await using var pipe = new TlsConnectionDualPipe(conn, tls, ownsSession: false);
 
