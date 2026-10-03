@@ -224,4 +224,19 @@ public sealed partial class Nghttp3Connection
         }
     }
 
+    // A request nghttp3 rejects after our GOAWAY, or an unknown uni stream: the peer is told, and a
+    // rejected request stops counting as owed. Aborting both ways covers what nghttp3 asks of either.
+    [UnmanagedCallersOnly]
+    private static unsafe void CallbackAbortStream(void* user, long streamId, ulong appErrorCode)
+    {
+        try
+        {
+            From(user)._quicConnection.ResetStream(streamId, appErrorCode);
+        }
+        catch (Exception e)
+        {
+            Fault(user, e);
+        }
+    }
+
 }

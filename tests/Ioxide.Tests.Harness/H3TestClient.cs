@@ -516,6 +516,10 @@ public sealed unsafe class H3TestClient : IDisposable
         public delegate* unmanaged<void*, long, byte*, nuint, void>            OnData;
         public delegate* unmanaged<void*, long, void>                          OnEndStream;
         public delegate* unmanaged<void*, long, nuint, void>                   OnDeferredConsume;
+
+        // The shim reads the whole struct, so every field it has must be here - left null.
+        public delegate* unmanaged<void*, long, byte**, nuint*, int*, void>    OnReadBody;
+        public delegate* unmanaged<void*, long, ulong, void>                   OnAbortStream;
     }
 
     private const string QuicLib = "ioxide_ngtcp2";

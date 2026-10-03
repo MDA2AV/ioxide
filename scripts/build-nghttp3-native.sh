@@ -5,23 +5,33 @@
 # with no external dependencies beyond libc. nghttp3 does no I/O and no crypto - the transport
 # is whatever QuicConnection the bridge rides on.
 #
-#   scripts/build-nghttp3-native.sh                 # build with pinned refs below
-#   NGHTTP3_REF=v1.6.0 scripts/build-nghttp3-native.sh
+#   scripts/build-nghttp3-native.sh                 # build with the pinned ref below
+#   NGHTTP3_REF=v1.18.0 scripts/build-nghttp3-native.sh
 #
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-NGHTTP3_REF=${NGHTTP3_REF:-master}
+# PINNED, like build-ngtcp2-native.sh and for the same reasons: "master" meant two builds from one
+# repo state could differ. This is the commit the shipped .so was built from (nghttp3 1.18.90; a
+# build of it reproduces the shipped nghttp3 symbols exactly).
+NGHTTP3_REF=${NGHTTP3_REF:-b1d0596fee2efb1f265fb921e46ef8525267aefe}
 WORK=${WORK:-/tmp/ioxide-h3-native}
 OUT=src/protocols/ioxide.nghttp3/runtimes/linux-x64/native
 
 rm -rf "$WORK" && mkdir -p "$WORK" "$OUT"
 cd "$WORK"
 
-echo "==> cloning nghttp3 ($NGHTTP3_REF)"
-git clone --depth 1 --branch "$NGHTTP3_REF" --recurse-submodules --shallow-submodules \
-    https://github.com/ngtcp2/nghttp3 >/dev/null 2>&1 || \
-    git clone --depth 1 --recurse-submodules --shallow-submodules https://github.com/ngtcp2/nghttp3
+# Fetch the exact ref: --branch takes tags and branches, not commits.
+echo "==> fetching nghttp3 ($NGHTTP3_REF)"
+mkdir -p nghttp3
+git -C nghttp3 init -q
+git -C nghttp3 remote add origin https://github.com/ngtcp2/nghttp3
+git -C nghttp3 fetch -q --depth 1 origin "$NGHTTP3_REF" || {
+    echo "could not fetch $NGHTTP3_REF" >&2
+    exit 1
+}
+git -C nghttp3 checkout -q FETCH_HEAD
+git -C nghttp3 submodule update -q --init --depth 1 --recursive
 
 echo "==> building nghttp3 (static, PIC)"
 cmake -S nghttp3 -B nghttp3/build -DCMAKE_BUILD_TYPE=Release \

@@ -86,12 +86,14 @@ internal sealed class IoxideConnectionContext : ConnectionContext,
 
     public override void Abort(ConnectionAbortedException abortReason)
     {
-        // Forced close: signal the lifetime token. The pumps are unwound (reactor-safely) in DisposeAsync,
-        // which Kestrel calls during connection cleanup after Abort.
+        // Forced close: signal the lifetime token and shut the socket down, which ends the read Kestrel waits
+        // on so it gets to DisposeAsync. The pumps are unwound (reactor-safely) there.
         try
         {
             _connectionClosedCts.Cancel();
         } catch { /* ignore */ }
+
+        _pipe.Abort();
     }
 
     public override async ValueTask DisposeAsync()

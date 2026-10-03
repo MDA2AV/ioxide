@@ -41,8 +41,10 @@
  * boundary; iq_abi() hands it to the managed side, which refuses to start on a mismatch.
  *   1 - iq_callbacks gained struct_size and on_path_change
  *   2 - iq_accept gained shard / shard_count for connection-id steering
- *   3 - iq_conn_set_keep_alive added */
-#define IQ_ABI 3
+ *   3 - iq_conn_set_keep_alive added
+ *   4 - iq_conn_shutdown_stream added
+ *   5 - iq_client_engine_set_idle_timeout added */
+#define IQ_ABI 5
 
 /* ---- callback table into C# ------------------------------------------------------------- */
 
@@ -1732,6 +1734,7 @@ typedef struct iq_client_engine {
     char           alpn[64];   /* the protocol every connection from this engine offers */
     /* Unused unless iq_client_engine_record_server_certificate was called. */
     ptls_verify_certificate_t record_cert;
+    uint64_t       max_idle_timeout;   /* advertised by every connection, in ns; 0 = none */
 } iq_client_engine;
 
 /* Records the subject of the certificate the SERVER served, and accepts it whatever it is.
@@ -1852,6 +1855,14 @@ iq_client_engine *iq_client_engine_new_mtls(const char *alpn, const char *cert_p
     return e;
 }
 
+/* Advertise this max_idle_timeout (ns, 0 = none) on the connections the engine opens from now on. */
+void iq_client_engine_set_idle_timeout(iq_client_engine *e, uint64_t ns)
+{
+    if (e != NULL) {
+        e->max_idle_timeout = ns;
+    }
+}
+
 void iq_client_engine_free(iq_client_engine *e)
 {
     if (e == NULL) {
@@ -1946,6 +1957,7 @@ iq_conn *iq_client_connect(iq_client_engine *e,
     params.initial_max_data                    = 1024 * 1024;
     params.initial_max_streams_bidi            = 1024;
     params.initial_max_streams_uni             = 100;
+    params.max_idle_timeout                    = e->max_idle_timeout;
 
     ngtcp2_cid dcid, scid;
     dcid.datalen = 16; ptls_openssl_random_bytes(dcid.data, dcid.datalen);
@@ -2011,6 +2023,16 @@ int64_t iq_client_open_bidi(iq_conn *c)
         return -1;
     }
     return sid;
+}
+
+/* Abort a stream both ways - RESET_STREAM and STOP_SENDING - with an application error code: a
+ * stream nothing will answer. Reactor thread only. */
+int iq_conn_shutdown_stream(iq_conn *c, int64_t stream_id, uint64_t app_error_code)
+{
+    if (c == NULL || c->conn == NULL) {
+        return -1;
+    }
+    return ngtcp2_conn_shutdown_stream(c->conn, 0, stream_id, app_error_code);
 }
 
 /* ---- app-paced receive windows ----------------------------------------------------------- */

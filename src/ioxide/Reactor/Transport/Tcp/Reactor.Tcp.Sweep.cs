@@ -58,8 +58,8 @@ public sealed unsafe partial class Reactor
                 continue;
             }
 
-            // A handler that let go mid-flush left its FIN for now.
-            if (conn.HandlerReleased && !conn.FinSent)
+            // A FIN left behind a flush - by a handler that let go, or by ShutdownWrite - goes now.
+            if ((conn.HandlerReleased || conn.FinWanted) && !conn.FinSent)
             {
                 conn.SendFin();
             }

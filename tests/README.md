@@ -91,8 +91,8 @@ refusal - a server that hangs has refused nothing, and it is holding the connect
 
 **Guard against passing vacuously.** If a test can pass because the thing under test never ran,
 assert that it ran: a count of observations, a byte count that had to be exceeded, a body that had
-to contain a specific name. `TlsPipeTests` asserts the pump was actually parked before disposal;
-without that the test would pass on a connection that never filled.
+to contain a specific name. `TlsPipeTests` requires two reactor-affinity observations before it
+trusts an empty drift list; without them, a handler that never ran would pass.
 
 **Pair a negative with a control.** "The server refused X" means little unless something very close
 to X is served by the same server. Where the two cannot share a server, put the control next to it

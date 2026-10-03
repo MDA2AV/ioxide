@@ -114,6 +114,23 @@ public unsafe partial class QuicEngineConnection
         }
     }
 
+    public override void ResetStream(long streamId, ulong applicationErrorCode)
+    {
+        if (_closed)
+        {
+            return;
+        }
+
+        SettleResponse(streamId);
+        if (!_inEngineCycle)
+        {
+            ApplyKeepAlive();
+        }
+        MarkOutStreamDead(streamId);
+        Ngtcp2.iq_conn_shutdown_stream(_conn, streamId, applicationErrorCode);
+        FlushConnection();
+    }
+
     /// <summary>Open a server-initiated unidirectional stream (H3 control / QPACK); id, or negative.</summary>
     public override long OpenUniStream()
     {
