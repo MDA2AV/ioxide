@@ -90,6 +90,9 @@ public sealed class Nghttp3ResponseWriter : IBufferWriter<byte>
     /// <summary>True once the body has been fully produced and handed over.</summary>
     public bool IsCompleted => _completed;
 
+    /// <summary>True once the response headers have been handed to nghttp3.</summary>
+    internal bool HeadersSent => _headersSent;
+
     /// <summary>
     /// Send the response headers. Must be called exactly once, before any body byte - HTTP/3 puts
     /// HEADERS ahead of DATA and there is no way to correct that afterwards.

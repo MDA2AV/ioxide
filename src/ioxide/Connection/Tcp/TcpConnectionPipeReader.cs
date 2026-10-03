@@ -66,6 +66,9 @@ public sealed unsafe class TcpConnectionPipeReader : PipeReader, IValueTaskSourc
     private bool _cancelRequested;
     private bool _connectionClosed;
 
+    // Closed by a receive-queue overflow, which dropped data: an error, never the clean end a peer's close is.
+    private bool LostToOverflow => _connectionClosed && _conn.RecvOverflowed;
+
     public TcpConnectionPipeReader(TcpConnection connection)
     {
         _conn = connection ?? throw new ArgumentNullException(nameof(connection));
@@ -88,7 +91,9 @@ public sealed unsafe class TcpConnectionPipeReader : PipeReader, IValueTaskSourc
         // Unexamined bytes (or a closed connection) complete synchronously.
         if (_heldBytes > _examined || _connectionClosed)
         {
-            return new ValueTask<ReadResult>(BuildResult(isCanceled: false));
+            return LostToOverflow
+                ? ValueTask.FromException<ReadResult>(TcpConnection.RecvOverflowError())
+                : new ValueTask<ReadResult>(BuildResult(isCanceled: false));
         }
 
         // Everything held was examined - wait for new bytes.
@@ -106,6 +111,10 @@ public sealed unsafe class TcpConnectionPipeReader : PipeReader, IValueTaskSourc
 
             if (Ingest(pending.Result) || _connectionClosed || _cancelRequested)
             {
+                if (LostToOverflow)
+                {
+                    return ValueTask.FromException<ReadResult>(TcpConnection.RecvOverflowError());
+                }
                 bool canceled = _cancelRequested;
                 _cancelRequested = false;
                 return new ValueTask<ReadResult>(BuildResult(canceled));
@@ -138,6 +147,12 @@ public sealed unsafe class TcpConnectionPipeReader : PipeReader, IValueTaskSourc
                     break;
                 }
             }
+        }
+
+        if (LostToOverflow)
+        {
+            _core.SetException(TcpConnection.RecvOverflowError());
+            return;
         }
 
         bool canceled = _cancelRequested;
@@ -207,6 +222,10 @@ public sealed unsafe class TcpConnectionPipeReader : PipeReader, IValueTaskSourc
 
         if (_heldBytes > _examined || _connectionClosed)
         {
+            if (LostToOverflow)
+            {
+                throw TcpConnection.RecvOverflowError();
+            }
             result = BuildResult(isCanceled: false);
             return true;
         }

@@ -248,6 +248,7 @@ public sealed unsafe partial class TcpConnection
         Volatile.Write(ref _armed, 0);
         Volatile.Write(ref _pending, 0);
         Volatile.Write(ref _closed, 0);
+        Volatile.Write(ref _recvOverflowed, 0);
         Volatile.Write(ref _flushArmed, 0);
         Volatile.Write(ref _flushInProgress, 0);
         Volatile.Write(ref FlushArmedMs, 0);

@@ -256,17 +256,28 @@ public sealed partial class Nghttp3Connection
 
     private void FailStreamed(long streamId, Nghttp3ResponseWriter writer, Nghttp3Request request)
     {
-        // Headers may already be on the wire, in which case the only honest ending is a reset -
-        // a 500 after a 200 would be a lie the peer cannot detect.
         if (writer.IsCompleted)
         {
+            return;
+        }
+        request.HandlerDone = true;
+
+        if (writer.HeadersSent)
+        {
+            // Headers are on the wire: a 500 after a 200 would be a lie the peer cannot detect, and
+            // a clean end would pass a truncated body off as whole. Only a reset is honest. The
+            // writer stays until the stream closes - nghttp3 may still point into its chunk.
+            if (_nghttp3Handle != 0)
+            {
+                Nghttp3.ih3_shutdown_stream_write(_nghttp3Handle, streamId);
+            }
+            _quicConnection.ResetStream(streamId, H3InternalError);
             return;
         }
 
         _writers.Remove(streamId);
         writer.Release();
         QueueResponse(streamId, new Nghttp3Response { Status = 500 });
-        request.HandlerDone = true;
     }
 
     /// <summary>Submit the headers of a streamed response; the body follows through the writer.</summary>

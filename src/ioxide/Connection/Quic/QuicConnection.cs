@@ -133,6 +133,12 @@ public abstract class QuicConnection : IValueTaskSource<QuicRecvSnapshot>
     /// </summary>
     public virtual void Close(ulong applicationErrorCode) { }
 
+    /// <summary>
+    /// Abort one stream both ways (RESET_STREAM and STOP_SENDING) with an application error code - for
+    /// a stream nothing will answer. The peer is told, and the stream no longer counts as owed.
+    /// </summary>
+    public virtual void ResetStream(long streamId, ulong applicationErrorCode) { }
+
     /// <summary>Send one datagram (or a GSO batch) to the connection's current peer address.</summary>
     protected void Send(ReadOnlySpan<byte> payload, int gsoSegmentSize = 0)
     {
@@ -330,6 +336,9 @@ public abstract class QuicConnection : IValueTaskSource<QuicRecvSnapshot>
     }
 
     internal void InitRefs() => Volatile.Write(ref _refs, 2);
+
+    /// <summary>The handler has let go, or there never was one: nothing here will answer the peer.</summary>
+    protected bool HandlerReleased => Volatile.Read(ref _refs) < 2;
 
     /// <summary>
     /// Release one owner's ref. Whoever hits 0 returns the leftover pooled buffers; the transport

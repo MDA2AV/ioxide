@@ -178,7 +178,7 @@
       <tr><td><code>Tcp.ListenBacklog</code></td><td>1024</td><td>accept-queue depth per listener</td></tr>
       <tr><td><code>Tcp.WriteSlabSize</code></td><td>16 KB</td><td>per-connection write buffer</td></tr>
       <tr><td><code>Tcp.PoolMax</code></td><td>1024</td><td>pooled connection objects per reactor (bounds native memory)</td></tr>
-      <tr><td><code>Tcp.RecvQueueEntries</code></td><td>64</td><td>per-connection slice queue depth; overflow closes the connection</td></tr>
+      <tr><td><code>Tcp.RecvQueueEntries</code></td><td>4096</td><td>per-connection slice queue depth; each queued slice holds a recv buffer; overflow closes the connection and readers see an error</td></tr>
       <tr><td><code>Udp.Ports</code></td><td>[]</td><td>raw UDP sockets; datagrams reach <code>Reactor.OnDatagram</code></td></tr>
       <tr><td><code>Udp.RecvSlots</code></td><td>16</td><td>shared UDP provided-buffer ring depth (in-flight datagrams)</td></tr>
       <tr><td><code>Udp.Gro</code></td><td>true</td><td>UDP_GRO: coalesce equal-size datagram bursts into one completion</td></tr>

@@ -10,7 +10,7 @@ namespace ioxide;
 /// stage in a pooled buffer and <see cref="FlushAsync"/> is one synchronous
 /// <see cref="QuicConnection.SendStream"/> call. Backpressure is the engine's retained-send cap,
 /// not a parked flush. <see cref="Complete"/> sends fin (half-close); a faulted Complete discards
-/// staged bytes and sends nothing.
+/// staged bytes and resets the stream (application error 0).
 ///
 /// The stream id comes from the constructor, or from the shared binding when the dual pipe's
 /// reader auto-binds - flushing bytes before any stream is bound throws. Reactor thread only,
@@ -112,6 +112,10 @@ public sealed class QuicConnectionPipeWriter : PipeWriter
         else
         {
             _written = 0;   // faulted: the staged bytes never reach the wire, and no clean fin
+            if (_binding.StreamId >= 0)
+            {
+                _conn.ResetStream(_binding.StreamId, 0);   // nor a stream left open and owed
+            }
         }
 
         if (_buf is not null)

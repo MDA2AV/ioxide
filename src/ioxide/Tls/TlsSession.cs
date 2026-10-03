@@ -25,6 +25,7 @@ public sealed unsafe class TlsSession : IDisposable
 
     private GCHandle _handle;   // roots this session so the keylog callback can reach it via SSL ex_data
     private int _fd = -1;       // the connection's fd - the teardown close_notify goes out on it
+    private TcpConnection? _conn;   // whether it can: no send in flight, no FIN yet
     private bool _txEnabled;
 
     /// <summary>The captured TLS 1.3 server traffic secret (set by the keylog callback during the handshake).</summary>
@@ -293,7 +294,11 @@ public sealed unsafe class TlsSession : IDisposable
 
     internal void AttachHandle(GCHandle handle) => _handle = handle;
 
-    internal void AttachFd(int fd) => _fd = fd;
+    internal void AttachConnection(TcpConnection conn)
+    {
+        _conn = conn;
+        _fd = conn.ClientFd;
+    }
 
     internal void MarkTxEnabled(int fd)
     {
@@ -348,9 +353,9 @@ public sealed unsafe class TlsSession : IDisposable
         int total = 0;
         while (true)
         {
-            // A larger request cannot be filled by one record, and a smaller one only costs extra
-            // SSL_read calls.
-            Span<byte> destination = writer.GetSpan(MaxRecordPlaintext);
+            // Whatever the segment has left: asking for a whole record's 16 KiB started a new segment
+            // per record, however small. SSL_read keeps what does not fit for the next call.
+            Span<byte> destination = writer.GetSpan();
 
             int n, error;
             fixed (byte* p = destination)
@@ -372,10 +377,6 @@ public sealed unsafe class TlsSession : IDisposable
             }
         }
     }
-
-    /// <summary>Most plaintext one TLS record can carry (RFC 8446 section 5.1) - the protocol's
-    /// own bound, not a tuning knob.</summary>
-    private const int MaxRecordPlaintext = 16 * 1024;
 
     /// <summary>
     /// How many COMPLETE TLS records are pending in the read BIO, and whether anything is left over
@@ -557,8 +558,10 @@ public sealed unsafe class TlsSession : IDisposable
         _disposed = true;
 
         // Clean server-side teardown: send close_notify so the peer can tell end-of-stream from a
-        // truncation, whichever backend owns the write side. Skip if the peer already closed.
-        if (!Closed && _fd >= 0)
+        // truncation, whichever backend owns the write side. Skip if the peer already closed, and
+        // where a raw send cannot go out cleanly: into a send the ring still has, or past the FIN -
+        // which a reactor teardown marks too, once the fd may be someone else's.
+        if (!Closed && _fd >= 0 && (_conn is null || (!_conn.FlushOutstanding && !_conn.FinSent)))
         {
             if (_txEnabled)
             {

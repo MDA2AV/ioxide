@@ -103,7 +103,7 @@
         PoolMax          = 1024,                     // pooled connection objects kept per reactor
         WriteOverflow    = WriteOverflowStrategy.Grow,  // Grow = realloc one slab; Segmented = chain + SENDMSG
         ZeroCopySend     = false,                     // SEND_ZC: kernel copies less, wins on large writes
-        RecvQueueEntries = 64,                        // per-connection recv completion queue depth
+        RecvQueueEntries = 4096,                      // per-connection recv completion queue depth
     },
 };
 
@@ -201,7 +201,7 @@ reactor.OnStart = r =&gt; TlsService.Start(r, options);</code></pre>
 
 if (tls.NegotiatedAlpn == "h2")
 {
-    // The decrypt pump lives in the pipe, so the HTTP/2 code below is
+    // The pipe decrypts as it is read, so the HTTP/2 code below is
     // byte-for-byte the h2c version.
     await using var pipe = new TlsConnectionDualPipe(conn, tls, ownsSession: false);
     await new Nghttp2Connection(pipe).RunBufferedAsync(request =&gt; new Nghttp2Response
@@ -374,7 +374,7 @@ if (tls.NegotiatedAlpn == "h2")
     <h2>Kernel decryption, and why it is off</h2>
     <p><code>TlsOptions.KernelRx</code> hands inbound records to the kernel as well, after which an
     ordinary recv returns plaintext and the zero-copy reader serves TLS connections exactly as it
-    serves cleartext ones - no pump, no owned buffer. It is <b>experimental and off by default</b>,
+    serves cleartext ones - no userspace decryption, no owned buffer. It is <b>experimental and off by default</b>,
     for two reasons that are not going away on their own.</p>
     <ul>
       <li>The handoff must land on a record boundary. Whatever the handshake already pulled off the
