@@ -13,8 +13,7 @@ public sealed unsafe partial class Reactor
     private readonly List<Action> _tickers = [];
 
     /// <summary>
-    /// The ticker's interval: the granularity of every sweep, and on an otherwise idle reactor of
-    /// QUIC engine timers too, which fire only when the loop wakes.
+    /// The ticker's interval: the granularity of every sweep.
     /// </summary>
     public const int TickMs = 250;
 

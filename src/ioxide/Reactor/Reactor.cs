@@ -97,10 +97,11 @@ public sealed unsafe partial class Reactor
     private readonly int  _connBufRingEntries;
     private readonly uint _incRecvBufferSize;
 
-    // Transient io_uring_enter errnos.
+    // Transient io_uring_enter errnos, and ETIME: a bounded wait that ran out.
     private const int EINTR  = 4;
     private const int EAGAIN = 11;
     private const int EBUSY  = 16;
+    private const int ETIME  = 62;
 
     public Reactor(int id, ServerConfig config)
     {

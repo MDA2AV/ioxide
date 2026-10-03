@@ -270,7 +270,7 @@ public sealed unsafe partial class Reactor
     }
 
     // Ticker callback (~250 ms): evict quiet connections. Engine deadlines are fired by
-    // QuicFireDueTimers at loop-pass granularity; this ticker's loop wake doubles as its floor.
+    // QuicFireDueTimers, and bound the loop's wait (WaitForCompletions).
     private void QuicSweep()
     {
         long now = Environment.TickCount64;
@@ -294,8 +294,8 @@ public sealed unsafe partial class Reactor
     }
 
     // Earliest engine deadline across live conns; long.MaxValue = none. Checked at the top of every
-    // loop pass, so loss/PTO timers fire at completion-batch granularity (~RTT under load) instead
-    // of the 250 ms ticker - a retransmit that waits 250 ms per loss makes storms self-sustaining.
+    // loop pass and bounding the wait, so loss/PTO timers fire when due instead of on the 250 ms
+    // ticker - a retransmit that waits 250 ms per loss makes storms self-sustaining.
     private long _quicNextTimeoutMs = long.MaxValue;
 
     private void QuicFireDueTimers()
@@ -360,6 +360,21 @@ public sealed unsafe partial class Reactor
         {
             _quicNextTimeoutMs = deadline;
         }
+    }
+
+    // The loop's wait, bounded by the earliest engine deadline: otherwise only a completion wakes an
+    // idle reactor, and the one it can count on is the 250 ms ticker.
+    private int WaitForCompletions()
+    {
+        // No connections left: the tracked deadline is the last one's leftover.
+        long due = _quicConnSet.Count == 0 ? long.MaxValue : _quicNextTimeoutMs;
+        if (due == long.MaxValue)
+        {
+            return _ring.SubmitAndWait(1);
+        }
+
+        // +1: the ms clock can read just short of the deadline when the kernel's timer wakes us.
+        return _ring.SubmitAndWait(1, Math.Max(0, due - NowMs) + 1);
     }
 
     private void TeardownQuic()
