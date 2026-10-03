@@ -133,6 +133,12 @@ internal sealed class HopDuplexPipe : IDuplexPipe, IAsyncDisposable
                 // Peer close: a TCP FIN, or (TLS) a clean close_notify decoded by the session.
                 if (snap.IsClosed || (_tls is not null && _tls.Closed))
                 {
+                    if (snap.IsClosed && _conn.RecvOverflowed)
+                    {
+                        // Not the peer: the reactor dropped data and closed. A clean end would hand Kestrel
+                        // a truncated request as a complete one, or blame the client for a short body.
+                        fault = new IOException("The connection's receive queue overflowed (TcpOptions.RecvQueueEntries): data was dropped and the connection closed.");
+                    }
                     break;
                 }
 
