@@ -35,6 +35,9 @@ public sealed partial class Nghttp2Connection : IDisposable
     // room for several without regrowing.
     private const int EgressBufferSize = 64 * 1024;
 
+    // RFC 9113 INTERNAL_ERROR: a stream this server could not finish.
+    private const uint InternalError = 0x2;
+
     private readonly IDuplexPipe _pipe;
     private readonly Nghttp2Options _options;
     private readonly byte[] _egress = new byte[EgressBufferSize];

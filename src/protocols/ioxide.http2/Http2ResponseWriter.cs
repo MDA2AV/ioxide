@@ -133,6 +133,29 @@ public sealed class Http2ResponseWriter : IBufferWriter<byte>
         }
     }
 
+    /// <summary>
+    /// End a response its handler failed to finish. Before the headers a 500 is still an honest
+    /// answer; after them only RST_STREAM is - END_STREAM would pass a truncated body off as whole.
+    /// </summary>
+    internal async ValueTask FailAsync()
+    {
+        if (_completed || !_headersSent)
+        {
+            await CompleteAsync();
+            return;
+        }
+
+        _completed = true;
+        _staged = 0;
+        if (_staging.Length > 0)
+        {
+            ArrayPool<byte>.Shared.Return(_staging);
+            _staging = [];
+        }
+
+        await _connection.ResetStreamedAsync(_streamId);
+    }
+
     private async ValueTask FlushCore(bool endStream)
     {
         if (!_headersSent)

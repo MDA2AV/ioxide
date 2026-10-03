@@ -61,7 +61,7 @@ public sealed partial class Nghttp2Connection
                 $"[ioxide.nghttp2] request handler faulted: {exception.GetBaseException().Message}");
             try
             {
-                await writer.CompleteAsync();
+                await writer.FailAsync();
             }
             catch
             {
@@ -131,6 +131,15 @@ public sealed partial class Nghttp2Connection
             {
                 _failed = true;
             }
+        }
+    }
+
+    /// <summary>A streamed response its handler could not finish: RST_STREAM INTERNAL_ERROR.</summary>
+    internal void ResetStreamed(int streamId)
+    {
+        if (_handle != 0 && Nghttp2.ih2_submit_rst_stream(_handle, streamId, InternalError) != 0)
+        {
+            _failed = true;
         }
     }
 

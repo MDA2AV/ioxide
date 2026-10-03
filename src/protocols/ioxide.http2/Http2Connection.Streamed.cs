@@ -76,7 +76,7 @@ public sealed partial class Http2Connection
             Console.Error.WriteLine($"[ioxide.http2] request handler faulted: {exception.GetBaseException().Message}");
             try
             {
-                await writer.CompleteAsync();
+                await writer.FailAsync();
             }
             catch
             {
@@ -182,6 +182,13 @@ public sealed partial class Http2Connection
 
     /// <summary>A streamed writer's flush: out to the transport, or the write queue's next turn.</summary>
     internal ValueTask FlushOutboundAsync() => FlushAsync();
+
+    /// <summary>A streamed response its handler could not finish: RST_STREAM, then out it goes.</summary>
+    internal ValueTask ResetStreamedAsync(int streamId)
+    {
+        ResetStream(streamId, Http2Error.InternalError);
+        return InDispatchPass ? default : FlushOutboundAsync();
+    }
 
     /// <summary>
     /// How much ONE response may stage before its writer flushes for real even inside a pass. The

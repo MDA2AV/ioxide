@@ -450,6 +450,16 @@ int ih2_stream_write(ih2_conn *c, int32_t stream_id, const uint8_t *data, size_t
     return rv == NGHTTP2_ERR_INVALID_ARGUMENT ? 0 : rv;
 }
 
+/* Abort a stream with RST_STREAM and an HTTP/2 error code: a response that cannot be finished. Its
+ * queued body goes with it, and on_stream_close frees the stream like any other close. */
+int ih2_submit_rst_stream(ih2_conn *c, int32_t stream_id, uint32_t error_code)
+{
+    if (c == NULL || c->session == NULL) {
+        return NGHTTP2_ERR_INVALID_STATE;
+    }
+    return nghttp2_submit_rst_stream(c->session, NGHTTP2_FLAG_NONE, stream_id, error_code);
+}
+
 /* No more body. read_body will flag EOF once what is buffered has gone out. */
 int ih2_stream_close(ih2_conn *c, int32_t stream_id)
 {
