@@ -24,6 +24,7 @@ public sealed class Http3ResponseWriter : IBufferWriter<byte>
 {
     private const int DefaultChunk = 16 * 1024;
     private const long FrameData = 0x0;
+    private const ulong H3InternalError = 0x0102;
 
     private readonly Http3Connection _connection;
     private readonly QuicConnection _quic;
@@ -130,6 +131,29 @@ public sealed class Http3ResponseWriter : IBufferWriter<byte>
             ArrayPool<byte>.Shared.Return(_staging);
             _staging = [];
         }
+    }
+
+    /// <summary>
+    /// End a response its handler failed to finish. Before the headers a 500 is still an honest
+    /// answer; after them only a reset is - a clean end would pass a truncated body off as whole.
+    /// </summary>
+    internal ValueTask FailAsync()
+    {
+        if (_completed || !_headersSent)
+        {
+            return CompleteAsync();
+        }
+
+        _completed = true;
+        _staged = 0;
+        _quic.ResetStream(_streamId, H3InternalError);
+
+        if (_staging.Length > 0)
+        {
+            ArrayPool<byte>.Shared.Return(_staging);
+            _staging = [];
+        }
+        return ValueTask.CompletedTask;
     }
 
     private async ValueTask FlushCore(bool fin)
