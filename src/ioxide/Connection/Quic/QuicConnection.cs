@@ -141,6 +141,10 @@ public abstract class QuicConnection : IValueTaskSource<QuicRecvSnapshot>
             return;   // torn down - a late handler resume must not send through freed memory
         }
         Reactor.UdpSendTo(SocketFd, PeerAddr, PeerAddrLen, payload, gsoSegmentSize);
+
+        // What went out may now be awaiting an ACK, and the handler that sent it can have been resumed
+        // by anything - a timer, a query - not only by one of this peer's datagrams.
+        Reactor.QuicArmTimer(this);
     }
 
     /// <summary>fd-table index of the socket claiming this peer, or -1. See Reactor.Quic.Pin.cs.</summary>

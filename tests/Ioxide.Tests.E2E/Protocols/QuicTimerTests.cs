@@ -4,6 +4,7 @@ using System.Runtime.InteropServices;
 using System.Text;
 using ioxide;
 using ioxide.ngtcp2;
+using ioxide.timer;
 
 namespace Ioxide.Tests;
 
@@ -143,6 +144,46 @@ internal static class QuicTimerTests
 
             string echoed = client.CollectEcho(30_000);
             Assert.Equal("retransmit-me", echoed);
+        });
+
+        runner.Test("quic/timer: an answer sent after a ring wait, not while a datagram is handled, is sent again", () =>
+        {
+            // The shape of a handler that waited on a query: its answer goes out from a RingTimer
+            // completion, not while the reactor handles one of the peer's datagrams. The reactor only
+            // learned of the retransmit deadline that answer set at the peer's NEXT datagram - so with
+            // the answer lost and the peer silent, it was resent at the next deadline the reactor did
+            // know of: the keep-alive, half the 60 s read timeout away.
+            (string certPath, string keyPath) = TestCert.Ensure();
+            using var engine = new QuicEngine(certPath, keyPath, cidLength: 8);
+            var answered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+
+            (_, int udpPort) = TestServer.StartDatagram(
+                onDatagram: null,
+                quicFactory: engine.CreateFactory(),
+                quicHandle: RingDelayedEchoHandler(600, answered));
+
+            using var client = new LossyQuicClient(udpPort);
+            client.Connect();
+            Assert.True(client.CompleteHandshake(5_000), "handshake did not complete");
+
+            // Only the answer may be lost. Anything else of the server's left unacknowledged - the
+            // handshake's tail, what it sends on taking the request - keeps a deadline the reactor does
+            // know of, and that firing would rescan this connection and resend the answer by accident.
+            client.Pump(500);
+            client.SendRequest(Encoding.ASCII.GetBytes("retransmit-me"));
+            client.Pump(400);
+            client.Blackout(1_000);
+
+            // The answer went out inside the blackout, so it was lost; without this, an answer still
+            // to come would make the recovery below meaningless.
+            Assert.True(answered.Task.IsCompleted, "the handler had not answered by the end of the blackout");
+            Assert.True(!client.EchoComplete,
+                $"the answer was already complete before the blackout ended: [{client.EchoSoFar}]");
+
+            string echoed = client.CollectEcho(5_000);
+            Assert.True(echoed == "retransmit-me",
+                $"the lost answer was not sent again within 5 s (got [{echoed}]): its retransmit deadline "
+                + "was never handed to the reactor");
         });
 
         runner.Test("control: with the engine timer suppressed the same lost answer never comes back", () =>
@@ -316,7 +357,7 @@ internal static class QuicTimerTests
 
     private static void RegisterOutboundTimers(Runner runner)
     {
-        runner.Pending("quic/timer: an outbound connection resends an Initial nobody answered", () =>
+        runner.Test("quic/timer: an outbound connection resends an Initial nobody answered", () =>
         {
             // A reactor that OPENS QUIC connections runs the same firing loop, and its very first
             // datagram is the one with no fallback: nothing else is in flight, and a client that
@@ -380,11 +421,10 @@ internal static class QuicTimerTests
             Assert.True(arrived >= 2,
                 "the Initial was sent once and never again, so a lost first flight is unrecoverable. "
                 + $"A fresh connection reports expiry={expiryBeforeFlight} before its first flight "
-                + $"(ulong.MaxValue = no deadline) and {expiryAfterFlight} after it - and the transport "
-                + "samples that deadline in QuicAdoptClient, which runs before Connect pumps the flight out");
-        }, "QuicAdoptClient reads the new connection's deadline before QuicClientEngine.Connect pumps "
-           + "the Initial, and a connection with nothing in flight has none - so the reactor records "
-           + "long.MaxValue as its next timeout and QuicFireDueTimers never scans again");
+                + $"(ulong.MaxValue = no deadline) and {expiryAfterFlight} after it - the reactor has to "
+                + "learn of it when the flight is sent (QuicConnection.Send), not from QuicAdoptClient, "
+                + "which runs before Connect pumps the flight out");
+        });
     }
 
     // --- handler -----------------------------------------------------------------------------
@@ -415,6 +455,58 @@ internal static class QuicTimerTests
             conn.DecRef();
         }
     }
+
+    // Echoes each finished request after a ring wait - answering from a RingTimer completion, not
+    // from the handling of a datagram.
+    private static Func<Reactor, QuicConnection, Task> RingDelayedEchoHandler(int delayMs, TaskCompletionSource answered)
+        => async (reactor, conn) =>
+        {
+            var timer = new RingTimer(reactor);
+            var requests = new Dictionary<long, List<byte>>();
+            try
+            {
+                while (true)
+                {
+                    QuicRecvSnapshot snap = await conn.ReadAsync();
+
+                    var finished = new List<(long StreamId, byte[] Body)>();
+                    while (conn.TryGetDelivery(in snap, out QuicRecvRing.Delivery item))
+                    {
+                        if (item.Kind == QuicStreamEvent.Data)
+                        {
+                            if (!requests.TryGetValue(item.StreamId, out List<byte>? body))
+                            {
+                                requests[item.StreamId] = body = [];
+                            }
+                            body.AddRange(item.AsSpan());
+                            if (item.Fin)
+                            {
+                                finished.Add((item.StreamId, [.. body]));
+                                requests.Remove(item.StreamId);
+                            }
+                        }
+                        conn.ReturnBuffer(in item);
+                    }
+
+                    if (snap.IsClosed)
+                    {
+                        break;
+                    }
+                    conn.ResetRead();
+
+                    foreach ((long streamId, byte[] body) in finished)
+                    {
+                        await timer.DelayAsync(delayMs);
+                        conn.SendStream(streamId, body, fin: true);
+                        answered.TrySetResult();
+                    }
+                }
+            }
+            finally
+            {
+                conn.DecRef();
+            }
+        };
 
     /// <summary>
     /// Records what the transport was handed, alongside the two values the conversion is made from:
