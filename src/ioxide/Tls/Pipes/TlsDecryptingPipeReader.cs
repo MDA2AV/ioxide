@@ -209,7 +209,8 @@ public sealed class TlsDecryptingPipeReader : PipeReader, IAsyncDisposable
         }
         if (closed)
         {
-            End(null);
+            // An overflow dropped ciphertext: a truncation, so it ends the stream as an error.
+            End(!_session.Closed && _conn.RecvOverflowed ? TcpConnection.RecvOverflowError() : null);
         }
         return true;
     }

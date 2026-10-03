@@ -49,6 +49,47 @@ internal static class ReadTimeoutTests
                 Assert.True(woke.Task.Result, "the handler woke, but not to the end of the stream");
             }, skip: rx && !ktls);
         }
+
+        foreach (bool parkRead in new[] { false, true })
+        {
+            bool parked = parkRead;
+            string how = parked ? "OpenSSL, a read parked" : "OpenSSL";
+            runner.Test($"tls exit ({how}): a response still sending when its handler lets go reaches a slow reader whole", () =>
+            {
+                // The teardown close_notify is a raw send: inside a send the ring still has, it would
+                // split a record, so it is skipped then.
+                const int total = 16 * 1024 * 1024;
+                int port = StartWith(false, LetGoMidFlush(total, parked), readTimeoutMs: 10_000);
+
+                using var client = new TcpClient { ReceiveBufferSize = 4096 };
+                client.Connect("127.0.0.1", port);
+                client.ReceiveTimeout = 10_000;
+                using SslStream ssl = Handshake(client);
+                ssl.Write("GET / HTTP/1.1\r\n\r\n"u8);
+                if (!parked)
+                {
+                    ssl.ShutdownAsync().GetAwaiter().GetResult();   // ours first - the reader never decrypts it
+                }
+                Thread.Sleep(1_500);   // not reading: the send is still in flight when the handler lets go
+
+                long got = 0;
+                string end = "EOF";
+                var buffer = new byte[256 * 1024];
+                try
+                {
+                    int n;
+                    while ((n = ssl.Read(buffer)) > 0)
+                    {
+                        got += n;
+                    }
+                }
+                catch (Exception e)
+                {
+                    end = $"{e.GetType().Name}: {e.Message}";
+                }
+                Assert.True(got == total, $"received {got} of {total} bytes, then {end}");
+            });
+        }
     }
 
     private static async Task BusyHandler(Reactor reactor, TcpConnection connection)
@@ -104,6 +145,53 @@ internal static class ReadTimeoutTests
             }
         };
 
+    // Writes more than the peer will take, gives up on the flush after 300 ms and lets go mid-send.
+    private static Func<Reactor, TcpConnection, Task> LetGoMidFlush(int total, bool parkRead)
+        => async (reactor, connection) =>
+        {
+            TlsSession? session = null;
+            TlsConnectionDualPipe? pipe = null;
+            try
+            {
+                session = await reactor.GetService<TlsService>()!.AcceptAsync(connection);
+                pipe = new TlsConnectionDualPipe(connection, session);
+
+                ReadResult read = await pipe.Input.ReadAsync();
+                pipe.Input.AdvanceTo(read.Buffer.End);
+                if (parkRead)
+                {
+                    _ = pipe.Input.ReadAsync();   // waiting for a next request that never comes
+                }
+
+                byte[] chunk = new byte[64 * 1024];
+                for (int written = 0; written < total; written += chunk.Length)
+                {
+                    pipe.Output.Write(chunk);
+                }
+                Task flush = pipe.Output.FlushAsync().AsTask();
+                await Task.WhenAny(flush, Task.Delay(300));
+            }
+            catch
+            {
+                // The harness's port probe fails the handshake.
+            }
+            finally
+            {
+                await Release(connection, session, pipe);
+            }
+        };
+
+    private static SslStream Handshake(TcpClient client)
+    {
+        var ssl = new SslStream(client.GetStream(), leaveInnerStreamOpen: false, (_, _, _, _) => true);
+        ssl.AuthenticateAsClient(new SslClientAuthenticationOptions
+        {
+            TargetHost = "localhost",
+            EnabledSslProtocols = SslProtocols.Tls13,
+        });
+        return ssl;
+    }
+
     private static async Task Release(TcpConnection connection, TlsSession? session, TlsConnectionDualPipe? pipe)
     {
         if (pipe is not null)
@@ -117,7 +205,7 @@ internal static class ReadTimeoutTests
         connection.DecRef();
     }
 
-    private static int StartWith(bool kernelRx, Func<Reactor, TcpConnection, Task> handle)
+    private static int StartWith(bool kernelRx, Func<Reactor, TcpConnection, Task> handle, int readTimeoutMs = ReadTimeoutMs)
     {
         (string certPath, string keyPath) = TestCert.Ensure();
         var options = new TlsOptions { CertificatePath = certPath, KeyPath = keyPath, KernelRx = kernelRx, KernelTx = kernelRx };
@@ -131,7 +219,7 @@ internal static class ReadTimeoutTests
                 WriteSlabSize = 16 * 1024,
                 PoolMax = 64,
                 RecvQueueEntries = 64,
-                ReadTimeoutMs = ReadTimeoutMs,
+                ReadTimeoutMs = readTimeoutMs,
             },
         }, r => TlsService.Start(r, options)).Port;
     }

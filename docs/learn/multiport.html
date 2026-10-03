@@ -68,7 +68,7 @@
         PoolMax          = 1024,                      // pooled connection objects kept per reactor
         WriteOverflow    = WriteOverflowStrategy.Grow,  // Grow = realloc one slab; Segmented = chain + SENDMSG
         ZeroCopySend     = false,                      // SEND_ZC: kernel copies less, wins on large writes
-        RecvQueueEntries = 64,                         // per-connection recv completion queue depth
+        RecvQueueEntries = 4096,                       // per-connection recv completion queue depth
     },
 };</code></pre>
     <p>With no <code>ExtraPorts</code>, behaviour is exactly as before - one listener, one accept.

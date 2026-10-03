@@ -337,6 +337,9 @@ public abstract class QuicConnection : IValueTaskSource<QuicRecvSnapshot>
 
     internal void InitRefs() => Volatile.Write(ref _refs, 2);
 
+    /// <summary>The handler has let go, or there never was one: nothing here will answer the peer.</summary>
+    protected bool HandlerReleased => Volatile.Read(ref _refs) < 2;
+
     /// <summary>
     /// Release one owner's ref. Whoever hits 0 returns the leftover pooled buffers; the transport
     /// teardown off refcount zero is wired together with the handler launch.
