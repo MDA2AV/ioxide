@@ -43,8 +43,11 @@ public sealed record TcpOptions
     // kernel re-buffers to encrypt, so zero-copy buys nothing there).
     public bool ZeroCopySend { get; init; } = false;
 
-    // Per-connection SPSC recv queue depth (power of two); overflow closes the connection.
-    public int RecvQueueEntries { get; init; } = 64;
+    // Per-connection SPSC recv queue depth (power of two), about 24 bytes a slot. Each queued delivery
+    // holds one of the reactor's recv buffers until the handler reads it, so in shared mode one connection
+    // can hold this many of RecvSlots. Overflow drops the delivery that did not fit and closes the
+    // connection, which its readers report as an error (TcpConnection.RecvOverflowed).
+    public int RecvQueueEntries { get; init; } = 4096;
 
     /// <summary>
     /// Close a connection whose read has waited this long for the peer. 0 disables.
