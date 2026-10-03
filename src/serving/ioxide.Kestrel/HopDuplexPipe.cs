@@ -253,10 +253,14 @@ internal sealed class HopDuplexPipe : IDuplexPipe, IAsyncDisposable
         {
             // Plaintext: half-close the write side so EOF-delimited clients (TcpConnection: close / upgrade)
             // see the end of the response now, not when the listener lets go. Then wake and unwind the recv side
-            // (MarkClosed wakes a recv parked in conn.ReadAsync - schedule it on the reactor so the
-            // continuation runs there, not the dispose thread).
-            Shutdown(_conn.ClientFd, ShutWr);
-            _reactor.ScheduleOnReactor(static c => ((TcpConnection)c!).MarkClosed(), _conn);
+            // (MarkClosed wakes a recv parked in conn.ReadAsync). Both on the reactor: the continuation runs
+            // there, not on the dispose thread, and ShutdownWrite cannot reach an fd it already closed.
+            _reactor.ScheduleOnReactor(static c =>
+            {
+                var conn = (TcpConnection)c!;
+                conn.ShutdownWrite();
+                conn.MarkClosed();
+            }, _conn);
             _inbound.Writer.CancelPendingFlush();
             try
             {
@@ -275,7 +279,7 @@ internal sealed class HopDuplexPipe : IDuplexPipe, IAsyncDisposable
                 await _recvPump.ConfigureAwait(false);
             } catch { }
             _tls.Dispose();
-            Shutdown(_conn.ClientFd, ShutWr);
+            _reactor.ScheduleOnReactor(static c => ((TcpConnection)c!).ShutdownWrite(), _conn);
         }
     }
 }
