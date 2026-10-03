@@ -348,9 +348,9 @@ public sealed unsafe class TlsSession : IDisposable
         int total = 0;
         while (true)
         {
-            // A larger request cannot be filled by one record, and a smaller one only costs extra
-            // SSL_read calls.
-            Span<byte> destination = writer.GetSpan(MaxRecordPlaintext);
+            // Whatever the segment has left: asking for a whole record's 16 KiB started a new segment
+            // per record, however small. SSL_read keeps what does not fit for the next call.
+            Span<byte> destination = writer.GetSpan();
 
             int n, error;
             fixed (byte* p = destination)
@@ -372,10 +372,6 @@ public sealed unsafe class TlsSession : IDisposable
             }
         }
     }
-
-    /// <summary>Most plaintext one TLS record can carry (RFC 8446 section 5.1) - the protocol's
-    /// own bound, not a tuning knob.</summary>
-    private const int MaxRecordPlaintext = 16 * 1024;
 
     /// <summary>
     /// How many COMPLETE TLS records are pending in the read BIO, and whether anything is left over
