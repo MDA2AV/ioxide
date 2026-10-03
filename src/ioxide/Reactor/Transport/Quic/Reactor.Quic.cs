@@ -307,6 +307,7 @@ public sealed unsafe partial class Reactor
 
         long now = Environment.TickCount64;
         long next = long.MaxValue;
+        _quicNextTimeoutMs = long.MaxValue;   // a send during the scan can arm another connection: keep it
         _quicSweepScratch.Clear();
         _quicSweepScratch.AddRange(_quicConnSet);
         foreach (QuicConnection conn in _quicSweepScratch)
@@ -346,13 +347,13 @@ public sealed unsafe partial class Reactor
                 conn.OnEvicted(QuicEvictReason.TimerFault);
             }
         }
-        _quicNextTimeoutMs = next;
+        _quicNextTimeoutMs = Math.Min(_quicNextTimeoutMs, next);
     }
 
     // Pull the tracked minimum forward after engine activity on a conn (its expiry may now be the
     // earliest). Deadlines that move LATER are caught by the next full scan when the stale minimum
     // fires - one wasted scan, never a missed timer.
-    private void QuicArmTimer(QuicConnection conn)
+    internal void QuicArmTimer(QuicConnection conn)
     {
         long deadline = conn.GetNextTimeout(Environment.TickCount64);
         if (deadline < _quicNextTimeoutMs)
