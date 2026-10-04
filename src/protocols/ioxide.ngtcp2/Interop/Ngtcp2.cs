@@ -96,7 +96,7 @@ internal static unsafe class Ngtcp2
     [DllImport(Lib)] internal static extern uint iq_abi();
 
     /// <summary>What this managed binding was written against. Bump both together.</summary>
-    internal const uint Abi = 5;
+    internal const uint Abi = 6;
 
     /// <summary>
     /// Refuse to run against a native library this binding was not built for.
@@ -144,6 +144,18 @@ internal static unsafe class Ngtcp2
     [DllImport(Lib)] internal static extern nint iq_conn_write(
         nint conn, byte* dest, nuint destLen,
         long streamId, byte* data, nuint dataLen, int fin,
+        long* pConsumed, ulong ts);
+
+    /// <summary>ngtcp2_vec.</summary>
+    internal readonly struct Vec(byte* data, nuint length)
+    {
+        public readonly byte* Base = data;
+        public readonly nuint Len = length;
+    }
+
+    [DllImport(Lib)] internal static extern nint iq_conn_writev(
+        nint conn, byte* dest, nuint destLen,
+        long streamId, Vec* data, nuint dataCount, int fin,
         long* pConsumed, ulong ts);
 
     [DllImport(Lib)] internal static extern nint iq_conn_close(

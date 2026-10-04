@@ -189,6 +189,29 @@ internal static class QuicEngineTests
                 "the first stream never ended: its FIN was counted as sent in an ACK-only packet");
         });
 
+        runner.Test("quic: writes to a stream in one engine cycle arrive as one STREAM frame", () =>
+        {
+            // A streamed response's headers, body and end are three writes made in one pass. They
+            // were three packets - each write was packetized on the spot - where a buffered response
+            // is one.
+            (string certPath, string keyPath) = TestCert.Ensure();
+            using var engine = new QuicEngine(certPath, keyPath, cidLength: 8);
+
+            (_, int udpPort) = TestServer.StartDatagram(
+                onDatagram: null,
+                quicFactory: engine.CreateFactory(),
+                quicHandle: ThreeWritesHandler);
+
+            using var client = new QuicTestClient("127.0.0.1", udpPort);
+            client.Connect();
+            Assert.True(client.CompleteHandshake(timeoutMs: 5000), "handshake did not complete");
+
+            long stream = client.Send("go"u8.ToArray(), fin: true);
+            Assert.True(client.PumpUntil(() => client.FinOn(stream), timeoutMs: 5000), "the response never ended");
+            Assert.Equal(12, client.BytesOn(stream));
+            Assert.Equal(1, client.FramesOn(stream));
+        });
+
         runner.Test("quic: dual-pipe (PipeReader/PipeWriter) stream echo (loopback)", () =>
         {
             (string certPath, string keyPath) = TestCert.Ensure();
@@ -318,6 +341,39 @@ internal static class QuicEngineTests
             }
         };
 
+    /// <summary>Answers each request with three writes in the same cycle: head, body, then a bare FIN.</summary>
+    private static async Task ThreeWritesHandler(Reactor reactor, QuicConnection conn)
+    {
+        try
+        {
+            while (true)
+            {
+                QuicRecvSnapshot snap = await conn.ReadAsync();
+
+                while (conn.TryGetDelivery(in snap, out QuicRecvRing.Delivery item))
+                {
+                    if (item.Kind == QuicStreamEvent.Data && item.Fin)
+                    {
+                        conn.SendStream(item.StreamId, "head"u8, fin: false);
+                        conn.SendStream(item.StreamId, "the body"u8, fin: false);
+                        conn.SendStream(item.StreamId, ReadOnlySpan<byte>.Empty, fin: true);
+                    }
+                    conn.ReturnBuffer(in item);
+                }
+
+                if (snap.IsClosed)
+                {
+                    break;
+                }
+                conn.ResetRead();
+            }
+        }
+        finally
+        {
+            conn.DecRef();
+        }
+    }
+
     /// <summary>
     /// Answers stream 0 without ending it. Stream 4 then fills the congestion window and is reset,
     /// so that stream 0's bare FIN, sent right after, is the only thing waiting for the window.
@@ -400,9 +456,13 @@ internal sealed unsafe class QuicTestClient : IDisposable
     private readonly List<byte> _echo = [];
     private bool _echoFin;
     private readonly Dictionary<long, int> _bytesOn = [];
+    private readonly Dictionary<long, int> _framesOn = [];
     private readonly HashSet<long> _finOn = [];
 
     public int BytesOn(long streamId) => _bytesOn.GetValueOrDefault(streamId);
+
+    /// <summary>STREAM frames received on the stream: ngtcp2 delivers each in-order frame on its own.</summary>
+    public int FramesOn(long streamId) => _framesOn.GetValueOrDefault(streamId);
 
     public bool FinOn(long streamId) => _finOn.Contains(streamId);
 
@@ -610,6 +670,7 @@ internal sealed unsafe class QuicTestClient : IDisposable
         var self = (QuicTestClient)GCHandle.FromIntPtr((nint)user).Target!;
         self._echo.AddRange(new ReadOnlySpan<byte>(data, (int)len).ToArray());
         self._bytesOn[streamId] = self.BytesOn(streamId) + (int)len;
+        self._framesOn[streamId] = self.FramesOn(streamId) + 1;
         if (fin != 0)
         {
             self._echoFin = true;

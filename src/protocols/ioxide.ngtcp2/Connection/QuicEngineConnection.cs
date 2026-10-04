@@ -291,14 +291,7 @@ public unsafe partial class QuicEngineConnection : QuicConnection
             return;
         }
         _inEngineCycle = true;
-        try
-        {
-            FlushEgress();
-        }
-        finally
-        {
-            EndEngineCycle();
-        }
+        EndEngineCycle();   // where the cycle's egress is packetized and flushed
     }
 
     // Single handshake-done funnel (the engine callback and the OnDatagram poll can both detect

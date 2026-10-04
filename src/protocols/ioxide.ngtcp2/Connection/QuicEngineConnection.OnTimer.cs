@@ -43,7 +43,7 @@ public unsafe partial class QuicEngineConnection
                 CloseFromEngine(rv);
                 return;
             }
-            FlushEgress();
+            SignalSendCapacity();
             FireRecv();
             FireHandshakeSignal();
         }

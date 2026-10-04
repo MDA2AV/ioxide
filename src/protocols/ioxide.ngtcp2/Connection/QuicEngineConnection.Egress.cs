@@ -54,6 +54,7 @@ public unsafe partial class QuicEngineConnection
     /// </summary>
     private void EndEngineCycle()
     {
+        FlushEgress();
         _inEngineCycle = false;
         FlushGso();
         ApplyKeepAlive();
@@ -114,16 +115,19 @@ public unsafe partial class QuicEngineConnection
 
     // --- engine egress pump -------------------------------------------------------------------
 
-    // Replay deferred stream bytes now that the window may have opened, then drain the engine's
-    // own frames. Runs after every inbound datagram (ACKs open the window) and every timer.
+    // Packetize every stream with bytes waiting - queued this cycle, or held back until the window
+    // opened - then drain the engine's own frames. Runs at the end of every engine cycle.
     private void FlushEgress()
     {
         ReplayOut();
         FlushConnection();
+    }
 
-        // Acks (processed just before this on the inbound path) freed retention: if a producer
-        // paused at the high-water, tell it to resume queueing. The read loop never sees these acks,
-        // so this is the resume trigger for a response larger than the retention window.
+    // Acks (processed just before this on the inbound path) freed retention: if a producer paused at
+    // the high-water, tell it to resume queueing. The read loop never sees these acks, so this is
+    // the resume trigger for a response larger than the retention window.
+    private void SignalSendCapacity()
+    {
         if (_sendAtCapacity && !_closed && _outRetained < _maxSendRetention)
         {
             _sendAtCapacity = false;
