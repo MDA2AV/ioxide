@@ -94,6 +94,9 @@ bench_assert_single_listener() {
 # Scale multiplies the concurrency and exists for the headroom probe below; a measured run always
 # uses 1.
 
+# HTTP/3 needs an h2load built with ngtcp2/nghttp3 - most distributions' is not, and reports 0 started.
+H2LOAD_H3=${H2LOAD_H3:-$HOME/h3x/bench/h2load}
+
 bench_load() {
     local proto=$1 port=$2 secs=$3 out=$4 path=$5 scale=${6:-1}
     local conns=$((CONNS * scale)) threads=$THREADS streams=$((32 * scale))
@@ -121,10 +124,12 @@ bench_load() {
                 PLAYGROUND_ECHO_SECONDS="$secs" "$drv" >"$out" 2>&1
             grep -oP '^\K[\d.]+(?= req/s)' "$out" | head -1 ;;
         h3)
-            [ -x "$H3X" ] || { echo "" ; return; }
-            "${pin[@]}" "$H3X" -d "$secs" --connections "$conns" -m "$streams" -k \
-                "https://127.0.0.1:$port$path" >"$out" 2>&1
-            grep -oP 'throughput:\s+\K[\d.]+' "$out" | head -1 ;;
+            # Not h3x: its rate divides by the whole run, which waits ~30 s on any request that never
+            # finishes - a dozen stuck streams made a 300k req/s server read as 50k.
+            [ -x "$H2LOAD_H3" ] || { echo "" ; return; }
+            "${pin[@]}" "$H2LOAD_H3" --alpn-list=h3 -D "$secs" -c "$conns" -m "$streams" \
+                -t "$(( threads < conns ? threads : conns ))" "https://127.0.0.1:$port$path" >"$out" 2>&1
+            grep -oP 'finished in [\d.]+s, \K[\d.]+(?= req/s)' "$out" | head -1 ;;
     esac
 }
 
