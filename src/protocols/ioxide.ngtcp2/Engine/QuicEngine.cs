@@ -44,14 +44,6 @@ public sealed unsafe class QuicEngine : IDisposable
     public uint CidLength { get; }
 
     /// <summary>
-    /// Per-connection send-retention high-water: how many unacknowledged response bytes a
-    /// connection buffers before it applies backpressure (the egress pump stops pulling more of a
-    /// response until acks drain it). Bounds memory to roughly this per connection regardless of
-    /// response size, so a large file streams through without buffering all of it. Default 16 MiB.
-    /// </summary>
-    public long MaxSendRetentionBytes { get; }
-
-    /// <summary>
     /// alpn: the protocols this server accepts, preference-ordered (e.g. ["h3"]). A client offering
     /// none of them fails the handshake with no_application_protocol (RFC 9001 §8.1). Null/empty:
     /// accept whichever protocol the client offers first (the pre-H3 permissive behavior).
@@ -95,7 +87,6 @@ public sealed unsafe class QuicEngine : IDisposable
     /// disables the bound. Defaults to 10 seconds, matching the TCP side's TlsOptions.
     /// </param>
     public QuicEngine(string certPemPath, string keyPemPath, uint cidLength = 8, string[]? alpn = null,
-        long maxSendRetentionBytes = 16L << 20,
         string? clientCaPemPath = null, bool requireClientCertificate = false,
         string? clientCaPem = null, int handshakeTimeoutMs = 10_000)
     {
@@ -130,9 +121,6 @@ public sealed unsafe class QuicEngine : IDisposable
         Ngtcp2.RequireAbi();
 
         CidLength = cidLength;
-        // Clamp to a floor: the pump overshoots the high-water by at most one egress chunk (16 KiB),
-        // so a cap below that would wedge a response mid-flight. 256 KiB gives comfortable headroom.
-        MaxSendRetentionBytes = Math.Max(maxSendRetentionBytes, 256L << 10);
 
         var callbacks = new Ngtcp2.Callbacks
         {

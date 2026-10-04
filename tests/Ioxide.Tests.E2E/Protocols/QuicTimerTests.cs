@@ -314,7 +314,7 @@ internal static class QuicTimerTests
             // OnEvicted is how a QuicConnection learns the transport let go of it, and for the
             // engine binding it is the ONLY call that runs Destroy: ngtcp2_conn_del, the picotls
             // session, the GCHandle rooting the managed object, and every retained send chunk (up
-            // to MaxSendRetentionBytes, 16 MiB by default). The idle sweep and the shutdown path
+            // to QuicOptions.SendRetentionCeilingBytes). The idle sweep and the shutdown path
             // both call it after QuicRemoveConnection, and so does the timer-fault path - it did
             // not, which is what this test was written to catch. Removal is what made that leak
             // permanent: once out of _quicConnSet and every CID route, the connection could never

@@ -319,9 +319,7 @@ var quic = new QuicOptions { Port = 8443, ConnectionFactory = engine.CreateFacto
 <pre><code class="language-csharp">var engine = new QuicEngine(
     certPath, keyPath,
     cidLength: 8,                      // connection-id length this endpoint mints
-    alpn: ["h3"],                      // pin the protocol; null accepts whatever the client offers
-    maxSendRetentionBytes: 16L &lt;&lt; 20); // send-retention high-water: bounds memory so a response
-                                       // larger than the window streams instead of buffering whole
+    alpn: ["h3"]);                     // pin the protocol; null accepts whatever the client offers
 
 var config = new ServerConfig
 {
@@ -342,6 +340,9 @@ var config = new ServerConfig
         Port = 8443,                   // UDP port, bound automatically on every reactor
         LocalCidLength = 8,            // must match the engine's cidLength
         ReadTimeoutMs = 60_000,        // close a connection whose peer is silent this long
+        SendRetentionBytes = 16L &lt;&lt; 20,        // send-retention high-water: bounds memory so a response
+                                                // larger than it streams instead of buffering whole
+        SendRetentionCeilingBytes = 32L &lt;&lt; 20, // past this a connection is closed: its producer ignored the wait
         ConnectionFactory = engine.CreateFactory(),
     },
 };
@@ -448,13 +449,13 @@ reactor.QuicHandle = async (r, conn) =>
       accounted those bytes as written and will never re-emit them. The unsent tail stays in the
       chunk chain and is replayed on every flush (each inbound ACK, each timer) until it fits.</li>
       <li><b>Retention is a backpressure high-water, not a hard cap.</b> Retained bytes
-      (sent-but-unacked plus unsent) are bounded by <code>QuicEngine</code>'s
-      <code>maxSendRetentionBytes</code> (default 16&nbsp;MiB). A producer feeding a response checks
+      (sent-but-unacked plus unsent) are bounded by
+      <code>QuicOptions.SendRetentionBytes</code> (default 16&nbsp;MiB). A producer feeding a response checks
       <code>CanQueueSend</code> and pauses there; as acks drain retention below the mark, the
       ack/timer egress path fires <code>OnSendCapacityAvailable</code> to resume it - the read loop
       never sees a download's acks, so that callback is the resume. This is what lets a response of
       any size stream out in bounded memory rather than buffering whole. The cap only <em>closes</em>
-      the connection as a backstop, at twice the high-water, when a producer ignores backpressure and
+      the connection as a backstop, at <code>QuicOptions.SendRetentionCeilingBytes</code> (default 32&nbsp;MiB), when a producer ignores backpressure and
       keeps pushing - or when a peer simply stops acking.</li>
     </ul>
     <div class="note"><b>War story.</b> Both rules exist because their violations shipped first.

@@ -31,12 +31,20 @@ public unsafe partial class QuicEngineConnection
 
     // Send-retention high-water (retained = sent-but-unacked + unsent, across all streams). A
     // cooperative producer checks CanQueueSend and pauses here, so a response of any size streams
-    // through in ~this much memory. Seeded from the engine; the client ctor keeps the default.
-    private long _maxSendRetention = 16 << 20;
+    // through in ~this much memory.
+    private long _maxSendRetention;
 
     // Hard backstop: a producer that ignores CanQueueSend and keeps pushing gets closed rather than
-    // buffered without bound. Set well above the high-water so cooperative producers never hit it.
-    private long OutRetainedCeiling => _maxSendRetention * 2;
+    // buffered without bound.
+    private long _outRetainedCeiling;
+
+    // Both from the reactor's QuicOptions. The floor: the pump overshoots the high-water by at most
+    // one egress chunk (16 KiB), so a cap below that would wedge a response mid-flight.
+    private void TakeSendRetention(Reactor reactor)
+    {
+        _maxSendRetention = Math.Max(reactor.QuicSendRetentionBytes, 256L << 10);
+        _outRetainedCeiling = Math.Max(reactor.QuicSendRetentionCeilingBytes, _maxSendRetention);
+    }
 
     /// <summary>False once retained send data reaches the high-water: pause queueing more and let
     /// acks drain it (the egress pump re-runs on every inbound datagram).</summary>
@@ -91,7 +99,7 @@ public unsafe partial class QuicEngineConnection
             _sendAtCapacity = true;   // arms the resume: FlushEgress fires it once acks drain below
         }
 
-        if (_outRetained > OutRetainedCeiling)
+        if (_outRetained > _outRetainedCeiling)
         {
             Console.Error.WriteLine("[ioxide.ngtcp2] send retention backstop exceeded (producer ignored backpressure); closing connection.");
 

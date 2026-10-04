@@ -65,7 +65,7 @@ Env.OverrideCert(ref certOverride, ref keyOverride);
 // The last argument bounds what one connection may retain unacknowledged, which is what keeps a
 // streamed response streaming instead of quietly buffering whole. See Playground/Http3/Nghttp3Buffered
 // for the full QUIC/h3 knob set.
-using var engine = new QuicEngine(certPath, keyPath, cidLength: 8, alpn: ["h3"], maxSendRetentionBytes: 16L << 20);
+using var engine = new QuicEngine(certPath, keyPath, cidLength: 8, alpn: ["h3"]);
 
 var config = new ServerConfig
 {
@@ -82,6 +82,8 @@ var config = new ServerConfig
         // connection id instead, which costs a little on every packet. See /how-ioxide-does-h3.
         Routing = QuicRouting.Forward,
         ReadTimeoutMs = 60_000,   // close a connection whose peer is silent this long; 0 = off
+        SendRetentionBytes = 16L << 20,          // unacked response bytes a connection holds before a response waits for acks
+        SendRetentionCeilingBytes = 32L << 20,   // a connection past this is closed: its producer ignored the wait
     },
 };
 
