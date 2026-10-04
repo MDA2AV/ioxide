@@ -1,20 +1,14 @@
-﻿using System.Runtime.CompilerServices;
-using System.Runtime.InteropServices;
-using static ioxide.Native;
-
 namespace ioxide;
 
 public sealed unsafe partial class Reactor
 {
-    // Periodic timer driving registered tickers (per-command timeout sweeps, pool replenishment).
-    // Single-shot, re-armed each fire. One timer in flight per reactor.
-    private __kernel_timespec* _timerTs;
-    private const long TimerIntervalNs = TickMs * 1_000_000L;
+    // Registered tickers (per-command timeout sweeps, pool replenishment), run by the loop every
+    // TickMs. No timer of their own: the loop's wait is bounded by the next run.
+    private long _nextTickMs;
     private readonly List<Action> _tickers = [];
 
     /// <summary>
-    /// The ticker's interval: the granularity of every sweep, and on an otherwise idle reactor of
-    /// QUIC engine timers too, which fire only when the loop wakes.
+    /// The ticker's interval: the granularity of every sweep.
     /// </summary>
     public const int TickMs = 250;
 
@@ -24,23 +18,43 @@ public sealed unsafe partial class Reactor
     /// </summary>
     public void AddTicker(Action ticker) => _tickers.Add(ticker);
 
-    // Armed before the loop starts; the timespec is freed in Teardown, after the ring fd closes.
+    // The first run is one interval after the loop starts.
     private void StartTicker()
     {
-        _timerTs = (__kernel_timespec*)NativeMemory.Alloc((nuint)sizeof(__kernel_timespec));
-        _timerTs->tv_sec  = 0;
-        _timerTs->tv_nsec = TimerIntervalNs;
-        ArmTimer();
+        NowMs = Environment.TickCount64;
+        _nextTickMs = NowMs + TickMs;
     }
 
-    private void ArmTimer()
+    // Checked on every pass, not left to the wait running out: a busy reactor's wait never does.
+    private void RunDueTickers()
     {
-        IoUringSqe* sqe = GetSqeOrFlush();
-        Unsafe.InitBlockUnaligned(sqe, 0, 64);
-        sqe->opcode    = IORING_OP_TIMEOUT;
-        sqe->addr      = (ulong)_timerTs;
-        sqe->len       = 1;
-        sqe->off       = 0;            // pure time-based (no completion-count trigger)
-        sqe->user_data = Tag(KindTimer, 0, 0);
+        if (NowMs < _nextTickMs)
+        {
+            return;
+        }
+        _nextTickMs = NowMs + TickMs;
+
+        for (int i = 0; i < _tickers.Count; i++)
+        {
+            try
+            {
+                _tickers[i]();
+            }
+            catch (Exception e)
+            {
+                Console.Error.WriteLine($"[r{_id}] ticker faulted: {e.Message}");
+            }
+        }
+    }
+
+    // The loop's wait, bounded by the next ticker run and the earliest engine deadline.
+    private int WaitForCompletions()
+    {
+        // No QUIC connections left: the tracked deadline is the last one's leftover.
+        long quicDue = _quicConnSet.Count == 0 ? long.MaxValue : _quicNextTimeoutMs;
+        long wakeAt = Math.Min(_nextTickMs, quicDue);
+
+        // +1: the ms clock can read just short of the deadline when the kernel's timer wakes us.
+        return _ring.SubmitAndWait(1, Math.Max(0, wakeAt - NowMs) + 1);
     }
 }

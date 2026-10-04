@@ -31,6 +31,7 @@ public static unsafe partial class Native {
     // CQE (IORING_CQE_F_NOTIF) once the buffer can be reused.
     public const byte IORING_OP_SEND_ZC = 47;
     public const uint IORING_ENTER_GETEVENTS = 1u << 0;
+    public const uint IORING_ENTER_EXT_ARG   = 1u << 3;   // the enter's arg is an io_uring_getevents_arg: a wait with a timeout
     public const long IORING_OFF_SQ_RING = 0;
     public const long IORING_OFF_SQES    = 0x10000000;
 
@@ -99,8 +100,11 @@ public static unsafe partial class Native {
     }
 
     public static int io_uring_enter(int fd, uint toSubmit, uint minComplete, uint flags)
+        => io_uring_enter(fd, toSubmit, minComplete, flags, null, 0);
+
+    public static int io_uring_enter(int fd, uint toSubmit, uint minComplete, uint flags, void* arg, nuint argSize)
     {
-        long rc = syscall6(SYS_IO_URING_ENTER, (uint)fd, toSubmit, minComplete, flags, null, 0);
+        long rc = syscall6(SYS_IO_URING_ENTER, (uint)fd, toSubmit, minComplete, flags, arg, argSize);
 
         return rc < 0 ? -Marshal.GetLastPInvokeError() : (int)rc;
     }
@@ -178,4 +182,13 @@ public static unsafe partial class Native {
     // include/uapi/linux/time_types.h - the timespec IORING_OP_TIMEOUT reads.
     [StructLayout(LayoutKind.Sequential)]
     public struct __kernel_timespec { public long tv_sec; public long tv_nsec; }
+
+    // io_uring_enter's argument under IORING_ENTER_EXT_ARG; ts points at a __kernel_timespec.
+    [StructLayout(LayoutKind.Sequential)]
+    public struct io_uring_getevents_arg {
+        public ulong sigmask;
+        public uint  sigmask_sz;
+        public uint  min_wait_usec;
+        public ulong ts;
+    }
 }

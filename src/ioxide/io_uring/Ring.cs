@@ -164,7 +164,13 @@ public sealed unsafe class Ring : IDisposable
         return &_sqes[slot];
     }
 
-    public int SubmitAndWait(uint waitFor)
+    public int SubmitAndWait(uint waitFor) => SubmitAndWait(waitFor, -1);
+
+    /// <summary>
+    /// As <see cref="SubmitAndWait(uint)"/>, with the wait bounded by <paramref name="timeoutMs"/>
+    /// (negative: unbounded). A wait that runs out with nothing submitted returns -ETIME.
+    /// </summary>
+    public int SubmitAndWait(uint waitFor, long timeoutMs)
     {
         // liburing-style accounting: derive the submit count from the kernel-consumed head, so
         // SQEs published by an enter that consumed nothing (-EBUSY under CQ-overflow pressure)
@@ -181,7 +187,15 @@ public sealed unsafe class Ring : IDisposable
 
         uint flags = waitFor > 0 ? IORING_ENTER_GETEVENTS : 0;
 
-        return io_uring_enter(_fd, toSubmit, waitFor, flags);
+        if (timeoutMs < 0)
+        {
+            return io_uring_enter(_fd, toSubmit, waitFor, flags);
+        }
+
+        // The kernel copies both during the call, so the stack is fine.
+        var ts  = new __kernel_timespec { tv_sec = timeoutMs / 1000, tv_nsec = timeoutMs % 1000 * 1_000_000 };
+        var arg = new io_uring_getevents_arg { ts = (ulong)&ts };
+        return io_uring_enter(_fd, toSubmit, waitFor, flags | IORING_ENTER_EXT_ARG, &arg, (nuint)sizeof(io_uring_getevents_arg));
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
