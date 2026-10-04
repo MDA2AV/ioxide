@@ -112,6 +112,7 @@ public sealed partial class Http3Connection
     private async Task RunCoreAsync(Func<Http3Request, Http3Response>? buffered, Func<Http3Request, ValueTask<Http3Response>>? streaming)
     {
         _streaming = streaming is not null;
+        _quicConnection.OnSendCapacityAvailable ??= SendPendingBodies;   // a streamed connection has its own
         try
         {
             while (true)
@@ -182,6 +183,7 @@ public sealed partial class Http3Connection
             }
             FireBodyWakes();
             _requests.Clear();
+            _pendingBodies.Clear();
 
             // Tell the peer why. A protocol error used to end the handler and leave the connection
             // registered and routable: no H3 error code ever reached the client, and the connection
@@ -731,7 +733,57 @@ public sealed partial class Http3Connection
         }
 
         _quicConnection.SendStream(streamId, head.AsSpan(0, headLen), fin: false);
-        _quicConnection.SendStream(streamId, resp.Body.Span, fin: true);
+        SendBody(streamId, resp.Body);
+    }
+
+    // A large body goes in pieces while the connection takes them, and the rest as acks free
+    // retention: handed over whole, 32 one-MiB responses on one connection crossed the backstop and
+    // lost the connection. A piece overshoots the high-water by at most its own size.
+    private const int BodyPiece = 64 * 1024;
+
+    private sealed class PendingBody(long streamId, ReadOnlyMemory<byte> rest)
+    {
+        public readonly long StreamId = streamId;
+        public ReadOnlyMemory<byte> Rest = rest;
+    }
+
+    private readonly Queue<PendingBody> _pendingBodies = new();
+
+    private void SendBody(long streamId, ReadOnlyMemory<byte> body)
+    {
+        if (_pendingBodies.Count == 0)
+        {
+            body = SendWhileCapacity(streamId, body);
+            if (body.IsEmpty)
+            {
+                return;
+            }
+        }
+        _pendingBodies.Enqueue(new PendingBody(streamId, body));   // after the ones already waiting
+    }
+
+    private ReadOnlyMemory<byte> SendWhileCapacity(long streamId, ReadOnlyMemory<byte> body)
+    {
+        while (!body.IsEmpty && _quicConnection.CanQueueSend)
+        {
+            int n = Math.Min(body.Length, BodyPiece);
+            _quicConnection.SendStream(streamId, body.Span[..n], fin: n == body.Length);
+            body = body[n..];
+        }
+        return body;
+    }
+
+    private void SendPendingBodies()
+    {
+        while (_pendingBodies.TryPeek(out PendingBody? next) && !IsBroken)
+        {
+            next.Rest = SendWhileCapacity(next.StreamId, next.Rest);
+            if (!next.Rest.IsEmpty)
+            {
+                return;   // at the high-water again: the next capacity signal carries on
+            }
+            _pendingBodies.Dequeue();
+        }
     }
 
     // --- streaming plumbing --------------------------------------------------------------------
