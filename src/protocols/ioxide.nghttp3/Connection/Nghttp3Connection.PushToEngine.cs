@@ -32,6 +32,10 @@ public sealed partial class Nghttp3Connection
             // the pool. Without this the writer and its native staging block lived until the
             // CONNECTION closed - one per response, which is what made a streamed response cost
             // several times the memory of a buffered one.
+            if (item.Kind == QuicStreamEvent.StopSending && _writers.TryGetValue(item.StreamId, out Nghttp3ResponseWriter? stopped))
+            {
+                stopped.OnPeerGone();   // never pulled again; a parked flush learns on this pass's drain
+            }
             if (item.Kind is not (QuicStreamEvent.Reset or QuicStreamEvent.StopSending))
             {
                 ReleaseWriter(item.StreamId);
