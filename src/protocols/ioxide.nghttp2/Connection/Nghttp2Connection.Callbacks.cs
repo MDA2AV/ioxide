@@ -159,6 +159,10 @@ public sealed partial class Nghttp2Connection
             {
                 pending.Dispose();
             }
+            if (connection._writers.TryGetValue(streamId, out Nghttp2ResponseWriter? writer))
+            {
+                writer.OnPeerReset();   // a response in flight: its handler learns at the next flush
+            }
             _ = errorCode;
         }
         catch (Exception e)

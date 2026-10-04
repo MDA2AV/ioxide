@@ -110,6 +110,9 @@ public sealed partial class Http2Connection
     internal void SendStreamedHeaders(int streamId, Http2Response response)
         => WriteHeaders(streamId, response, endStream: false);
 
+    /// <summary>False once the peer has reset this response's stream, or the connection is gone.</summary>
+    internal bool IsResponseLive(int streamId) => !IsBroken && _responseWindows.ContainsKey(streamId);
+
     /// <summary>
     /// How many body bytes may be sent on this stream right now: the smaller of the connection
     /// window, the stream window and the peer's maximum frame size. Zero means wait.

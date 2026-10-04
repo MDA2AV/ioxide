@@ -1,4 +1,5 @@
 using System.Buffers;
+using System.IO.Pipelines;
 
 namespace ioxide.nghttp2;
 
@@ -26,6 +27,7 @@ public sealed class Nghttp2ResponseWriter : IBufferWriter<byte>
 
     private bool _headersSent;
     private bool _completed;
+    private bool _gone;   // the peer reset the stream; nghttp2 has forgotten it
 
     internal Nghttp2ResponseWriter(Nghttp2Connection connection, int streamId)
     {
@@ -47,7 +49,10 @@ public sealed class Nghttp2ResponseWriter : IBufferWriter<byte>
         }
 
         _headersSent = true;
-        _connection.SendStreamedHeaders(StreamId, response);
+        if (!_gone)
+        {
+            _connection.SendStreamedHeaders(StreamId, response);
+        }
     }
 
     // --- IBufferWriter<byte> ---------------------------------------------------------------
@@ -73,21 +78,41 @@ public sealed class Nghttp2ResponseWriter : IBufferWriter<byte>
     /// Headers are sent for you if the handler never called <see cref="WriteHeaders"/>, because a
     /// body cannot precede them and a 200 is what the buffered path would have sent.
     /// </remarks>
-    public async ValueTask FlushAsync()
+    /// <returns>
+    /// <see cref="FlushResult.IsCompleted"/> once the peer has reset the stream or the connection is
+    /// gone, as a TCP pipe writer reports a closed peer: nothing written from then on reaches anyone.
+    /// </returns>
+    public async ValueTask<FlushResult> FlushAsync()
     {
         if (!_headersSent)
         {
             WriteHeaders(new Nghttp2Response { Status = 200 });
         }
 
-        if (_staged > 0)
+        HandOverStaged();
+
+        if (_gone || _connection.IsBroken)
         {
-            _connection.SendStreamedData(StreamId, _staging.AsSpan(0, _staged));
-            _staged = 0;
+            return PeerGone;
         }
 
         await _connection.FlushStreamedAsync();
+        return default;
     }
+
+    private static readonly FlushResult PeerGone = new(isCanceled: false, isCompleted: true);
+
+    private void HandOverStaged()
+    {
+        if (_staged > 0 && !_gone && !_connection.SendStreamedData(StreamId, _staging.AsSpan(0, _staged)))
+        {
+            _gone = true;
+        }
+        _staged = 0;
+    }
+
+    /// <summary>The peer reset this stream: from here on nothing is sent on it.</summary>
+    internal void OnPeerReset() => _gone = true;
 
     /// <summary>End the response: whatever is staged goes out, then END_STREAM. Idempotent.</summary>
     internal async ValueTask CompleteAsync()
@@ -105,10 +130,10 @@ public sealed class Nghttp2ResponseWriter : IBufferWriter<byte>
             WriteHeaders(new Nghttp2Response { Status = 200 });
         }
 
-        if (_staged > 0)
+        HandOverStaged();
+        if (_gone)
         {
-            _connection.SendStreamedData(StreamId, _staging.AsSpan(0, _staged));
-            _staged = 0;
+            return;   // reset by the peer: there is no end left to send
         }
 
         _connection.EndStreamedBody(StreamId);
@@ -136,6 +161,10 @@ public sealed class Nghttp2ResponseWriter : IBufferWriter<byte>
 
         _completed = true;
         _staged = 0;
+        if (_gone)
+        {
+            return;   // never in answer to the peer's own reset (RFC 9113 5.4.2)
+        }
         _connection.ResetStreamed(StreamId);
         await _connection.FlushStreamedAsync();
     }
@@ -164,6 +193,7 @@ public sealed class Nghttp2ResponseWriter : IBufferWriter<byte>
         _staged = 0;
         _headersSent = false;
         _completed = false;
+        _gone = false;
     }
 
     internal void Release()

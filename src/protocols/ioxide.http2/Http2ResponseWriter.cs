@@ -1,4 +1,5 @@
 using System.Buffers;
+using System.IO.Pipelines;
 
 namespace ioxide.http2;
 
@@ -72,7 +73,10 @@ public sealed class Http2ResponseWriter : IBufferWriter<byte>
         }
 
         _headersSent = true;
-        _connection.SendStreamedHeaders(_streamId, response);
+        if (_connection.IsResponseLive(_streamId))
+        {
+            _connection.SendStreamedHeaders(_streamId, response);
+        }
     }
 
     /// <inheritdoc />
@@ -105,7 +109,11 @@ public sealed class Http2ResponseWriter : IBufferWriter<byte>
     /// That wait is the backpressure: a peer that stops reading stops the producer rather than
     /// growing a queue behind it.
     /// </summary>
-    public ValueTask FlushAsync() => FlushCore(endStream: false);
+    /// <returns>
+    /// <see cref="FlushResult.IsCompleted"/> once the peer has reset the stream or the connection is
+    /// gone, as a TCP pipe writer reports a closed peer: nothing written from then on reaches anyone.
+    /// </returns>
+    public ValueTask<FlushResult> FlushAsync() => FlushCore(endStream: false);
 
     /// <summary>
     /// Send what is left and mark END_STREAM. A handler that returns without calling this gets it
@@ -153,10 +161,16 @@ public sealed class Http2ResponseWriter : IBufferWriter<byte>
             _staging = [];
         }
 
-        await _connection.ResetStreamedAsync(_streamId);
+        // Not in answer to the peer's own reset (RFC 9113 5.4.2), and not on a connection that is gone.
+        if (_connection.IsResponseLive(_streamId))
+        {
+            await _connection.ResetStreamedAsync(_streamId);
+        }
     }
 
-    private async ValueTask FlushCore(bool endStream)
+    private static readonly FlushResult PeerGone = new(isCanceled: false, isCompleted: true);
+
+    private async ValueTask<FlushResult> FlushCore(bool endStream)
     {
         if (!_headersSent)
         {
@@ -166,16 +180,17 @@ public sealed class Http2ResponseWriter : IBufferWriter<byte>
         int sent = 0;
         while (sent < _staged)
         {
+            if (!_connection.IsResponseLive(_streamId))
+            {
+                _staged = 0;   // reset by the peer, or the connection is gone: nobody to send it to
+                return PeerGone;
+            }
+
             // Bounded by the frame size AND by both windows: exceeding either is a connection
             // error the peer would be right to hang up over.
             int credit = _connection.SendCredit(_streamId);
             if (credit <= 0)
             {
-                if (_connection.IsBroken)
-                {
-                    return;
-                }
-
                 // Take the wait BEFORE flushing. The flush below is an await, and the WINDOW_UPDATE
                 // it exists to provoke can arrive while this writer is still inside it - at which
                 // point a release has no waiter to find, is dropped, and the writer then parks on a
@@ -207,6 +222,11 @@ public sealed class Http2ResponseWriter : IBufferWriter<byte>
         _staged = 0;
         _sinceRealFlush += sent;
 
+        if (!_connection.IsResponseLive(_streamId))
+        {
+            return PeerGone;   // nothing was staged, or no stream is left to end
+        }
+
         if (endStream && sent == 0)
         {
             // Nothing left to send, but the stream still needs its end.
@@ -218,11 +238,12 @@ public sealed class Http2ResponseWriter : IBufferWriter<byte>
         // limit, where it must write for real to yield. Outside a pass the flush is always real.
         if (_connection.InDispatchPass && _sinceRealFlush < Http2Connection.CoalesceLimit)
         {
-            return;
+            return default;
         }
 
         _sinceRealFlush = 0;
         await _connection.FlushOutboundAsync();
+        return default;
     }
 
     private void EnsureStaging(int sizeHint)

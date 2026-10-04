@@ -14,6 +14,9 @@ namespace ioxide.nghttp2;
 public sealed partial class Nghttp2Connection
 {
     private readonly Stack<Nghttp2ResponseWriter> _writerPool = new();
+
+    // Streamed responses in flight, so a RST_STREAM from the peer can reach the one it ends.
+    private readonly Dictionary<int, Nghttp2ResponseWriter> _writers = new();
     private Func<Nghttp2Request, Nghttp2ResponseWriter, ValueTask>? _streamedHandler;
 
     /// <summary>
@@ -43,6 +46,7 @@ public sealed partial class Nghttp2Connection
         }
 
         Nghttp2ResponseWriter writer = RentWriter(request.StreamId);
+        _writers[request.StreamId] = writer;
         _ = ServeStreamedAsync(_streamedHandler, request, writer, pending);
         return true;
     }
@@ -74,6 +78,7 @@ public sealed partial class Nghttp2Connection
             // happen here - the arena backs the request's memories and the writer holds a pooled
             // staging buffer.
             pending.Dispose();
+            _writers.Remove(writer.StreamId);
             writer.Release();
             _writerPool.Push(writer);
         }
@@ -118,20 +123,30 @@ public sealed partial class Nghttp2Connection
     }
 
     /// <summary>Hand a chunk to nghttp2 and wake the deferred stream. Copied natively.</summary>
-    internal unsafe void SendStreamedData(int streamId, ReadOnlySpan<byte> body)
+    /// <returns>False when nghttp2 no longer knows the stream: the peer reset it.</returns>
+    internal unsafe bool SendStreamedData(int streamId, ReadOnlySpan<byte> body)
     {
         if (_handle == 0 || body.IsEmpty)
         {
-            return;
+            return true;
         }
 
         fixed (byte* bodyBytes = body)
         {
-            if (Nghttp2.ih2_stream_write(_handle, streamId, bodyBytes, (nuint)body.Length) != 0)
+            int result = Nghttp2.ih2_stream_write(_handle, streamId, bodyBytes, (nuint)body.Length);
+
+            // A stream closed by the peer is dropped natively, so the write finds nothing - one
+            // stream's end, not a fault in the connection every other stream is riding.
+            if (result == ErrInvalidArgument)
+            {
+                return false;
+            }
+            if (result != 0)
             {
                 _failed = true;
             }
         }
+        return true;
     }
 
     /// <summary>A streamed response its handler could not finish: RST_STREAM INTERNAL_ERROR.</summary>
