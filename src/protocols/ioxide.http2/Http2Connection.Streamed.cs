@@ -110,29 +110,22 @@ public sealed partial class Http2Connection
     internal void SendStreamedHeaders(int streamId, Http2Response response)
         => WriteHeaders(streamId, response, endStream: false);
 
+    /// <summary>False once the peer has reset this response's stream, or the connection is gone.</summary>
+    internal bool IsResponseLive(int streamId) => !IsBroken && _responseWindows.ContainsKey(streamId);
+
     /// <summary>
     /// How many body bytes may be sent on this stream right now: the smaller of the connection
-    /// window, the stream window and the peer's maximum frame size. Zero means wait.
+    /// window, the stream window and the peer's maximum frame size. Zero means wait; negative means
+    /// never - the peer reset the stream, or the connection is gone.
     /// </summary>
     internal int SendCredit(int streamId)
     {
-        if (IsBroken)
+        if (IsBroken || !_responseWindows.TryGetValue(streamId, out int window))
         {
-            return 0;
+            return -1;
         }
 
-        int credit = Math.Min(_peerConnectionWindow, _peerMaxFrameSize);
-
-        if (_responseWindows.TryGetValue(streamId, out int window))
-        {
-            credit = Math.Min(credit, window);
-        }
-        else if (_streams.TryGetValue(streamId, out PendingRequest? pending))
-        {
-            credit = Math.Min(credit, pending.SendWindow);
-        }
-
-        return Math.Max(credit, 0);
+        return Math.Max(Math.Min(Math.Min(_peerConnectionWindow, _peerMaxFrameSize), window), 0);
     }
 
     /// <summary>One DATA frame, already known to fit both windows.</summary>

@@ -11,7 +11,7 @@
 #         h1s   HTTP/1.1 over TLS                  (wrk)
 #         h2c   HTTP/2 prior-knowledge, cleartext  (h2load)
 #         h2    HTTP/2 over TLS, ALPN              (h2load)
-#         h3    HTTP/3 over QUIC                   (h3x)
+#         h3    HTTP/3 over QUIC                   (h2load built with HTTP/3)
 #         echo  raw stream echo, no HTTP           (Playground/Clients/Quic drives it)
 #         driver a sample that GENERATES load rather than serving it
 #         none  nothing here can drive it - the mutual-TLS samples need a client certificate,

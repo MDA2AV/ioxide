@@ -52,6 +52,10 @@ public sealed partial class Nghttp3Connection
     {
         _streaming = true;
 
+        // Writers parked at the retention high-water resume when acks drain it: the drain pumps and
+        // releases them, where a bare PumpEgress would leave them parked.
+        _quicConnection.OnSendCapacityAvailable = DrainStreamed;
+
         try
         {
             while (true)
@@ -217,6 +221,7 @@ public sealed partial class Nghttp3Connection
 
             Nghttp3ResponseWriter writer = RentWriter(streamId);
             _writers[streamId] = writer;
+            writer.HandlerRunning = true;
 
             ValueTask pending;
             try
@@ -227,6 +232,7 @@ public sealed partial class Nghttp3Connection
             {
                 Console.Error.WriteLine($"[ioxide.nghttp3] request handler faulted: {exception.GetBaseException().Message}");
                 FailStreamed(streamId, writer, request);
+                HandlerExited(writer);
                 continue;
             }
 
@@ -248,10 +254,33 @@ public sealed partial class Nghttp3Connection
         {
             Console.Error.WriteLine($"[ioxide.nghttp3] request handler faulted: {exception.GetBaseException().Message}");
             FailStreamed(writer.StreamId, writer, request);
+            HandlerExited(writer);
             return;
         }
 
         request.HandlerDone = true;
+        HandlerExited(writer);
+    }
+
+    // A writer has two owners - its handler and its stream, since nghttp3 may point into the chunk
+    // until the stream closes - and goes back to the pool when the second lets go. The stream's
+    // close does it when the handler finished first; this does when the stream closed under it.
+    private void HandlerExited(Nghttp3ResponseWriter writer)
+    {
+        writer.HandlerRunning = false;
+        if (_writers.ContainsKey(writer.StreamId))
+        {
+            return;
+        }
+
+        if (_protocolFailed)
+        {
+            writer.Release();   // the connection is gone, and its pool with it
+        }
+        else
+        {
+            _writerPool.Push(writer);
+        }
     }
 
     private void FailStreamed(long streamId, Nghttp3ResponseWriter writer, Nghttp3Request request)
@@ -344,7 +373,13 @@ public sealed partial class Nghttp3Connection
         if (!_inStreamedDrain)
         {
             DrainStreamed();
-            return Task.CompletedTask;
+
+            // At the high-water nothing more is taken until acks drain it, and acks are only read once
+            // the reactor is back in its loop: spinning here never let it get there.
+            if (_quicConnection.CanQueueSend)
+            {
+                return Task.CompletedTask;
+            }
         }
 
         // NOT RunContinuationsAsynchronously: everything on a reactor resumes inline on the
@@ -398,6 +433,12 @@ public sealed partial class Nghttp3Connection
     {
         if (_writers.Remove(streamId, out Nghttp3ResponseWriter? writer))
         {
+            if (writer.HandlerRunning)
+            {
+                // Pooling it now would hand a writer its handler still holds to the next request.
+                writer.OnPeerGone();
+                return;
+            }
             _writerPool.Push(writer);   // buffers stay; freed with the connection
         }
     }

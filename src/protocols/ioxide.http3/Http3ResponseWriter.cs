@@ -1,4 +1,5 @@
 using System.Buffers;
+using System.IO.Pipelines;
 
 namespace ioxide.http3;
 
@@ -35,6 +36,7 @@ public sealed class Http3ResponseWriter : IBufferWriter<byte>
 
     private bool _headersSent;
     private bool _completed;
+    private bool _gone;   // the peer stopped reading, or the stream closed under the handler
 
     internal Http3ResponseWriter(Http3Connection connection, QuicConnection quic, long streamId)
     {
@@ -72,7 +74,10 @@ public sealed class Http3ResponseWriter : IBufferWriter<byte>
         }
 
         _headersSent = true;
-        _connection.SendStreamedHeaders(_streamId, response);
+        if (!_gone)
+        {
+            _connection.SendStreamedHeaders(_streamId, response);
+        }
     }
 
     /// <inheritdoc />
@@ -105,7 +110,17 @@ public sealed class Http3ResponseWriter : IBufferWriter<byte>
     /// send-retention high-water: that wait is the backpressure, and it is what keeps memory bound
     /// to one chunk rather than to the whole response.
     /// </summary>
-    public ValueTask FlushAsync() => FlushCore(fin: false);
+    /// <returns>
+    /// <see cref="FlushResult.IsCompleted"/> once the peer has stopped reading the stream or the
+    /// connection is gone, as a TCP pipe writer reports a closed peer: nothing written from then on
+    /// reaches anyone.
+    /// </returns>
+    public ValueTask<FlushResult> FlushAsync() => FlushCore(fin: false);
+
+    /// <summary>The peer will read no more of this stream: from here on nothing is sent on it.</summary>
+    internal void OnPeerGone() => _gone = true;
+
+    private static readonly FlushResult PeerGone = new(isCanceled: false, isCompleted: true);
 
     /// <summary>
     /// Send what is left and close the stream. A handler that returns without calling this still
@@ -146,7 +161,10 @@ public sealed class Http3ResponseWriter : IBufferWriter<byte>
 
         _completed = true;
         _staged = 0;
-        _quic.ResetStream(_streamId, H3InternalError);
+        if (!_gone)
+        {
+            _quic.ResetStream(_streamId, H3InternalError);   // never on a stream the peer already stopped
+        }
 
         if (_staging.Length > 0)
         {
@@ -156,7 +174,7 @@ public sealed class Http3ResponseWriter : IBufferWriter<byte>
         return ValueTask.CompletedTask;
     }
 
-    private async ValueTask FlushCore(bool fin)
+    private async ValueTask<FlushResult> FlushCore(bool fin)
     {
         if (!_headersSent)
         {
@@ -165,25 +183,26 @@ public sealed class Http3ResponseWriter : IBufferWriter<byte>
 
         if (_staged == 0 && !fin)
         {
-            return;
+            return _gone || _connection.IsBroken ? PeerGone : default;
         }
 
         // The peer has stopped reading and the connection is holding all it is willing to. Wait
         // rather than queue: unbounded queueing here is exactly what streaming exists to avoid.
-        while (!_quic.CanQueueSend && !_connection.IsBroken)
+        while (!_quic.CanQueueSend && !_connection.IsBroken && !_gone)
         {
             await _connection.WaitForSendCapacityAsync();
         }
 
-        if (_connection.IsBroken)
+        if (_connection.IsBroken || _gone)
         {
-            return;
+            _staged = 0;   // nobody to send it to
+            return PeerGone;
         }
 
         if (_staged == 0)
         {
             _quic.SendStream(_streamId, ReadOnlySpan<byte>.Empty, fin: true);
-            return;
+            return default;
         }
 
         // [0x00][varint length][payload], sent as one call - the header is tiny and splitting it
@@ -200,6 +219,7 @@ public sealed class Http3ResponseWriter : IBufferWriter<byte>
         ArrayPool<byte>.Shared.Return(frame);
 
         _staged = 0;
+        return default;
     }
 
     private void EnsureStaging(int sizeHint)
@@ -233,5 +253,6 @@ public sealed class Http3ResponseWriter : IBufferWriter<byte>
         _staged = 0;
         _headersSent = false;
         _completed = false;
+        _gone = false;
     }
 }

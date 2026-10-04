@@ -9,6 +9,9 @@ namespace ioxide.http3;
 public sealed partial class Http3Connection
 {
     private readonly Stack<Http3ResponseWriter> _writerPool = new();
+
+    // Streamed responses in flight, so a STOP_SENDING from the peer can reach the one it ends.
+    private readonly Dictionary<long, Http3ResponseWriter> _writers = new();
     private readonly List<TaskCompletionSource> _capacityWaiters = [];
 
     /// <summary>True once the connection can no longer make progress; a parked writer gives up.</summary>
@@ -61,6 +64,7 @@ public sealed partial class Http3Connection
         }
 
         Http3ResponseWriter writer = RentWriter(request.StreamId);
+        _writers[request.StreamId] = writer;
         _ = ServeAsync(_streamedResponseHandler, request, writer);
         return true;
     }
@@ -80,6 +84,7 @@ public sealed partial class Http3Connection
         }
         finally
         {
+            _writers.Remove(writer.StreamId);
             _writerPool.Push(writer);
         }
     }

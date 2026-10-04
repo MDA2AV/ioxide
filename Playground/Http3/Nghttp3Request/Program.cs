@@ -61,7 +61,7 @@ Env.OverrideCert(ref certOverride, ref keyOverride);
 // the per-connection send-retention high-water (default 16 MiB): a response larger than it streams
 // out paced by acks instead of buffering whole, so h3 serves large files in bounded memory. See
 // Playground/Http3/Nghttp3Buffered for the full QUIC/h3 knob set.
-using var engine = new QuicEngine(certPath, keyPath, cidLength: 8, alpn: ["h3"], maxSendRetentionBytes: 16L << 20);
+using var engine = new QuicEngine(certPath, keyPath, cidLength: 8, alpn: ["h3"]);
 
 var config = new ServerConfig
 {
@@ -94,6 +94,8 @@ var config = new ServerConfig
         Port              = quicPort,                // https://127.0.0.1:8443/ over UDP - h3 lives here
         LocalCidLength    = 8,                       // must match the engine's cidLength
         ReadTimeoutMs     = 60_000,                  // close a connection whose peer is silent this long; 0 = off
+        SendRetentionBytes        = 16L << 20,       // unacked response bytes a connection holds before a response waits for acks
+        SendRetentionCeilingBytes = 32L << 20,       // a connection past this is closed: its producer ignored the wait
         ConnectionFactory = engine.CreateFactory(),  // the engine adopts each new connection
         // Where a moved client's packets go when several reactors share the port. Forward costs
         // nothing until a client actually changes address; KernelFilter has the kernel route by

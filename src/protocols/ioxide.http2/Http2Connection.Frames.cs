@@ -504,6 +504,13 @@ public sealed partial class Http2Connection
         {
             pending.Dispose();   // the peer gave up; there is nobody to answer
         }
+
+        // A response in flight may send nothing more on the stream (RFC 9113 5.1), and a writer parked
+        // on its credit has to wake to learn that - the WINDOW_UPDATE it waits for will never come.
+        if (_responseWindows.Remove(header.StreamId))
+        {
+            ReleaseCreditWaiters(header.StreamId);
+        }
     }
 
     /// <summary>

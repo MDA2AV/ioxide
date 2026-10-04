@@ -70,6 +70,8 @@ var config = new ServerConfig
         // connection id instead, which costs a little on every packet. See /how-ioxide-does-h3.
         Routing = QuicRouting.Forward,
         ReadTimeoutMs = 60_000,   // close a connection whose peer is silent this long; 0 = off
+        SendRetentionBytes = 16L << 20,          // unacked response bytes a connection holds before a response waits for acks
+        SendRetentionCeilingBytes = 32L << 20,   // a connection past this is closed: its producer ignored the wait
     },
 };
 

@@ -37,6 +37,7 @@ public sealed partial class Nghttp2Connection : IDisposable
 
     // RFC 9113 INTERNAL_ERROR: a stream this server could not finish.
     private const uint InternalError = 0x2;
+    private const int  ErrInvalidArgument = -501;   // NGHTTP2_ERR_INVALID_ARGUMENT
 
     private readonly IDuplexPipe _pipe;
     private readonly Nghttp2Options _options;

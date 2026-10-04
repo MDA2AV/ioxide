@@ -1156,6 +1156,8 @@ var config = new ServerConfig
         // connection id instead, which costs a little on every packet. See /how-ioxide-does-h3.
         Routing = QuicRouting.Forward,
         ReadTimeoutMs = 60_000,   // close a connection whose peer is silent this long; 0 = off
+        SendRetentionBytes = 16L &lt;&lt; 20,          // unacked response bytes a connection holds before a response waits for acks
+        SendRetentionCeilingBytes = 32L &lt;&lt; 20,   // a connection past this is closed: its producer ignored the wait
     },
 };
 
@@ -1269,6 +1271,8 @@ var config = new ServerConfig
         // connection id instead, which costs a little on every packet. See /how-ioxide-does-h3.
         Routing = QuicRouting.Forward,
         ReadTimeoutMs = 60_000,   // close a connection whose peer is silent this long; 0 = off
+        SendRetentionBytes = 16L &lt;&lt; 20,          // unacked response bytes a connection holds before a response waits for acks
+        SendRetentionCeilingBytes = 32L &lt;&lt; 20,   // a connection past this is closed: its producer ignored the wait
     },
 };
 
@@ -2441,6 +2445,8 @@ var config = new ServerConfig
         // connection id instead, which costs a little on every packet. See /how-ioxide-does-h3.
         Routing = QuicRouting.Forward,
         ReadTimeoutMs = 60_000,   // close a connection whose peer is silent this long; 0 = off
+        SendRetentionBytes = 16L &lt;&lt; 20,          // unacked response bytes a connection holds before a response waits for acks
+        SendRetentionCeilingBytes = 32L &lt;&lt; 20,   // a connection past this is closed: its producer ignored the wait
     },
 };
 
@@ -2527,6 +2533,8 @@ var config = new ServerConfig
         // connection id instead, which costs a little on every packet. See /how-ioxide-does-h3.
         Routing = QuicRouting.Forward,
         ReadTimeoutMs = 60_000,   // close a connection whose peer is silent this long; 0 = off
+        SendRetentionBytes = 16L &lt;&lt; 20,          // unacked response bytes a connection holds before a response waits for acks
+        SendRetentionCeilingBytes = 32L &lt;&lt; 20,   // a connection past this is closed: its producer ignored the wait
     },
 };
 
@@ -2620,7 +2628,7 @@ const string keyPath  = &quot;key.pem&quot;;
 // The last argument bounds what one connection may retain unacknowledged, which is what keeps a
 // streamed response streaming instead of quietly buffering whole. See Playground/Http3/Nghttp3Buffered
 // for the full QUIC/h3 knob set.
-using var engine = new QuicEngine(certPath, keyPath, cidLength: 8, alpn: [&quot;h3&quot;], maxSendRetentionBytes: 16L &lt;&lt; 20);
+using var engine = new QuicEngine(certPath, keyPath, cidLength: 8, alpn: [&quot;h3&quot;]);
 
 var config = new ServerConfig
 {
@@ -2637,6 +2645,8 @@ var config = new ServerConfig
         // connection id instead, which costs a little on every packet. See /how-ioxide-does-h3.
         Routing = QuicRouting.Forward,
         ReadTimeoutMs = 60_000,   // close a connection whose peer is silent this long; 0 = off
+        SendRetentionBytes = 16L &lt;&lt; 20,          // unacked response bytes a connection holds before a response waits for acks
+        SendRetentionCeilingBytes = 32L &lt;&lt; 20,   // a connection past this is closed: its producer ignored the wait
     },
 };
 
@@ -2800,6 +2810,8 @@ var config = new ServerConfig
         // connection id instead, which costs a little on every packet. See /how-ioxide-does-h3.
         Routing = QuicRouting.Forward,
         ReadTimeoutMs = 60_000,   // close a connection whose peer is silent this long; 0 = off
+        SendRetentionBytes = 16L &lt;&lt; 20,          // unacked response bytes a connection holds before a response waits for acks
+        SendRetentionCeilingBytes = 32L &lt;&lt; 20,   // a connection past this is closed: its producer ignored the wait
     },
 };
 
@@ -2974,6 +2986,8 @@ var config = new ServerConfig
         // connection id instead, which costs a little on every packet. See /how-ioxide-does-h3.
         Routing = QuicRouting.Forward,
         ReadTimeoutMs = 60_000,   // close a connection whose peer is silent this long; 0 = off
+        SendRetentionBytes = 16L &lt;&lt; 20,          // unacked response bytes a connection holds before a response waits for acks
+        SendRetentionCeilingBytes = 32L &lt;&lt; 20,   // a connection past this is closed: its producer ignored the wait
     },
 };
 
@@ -3046,14 +3060,18 @@ int    reactors = Environment.ProcessorCount;  // one ring per reactor, one reac
 // ── QuicEngine: the per-endpoint QUIC/TLS state, shared by every connection ───────────────────
 uint cidLength = 8;                            // connection-id length this endpoint mints (1..20)
 
-// Per-connection send-retention high-water. A response larger than this is streamed out paced by
-// the peer&#x27;s acks instead of buffered whole, so memory stays ~this-per-connection whatever the
-// response size - the knob that lets HTTP/3 serve large files. Raise for more in-flight throughput
-// on fat links; lower to cap memory under many connections. Default 16 MiB.
-long maxSendRetentionBytes = 16L &lt;&lt; 20;
-
 // ── QuicOptions: the listener ─────────────────────────────────────────────────────────────────
 int readTimeoutMs = 60_000;                    // close a connection whose peer is silent this long; 0 = off
+
+// Per-connection send-retention. A response larger than this is streamed out paced by the peer&#x27;s
+// acks instead of buffered whole, so memory stays ~this-per-connection whatever the response size -
+// the knob that lets HTTP/3 serve large files. Raise for more in-flight throughput on fat links;
+// lower to cap memory under many connections. Default 16 MiB.
+long sendRetentionBytes = 16L &lt;&lt; 20;
+
+// Past this a connection is closed: its producer ignored the wait above. A buffered response is
+// handed over whole, so the buffered responses in flight on one connection must fit under it.
+long sendRetentionCeilingBytes = 32L &lt;&lt; 20;
 
 // ── UdpOptions: how datagrams are received ────────────────────────────────────────────────────
 int  udpRecvSlots = 16;                        // multishot recv slots per reactor - datagrams the ring can hold at once
@@ -3070,7 +3088,7 @@ long qpackBlockedStreams = qpackCapacity &gt; 0 ? 100 : 0;
 const string certPath = &quot;cert.pem&quot;;   // any PEM pair
 const string keyPath  = &quot;key.pem&quot;;
 
-using var engine = new QuicEngine(certPath, keyPath, cidLength, alpn: [&quot;h3&quot;], maxSendRetentionBytes);
+using var engine = new QuicEngine(certPath, keyPath, cidLength, alpn: [&quot;h3&quot;]);
 
 var config = new ServerConfig
 {
@@ -3099,6 +3117,8 @@ var config = new ServerConfig
         Port = quicPort,
         LocalCidLength = (int)cidLength,        // must match the engine&#x27;s cidLength
         ReadTimeoutMs = readTimeoutMs,
+        SendRetentionBytes = sendRetentionBytes,
+        SendRetentionCeilingBytes = sendRetentionCeilingBytes,
         ConnectionFactory = engine.CreateFactory(),
         // Where a moved client&#x27;s packets go when several reactors share the port. Forward costs
         // nothing until a client actually changes address; KernelFilter has the kernel route by
@@ -3235,9 +3255,10 @@ int    reactors = Environment.ProcessorCount;  // one ring per reactor, one reac
 // UDP receive slots per reactor: how many datagrams the ring can have outstanding at once.
 int udpRecvSlots = 16;
 
-// Per-connection send-retention high-water (default 16 MiB): a response larger than it streams out
-// paced by acks instead of buffering whole. See Playground/Http3/Nghttp3Buffered for the full knob set.
-long maxSendRetentionBytes = 16L &lt;&lt; 20;
+// Per-connection send-retention (default 16 MiB): a response larger than it streams out paced by acks
+// instead of buffering whole; past the ceiling a connection is closed. See Playground/Http3/Nghttp3Buffered.
+long sendRetentionBytes = 16L &lt;&lt; 20;
+long sendRetentionCeilingBytes = 32L &lt;&lt; 20;
 
 // ─────────────────────────────────────────────────────────────────────────────────────────────
 
@@ -3246,7 +3267,7 @@ const string keyPath  = &quot;key.pem&quot;;
 
 // Permissive ALPN (no allowlist): h3 clients negotiate &quot;h3&quot;; everything else still handshakes
 // and falls through to the echo branch.
-using var engine = new QuicEngine(certPath, keyPath, cidLength: 8, alpn: null, maxSendRetentionBytes);
+using var engine = new QuicEngine(certPath, keyPath, cidLength: 8, alpn: null);
 
 var config = new ServerConfig
 {
@@ -3267,6 +3288,8 @@ var config = new ServerConfig
         Port              = quicPort,                // https://127.0.0.1:8443/ - UDP, not TCP
         LocalCidLength    = 8,                       // must match the engine&#x27;s cidLength
         ReadTimeoutMs     = 60_000,                  // close a connection whose peer is silent this long; 0 = off
+        SendRetentionBytes        = sendRetentionBytes,
+        SendRetentionCeilingBytes = sendRetentionCeilingBytes,
         ConnectionFactory = engine.CreateFactory(),  // the engine adopts each new connection
         // Where a moved client&#x27;s packets go when several reactors share the port. Forward costs
         // nothing until a client actually changes address; KernelFilter has the kernel route by
@@ -5827,18 +5850,18 @@ int    reactors = Environment.ProcessorCount;  // one ring per reactor, one reac
 // UDP receive slots per reactor. Each slot pins ~64 KiB, enough for a full GRO train.
 int udpRecvSlots = 16;
 
-// Per-connection send-retention high-water. A response larger than this streams out paced by
-// acks instead of being buffered whole, so QUIC serves large responses without unbounded
-// per-connection memory.
-long maxSendRetentionBytes = 16L &lt;&lt; 20;
+// Per-connection send-retention: a response larger than this streams out paced by acks instead of
+// being buffered whole, so QUIC serves large responses without unbounded per-connection memory.
+// A connection past the ceiling is closed - its producer ignored the wait.
+long sendRetentionBytes = 16L &lt;&lt; 20;
+long sendRetentionCeilingBytes = 32L &lt;&lt; 20;
 
 // ─────────────────────────────────────────────────────────────────────────────────────────────
 
 const string certPath = &quot;cert.pem&quot;;   // any PEM pair
 const string keyPath  = &quot;key.pem&quot;;
 
-using var engine = new QuicEngine(certPath, keyPath, cidLength: 8, alpn: [&quot;echo&quot;],
-                                  maxSendRetentionBytes: maxSendRetentionBytes);
+using var engine = new QuicEngine(certPath, keyPath, cidLength: 8, alpn: [&quot;echo&quot;]);
 
 var config = new ServerConfig
 {
@@ -5868,6 +5891,8 @@ var config = new ServerConfig
         // connection id instead, which costs a little on every packet. See /how-ioxide-does-h3.
         Routing = QuicRouting.Forward,
         ReadTimeoutMs     = 60_000,              // close a connection whose peer is silent this long; 0 = off
+        SendRetentionBytes        = sendRetentionBytes,
+        SendRetentionCeilingBytes = sendRetentionCeilingBytes,
     },
 };
 
@@ -5941,18 +5966,18 @@ int    reactors = Environment.ProcessorCount;  // one ring per reactor, one reac
 // UDP receive slots per reactor. Each slot pins ~64 KiB, enough for a full GRO train.
 int udpRecvSlots = 16;
 
-// Per-connection send-retention high-water. A response larger than this streams out paced by
-// acks instead of being buffered whole, so QUIC serves large responses without unbounded
-// per-connection memory.
-long maxSendRetentionBytes = 16L &lt;&lt; 20;
+// Per-connection send-retention: a response larger than this streams out paced by acks instead of
+// being buffered whole, so QUIC serves large responses without unbounded per-connection memory.
+// A connection past the ceiling is closed - its producer ignored the wait.
+long sendRetentionBytes = 16L &lt;&lt; 20;
+long sendRetentionCeilingBytes = 32L &lt;&lt; 20;
 
 // ─────────────────────────────────────────────────────────────────────────────────────────────
 
 const string certPath = &quot;cert.pem&quot;;   // any PEM pair
 const string keyPath  = &quot;key.pem&quot;;
 
-using var engine = new QuicEngine(certPath, keyPath, cidLength: 8, alpn: [&quot;echo&quot;],
-                                  maxSendRetentionBytes: maxSendRetentionBytes);
+using var engine = new QuicEngine(certPath, keyPath, cidLength: 8, alpn: [&quot;echo&quot;]);
 
 var config = new ServerConfig
 {
@@ -5982,6 +6007,8 @@ var config = new ServerConfig
         // connection id instead, which costs a little on every packet. See /how-ioxide-does-h3.
         Routing = QuicRouting.Forward,
         ReadTimeoutMs     = 60_000,              // close a connection whose peer is silent this long; 0 = off
+        SendRetentionBytes        = sendRetentionBytes,
+        SendRetentionCeilingBytes = sendRetentionCeilingBytes,
     },
 };
 
@@ -6076,7 +6103,7 @@ const string keyPath  = &quot;key.pem&quot;;
 // the per-connection send-retention high-water (default 16 MiB): a response larger than it streams
 // out paced by acks instead of buffering whole, so h3 serves large files in bounded memory. See
 // Playground/Http3/Nghttp3Buffered for the full QUIC/h3 knob set.
-using var engine = new QuicEngine(certPath, keyPath, cidLength: 8, alpn: [&quot;h3&quot;], maxSendRetentionBytes: 16L &lt;&lt; 20);
+using var engine = new QuicEngine(certPath, keyPath, cidLength: 8, alpn: [&quot;h3&quot;]);
 
 var config = new ServerConfig
 {
@@ -6109,6 +6136,8 @@ var config = new ServerConfig
         Port              = quicPort,                // https://127.0.0.1:8443/ over UDP - h3 lives here
         LocalCidLength    = 8,                       // must match the engine&#x27;s cidLength
         ReadTimeoutMs     = 60_000,                  // close a connection whose peer is silent this long; 0 = off
+        SendRetentionBytes        = 16L &lt;&lt; 20,       // unacked response bytes a connection holds before a response waits for acks
+        SendRetentionCeilingBytes = 32L &lt;&lt; 20,       // a connection past this is closed: its producer ignored the wait
         ConnectionFactory = engine.CreateFactory(),  // the engine adopts each new connection
         // Where a moved client&#x27;s packets go when several reactors share the port. Forward costs
         // nothing until a client actually changes address; KernelFilter has the kernel route by
@@ -6740,8 +6769,7 @@ const string keyPath  = &quot;key.pem&quot;;
 
 using var engine = new QuicEngine(certPath, keyPath,
     cidLength: 8,                       // CID bytes this endpoint mints (1..20)
-    alpn: [&quot;h3&quot;],                       // the only protocol offered (else no_application_protocol)
-    maxSendRetentionBytes: 16L &lt;&lt; 20);  // per-connection send-retention high-water (default 16 MiB)
+    alpn: [&quot;h3&quot;]);                      // the only protocol offered (else no_application_protocol)
 
 var config = new ServerConfig
 {
@@ -6762,6 +6790,8 @@ var config = new ServerConfig
         Port              = quicPort,  // h3 over UDP - the QUIC listener
         LocalCidLength    = 8,                                       // CID bytes this endpoint mints (must match the engine)
         ReadTimeoutMs     = 60_000,                                  // close a connection whose peer is silent this long; 0 = off
+        SendRetentionBytes        = 16L &lt;&lt; 20,                       // unacked response bytes a connection holds before a response waits for acks
+        SendRetentionCeilingBytes = 32L &lt;&lt; 20,                       // a connection past this is closed: its producer ignored the wait
         ConnectionFactory = engine.CreateFactory(),                  // adopts new connections into the engine
         // Where a moved client&#x27;s packets go when several reactors share the port. Forward costs
         // nothing until a client actually changes address; KernelFilter has the kernel route by

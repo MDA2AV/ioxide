@@ -52,8 +52,7 @@ Env.OverrideOptional(ref keyOverride, "PLAYGROUND_QUIC_KEY");
 
 using var engine = new QuicEngine(certPath, keyPath,
     cidLength: 8,                       // CID bytes this endpoint mints (1..20)
-    alpn: ["h3"],                       // the only protocol offered (else no_application_protocol)
-    maxSendRetentionBytes: 16L << 20);  // per-connection send-retention high-water (default 16 MiB)
+    alpn: ["h3"]);                      // the only protocol offered (else no_application_protocol)
 
 var config = new ServerConfig
 {
@@ -74,6 +73,8 @@ var config = new ServerConfig
         Port              = quicPort,  // h3 over UDP - the QUIC listener
         LocalCidLength    = 8,                                       // CID bytes this endpoint mints (must match the engine)
         ReadTimeoutMs     = 60_000,                                  // close a connection whose peer is silent this long; 0 = off
+        SendRetentionBytes        = 16L << 20,                       // unacked response bytes a connection holds before a response waits for acks
+        SendRetentionCeilingBytes = 32L << 20,                       // a connection past this is closed: its producer ignored the wait
         ConnectionFactory = engine.CreateFactory(),                  // adopts new connections into the engine
         // Where a moved client's packets go when several reactors share the port. Forward costs
         // nothing until a client actually changes address; KernelFilter has the kernel route by

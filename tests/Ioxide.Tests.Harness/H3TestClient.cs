@@ -155,6 +155,46 @@ public sealed unsafe class H3TestClient : IDisposable
 
     public (int Status, string Body) Request(string method, string path, byte[]? body, (string Name, string Value)[]? extraHeaders, int timeoutMs)
     {
+        Submit(method, path, body, extraHeaders);
+        Pump(timeoutMs);
+
+        // Status 0 = never answered, which is what a refused connection looks like from here.
+        return (_status, Encoding.UTF8.GetString(_body.ToArray()));
+    }
+
+    /// <summary>
+    /// Open a GET and read its response for <paramref name="readMs"/>, then abandon it the way a
+    /// closed browser tab does: STOP_SENDING and RESET_STREAM, H3_REQUEST_CANCELLED. Returns how
+    /// many body bytes had arrived by then.
+    /// </summary>
+    public int RequestThenCancel(string path, int readMs)
+    {
+        Submit("GET", path, null, null);
+        Pump(readMs);
+
+        int received = _body.Count;
+        Assert.True(iq_conn_shutdown_stream(_conn, _requestSid, H3RequestCancelled) == 0, "shutdown_stream failed");
+        _requestSid = -1;   // whatever still arrives for it belongs to nobody
+        FlushOut();
+        return received;
+    }
+
+    /// <summary>Keep the connection turning over for <paramref name="ms"/>, or until the request in hand ends.</summary>
+    public void Pump(int ms)
+    {
+        long deadline = Environment.TickCount64 + ms;
+        while (Environment.TickCount64 < deadline && !_done && !_peerClosed)
+        {
+            DrainH3Out();
+            FlushOut();
+            PumpIn();
+        }
+    }
+
+    private const ulong H3RequestCancelled = 0x010c;
+
+    private void Submit(string method, string path, byte[]? body, (string Name, string Value)[]? extraHeaders)
+    {
         EnsureH3Session();
 
         // Per request: a fresh bidi stream and response state. The session is not - see above.
@@ -193,17 +233,55 @@ public sealed unsafe class H3TestClient : IDisposable
                     pb, (nuint)(body?.Length ?? 0)) == 0,
                 "submit_request failed");
         }
+    }
 
-        long deadline = Environment.TickCount64 + timeoutMs;
-        while (Environment.TickCount64 < deadline && !_done && !_peerClosed)
+    // GetConcurrent's responses, by stream. Bodies are counted, not kept.
+    private sealed class Response
+    {
+        public int Status = -1;
+        public long Bytes;
+        public bool Done;
+    }
+
+    private readonly Dictionary<long, Response> _concurrent = [];
+
+    /// <summary>
+    /// GET every path at once on this connection, each on its own stream, and wait for all of the
+    /// responses. Returns each one's status and body length, in path order.
+    /// </summary>
+    public (int Status, long BodyLength)[] GetConcurrent(string[] paths, int timeoutMs)
+    {
+        EnsureH3Session();
+        for (int settle = 0; settle < 10; settle++)
         {
             DrainH3Out();
             FlushOut();
             PumpIn();
         }
 
-        // Status 0 = never answered, which is what a refused connection looks like from here.
-        return (_status, Encoding.UTF8.GetString(_body.ToArray()));
+        var streams = new long[paths.Length];
+        for (int i = 0; i < paths.Length; i++)
+        {
+            streams[i] = iq_client_open_bidi(_conn);
+            Assert.True(streams[i] >= 0, "failed to open request stream");
+            _concurrent[streams[i]] = new Response();
+
+            byte[] headers = PackHeaders([(":method", "GET"), (":scheme", "https"), (":authority", "localhost"), (":path", paths[i])]);
+            fixed (byte* p = headers)
+            {
+                Assert.True(ih3_submit_request(_h3, streams[i], p, (nuint)headers.Length, null, 0) == 0, "submit_request failed");
+            }
+        }
+
+        long deadline = Environment.TickCount64 + timeoutMs;
+        while (Environment.TickCount64 < deadline && !_peerClosed && streams.Any(sid => !_concurrent[sid].Done))
+        {
+            DrainH3Out();
+            FlushOut();
+            PumpIn();
+        }
+
+        return streams.Select(sid => (_concurrent[sid].Status, _concurrent[sid].Bytes)).ToArray();
     }
 
     /// <summary>
@@ -455,6 +533,10 @@ public sealed unsafe class H3TestClient : IDisposable
         if (n == ":status")
         {
             self._status = int.Parse(Encoding.ASCII.GetString(value, (int)valueLen));
+            if (self._concurrent.TryGetValue(streamId, out Response? response))
+            {
+                response.Status = self._status;
+            }
         }
     }
 
@@ -469,6 +551,10 @@ public sealed unsafe class H3TestClient : IDisposable
         {
             self._body.AddRange(new ReadOnlySpan<byte>(data, (int)len).ToArray());
         }
+        else if (self._concurrent.TryGetValue(streamId, out Response? response))
+        {
+            response.Bytes += (long)len;
+        }
     }
 
     [UnmanagedCallersOnly]
@@ -478,6 +564,10 @@ public sealed unsafe class H3TestClient : IDisposable
         if (streamId == self._requestSid)
         {
             self._done = true;
+        }
+        else if (self._concurrent.TryGetValue(streamId, out Response? response))
+        {
+            response.Done = true;
         }
     }
 
@@ -531,6 +621,7 @@ public sealed unsafe class H3TestClient : IDisposable
         [MarshalAs(UnmanagedType.LPUTF8Str)] string? keyPath, IqCallbacks cbs);
     [DllImport(QuicLib)] private static extern long iq_client_open_bidi(nint conn);
     [DllImport(QuicLib)] private static extern long iq_conn_open_uni(nint conn);
+    [DllImport(QuicLib)] private static extern int  iq_conn_shutdown_stream(nint conn, long streamId, ulong appErrorCode);
     [DllImport(QuicLib)] private static extern ulong iq_conn_expiry(nint conn);
     [DllImport(QuicLib)] private static extern int iq_conn_handle_expiry(nint conn, ulong ts);
     [DllImport(QuicLib)] private static extern nint iq_conn_write(nint conn, byte* dest, nuint destLen, long streamId, byte* data, nuint dataLen, int fin, long* pConsumed, ulong ts);

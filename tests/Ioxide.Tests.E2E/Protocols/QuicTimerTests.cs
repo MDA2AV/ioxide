@@ -27,6 +27,7 @@ internal static class QuicTimerTests
         RegisterLossRecovery(runner);
         RegisterTimerFaults(runner);
         RegisterOutboundTimers(runner);
+        RegisterIdleReactor(runner);
     }
 
     // --- the expiry arithmetic itself -------------------------------------------------------
@@ -37,8 +38,8 @@ internal static class QuicTimerTests
         {
             // GetNextTimeout converts ngtcp2's ns expiry into the sweep's TickCount64 ms frame by
             // subtracting the current ns clock. Both are UNSIGNED, and by the time the loop looks,
-            // the expiry has normally already passed - the loop parks in io_uring until a
-            // completion arrives, so it reads the clock milliseconds late, every time. Unguarded,
+            // the expiry has normally already passed - the loop wakes for it at millisecond
+            // granularity, or for some other completion, so it reads the clock after it. Unguarded,
             // that subtraction underflows and the connection's next deadline comes back roughly 584
             // years out. It does not look like a crash: the connection works perfectly until the
             // first packet is lost, and then never recovers, for the rest of its life.
@@ -72,16 +73,15 @@ internal static class QuicTimerTests
             // Keep it turning over until the transport has actually been asked for a deadline that
             // had already passed - the state the guard exists for, and the only state in which this
             // test means anything. It happens within a second; the budget is generous only so a
-            // loaded machine cannot make it flaky. "Already passed" carries 2 ms of margin, so the
-            // answer cannot turn on the microseconds between the probe's sample and the engine's
-            // own re-read inside GetNextTimeout.
+            // loaded machine cannot make it flaky. Any amount past counts: the clock only moves
+            // forward, so an expiry the probe saw pass has passed for GetNextTimeout's re-read too.
             TimerProbeConnection.Observation[] alreadyDue;
             long deadline = Environment.TickCount64 + 20_000;
             do
             {
                 client.Pump(100);
                 alreadyDue = TimerProbeConnection.Snapshot()
-                    .Where(o => o.ExpiryNs != ulong.MaxValue && o.ExpiryNs + 2_000_000 <= o.NowNs)
+                    .Where(o => o.ExpiryNs != ulong.MaxValue && o.ExpiryNs < o.NowNs)
                     .ToArray();
             }
             while (alreadyDue.Length == 0 && Environment.TickCount64 < deadline);
@@ -314,7 +314,7 @@ internal static class QuicTimerTests
             // OnEvicted is how a QuicConnection learns the transport let go of it, and for the
             // engine binding it is the ONLY call that runs Destroy: ngtcp2_conn_del, the picotls
             // session, the GCHandle rooting the managed object, and every retained send chunk (up
-            // to MaxSendRetentionBytes, 16 MiB by default). The idle sweep and the shutdown path
+            // to QuicOptions.SendRetentionCeilingBytes). The idle sweep and the shutdown path
             // both call it after QuicRemoveConnection, and so does the timer-fault path - it did
             // not, which is what this test was written to catch. Removal is what made that leak
             // permanent: once out of _quicConnSet and every CID route, the connection could never
@@ -427,6 +427,99 @@ internal static class QuicTimerTests
         });
     }
 
+    // --- an idle reactor ---------------------------------------------------------------------
+
+    private static void RegisterIdleReactor(Runner runner)
+    {
+        runner.Test("quic/timer: an idle reactor fires an engine deadline when it is due, not at the next tick", () =>
+        {
+            // Nothing wakes an idle reactor but a completion, and the only one it can count on is the
+            // 250 ms ticker - so a retransmit due ~25 ms after a loss went out at the next tick. Here
+            // the answer is lost and the peer stays silent, so the retransmit timer fires again and
+            // again with backoff, each firing timed against the engine's own deadline.
+            (string certPath, string keyPath) = TestCert.Ensure();
+            using var engine = new QuicEngine(certPath, keyPath, cidLength: 8);
+            var answered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+
+            (_, int udpPort) = TestServer.StartDatagram(
+                onDatagram: null,
+                quicFactory: engine.CreateFactory(r => new TimerLatenessConnection(engine)),
+                quicHandle: RingDelayedEchoHandler(300, answered));
+
+            using var client = new LossyQuicClient(udpPort);
+            client.Connect();
+            Assert.True(client.CompleteHandshake(5_000), "handshake did not complete");
+
+            client.Pump(500);
+            client.SendRequest(Encoding.ASCII.GetBytes("on-time"));
+            client.Pump(100);
+
+            // From here the reactor has nothing to do but the answer, then its retransmits.
+            TimerLatenessConnection.Reset();
+            client.Blackout(3_000);
+
+            Assert.True(answered.Task.IsCompleted, "the handler had not answered by the end of the blackout");
+            double[] lateMs = TimerLatenessConnection.Snapshot();
+            Assert.True(lateMs.Length >= 3,
+                $"the engine timer fired {lateMs.Length} times in the blackout, too few to judge its timing");
+            Assert.True(lateMs.Max() < 50,
+                $"engine deadlines fired up to {lateMs.Max():F0} ms late "
+                + $"([{string.Join(", ", lateMs.Select(l => l.ToString("F0")))}] ms): the reactor slept past "
+                + "them until the next tick");
+        });
+
+        runner.Test("quic/timer: a reactor whose last connection is gone does not keep waking for it", () =>
+        {
+            // The reactor tracks only the earliest engine deadline, and nothing resets it when the last
+            // connection leaves: the loop stops looking once there are none. A wait bounded by that
+            // leftover would wake an empty reactor every millisecond, for good.
+            (string certPath, string keyPath) = TestCert.Ensure();
+            using var engine = new QuicEngine(certPath, keyPath, cidLength: 8);
+
+            (_, int udpPort) = TestServer.StartDatagram(
+                onDatagram: null,
+                quicFactory: engine.CreateFactory(),
+                quicReadMs: 1_000,
+                quicHandle: EchoHandler);
+
+            using (var client = new LossyQuicClient(udpPort))
+            {
+                client.Connect();
+                Assert.True(client.CompleteHandshake(5_000), "handshake did not complete");
+
+                // The answer is lost and the peer goes silent, so the connection is evicted for its read
+                // timeout with a retransmit still scheduled - a deadline that then passes.
+                client.SendRequest(Encoding.ASCII.GetBytes("leave-a-deadline"));
+                client.Blackout(3_000);
+                Assert.True(client.DroppedInbound > 0, "the server never answered, so it scheduled no retransmit");
+            }
+
+            string reactorThread = $"test-reactor-udp-{udpPort}";
+            long before = VoluntarySwitches(reactorThread);
+            Thread.Sleep(1_000);
+            long wakes = VoluntarySwitches(reactorThread) - before;
+
+            Assert.True(wakes < 50,
+                $"a reactor with no connections woke {wakes} times in a second; its ticker accounts for 4");
+        });
+    }
+
+    // How often a thread has parked: each io_uring wait that sleeps is one voluntary switch.
+    private static long VoluntarySwitches(string threadName)
+    {
+        string comm = threadName.Length > 15 ? threadName[..15] : threadName;   // the kernel keeps 15 bytes
+        foreach (string task in Directory.GetDirectories("/proc/self/task"))
+        {
+            if (File.ReadAllText(Path.Combine(task, "comm")).TrimEnd('\n') != comm)
+            {
+                continue;
+            }
+            string line = File.ReadLines(Path.Combine(task, "status")).First(l => l.StartsWith("voluntary_ctxt_switches:"));
+            return long.Parse(line["voluntary_ctxt_switches:".Length..].Trim());
+        }
+        throw new InvalidOperationException($"no thread named {comm}");
+    }
+
     // --- handler -----------------------------------------------------------------------------
 
     private static async Task EchoHandler(Reactor reactor, QuicConnection conn)
@@ -519,7 +612,7 @@ internal static class QuicTimerTests
     {
         internal readonly record struct Observation(ulong ExpiryNs, ulong NowNs, long NowMs, long Deadline);
 
-        private static readonly System.Reflection.FieldInfo ConnHandle =
+        internal static readonly System.Reflection.FieldInfo ConnHandle =
             typeof(QuicEngineConnection).GetField("_conn",
                 System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)
             ?? throw new Exception("could not reflect QuicEngineConnection._conn");
@@ -545,7 +638,7 @@ internal static class QuicTimerTests
         }
 
         // Same clock and the same call the engine makes; reactor thread, like everything else here.
-        private static ulong NowNs() => (ulong)(System.Diagnostics.Stopwatch.GetTimestamp() *
+        internal static ulong NowNs() => (ulong)(System.Diagnostics.Stopwatch.GetTimestamp() *
                                                 (1_000_000_000.0 / System.Diagnostics.Stopwatch.Frequency));
 
         public override long GetNextTimeout(long nowMs)
@@ -566,6 +659,46 @@ internal static class QuicTimerTests
         public override void OnTimer(long nowMs)
         {
             Interlocked.Increment(ref TimersFired);
+            base.OnTimer(nowMs);
+        }
+    }
+
+    /// <summary>
+    /// Records how late each firing was: the engine's own ns expiry against the ns clock, on entry to
+    /// OnTimer. A firing whose expiry is still ahead (the ms deadline rounds down) is not a late one.
+    /// </summary>
+    private sealed class TimerLatenessConnection(QuicEngine engine) : QuicEngineConnection(engine)
+    {
+        private static readonly List<double> LateMs = [];
+
+        public static void Reset()
+        {
+            lock (LateMs)
+            {
+                LateMs.Clear();
+            }
+        }
+
+        public static double[] Snapshot()
+        {
+            lock (LateMs)
+            {
+                return LateMs.ToArray();
+            }
+        }
+
+        public override void OnTimer(long nowMs)
+        {
+            nint conn = (nint)TimerProbeConnection.ConnHandle.GetValue(this)!;
+            ulong expiry = conn == 0 ? ulong.MaxValue : LossyQuicClient.Expiry(conn);
+            ulong now = TimerProbeConnection.NowNs();
+            if (expiry <= now)
+            {
+                lock (LateMs)
+                {
+                    LateMs.Add((now - expiry) / 1_000_000.0);
+                }
+            }
             base.OnTimer(nowMs);
         }
     }

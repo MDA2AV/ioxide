@@ -44,7 +44,7 @@ A number from a broken fixture is worse than no number.
 | `THREADS` | 8 | load generator threads |
 | `MIN_UTIL` | 90 | reject a cell whose reactors were not saturated |
 | `BASELINE` | `results/latest.json` | compare against this instead of the previous run |
-| `H3X` | `~/h3x/build/h3x` | the HTTP/3 driver |
+| `H2LOAD_H3` | `~/h3x/bench/h2load` | an `h2load` built with ngtcp2/nghttp3, the HTTP/3 driver |
 
 ## Results are kept
 
@@ -68,7 +68,7 @@ A number with nothing to compare against cannot catch a regression, which is the
 | --- | --- |
 | `h1`, `h1s` | `wrk` |
 | `h2c`, `h2` | `h2load` (nghttp2) |
-| `h3` | [`h3x`](https://github.com/MDA2AV) - the `h2load` in most distributions is built without ngtcp2/nghttp3 and cannot drive HTTP/3 (it reports 0 started) |
+| `h3` | `h2load` built with ngtcp2/nghttp3 (`H2LOAD_H3`) - the one in most distributions is not, and reports 0 started. Not `h3x`: its rate divides by the whole run, which waits ~30 s on any request that never finishes, so a few stuck streams made a 300k req/s server read as 50k |
 | `echo` | `Playground/Clients/Quic` - the QUIC echo servers speak no HTTP, so nothing off the shelf can drive them. The driver is itself a sample, not a bench-only artifact |
 
 `Bench.Clients` drives ioxide's own HTTP clients (`h1`/`h2`/`h3`) against an external server, for

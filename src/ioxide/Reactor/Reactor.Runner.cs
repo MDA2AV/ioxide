@@ -23,11 +23,21 @@ public sealed unsafe partial class Reactor
     public void Run()
     {
         BindReactorThread();
-        _ring = Ring.Create(_ringEntries);
+
+        // A kernel that refuses the ring is a fault the host must hear of too (#270); it gets its own
+        // catch because there is nothing to tear down until Create returns.
+        try
+        {
+            _ring = Ring.Create(_ringEntries);
+        }
+        catch (Exception e) when (OnFault is not null)
+        {
+            OnFault(this, e);
+            return;
+        }
 
         // Covers setup, not just the loop: OnStart is user code, and a throw from it used to leak
-        // the listener, the eventfd and both ring mappings. Ring.Create stays outside - nothing to
-        // tear down until it returns.
+        // the listener, the eventfd and both ring mappings.
         try
         {
 
@@ -128,11 +138,6 @@ public sealed unsafe partial class Reactor
                 spin.SpinOnce();
             }
             close(wakeFd);
-        }
-        if (_timerTs != null)
-        {
-            NativeMemory.Free(_timerTs);
-            _timerTs = null;
         }
         if (_opTimespecs != null)
         {

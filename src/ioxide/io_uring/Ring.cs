@@ -67,6 +67,48 @@ public sealed unsafe class Ring : IDisposable
     private static int EstimateRingKib(uint entries)
         => (int)((entries * (64 + 4) + entries * 2 * 16 + 4096) / 1024);
 
+    // A failed setup in terms a host can act on: a bare "errno 22" sends people to limits and
+    // permissions first, when the usual cause is a kernel older than the setup flags (#270).
+    internal static string DescribeSetupFailure(int errno, uint entries, string kernelRelease)
+    {
+        string failed = $"io_uring_setup failed with errno {errno} for a ring of {entries} entries on Linux {kernelRelease}";
+        return errno switch
+        {
+            EINVAL when entries > 32768 => $"{failed}: the kernel allows at most 32768 (ServerConfig.RingEntries).",
+            EINVAL when KernelOlderThan(kernelRelease, 6, 1)
+                => $"{failed}: the kernel does not know SINGLE_ISSUER | DEFER_TASKRUN, and ioxide needs Linux 6.1 or later.",
+            ENOMEM => $"{failed}: it costs roughly {EstimateRingKib(entries)} KiB of RLIMIT_MEMLOCK, and the kernel "
+                      + "reclaims a closed ring's memory asynchronously - raise `ulimit -l`, lower "
+                      + "ServerConfig.RingEntries, or create reactors less abruptly.",
+            EPERM => $"{failed}: io_uring is disabled here, by the kernel.io_uring_disabled sysctl or by a seccomp "
+                     + "profile such as a container runtime's default.",
+            ENOSYS => $"{failed}: this kernel was built without io_uring.",
+            _ => failed + ".",
+        };
+    }
+
+    private static string KernelRelease()
+    {
+        try
+        {
+            return File.ReadAllText("/proc/sys/kernel/osrelease").Trim();
+        }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException)
+        {
+            return Environment.OSVersion.Version.ToString();
+        }
+    }
+
+    // "5.15.167.4-microsoft-standard-WSL2" is older than 6.1; "6.14.0-37-generic" is not.
+    private static bool KernelOlderThan(string release, int major, int minor)
+    {
+        string[] parts = release.Split('.', '-');
+        return parts.Length >= 2
+               && int.TryParse(parts[0], out int a)
+               && int.TryParse(parts[1], out int b)
+               && (a < major || (a == major && b < minor));
+    }
+
     public static Ring Create(uint entries)
     {
         // Prefer NO_SQARRAY (6.6+): the SQ slot index is implicit, dropping one
@@ -86,14 +128,7 @@ public sealed unsafe class Ring : IDisposable
 
         if (fd < 0)
         {
-            throw new InvalidOperationException(
-                $"io_uring_setup failed with errno {-fd}"
-                + (fd == -ENOMEM
-                    ? $". A ring of {entries} entries costs roughly {EstimateRingKib(entries)} KiB of "
-                      + "RLIMIT_MEMLOCK, and the kernel reclaims a closed ring's memory "
-                      + "asynchronously - raise `ulimit -l`, lower ServerConfig.RingEntries, or "
-                      + "create reactors less abruptly."
-                    : string.Empty));
+            throw new InvalidOperationException(DescribeSetupFailure(-fd, entries, KernelRelease()));
         }
 
         var ring = new Ring
@@ -164,7 +199,13 @@ public sealed unsafe class Ring : IDisposable
         return &_sqes[slot];
     }
 
-    public int SubmitAndWait(uint waitFor)
+    public int SubmitAndWait(uint waitFor) => SubmitAndWait(waitFor, -1);
+
+    /// <summary>
+    /// As <see cref="SubmitAndWait(uint)"/>, with the wait bounded by <paramref name="timeoutMs"/>
+    /// (negative: unbounded). A wait that runs out with nothing submitted returns -ETIME.
+    /// </summary>
+    public int SubmitAndWait(uint waitFor, long timeoutMs)
     {
         // liburing-style accounting: derive the submit count from the kernel-consumed head, so
         // SQEs published by an enter that consumed nothing (-EBUSY under CQ-overflow pressure)
@@ -181,7 +222,15 @@ public sealed unsafe class Ring : IDisposable
 
         uint flags = waitFor > 0 ? IORING_ENTER_GETEVENTS : 0;
 
-        return io_uring_enter(_fd, toSubmit, waitFor, flags);
+        if (timeoutMs < 0)
+        {
+            return io_uring_enter(_fd, toSubmit, waitFor, flags);
+        }
+
+        // The kernel copies both during the call, so the stack is fine.
+        var ts  = new __kernel_timespec { tv_sec = timeoutMs / 1000, tv_nsec = timeoutMs % 1000 * 1_000_000 };
+        var arg = new io_uring_getevents_arg { ts = (ulong)&ts };
+        return io_uring_enter(_fd, toSubmit, waitFor, flags | IORING_ENTER_EXT_ARG, &arg, (nuint)sizeof(io_uring_getevents_arg));
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]

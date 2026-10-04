@@ -7,8 +7,8 @@ namespace ioxide.ngtcp2;
 /// <summary>
 /// A live ngtcp2 server connection, bridging the reactor's QUIC transport to the native engine.
 /// Datagrams routed by CID arrive at <see cref="OnDatagram(System.ReadOnlySpan{byte}, byte)"/> and are fed to ngtcp2; the engine's
-/// output is flushed back through the transport's <c>Send</c>; loss/idle deadlines ride the reactor
-/// ticker via <see cref="GetNextTimeout"/> / <see cref="OnTimer"/>. Everything runs on the owning
+/// output is flushed back through the transport's <c>Send</c>; loss/idle deadlines reach the reactor
+/// loop via <see cref="GetNextTimeout"/> / <see cref="OnTimer"/>. Everything runs on the owning
 /// reactor thread, so the whole connection - transport half and engine half - is single-threaded.
 ///
 /// Application bytes flow through the read surface on <see cref="QuicConnection"/>: each decrypted
@@ -129,14 +129,12 @@ public unsafe partial class QuicEngineConnection : QuicConnection
     public QuicEngineConnection(QuicEngine engine)
     {
         _engine = engine;
-        _maxSendRetention = engine.MaxSendRetentionBytes;
     }
 
     /// <summary>Client-side connection; <see cref="QuicClientEngine.Connect"/> builds these.</summary>
     public QuicEngineConnection(QuicClientEngine clientEngine)
     {
         _clientEngine = clientEngine;
-        // Client request bodies are small; the default high-water is plenty and needs no knob.
     }
 
     /// <summary>Handshake finished; safe to open server-initiated streams and send.</summary>
@@ -213,6 +211,7 @@ public unsafe partial class QuicEngineConnection : QuicConnection
     internal bool TryAccept(nint enginePtr, Reactor reactor, in UdpDatagram datagram, Span<byte> scidOut, out int scidLen)
     {
         _reactor  = reactor;
+        TakeSendRetention(reactor);
         _socketFd = datagram.SocketFd;
         _self     = GCHandle.Alloc(this);
         scidLen = 0;
@@ -255,6 +254,7 @@ public unsafe partial class QuicEngineConnection : QuicConnection
         _reactor  = reactor;
         _socketFd = socketFd;
         _self     = GCHandle.Alloc(this);
+        TakeSendRetention(reactor);
 
         Span<byte> local = stackalloc byte[16];
         FillSockaddrInLoopback(local, localPort);
