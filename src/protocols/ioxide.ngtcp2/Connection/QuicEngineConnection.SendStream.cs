@@ -257,8 +257,9 @@ public unsafe partial class QuicEngineConnection
                     os.FinSent = true;
                 }
             }
-            else if (fin && len == 0 && n > 0)
+            else if (fin && len == 0 && consumed == 0)
             {
+                // Not n > 0: with the window full, a due ACK goes out alone and reports -1.
                 os.FinSent = true;   // bare-fin frame went out
             }
             if (n > 0)
