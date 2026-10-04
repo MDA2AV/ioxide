@@ -39,7 +39,6 @@ for a in "$@"; do
 done
 set -- ${ARGS+"${ARGS[@]}"}
 SERVER_CPUS=${SERVER_CPUS:-$(. "$(dirname "$0")/lib.sh"; bench_server_cpus)}
-H3X=${H3X:-/home/diogo/h3x/build/h3x}
 
 # One definition of how each protocol is driven, shared with every other script under bench/.
 . "$(dirname "$0")/lib.sh"
@@ -133,6 +132,11 @@ bad_run() {
   [ -n "${n:-}" ] && [ "${n:-0}" != 0 ] && { echo "non-2xx=$n"; return 0; }
   grep -q 'Socket errors' "$out" && { echo "socket errors"; return 0; }
   grep -qE '^\s*[1-9][0-9]* failed' "$out" && { echo "failed requests"; return 0; }
+  grep -qP '^requests: .* [1-9]\d* (failed|errored|timeout)' "$out" && { echo "failed requests"; return 0; }   # h2load
+  grep -qP '^status codes: .* [1-9]\d* [345]xx' "$out" && { echo "non-2xx"; return 0; }                         # h2load
+  # h2load counts a request killed with its connection as neither failed nor errored, only not done.
+  grep -qP '^requests: .* [1-9]\d* started, 0 done' "$out" && { echo "no request completed"; return 0; }        # h2load
+  grep -qP '^req/s\s+:\s+0\.00\s' "$out" && { echo "a connection completed nothing"; return 0; }                # h2load
   return 1
 }
 
@@ -146,7 +150,7 @@ if [ "${1:-}" = "--list" ]; then
     [ "$proto" = none ] && r="no (no load generator here can drive it)"
     [ "$proto" = echo ] && [ ! -x Playground/Clients/Quic/bin/Release/net11.0/Playground.Clients.Quic ] \
         && r="no (Clients/Quic not built)"
-    [ "$proto" = h3 ] && [ ! -x "$H3X" ] && r="no (h3x missing)"
+    [ "$proto" = h3 ] && [ ! -x "$H2LOAD_H3" ] && r="no (no h2load with HTTP/3 - set H2LOAD_H3)"
     [ -z "$(binary "$sample")" ] && r="no (not built)"
     printf '%-26s %-7s %-6s %-11s %-20s %s\n' "$sample" "$proto" "$port" "$path" "$origin" "$r"
   done < <(registry)
@@ -184,7 +188,7 @@ while read -r sample proto port path origin extra; do
   [ "$proto" = none ] && skip="no load generator here can drive it"
   [ "$proto" = echo ] && [ ! -x Playground/Clients/Quic/bin/Release/net11.0/Playground.Clients.Quic ] \
       && skip="Clients/Quic (the driver) not built"
-  [ "$proto" = h3 ] && [ ! -x "$H3X" ] && skip="h3x missing"
+  [ "$proto" = h3 ] && [ ! -x "$H2LOAD_H3" ] && skip="no h2load with HTTP/3 (H2LOAD_H3)"
   [ -z "$(binary "$sample")" ] && skip="not built"
   if [ -n "$skip" ]; then
     printf '   %-24s %12s %10s %10s  %s\n' "$sample" - - - "skipped: $skip"
@@ -241,8 +245,9 @@ while read -r sample proto port path origin extra; do
   cleanup
 
   note=""; rps=${rps:-0}
-  if [ "$rps" = 0 ]; then note="driver produced no number"
-  elif bad=$(bad_run "$WORK/$STAMP.txt"); then note="discarded: $bad"; rps=0
+  if [ "$(awk -v r="$rps" 'BEGIN{print (r == 0)}')" = 1 ]; then note="driver produced no number"; rps=0
+  fi
+  if bad=$(bad_run "$WORK/$STAMP.txt"); then note="discarded: $bad"; rps=0
   fi
 
   # As a percentage of REACTORS cores, not one - two pegged reactors burn 200% of a core.

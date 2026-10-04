@@ -7,7 +7,7 @@
 #
 # Servers run 4 reactors (BENCH_REACTORS to override); the tcp-raw/tcp-pipe pair repeats at 12
 # reactors as the io_uring baseline. Loads: wrk for everything TCP (fixed -c 64 -t 4,
-# time-bounded), h3x for the HTTP/3 server (H3X to point at the binary), Bench.Clients for the
+# time-bounded), h2load built with HTTP/3 for the HTTP/3 server (H2LOAD_H3 to point at it), Bench.Clients for the
 # ring-native clients. Sidecars (redis, postgres, an h2c nginx) start via docker when available;
 # anything missing skips with a note instead of failing the run.
 #
@@ -17,7 +17,6 @@ cd "$(dirname "$0")/.."
 
 R=${BENCH_REACTORS:-4}
 DUR=${BENCH_SECONDS:-8}
-H3X=${H3X:-/home/diogo/h3x/build/h3x}
 
 # The drivers live in one place. This file used to carry its own HTTP/3 invocation that differed
 # from any.sh's, and the same server measured 260k under one and 505k under the other.
@@ -93,12 +92,12 @@ fi
 
 # ── h3 server ───────────────────────────────────────────────────────────────────────────────
 play Http3/Nghttp3Request PLAYGROUND_REACTORS=$R PLAYGROUND_QUIC_PORT=18444 PLAYGROUND_PORT=18090
-if [ -x "$H3X" ]; then
+if [ -x "$H2LOAD_H3" ]; then
   N=$(CONNS=${CONNS:-64} THREADS=${THREADS:-8} REACTORS=$R \
       bench_load h3 18444 "$DUR" "$BIN/h3-server.txt" / | cut -d. -f1)
   note "h3-server" "${R}r" "${N:-fail} req/s"
 else
-  note "h3-server" "${R}r" "SKIP (h3x not found - set H3X=/path/to/h3x)"
+  note "h3-server" "${R}r" "SKIP (no h2load with HTTP/3 - set H2LOAD_H3=/path/to/h2load)"
 fi
 # the h3 server stays up: the h3 client bench below dials it
 
