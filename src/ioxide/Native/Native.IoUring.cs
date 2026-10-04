@@ -70,6 +70,8 @@ public static unsafe partial class Native {
 
     public const int EINVAL = 22;
     public const int ENOMEM = 12;
+    public const int EPERM  = 1;
+    public const int ENOSYS = 38;
 
     public const int PROT_READ    = 1;
     public const int PROT_WRITE   = 2;
