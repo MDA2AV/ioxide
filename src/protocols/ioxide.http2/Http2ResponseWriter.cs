@@ -180,16 +180,15 @@ public sealed class Http2ResponseWriter : IBufferWriter<byte>
         int sent = 0;
         while (sent < _staged)
         {
-            if (!_connection.IsResponseLive(_streamId))
+            // Bounded by the frame size AND by both windows: exceeding either is a connection
+            // error the peer would be right to hang up over.
+            int credit = _connection.SendCredit(_streamId);
+            if (credit < 0)
             {
                 _staged = 0;   // reset by the peer, or the connection is gone: nobody to send it to
                 return PeerGone;
             }
-
-            // Bounded by the frame size AND by both windows: exceeding either is a connection
-            // error the peer would be right to hang up over.
-            int credit = _connection.SendCredit(_streamId);
-            if (credit <= 0)
+            if (credit == 0)
             {
                 // Take the wait BEFORE flushing. The flush below is an await, and the WINDOW_UPDATE
                 // it exists to provoke can arrive while this writer is still inside it - at which
@@ -222,9 +221,10 @@ public sealed class Http2ResponseWriter : IBufferWriter<byte>
         _staged = 0;
         _sinceRealFlush += sent;
 
-        if (!_connection.IsResponseLive(_streamId))
+        // Sending proved the stream live; with nothing sent it still has to be asked.
+        if (sent == 0 && !_connection.IsResponseLive(_streamId))
         {
-            return PeerGone;   // nothing was staged, or no stream is left to end
+            return PeerGone;
         }
 
         if (endStream && sent == 0)
