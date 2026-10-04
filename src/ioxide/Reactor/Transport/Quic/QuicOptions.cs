@@ -30,6 +30,20 @@ public sealed record QuicOptions
     /// handler is not timed out.
     /// </summary>
     public int ReadTimeoutMs { get; init; } = 60_000;
+
+    /// <summary>
+    /// Response bytes a connection may hold unacknowledged before a response waits for acks, so
+    /// memory per connection stays near this whatever the response size. Floored at 256 KiB.
+    /// </summary>
+    public long SendRetentionBytes { get; init; } = 16L << 20;
+
+    /// <summary>
+    /// Where the connection is closed instead: a producer that keeps sending past the wait and
+    /// reaches this is not going to stop. A buffered HTTP/3 response is handed over whole, so the
+    /// buffered responses in flight on one connection must fit under it. Never below
+    /// <see cref="SendRetentionBytes"/>.
+    /// </summary>
+    public long SendRetentionCeilingBytes { get; init; } = 32L << 20;
 }
 
 /// <summary>

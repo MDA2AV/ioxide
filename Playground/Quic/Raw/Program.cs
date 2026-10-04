@@ -33,10 +33,11 @@ Env.OverrideQuic(ref quicPort, ref reactors);
 // UDP receive slots per reactor. Each slot pins ~64 KiB, enough for a full GRO train.
 int udpRecvSlots = 16;
 
-// Per-connection send-retention high-water. A response larger than this streams out paced by
-// acks instead of being buffered whole, so QUIC serves large responses without unbounded
-// per-connection memory.
-long maxSendRetentionBytes = 16L << 20;
+// Per-connection send-retention: a response larger than this streams out paced by acks instead of
+// being buffered whole, so QUIC serves large responses without unbounded per-connection memory.
+// A connection past the ceiling is closed - its producer ignored the wait.
+long sendRetentionBytes = 16L << 20;
+long sendRetentionCeilingBytes = 32L << 20;
 
 // A real PEM pair, or null to generate a self-signed localhost cert on first run.
 string? certOverride = null;
@@ -45,8 +46,7 @@ string? keyOverride  = null;
 
 (string certPath, string keyPath) = QuicCert.Ensure(certOverride, keyOverride);
 
-using var engine = new QuicEngine(certPath, keyPath, cidLength: 8, alpn: ["echo"],
-                                  maxSendRetentionBytes: maxSendRetentionBytes);
+using var engine = new QuicEngine(certPath, keyPath, cidLength: 8, alpn: ["echo"]);
 
 var config = new ServerConfig
 {
@@ -76,6 +76,8 @@ var config = new ServerConfig
         // connection id instead, which costs a little on every packet. See /how-ioxide-does-h3.
         Routing = QuicRouting.Forward,
         ReadTimeoutMs     = 60_000,              // close a connection whose peer is silent this long; 0 = off
+        SendRetentionBytes        = sendRetentionBytes,
+        SendRetentionCeilingBytes = sendRetentionCeilingBytes,
     },
 };
 

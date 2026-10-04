@@ -17,7 +17,7 @@ using Playground.Shared;
 //  when uploads can be large or hostile.
 //
 //  It doubles as the QUIC/HTTP3 tuning reference: the Knobs block below shows every h3-path option
-//  (engine, listener, UDP, QPACK) as a literal, including maxSendRetentionBytes - the knob that
+//  (engine, listener, UDP, QPACK) as a literal, including sendRetentionBytes - the knob that
 //  bounds memory when serving large responses.
 //
 //      dotnet run -c Release --project Playground/Http3/Nghttp3Buffered
@@ -45,14 +45,18 @@ Env.OverrideQuic(ref quicPort, ref reactors);
 // ── QuicEngine: the per-endpoint QUIC/TLS state, shared by every connection ───────────────────
 uint cidLength = 8;                            // connection-id length this endpoint mints (1..20)
 
-// Per-connection send-retention high-water. A response larger than this is streamed out paced by
-// the peer's acks instead of buffered whole, so memory stays ~this-per-connection whatever the
-// response size - the knob that lets HTTP/3 serve large files. Raise for more in-flight throughput
-// on fat links; lower to cap memory under many connections. Default 16 MiB.
-long maxSendRetentionBytes = 16L << 20;
-
 // ── QuicOptions: the listener ─────────────────────────────────────────────────────────────────
 int readTimeoutMs = 60_000;                    // close a connection whose peer is silent this long; 0 = off
+
+// Per-connection send-retention. A response larger than this is streamed out paced by the peer's
+// acks instead of buffered whole, so memory stays ~this-per-connection whatever the response size -
+// the knob that lets HTTP/3 serve large files. Raise for more in-flight throughput on fat links;
+// lower to cap memory under many connections. Default 16 MiB.
+long sendRetentionBytes = 16L << 20;
+
+// Past this a connection is closed: its producer ignored the wait above. A buffered response is
+// handed over whole, so the buffered responses in flight on one connection must fit under it.
+long sendRetentionCeilingBytes = 32L << 20;
 
 // ── UdpOptions: how datagrams are received ────────────────────────────────────────────────────
 int  udpRecvSlots = 16;                        // multishot recv slots per reactor - datagrams the ring can hold at once
@@ -71,7 +75,7 @@ string? keyOverride  = null;
 
 (string certPath, string keyPath) = QuicCert.Ensure(certOverride, keyOverride);
 
-using var engine = new QuicEngine(certPath, keyPath, cidLength, alpn: ["h3"], maxSendRetentionBytes);
+using var engine = new QuicEngine(certPath, keyPath, cidLength, alpn: ["h3"]);
 
 var config = new ServerConfig
 {
@@ -100,6 +104,8 @@ var config = new ServerConfig
         Port = quicPort,
         LocalCidLength = (int)cidLength,        // must match the engine's cidLength
         ReadTimeoutMs = readTimeoutMs,
+        SendRetentionBytes = sendRetentionBytes,
+        SendRetentionCeilingBytes = sendRetentionCeilingBytes,
         ConnectionFactory = engine.CreateFactory(),
         // Where a moved client's packets go when several reactors share the port. Forward costs
         // nothing until a client actually changes address; KernelFilter has the kernel route by

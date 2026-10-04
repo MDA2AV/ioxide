@@ -471,8 +471,9 @@ public static class TestServer
         UdpDatagramHandler? onDatagram,
         QuicConnectionFactory? quicFactory = null,
         int quicReadMs = 60_000,
-        Func<Reactor, QuicConnection, Task>? quicHandle = null)
-        => StartDatagramConfigured(onDatagram, quicFactory, quicReadMs, udpRecvSlots: 16, quicHandle);
+        Func<Reactor, QuicConnection, Task>? quicHandle = null,
+        Func<QuicOptions, QuicOptions>? quicOptions = null)
+        => StartDatagramConfigured(onDatagram, quicFactory, quicReadMs, udpRecvSlots: 16, quicHandle, quicOptions);
 
     /// <summary>StartDatagram with a tunable UDP ring depth (for the -ENOBUFS re-arm burst test).</summary>
     public static (int TcpPort, int UdpPort) StartDatagramConfigured(
@@ -480,7 +481,8 @@ public static class TestServer
         QuicConnectionFactory? quicFactory = null,
         int quicReadMs = 60_000,
         int udpRecvSlots = 16,
-        Func<Reactor, QuicConnection, Task>? quicHandle = null)
+        Func<Reactor, QuicConnection, Task>? quicHandle = null,
+        Func<QuicOptions, QuicOptions>? quicOptions = null)
     {
         int tcpPort = ReserveFreePort();
         int udpPort = ReserveFreePort();
@@ -502,13 +504,13 @@ public static class TestServer
                 RecvSlots = udpRecvSlots,
                 Ports = quicFactory == null ? [(ushort)udpPort] : [],
             },
-            Quic = quicFactory == null ? null : new QuicOptions
+            Quic = quicFactory == null ? null : (quicOptions ?? (o => o))(new QuicOptions
             {
                 Port = (ushort)udpPort,
                 LocalCidLength = 8,
                 ConnectionFactory = quicFactory,
                 ReadTimeoutMs = quicReadMs,
-            },
+            }),
         };
 
         var reactor = new Reactor(0, config)

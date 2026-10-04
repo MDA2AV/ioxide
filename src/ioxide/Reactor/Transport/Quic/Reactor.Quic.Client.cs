@@ -32,6 +32,8 @@ public sealed unsafe partial class Reactor
     /// <summary>Read timeout for a client-only reactor, which has no QuicOptions to read it from.</summary>
     private const int QuicClientDefaultReadMs = 30_000;
 
+    private static readonly QuicOptions QuicDefaults = new();
+
     /// <summary>
     /// Make this reactor able to open outbound QUIC connections and return the socket they send
     /// from - a dedicated one on an ephemeral port, opened on first use. Reactor thread only.
@@ -69,6 +71,12 @@ public sealed unsafe partial class Reactor
 
     /// <summary>The sweep's read timeout; public so an engine can keep a busy connection inside it.</summary>
     public int QuicReadTimeoutMs => _quicOptions?.ReadTimeoutMs ?? QuicClientDefaultReadMs;
+
+    /// <inheritdoc cref="QuicOptions.SendRetentionBytes"/>
+    public long QuicSendRetentionBytes => (_quicOptions ?? QuicDefaults).SendRetentionBytes;
+
+    /// <inheritdoc cref="QuicOptions.SendRetentionCeilingBytes"/>
+    public long QuicSendRetentionCeilingBytes => (_quicOptions ?? QuicDefaults).SendRetentionCeilingBytes;
 
     /// <summary>
     /// Adopt an outgoing connection the engine binding just created: route its replies by

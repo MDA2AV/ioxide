@@ -65,14 +65,47 @@ internal static class QuicTeardownWireTests
                 $"the peer was never told: {client.DatagramsReceived} datagrams arrived and none was a CONNECTION_CLOSE");
         });
 
+        runner.Test("quic: a connection pushes back at QuicOptions.SendRetentionBytes", () =>
+        {
+            // 300 KiB queued in one call is past a 256 KiB high-water and under a 512 KiB ceiling. At
+            // the 16 MiB default CanQueueSend would still be true - which is what tells them apart.
+            (string certPath, string keyPath) = TestCert.Ensure();
+            using var engine = new QuicEngine(certPath, keyPath, cidLength: 8);
+
+            var accepted = new TaskCompletionSource<Reactor>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var torndown = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var canQueue = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+
+            (_, int udpPort) = TestServer.StartDatagram(
+                onDatagram: null,
+                quicFactory: engine.CreateFactory(),
+                quicHandle: EchoThen(accepted, torndown, (conn, _) =>
+                {
+                    conn.SendStream(conn.OpenUniStream(), new byte[300 * 1024], fin: false);
+                    canQueue.TrySetResult(conn.CanQueueSend);
+                }),
+                quicOptions: SmallRetention);
+
+            using var client = new TeardownWireClient(udpPort);
+            Assert.True(client.CompleteHandshake(ExchangeMs), "handshake did not complete");
+
+            client.SendRequest("push-back"u8.ToArray());
+            Assert.Equal("push-back", client.WaitForEcho(ExchangeMs));
+
+            Assert.True(canQueue.Task.Wait(ExchangeMs), "the handler never queued the 300 KiB");
+            Assert.True(!canQueue.Task.Result,
+                "300 KiB held and the connection still takes more: the 256 KiB high-water in QuicOptions never reached it");
+            Assert.True(!torndown.Task.IsCompleted, "the connection was closed, though 300 KiB is under the 512 KiB ceiling");
+        });
+
         runner.Test("quic: the send-retention backstop tells the peer before it drops the connection", () =>
         {
             // The backstop is the server aborting a connection over its OWN producer's behaviour:
             // the peer did nothing wrong and has no way to know, so the one thing it must not get
-            // is silence. maxSendRetentionBytes is floored at 256 KiB and the ceiling is twice the
-            // high-water, so 768 KiB queued in a single call is over it before anything is pumped.
+            // is silence. With a 512 KiB ceiling, 768 KiB queued in a single call is over it before
+            // anything is pumped.
             (string certPath, string keyPath) = TestCert.Ensure();
-            using var engine = new QuicEngine(certPath, keyPath, cidLength: 8, maxSendRetentionBytes: 256L << 10);
+            using var engine = new QuicEngine(certPath, keyPath, cidLength: 8);
 
             var accepted = new TaskCompletionSource<Reactor>(TaskCreationOptions.RunContinuationsAsynchronously);
             var torndown = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -86,7 +119,8 @@ internal static class QuicTeardownWireTests
                     // SendStream drops bytes queued after a fin - the flood would never be counted.
                     long uni = conn.OpenUniStream();
                     conn.SendStream(uni, new byte[768 * 1024], fin: false);
-                }));
+                }),
+                quicOptions: SmallRetention);
 
             using var client = new TeardownWireClient(udpPort);
             Assert.True(client.CompleteHandshake(ExchangeMs), "handshake did not complete");
@@ -181,6 +215,9 @@ internal static class QuicTeardownWireTests
     /// got as far as ending the connection". <paramref name="accepted"/> hands out the reactor,
     /// which is otherwise not reachable from a datagram server the harness started.
     /// </summary>
+    private static QuicOptions SmallRetention(QuicOptions options)
+        => options with { SendRetentionBytes = 256L << 10, SendRetentionCeilingBytes = 512L << 10 };
+
     private static Func<Reactor, QuicConnection, Task> EchoThen(
         TaskCompletionSource<Reactor> accepted,
         TaskCompletionSource torndown,

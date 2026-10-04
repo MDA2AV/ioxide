@@ -35,9 +35,10 @@ Env.OverrideQuic(ref quicPort, ref reactors);
 // UDP receive slots per reactor: how many datagrams the ring can have outstanding at once.
 int udpRecvSlots = 16;
 
-// Per-connection send-retention high-water (default 16 MiB): a response larger than it streams out
-// paced by acks instead of buffering whole. See Playground/Http3/Nghttp3Buffered for the full knob set.
-long maxSendRetentionBytes = 16L << 20;
+// Per-connection send-retention (default 16 MiB): a response larger than it streams out paced by acks
+// instead of buffering whole; past the ceiling a connection is closed. See Playground/Http3/Nghttp3Buffered.
+long sendRetentionBytes = 16L << 20;
+long sendRetentionCeilingBytes = 32L << 20;
 
 // A real PEM pair, or null to generate a self-signed localhost cert on first run.
 string? certOverride = null;
@@ -48,7 +49,7 @@ string? keyOverride  = null;
 
 // Permissive ALPN (no allowlist): h3 clients negotiate "h3"; everything else still handshakes
 // and falls through to the echo branch.
-using var engine = new QuicEngine(certPath, keyPath, cidLength: 8, alpn: null, maxSendRetentionBytes);
+using var engine = new QuicEngine(certPath, keyPath, cidLength: 8, alpn: null);
 
 var config = new ServerConfig
 {
@@ -69,6 +70,8 @@ var config = new ServerConfig
         Port              = quicPort,                // https://127.0.0.1:8443/ - UDP, not TCP
         LocalCidLength    = 8,                       // must match the engine's cidLength
         ReadTimeoutMs     = 60_000,                  // close a connection whose peer is silent this long; 0 = off
+        SendRetentionBytes        = sendRetentionBytes,
+        SendRetentionCeilingBytes = sendRetentionCeilingBytes,
         ConnectionFactory = engine.CreateFactory(),  // the engine adopts each new connection
         // Where a moved client's packets go when several reactors share the port. Forward costs
         // nothing until a client actually changes address; KernelFilter has the kernel route by

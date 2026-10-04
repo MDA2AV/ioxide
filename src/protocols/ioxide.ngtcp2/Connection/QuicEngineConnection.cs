@@ -129,14 +129,12 @@ public unsafe partial class QuicEngineConnection : QuicConnection
     public QuicEngineConnection(QuicEngine engine)
     {
         _engine = engine;
-        _maxSendRetention = engine.MaxSendRetentionBytes;
     }
 
     /// <summary>Client-side connection; <see cref="QuicClientEngine.Connect"/> builds these.</summary>
     public QuicEngineConnection(QuicClientEngine clientEngine)
     {
         _clientEngine = clientEngine;
-        // Client request bodies are small; the default high-water is plenty and needs no knob.
     }
 
     /// <summary>Handshake finished; safe to open server-initiated streams and send.</summary>
@@ -213,6 +211,7 @@ public unsafe partial class QuicEngineConnection : QuicConnection
     internal bool TryAccept(nint enginePtr, Reactor reactor, in UdpDatagram datagram, Span<byte> scidOut, out int scidLen)
     {
         _reactor  = reactor;
+        TakeSendRetention(reactor);
         _socketFd = datagram.SocketFd;
         _self     = GCHandle.Alloc(this);
         scidLen = 0;
@@ -255,6 +254,7 @@ public unsafe partial class QuicEngineConnection : QuicConnection
         _reactor  = reactor;
         _socketFd = socketFd;
         _self     = GCHandle.Alloc(this);
+        TakeSendRetention(reactor);
 
         Span<byte> local = stackalloc byte[16];
         FillSockaddrInLoopback(local, localPort);
