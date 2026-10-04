@@ -11,6 +11,7 @@
  *   conn    = iq_accept(engine, addrs, first_pkt, ...)   validates + creates the server conn
  *             iq_conn_read(...)                          feed one UDP datagram
  *             iq_conn_write(...)                         produce one UDP datagram (loop until 0)
+ *             iq_conn_writev(...)                        the same, from several stream buffers
  *             iq_conn_open_uni / iq_conn_get_alpn        H3 plumbing (uni streams, negotiated proto)
  *             iq_conn_expiry / iq_conn_handle_expiry     ns-precision engine deadlines
  *             iq_conn_free / iq_engine_free
@@ -43,8 +44,9 @@
  *   2 - iq_accept gained shard / shard_count for connection-id steering
  *   3 - iq_conn_set_keep_alive added
  *   4 - iq_conn_shutdown_stream added
- *   5 - iq_client_engine_set_idle_timeout added */
-#define IQ_ABI 5
+ *   5 - iq_client_engine_set_idle_timeout added
+ *   6 - iq_conn_writev added */
+#define IQ_ABI 6
 
 /* ---- callback table into C# ------------------------------------------------------------- */
 
@@ -1607,6 +1609,23 @@ ngtcp2_ssize iq_conn_write(iq_conn *c, uint8_t *dest, size_t destlen,
     return n;
 }
 
+/* iq_conn_write with the stream bytes in several buffers. A packet carries one STREAM frame and the
+ * frame can span all of them, so a stream's queued writes - a response's headers, body and FIN -
+ * share a packet instead of taking one each. */
+ngtcp2_ssize iq_conn_writev(iq_conn *c, uint8_t *dest, size_t destlen,
+                            int64_t stream_id, const ngtcp2_vec *datav, size_t datavcnt, int fin,
+                            int64_t *pconsumed, uint64_t ts)
+{
+    ngtcp2_ssize consumed = -1;
+
+    ngtcp2_ssize n = ngtcp2_conn_writev_stream(
+        c->conn, &c->path, NULL, dest, destlen, &consumed,
+        fin ? NGTCP2_WRITE_STREAM_FLAG_FIN : 0, stream_id, datav, datavcnt, ts);
+
+    *pconsumed = consumed;
+    iq_sync_path(c);   /* as in iq_conn_write: the destination ngtcp2 chose for this datagram */
+    return n;
+}
 
 /* App-initiated close: record an APPLICATION error (e.g. H3_NO_ERROR for graceful shutdown) and
  * build the CONNECTION_CLOSE datagram carrying it. The caller sends it and tears the conn down. */

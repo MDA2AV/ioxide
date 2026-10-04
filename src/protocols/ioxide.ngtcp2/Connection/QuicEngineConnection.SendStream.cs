@@ -50,8 +50,8 @@ public unsafe partial class QuicEngineConnection
     /// acks drain it (the egress pump re-runs on every inbound datagram).</summary>
     public override bool CanQueueSend => !_closed && _outRetained < _maxSendRetention;
 
-    // Set when a producer filled retention to the high-water; FlushEgress fires the resume callback
-    // and clears it once acks bring retention back down.
+    // Set when a producer filled retention to the high-water; SignalSendCapacity fires the resume
+    // callback and clears it once acks bring retention back down.
     private bool _sendAtCapacity;
 
     /// <summary>Queue bytes on a stream and flush. streamId must come from a delivered item or
@@ -96,12 +96,23 @@ public unsafe partial class QuicEngineConnection
 
         if (_outRetained >= _maxSendRetention)
         {
-            _sendAtCapacity = true;   // arms the resume: FlushEgress fires it once acks drain below
+            _sendAtCapacity = true;   // arms the resume, which SignalSendCapacity fires
         }
 
         if (_outRetained > _outRetainedCeiling)
         {
             Console.Error.WriteLine("[ioxide.ngtcp2] send retention backstop exceeded (producer ignored backpressure); closing connection.");
+
+            // What the cycle queued before the flood goes out ahead of the close, as it would have
+            // had it been packetized on the spot.
+            if (_inEngineCycle)
+            {
+                FlushEgress();
+                if (_closed)
+                {
+                    return;
+                }
+            }
 
             // Through Teardown, so the peer is told. The abort is ours, not the peer's, so it
             // hears INTERNAL_ERROR rather than waiting out a timeout for silence.
@@ -109,12 +120,17 @@ public unsafe partial class QuicEngineConnection
             return;
         }
 
-        PumpOut(streamId, os);
-        if (_closed)
+        // Inside an engine cycle nothing reaches the wire before the cycle ends, so the stream is
+        // packetized then, together with whatever else the cycle gives it.
+        if (!_inEngineCycle)
         {
-            return;
+            PumpOut(streamId, os);
+            if (_closed)
+            {
+                return;
+            }
+            FlushConnection();
         }
-        FlushConnection();
         if (!OutDone(os) && !os.Pending)
         {
             os.Pending = true;
@@ -208,27 +224,36 @@ public unsafe partial class QuicEngineConnection
         _outPending.RemoveRange(keep, _outPending.Count - keep);
     }
 
+    // Chunks handed to one write. A packet carries one STREAM frame, and the frame can span them.
+    private const int MaxWriteChunks = 8;
+
     // Feed one stream's unsent bytes (pointers into the retained chunks - stable until acked) into
     // the engine, sending each produced datagram, until done or the engine can't take more.
     private void PumpOut(long sid, OutStream os)
     {
+        Ngtcp2.Vec* chunks = stackalloc Ngtcp2.Vec[MaxWriteChunks];
         while (!_closed && !OutDone(os))
         {
-            // Locate the first unsent byte inside the chunk chain.
-            byte* ptr = null;
-            int len = 0;
+            // The unsent bytes, from the first one on, as they lie in the chunk chain.
+            int count = 0;
+            long len = 0;
             if (os.Sent < os.End)
             {
                 long skip = os.Sent - os.Base;
                 foreach ((nint p, int l) in os.Chunks)
                 {
-                    if (skip < l)
+                    if (skip >= l)
                     {
-                        ptr = (byte*)p + skip;
-                        len = (int)(l - skip);
+                        skip -= l;
+                        continue;
+                    }
+                    chunks[count++] = new Ngtcp2.Vec((byte*)p + skip, (nuint)(l - skip));
+                    len += l - skip;
+                    skip = 0;
+                    if (count == MaxWriteChunks)
+                    {
                         break;
                     }
-                    skip -= l;
                 }
             }
             bool fin = os.Fin && os.Sent + len == os.End;
@@ -237,8 +262,8 @@ public unsafe partial class QuicEngineConnection
             nint n;
             fixed (byte* dest = _sendBuf)
             {
-                n = Ngtcp2.iq_conn_write(_conn, dest, (nuint)_sendBuf.Length,
-                    sid, ptr, (nuint)len, fin ? 1 : 0, &consumed, NowNs());
+                n = Ngtcp2.iq_conn_writev(_conn, dest, (nuint)_sendBuf.Length,
+                    sid, count > 0 ? chunks : null, (nuint)count, fin ? 1 : 0, &consumed, NowNs());
             }
 
             int code = (int)n;

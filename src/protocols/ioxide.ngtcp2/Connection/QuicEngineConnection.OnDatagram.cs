@@ -50,7 +50,7 @@ public unsafe partial class QuicEngineConnection
             HandshakeCompletedOnce();
         }
 
-        FlushEgress();
+        SignalSendCapacity();
         FireRecv();
         FireHandshakeSignal();
     }

@@ -12,6 +12,16 @@ public unsafe partial class QuicEngineConnection
             return;
         }
 
+        // What this cycle queued is packetized first: after CONNECTION_CLOSE nothing more can be.
+        if (_inEngineCycle)
+        {
+            FlushEgress();
+            if (_closed)
+            {
+                return;
+            }
+        }
+
         int farewell = 0;
         if (_conn != 0)
         {
