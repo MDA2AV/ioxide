@@ -1,4 +1,5 @@
 using System.Buffers;
+using System.IO.Pipelines;
 
 using System.Runtime.InteropServices;
 
@@ -57,6 +58,10 @@ public sealed class Nghttp3ResponseWriter : IBufferWriter<byte>
     private bool _headersSent;
     private bool _completed;   // the handler has finished producing
     private bool _finReported; // nghttp3 has been told this is the end
+    private bool _gone;        // the peer stopped reading, or the stream closed under the handler
+
+    /// <summary>True from dispatch until the handler is done with this writer (see HandlerExited).</summary>
+    internal bool HandlerRunning;
 
     internal Nghttp3ResponseWriter(Nghttp3Connection connection, long streamId)
     {
@@ -78,6 +83,8 @@ public sealed class Nghttp3ResponseWriter : IBufferWriter<byte>
         _headersSent = false;
         _completed = false;
         _finReported = false;
+        _gone = false;
+        HandlerRunning = false;
 
         // The scratch buffer survives - that is the point of pooling the writer - but a hand-out
         // from the previous stream must not be mistaken for one from this one.
@@ -113,7 +120,10 @@ public sealed class Nghttp3ResponseWriter : IBufferWriter<byte>
         }
 
         _headersSent = true;
-        _connection.SubmitStreamedHeaders(_streamId, response, this);
+        if (!_gone)
+        {
+            _connection.SubmitStreamedHeaders(_streamId, response, this);
+        }
     }
 
     /// <inheritdoc />
@@ -181,7 +191,12 @@ public sealed class Nghttp3ResponseWriter : IBufferWriter<byte>
     /// taken, which is the backpressure: a peer that stops reading stops this returning, so a
     /// producer cannot outrun the connection.
     /// </summary>
-    public async ValueTask FlushAsync()
+    /// <returns>
+    /// <see cref="FlushResult.IsCompleted"/> once the peer has stopped reading the stream or the
+    /// connection is gone, as a TCP pipe writer reports a closed peer: nothing written from then on
+    /// reaches anyone.
+    /// </returns>
+    public async ValueTask<FlushResult> FlushAsync()
     {
         if (!_headersSent)
         {
@@ -189,26 +204,34 @@ public sealed class Nghttp3ResponseWriter : IBufferWriter<byte>
         }
         if (_staged == 0)
         {
-            return;
+            return _gone || _connection.IsFailed ? PeerGone : default;
         }
 
         // Wait for the previous chunk to be taken before replacing it - one is in flight at a time.
-        while (_inFlightLength > 0 && !_connection.IsFailed)
+        // A stream the peer stopped is never pulled again, so that ends the wait too.
+        while (_inFlightLength > 0 && !_gone && !_connection.IsFailed)
         {
             _connection.ResumeStreamedResponse(_streamId);
             await _connection.PumpAsync();
         }
 
-        if (_connection.IsFailed)
+        if (_gone || _connection.IsFailed)
         {
-            return;
+            _staged = 0;   // nobody to send it to
+            return PeerGone;
         }
 
         PromoteStagedChunk();
 
         _connection.ResumeStreamedResponse(_streamId);
         _connection.PumpIfOutsidePass();
+        return default;
     }
+
+    private static readonly FlushResult PeerGone = new(isCanceled: false, isCompleted: true);
+
+    /// <summary>The peer will read no more of this stream: from here on nothing is sent on it.</summary>
+    internal void OnPeerGone() => _gone = true;
 
     /// <summary>
     /// Flush what is left and mark the end of the body.
@@ -238,6 +261,10 @@ public sealed class Nghttp3ResponseWriter : IBufferWriter<byte>
         // pass pumps it out. The staged buffer stays alive until the stream closes, so there is
         // nothing to keep the handler around for.
         _completed = true;
+        if (_gone)
+        {
+            return;   // the peer stopped the stream: there is no end left to send
+        }
         _connection.ResumeStreamedResponse(_streamId);
         _connection.PumpIfOutsidePass();
     }

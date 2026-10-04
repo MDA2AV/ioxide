@@ -231,6 +231,15 @@ public sealed partial class Http3Connection
                 ReleaseParseBuffers(dead);
             }
             _unis.Remove(item.StreamId);
+
+            // A response in flight whose peer will read no more of it: its handler learns at the next
+            // flush, and one parked on send capacity wakes to find that out.
+            if (item.Kind is QuicStreamEvent.StopSending or QuicStreamEvent.Closed
+                && _writers.TryGetValue(item.StreamId, out Http3ResponseWriter? stopped))
+            {
+                stopped.OnPeerGone();
+                ReleaseCapacityWaiters();
+            }
             return;
         }
 
