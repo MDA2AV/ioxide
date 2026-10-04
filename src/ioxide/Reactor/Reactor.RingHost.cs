@@ -59,8 +59,8 @@ public sealed unsafe partial class Reactor : IRingHost
 
     /// <summary>
     /// Raised on the reactor's own thread when it is ending because of a fault rather than a
-    /// <see cref="Stop"/>, after the ring has been torn down. Handle it to log, restart, or bring
-    /// the process down deliberately.
+    /// <see cref="Stop"/> - a kernel that refuses to create the ring included - after the ring has
+    /// been torn down. Handle it to log, restart, or bring the process down deliberately.
     /// </summary>
     /// <remarks>
     /// Without a handler the exception propagates out of <see cref="Run"/>, which on a bare

@@ -69,5 +69,43 @@ internal static class ReactorSetupTeardownTests
                 "teardown after the failed bind closed fd 0 - stdin - and the number is now free "
                 + "for the next socket the process opens");
         });
+
+        runner.Test("reactor: a ring the kernel refuses reaches OnFault instead of ending the process", () =>
+        {
+            // Every kernel refuses more than 32768 entries with EINVAL - the errno a kernel older than
+            // 6.1 gives for SINGLE_ISSUER | DEFER_TASKRUN (#270). Ring.Create ran outside the try that
+            // hands faults to OnFault, so a host that asked to hear of faults lost the process instead.
+            Exception? reported = null;
+            var reactor = new Reactor(0, new ServerConfig { ReactorCount = 1, RingEntries = 65_536 })
+            {
+                TcpHandle = (_, connection) =>
+                {
+                    connection.DecRef();
+                    return Task.CompletedTask;
+                },
+                OnFault = (_, e) => reported = e,
+            };
+
+            Exception? escaped = null;
+            var thread = new Thread(() =>
+            {
+                try
+                {
+                    reactor.Run();
+                }
+                catch (Exception e)
+                {
+                    escaped = e;
+                }
+            });
+            thread.Start();
+
+            Assert.True(thread.Join(TimeSpan.FromSeconds(10)), "Run should have returned after the ring was refused");
+            Assert.True(escaped is null,
+                $"the refused ring was thrown out of Run past OnFault - on a host's thread, that ends the process: {escaped?.Message}");
+            Assert.True(reported is InvalidOperationException, $"OnFault was not told: {reported}");
+            Assert.True(reported!.Message.Contains("32768"),
+                $"the message does not say what the kernel refused: {reported.Message}");
+        });
     }
 }

@@ -13,6 +13,7 @@ internal static class Program
 
         VersionTests.Register(runner);
         SyscallErrnoTests.Register(runner);
+        RingSetupMessageTests.Register(runner);
         DemuxParseTests.Register(runner);
         MessageTests.Register(runner);
         ResponseCapTests.Register(runner);
