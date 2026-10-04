@@ -52,6 +52,10 @@ public sealed partial class Nghttp3Connection
     {
         _streaming = true;
 
+        // Writers parked at the retention high-water resume when acks drain it: the drain pumps and
+        // releases them, where a bare PumpEgress would leave them parked.
+        _quicConnection.OnSendCapacityAvailable = DrainStreamed;
+
         try
         {
             while (true)
@@ -369,7 +373,13 @@ public sealed partial class Nghttp3Connection
         if (!_inStreamedDrain)
         {
             DrainStreamed();
-            return Task.CompletedTask;
+
+            // At the high-water nothing more is taken until acks drain it, and acks are only read once
+            // the reactor is back in its loop: spinning here never let it get there.
+            if (_quicConnection.CanQueueSend)
+            {
+                return Task.CompletedTask;
+            }
         }
 
         // NOT RunContinuationsAsynchronously: everything on a reactor resumes inline on the

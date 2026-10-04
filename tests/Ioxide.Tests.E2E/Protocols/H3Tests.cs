@@ -121,6 +121,38 @@ internal static class H3Tests
             Assert.Equal("chunkchunkchunkchunk", body);
         });
 
+        runner.Test("h3: a streamed response past the send-retention high-water completes", () =>
+        {
+            // 20 MiB in 64 KiB flushes, from the dispatch pass: past the 16 MiB high-water the writer
+            // has to wait for acks, and its flush spun on the reactor thread that reads them instead.
+            (string certPath, string keyPath) = TestCert.Ensure();
+            using var engine = new QuicEngine(certPath, keyPath, cidLength: 8, alpn: ["h3"]);
+
+            const int Chunks = 320;
+            (_, int udpPort) = TestServer.StartDatagram(
+                onDatagram: null,
+                quicFactory: engine.CreateFactory(),
+                quicHandle: static (_, conn) => new Nghttp3Connection(conn).RunStreamedResponseAsync(
+                    static async (_, writer) =>
+                    {
+                        writer.WriteHeaders(new Nghttp3Response { Status = 200 });
+                        for (int i = 0; i < Chunks; i++)
+                        {
+                            writer.GetSpan(64 * 1024)[..(64 * 1024)].Fill((byte)'x');
+                            writer.Advance(64 * 1024);
+                            await writer.FlushAsync();
+                        }
+                    }));
+
+            using var client = new H3TestClient("127.0.0.1", udpPort);
+            client.Connect();
+            Assert.True(client.CompleteHandshake(timeoutMs: 5000), "handshake did not complete");
+
+            (int status, string body) = client.Get("/big", timeoutMs: 30_000);
+            Assert.True(status == 200 && body.Length == Chunks * 64 * 1024,
+                $"got status {status} and {body.Length} of {Chunks * 64 * 1024} bytes: the response stalled at the high-water");
+        });
+
         runner.Test("h3: buffered-async handler (whole body in req.Body, handler may await)", () =>
         {
             (string certPath, string keyPath) = TestCert.Ensure();
