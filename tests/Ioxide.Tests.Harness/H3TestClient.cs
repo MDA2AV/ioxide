@@ -206,6 +206,55 @@ public sealed unsafe class H3TestClient : IDisposable
         return (_status, Encoding.UTF8.GetString(_body.ToArray()));
     }
 
+    // GetConcurrent's responses, by stream. Bodies are counted, not kept.
+    private sealed class Response
+    {
+        public int Status = -1;
+        public long Bytes;
+        public bool Done;
+    }
+
+    private readonly Dictionary<long, Response> _concurrent = [];
+
+    /// <summary>
+    /// GET every path at once on this connection, each on its own stream, and wait for all of the
+    /// responses. Returns each one's status and body length, in path order.
+    /// </summary>
+    public (int Status, long BodyLength)[] GetConcurrent(string[] paths, int timeoutMs)
+    {
+        EnsureH3Session();
+        for (int settle = 0; settle < 10; settle++)
+        {
+            DrainH3Out();
+            FlushOut();
+            PumpIn();
+        }
+
+        var streams = new long[paths.Length];
+        for (int i = 0; i < paths.Length; i++)
+        {
+            streams[i] = iq_client_open_bidi(_conn);
+            Assert.True(streams[i] >= 0, "failed to open request stream");
+            _concurrent[streams[i]] = new Response();
+
+            byte[] headers = PackHeaders([(":method", "GET"), (":scheme", "https"), (":authority", "localhost"), (":path", paths[i])]);
+            fixed (byte* p = headers)
+            {
+                Assert.True(ih3_submit_request(_h3, streams[i], p, (nuint)headers.Length, null, 0) == 0, "submit_request failed");
+            }
+        }
+
+        long deadline = Environment.TickCount64 + timeoutMs;
+        while (Environment.TickCount64 < deadline && !_peerClosed && streams.Any(sid => !_concurrent[sid].Done))
+        {
+            DrainH3Out();
+            FlushOut();
+            PumpIn();
+        }
+
+        return streams.Select(sid => (_concurrent[sid].Status, _concurrent[sid].Bytes)).ToArray();
+    }
+
     /// <summary>
     /// The H3 session - client conn plus its control and QPACK streams - stood up once per
     /// CONNECTION, not per request. HTTP/3 allows one control stream per peer and RFC 9114 6.2.1
@@ -455,6 +504,10 @@ public sealed unsafe class H3TestClient : IDisposable
         if (n == ":status")
         {
             self._status = int.Parse(Encoding.ASCII.GetString(value, (int)valueLen));
+            if (self._concurrent.TryGetValue(streamId, out Response? response))
+            {
+                response.Status = self._status;
+            }
         }
     }
 
@@ -469,6 +522,10 @@ public sealed unsafe class H3TestClient : IDisposable
         {
             self._body.AddRange(new ReadOnlySpan<byte>(data, (int)len).ToArray());
         }
+        else if (self._concurrent.TryGetValue(streamId, out Response? response))
+        {
+            response.Bytes += (long)len;
+        }
     }
 
     [UnmanagedCallersOnly]
@@ -478,6 +535,10 @@ public sealed unsafe class H3TestClient : IDisposable
         if (streamId == self._requestSid)
         {
             self._done = true;
+        }
+        else if (self._concurrent.TryGetValue(streamId, out Response? response))
+        {
+            response.Done = true;
         }
     }
 
