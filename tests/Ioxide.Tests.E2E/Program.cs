@@ -19,6 +19,7 @@ internal static class Program
         SendInFlightRecycleTests.Register(runner);
         PipeReaderContractTests.Register(runner);
         TcpTimeoutTests.Register(runner);
+        AcceptExhaustionTests.Register(runner);
         ReactorSetupTeardownTests.Register(runner);
         UdpTests.Register(runner);
         QuicTests.Register(runner);

@@ -74,6 +74,14 @@ public sealed unsafe partial class Reactor
         sqe->user_data = Tag(KindTcpAccept, 0, listenFd);
     }
 
+    // Accept failures that leave the connection in the backlog, so an accept re-armed at once fails
+    // again at once (#222): out of descriptors, the process's or the system's, or out of memory.
+    private const int ENOMEM = 12, ENFILE = 23, EMFILE = 24;
+
+    // Listeners whose accept stopped on one of those; TcpSweep re-arms them on its next tick.
+    private readonly List<int> _acceptPaused = [];
+    private bool _acceptPauseReported;
+
     private void ArmTcpAccepts()
     {
         foreach (int listenFd in _listenFds)
@@ -223,6 +231,7 @@ public sealed unsafe partial class Reactor
         if (res >= 0)
         {
             int clientFd = res;
+            _acceptPauseReported = false;
 
             if (_incremental && _freeGids!.Count == 0)
             {
@@ -257,6 +266,21 @@ public sealed unsafe partial class Reactor
             }
 
             _ = RunHandlerAsync(conn);
+        }
+        else if (res is -EMFILE or -ENFILE or -ENOBUFS or -ENOMEM)
+        {
+            // Re-armed now it would fail again at once and spin the reactor; once a tick instead,
+            // reported once until an accept succeeds.
+            if (!_acceptPauseReported)
+            {
+                _acceptPauseReported = true;
+                Console.Error.WriteLine($"[r{_id}] accept failed ({res}): out of file descriptors or memory, retrying every {TickMs} ms");
+            }
+            if (!more)
+            {
+                _acceptPaused.Add(listenFd);
+            }
+            return;
         }
         else
         {
