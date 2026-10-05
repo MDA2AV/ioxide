@@ -21,9 +21,10 @@ namespace ioxide;
 /// provided-buffer ring, handed back the moment dispatch returns, so passing a pointer into it
 /// would be a use-after-free under load.
 ///
-/// Only short headers are forwarded: their id is one this server minted, so its first byte really
-/// does name the owner (iq_stamp_shard in the shim). A long header's id is chosen by the CLIENT,
-/// and routing on a byte the peer controls would let anyone aim traffic at a reactor.
+/// Short headers and Handshake packets are forwarded: their id is one this server minted, so its
+/// first byte really does name the owner (iq_stamp_shard in the shim). An Initial's or a 0-RTT
+/// packet's id can be the CLIENT's own choice, and routing a new connection on a byte the peer
+/// picked would let anyone aim connections at a reactor.
 /// </summary>
 public sealed unsafe partial class Reactor
 {

@@ -393,8 +393,11 @@ public static class TestServer
     public static (int Port, Reactor[] Reactors) StartQuicSharded(int reactorCount,
         QuicConnectionFactory quicFactory,
         Func<Reactor, QuicConnection, Task>? quicHandle = null, int quicReadMs = 60_000,
-        QuicRouting routing = QuicRouting.Forward)
+        QuicRouting routing = QuicRouting.Forward,
+        ManualResetEventSlim? holdLast = null, ManualResetEventSlim? lastStarted = null)
     {
+        // holdLast keeps the last reactor from starting until it is set, so it binds the port after
+        // the others are already serving; lastStarted is set once it has.
         int tcpPort = ReserveFreePort();
         int udpPort = ReserveFreePort();
 
@@ -421,21 +424,23 @@ public static class TestServer
             },
         };
 
-        using var ready = new CountdownEvent(reactorCount);
+        using var ready = new CountdownEvent(holdLast is null ? reactorCount : reactorCount - 1);
         var reactors = new Reactor[reactorCount];
 
         for (int i = 0; i < reactorCount; i++)
         {
             int shard = i;
+            bool held = holdLast is not null && shard == reactorCount - 1;
             var reactor = new Reactor(shard, config)
             {
                 TcpHandle = static (_, _) => Task.CompletedTask,
                 QuicHandle = quicHandle,
-                OnStart = _ => ready.Signal(),
+                OnStart = held ? _ => lastStarted?.Set() : _ => ready.Signal(),
             };
             reactors[shard] = reactor;
 
-            var thread = new Thread(RunGuarded(reactor, tcpPort))
+            ThreadStart run = RunGuarded(reactor, tcpPort);
+            var thread = new Thread(held ? () => { holdLast!.Wait(); run(); } : run)
             {
                 IsBackground = true,
                 Name = $"test-quic-shard-{udpPort}-{shard}",

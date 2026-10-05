@@ -126,6 +126,13 @@ public sealed unsafe partial class Reactor
             return;
         }
 
+        // A Handshake packet carries an id this server minted (the client learns it from our Initial),
+        // so it goes to the reactor that id names - the reuseport group moved this client mid-handshake.
+        if (IsHandshakePacket(datagram.Payload) && QuicTryForward(in datagram, in dcid))
+        {
+            return;
+        }
+
         // No factory (or no QuicOptions at all, on a client-only reactor): nothing is accepted here.
         QuicConnection? freshQuicConnection = _quicOptions?.ConnectionFactory?.Invoke(this, in datagram, in dcid);
         if (freshQuicConnection == null)
@@ -165,6 +172,19 @@ public sealed unsafe partial class Reactor
 
         freshQuicConnection.OnDatagram(datagram.Payload, datagram.Tos, datagram.PeerAddr, datagram.PeerAddrLen);
         QuicArmTimer(freshQuicConnection);
+    }
+
+    // The long-header type bits differ by version: Handshake is 2 in v1 (RFC 9000 17.2) and 3 in v2
+    // (RFC 9369 3.2). The header was validated as long, so the version bytes are there.
+    private static bool IsHandshakePacket(ReadOnlySpan<byte> packet)
+    {
+        int type = (packet[0] & 0x30) >> 4;
+        return System.Buffers.Binary.BinaryPrimitives.ReadUInt32BigEndian(packet[1..5]) switch
+        {
+            0x00000001 => type == 2,
+            0x6b3343cf => type == 3,
+            _ => false,
+        };
     }
 
     // RFC 8999 (version-independent invariants): long header (bit 0x80) carries an explicit DCID
