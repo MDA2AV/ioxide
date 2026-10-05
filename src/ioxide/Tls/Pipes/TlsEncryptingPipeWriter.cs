@@ -17,7 +17,8 @@ namespace ioxide.tls;
 /// cannot be handed the slab directly - but BIO_read afterwards writes the records straight into
 /// the slab, so there is exactly one extra pass over the bytes, not two.
 ///
-/// Reactor thread only.
+/// The session belongs to the reactor, so a flush or a completion from another thread is handed to
+/// it rather than encrypting where it was called.
 /// </remarks>
 public sealed class TlsEncryptingPipeWriter : PipeWriter
 {
@@ -64,6 +65,20 @@ public sealed class TlsEncryptingPipeWriter : PipeWriter
     {
         ThrowIfCompleted();
 
+        // SSL_write must not overlap the reactor's SSL_read on this session (#249), so a flush from
+        // another thread encrypts and sends on the reactor, the way a plaintext flush sends from it.
+        Reactor reactor = _conn.Reactor;
+        if (!reactor.OnReactorThread)
+        {
+            var flushed = new TaskCompletionSource<FlushResult>();
+            reactor.ScheduleOnReactor(static state =>
+            {
+                var (writer, done) = ((TlsEncryptingPipeWriter, TaskCompletionSource<FlushResult>))state!;
+                _ = writer.FlushOnReactorAsync(done);
+            }, (this, flushed));
+            return new ValueTask<FlushResult>(flushed.Task);
+        }
+
         if (_cancelRequested)
         {
             _cancelRequested = false;
@@ -93,12 +108,38 @@ public sealed class TlsEncryptingPipeWriter : PipeWriter
         return new FlushResult(canceled, _completed || _conn.IsClosed);
     }
 
+    // A completion since, by the pipe's dispose, has already committed what was staged.
+    private async Task FlushOnReactorAsync(TaskCompletionSource<FlushResult> flushed)
+    {
+        try
+        {
+            flushed.SetResult(_completed ? new FlushResult(isCanceled: false, isCompleted: true) : await FlushAsync());
+        }
+        catch (Exception e)
+        {
+            flushed.SetException(e);
+        }
+    }
+
     public override void CancelPendingFlush() => _cancelRequested = true;
 
     public override void Complete(Exception? exception = null)
     {
         if (_completed)
         {
+            return;
+        }
+
+        // Committing encrypts, so from another thread it runs on the reactor too. If the pipe's
+        // dispose gets there first, it completes the writer and commits the bytes itself.
+        Reactor reactor = _conn.Reactor;
+        if (!reactor.OnReactorThread)
+        {
+            reactor.ScheduleOnReactor(static state =>
+            {
+                var (writer, error) = ((TlsEncryptingPipeWriter, Exception?))state!;
+                writer.Complete(error);
+            }, (this, exception));
             return;
         }
         _completed = true;

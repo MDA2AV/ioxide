@@ -447,6 +447,13 @@ public sealed unsafe class TlsSession : IDisposable
             return;
         }
 
+        // An OpenSSL session is not thread-safe, and the reactor decrypts with this one (#249).
+        if (!connection.Reactor.OnReactorThread)
+        {
+            throw new InvalidOperationException(
+                "TlsSession.Write encrypts with OpenSSL, which the reactor uses for this session: call it on the reactor thread, or write through TlsConnectionDualPipe, whose flush is handed to the reactor.");
+        }
+
         WriteEncrypted(connection, plaintext);
     }
 

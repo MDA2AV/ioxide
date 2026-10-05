@@ -21,6 +21,7 @@ internal static class Program
         TlsTests.Register(runner, ktls);
         DecryptFaultTests.Register(runner, ktls);
         TlsPipeTests.Register(runner, ktls);
+        OffReactorFlushTests.Register(runner);
         MutualTlsTests.Register(runner, ktls);
         MutualTlsConfigTests.Register(runner);
         SniTests.Register(runner, ktls);

@@ -15,7 +15,7 @@ public sealed partial class Reactor
         }
         catch (Exception e)
         {
-            Console.Error.WriteLine($"[r{_id}] connection handler faulted: {e.GetBaseException().Message}");
+            Console.Error.WriteLine($"[r{_id}] connection handler faulted: {e}");
 
             // A handler that faulted before its DecRef would otherwise leak the connection (#94).
             conn.ReleaseHandlerRefOnFault(gen);

@@ -7,6 +7,8 @@ public sealed unsafe partial class TcpConnection
 {
     private readonly Reactor _reactor;
 
+    internal Reactor Reactor => _reactor;
+
     public int ClientFd { get; private set; }
 
     /// <summary>The listener port this connection was accepted on; set per accept.</summary>
