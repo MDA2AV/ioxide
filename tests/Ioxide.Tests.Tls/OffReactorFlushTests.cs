@@ -125,6 +125,34 @@ internal static class OffReactorFlushTests
                 $"expected the {payload.Length} staged bytes, got {received.Length}");
         });
 
+        runner.Test("tls pipe: a flush allocates nothing, on the reactor or handed to it from another thread", () =>
+        {
+            (string certPath, string keyPath) = TestCert.Ensure();
+            var options = new TlsOptions { CertificatePath = certPath, KeyPath = keyPath };
+
+            const int Flushes = 2000;
+            var report = new TaskCompletionSource<(double OnReactor, double OffCaller, double OffReactor)>(
+                TaskCreationOptions.RunContinuationsAsynchronously);
+
+            int port = TestServer.Start(AllocationHandler(Flushes, report), r => TlsService.Start(r, options));
+
+            using var tcp = new TcpClient();
+            tcp.Connect("127.0.0.1", port);
+            tcp.ReceiveTimeout = 10_000;
+            using var ssl = new SslStream(tcp.GetStream(), leaveInnerStreamOpen: false, (_, _, _, _) => true);
+            ssl.AuthenticateAsClient(new SslClientAuthenticationOptions { TargetHost = "localhost" });
+
+            byte[] buffer = new byte[64 * 1024];
+            while (ssl.Read(buffer) > 0)
+            {
+            }
+
+            Assert.True(report.Task.Wait(10_000), "the handler never reported");
+            (double onReactor, double offCaller, double offReactor) = report.Task.Result;
+            Assert.True(onReactor < 8 && offCaller < 8 && offReactor < 8,
+                $"bytes allocated per flush: {onReactor:F1} on the reactor; handed over, {offCaller:F1} on the caller and {offReactor:F1} on the reactor");
+        });
+
         runner.Test("tls session: Write from another thread is refused rather than racing the reactor", () =>
         {
             (string certPath, string keyPath) = TestCert.Ensure();
@@ -142,6 +170,95 @@ internal static class OffReactorFlushTests
             Assert.Equal(nameof(InvalidOperationException), outcome.Task.Result);
         });
     }
+
+    private static Func<Reactor, TcpConnection, Task> AllocationHandler(
+        int flushes, TaskCompletionSource<(double OnReactor, double OffCaller, double OffReactor)> report)
+        => async (reactor, connection) =>
+        {
+            TlsSession? session = null;
+            TlsConnectionDualPipe? pipe = null;
+            try
+            {
+                try
+                {
+                    session = await reactor.GetService<TlsService>()!.AcceptAsync(connection);
+                }
+                catch
+                {
+                    return;   // the harness's readiness probe never completes a handshake
+                }
+
+                pipe = new TlsConnectionDualPipe(connection, session);
+                PipeWriter output = pipe.Output;
+
+                // Inline loops: an async helper would allocate a state machine of its own per call.
+                for (int i = 0; i < 64; i++)
+                {
+                    output.GetSpan(1024);
+                    output.Advance(1024);
+                    await output.FlushAsync();
+                }
+                long before = GC.GetAllocatedBytesForCurrentThread();
+                for (int i = 0; i < flushes; i++)
+                {
+                    output.GetSpan(1024);
+                    output.Advance(1024);
+                    await output.FlushAsync();
+                }
+                double onReactor = (GC.GetAllocatedBytesForCurrentThread() - before) / (double)flushes;
+
+                double offCaller = 0;
+                var done = new TaskCompletionSource();
+                var writer = new Thread(() =>
+                {
+                    using var signal = new ManualResetEventSlim();
+                    Action wake = signal.Set;
+                    long callerBefore = 0;
+                    for (int i = 0; i < 64 + flushes; i++)
+                    {
+                        if (i == 64)
+                        {
+                            callerBefore = GC.GetAllocatedBytesForCurrentThread();
+                        }
+                        output.GetSpan(1024);
+                        output.Advance(1024);
+                        ValueTask<FlushResult> flush = output.FlushAsync();
+                        if (!flush.IsCompleted)
+                        {
+                            signal.Reset();
+                            flush.GetAwaiter().UnsafeOnCompleted(wake);
+                            signal.Wait();
+                        }
+                        flush.GetAwaiter().GetResult();
+                    }
+                    offCaller = (GC.GetAllocatedBytesForCurrentThread() - callerBefore) / (double)flushes;
+                    reactor.ScheduleOnReactor(static s => ((TaskCompletionSource)s!).SetResult(), done);
+                }) { IsBackground = true, Name = "tls-alloc-writer" };
+                writer.Start();
+
+                long reactorBefore = GC.GetAllocatedBytesForCurrentThread();
+                await done.Task;
+                double offReactor = (GC.GetAllocatedBytesForCurrentThread() - reactorBefore) / (double)(64 + flushes);
+
+                report.TrySetResult((onReactor, offCaller, offReactor));
+            }
+            catch (Exception e)
+            {
+                report.TrySetException(e);
+            }
+            finally
+            {
+                if (pipe is not null)
+                {
+                    await pipe.DisposeAsync();
+                }
+                else
+                {
+                    session?.Dispose();
+                }
+                connection.DecRef();
+            }
+        };
 
     private static Func<Reactor, TcpConnection, Task> CompleteHandler(byte[] payload, ConcurrentQueue<string> faults)
         => async (reactor, connection) =>

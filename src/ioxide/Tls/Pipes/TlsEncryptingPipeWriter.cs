@@ -1,5 +1,7 @@
 using System.Buffers;
 using System.IO.Pipelines;
+using System.Runtime.CompilerServices;
+using System.Threading.Tasks.Sources;
 
 namespace ioxide.tls;
 
@@ -20,7 +22,7 @@ namespace ioxide.tls;
 /// The session belongs to the reactor, so a flush or a completion from another thread is handed to
 /// it rather than encrypting where it was called.
 /// </remarks>
-public sealed class TlsEncryptingPipeWriter : PipeWriter
+public sealed class TlsEncryptingPipeWriter : PipeWriter, IValueTaskSource<FlushResult>
 {
     private readonly TcpConnection _conn;
     private readonly TlsSession _tls;
@@ -30,11 +32,20 @@ public sealed class TlsEncryptingPipeWriter : PipeWriter
     private bool _completed;
     private bool _cancelRequested;
 
+    // One flush at a time, so one reused completion serves every flush that has to wait.
+    private ManualResetValueTaskSourceCore<FlushResult> _core = new()
+    {
+        RunContinuationsAsynchronously = false,
+    };
+    private ValueTaskAwaiter _pendingFlush;
+    private readonly Action _onFlushDone;
+
     public TlsEncryptingPipeWriter(TcpConnection connection, TlsSession session, int initialCapacity = 16 * 1024)
     {
         _conn = connection ?? throw new ArgumentNullException(nameof(connection));
         _tls = session ?? throw new ArgumentNullException(nameof(session));
         _staging = ArrayPool<byte>.Shared.Rent(Math.Max(initialCapacity, 4 * 1024));
+        _onFlushDone = OnFlushDone;
     }
 
     public override bool CanGetUnflushedBytes => true;
@@ -70,19 +81,30 @@ public sealed class TlsEncryptingPipeWriter : PipeWriter
         Reactor reactor = _conn.Reactor;
         if (!reactor.OnReactorThread)
         {
-            var flushed = new TaskCompletionSource<FlushResult>();
-            reactor.ScheduleOnReactor(static state =>
-            {
-                var (writer, done) = ((TlsEncryptingPipeWriter, TaskCompletionSource<FlushResult>))state!;
-                _ = writer.FlushOnReactorAsync(done);
-            }, (this, flushed));
-            return new ValueTask<FlushResult>(flushed.Task);
+            _core.Reset();
+            reactor.ScheduleOnReactor(static state => ((TlsEncryptingPipeWriter)state!).FlushOnReactor(), this);
+            return new ValueTask<FlushResult>(this, _core.Version);
         }
 
+        if (TryFlush(out FlushResult result))
+        {
+            return new ValueTask<FlushResult>(result);
+        }
+
+        _core.Reset();
+        _pendingFlush.UnsafeOnCompleted(_onFlushDone);
+        return new ValueTask<FlushResult>(this, _core.Version);
+    }
+
+    // Encrypts what is staged and starts the connection's flush: true, with its result, when that
+    // finished at once; false when it waits in _pendingFlush.
+    private bool TryFlush(out FlushResult result)
+    {
         if (_cancelRequested)
         {
             _cancelRequested = false;
-            return new ValueTask<FlushResult>(new FlushResult(isCanceled: true, isCompleted: _completed || _conn.IsClosed));
+            result = new FlushResult(isCanceled: true, isCompleted: _completed || _conn.IsClosed);
+            return true;
         }
 
         if (_staged > 0)
@@ -91,12 +113,55 @@ public sealed class TlsEncryptingPipeWriter : PipeWriter
             _staged = 0;
         }
 
-        return FlushConnectionAsync();
+        ValueTask inner = _conn.FlushAsync();
+        if (inner.IsCompletedSuccessfully)
+        {
+            result = new FlushResult(isCanceled: false, isCompleted: _completed || _conn.IsClosed);
+            return true;
+        }
+
+        _pendingFlush = inner.GetAwaiter();
+        result = default;
+        return false;
     }
 
-    private async ValueTask<FlushResult> FlushConnectionAsync()
+    // The flush a caller on another thread asked for. A completion since, by the pipe's dispose,
+    // has already committed what was staged.
+    private void FlushOnReactor()
     {
-        await _conn.FlushAsync();
+        try
+        {
+            if (_completed)
+            {
+                _core.SetResult(new FlushResult(isCanceled: false, isCompleted: true));
+            }
+            else if (TryFlush(out FlushResult result))
+            {
+                _core.SetResult(result);
+            }
+            else
+            {
+                _pendingFlush.UnsafeOnCompleted(_onFlushDone);
+            }
+        }
+        catch (Exception e)
+        {
+            _core.SetException(e);
+        }
+    }
+
+    // Completion of a flush that waited - runs inline on the reactor.
+    private void OnFlushDone()
+    {
+        try
+        {
+            _pendingFlush.GetResult();
+        }
+        catch (Exception e)
+        {
+            _core.SetException(e);
+            return;
+        }
 
         // Report the cancel on the flush it was aimed at, and clear it. CancelPendingFlush cannot
         // wake a flush already parked on the connection's send - only the completion or a close
@@ -105,20 +170,7 @@ public sealed class TlsEncryptingPipeWriter : PipeWriter
         // plaintext staged for it. A flush nobody cancelled was cancelled, silently and lossily.
         bool canceled = _cancelRequested;
         _cancelRequested = false;
-        return new FlushResult(canceled, _completed || _conn.IsClosed);
-    }
-
-    // A completion since, by the pipe's dispose, has already committed what was staged.
-    private async Task FlushOnReactorAsync(TaskCompletionSource<FlushResult> flushed)
-    {
-        try
-        {
-            flushed.SetResult(_completed ? new FlushResult(isCanceled: false, isCompleted: true) : await FlushAsync());
-        }
-        catch (Exception e)
-        {
-            flushed.SetException(e);
-        }
+        _core.SetResult(new FlushResult(canceled, _completed || _conn.IsClosed));
     }
 
     public override void CancelPendingFlush() => _cancelRequested = true;
@@ -198,5 +250,22 @@ public sealed class TlsEncryptingPipeWriter : PipeWriter
         _staging.AsSpan(0, _staged).CopyTo(grown);
         ArrayPool<byte>.Shared.Return(_staging);
         _staging = grown;
+    }
+
+    // IValueTaskSource<FlushResult> - forwards to the core armed in FlushAsync.
+    FlushResult IValueTaskSource<FlushResult>.GetResult(short token) => _core.GetResult(token);
+
+    ValueTaskSourceStatus IValueTaskSource<FlushResult>.GetStatus(short token) => _core.GetStatus(token);
+
+    void IValueTaskSource<FlushResult>.OnCompleted(
+        Action<object?> continuation,
+        object? state,
+        short token,
+        ValueTaskSourceOnCompletedFlags flags)
+    {
+        // Completes on the reactor thread only - strip the context-post so resumes stay inline
+        // (see ReactorSynchronizationContext).
+        _core.OnCompleted(continuation, state, token,
+            flags & ~ValueTaskSourceOnCompletedFlags.UseSchedulingContext);
     }
 }
