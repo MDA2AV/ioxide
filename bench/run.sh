@@ -31,7 +31,7 @@ note() { RESULTS+=("$(printf '%-16s %3s  %s' "$1" "$2" "$3")"); }
 play() { # $1 subdir, rest env; starts a playground binary detached
   local dir=$1; shift
   local exe
-  exe=$(ls Playground/$dir/bin/Release/net11.0/Playground.* 2>/dev/null | grep -vE '\.(dll|pdb|json|so)$' | head -1)
+  exe=$(bench_binary "$dir")
   [ -z "$exe" ] && { say "missing binary for $dir"; return 1; }
   env "$@" setsid "$exe" > $BIN/server.log 2>&1 < /dev/null &
   sleep 3

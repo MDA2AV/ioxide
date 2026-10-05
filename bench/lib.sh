@@ -88,6 +88,34 @@ bench_assert_single_listener() {
     return 0
 }
 
+# Each reactor binds its own socket and the port answers from the first one, so load started then
+# reaches only the reactors bound so far.
+bench_await_listeners() {
+    local port=$1 expect=$2 kind=${3:-tcp} n=0
+    for _ in $(seq 100); do
+        if [ "$kind" = udp ]; then
+            n=$(ss -ulnH 2>/dev/null | grep -c ":$port ")
+        else
+            n=$(ss -tlnH 2>/dev/null | grep -c ":$port ")
+        fi
+        [ "$n" -ge "$expect" ] && return 0
+        sleep 0.1
+    done
+    echo "port $port has $n of $expect $kind listeners after 10 s" >&2
+    return 1
+}
+
+# A sample's apphost is named after its project; a renamed sample leaves the old one in bin/.
+bench_binary() {
+    local dir=Playground/$1 proj name
+    proj=$(ls "$dir"/*.csproj 2>/dev/null | head -1)
+    [ -n "$proj" ] || return 0
+    name=$(grep -oP '<AssemblyName>\K[^<]+' "$proj" | head -1)
+    name=${name:-$(basename "$proj" .csproj)}
+    [ -x "$dir/bin/Release/net11.0/$name" ] && echo "$dir/bin/Release/net11.0/$name"
+    return 0
+}
+
 # ── the drivers ──────────────────────────────────────────────────────────────────────────────
 #
 # $1 proto, $2 port, $3 seconds, $4 output file, $5 path, $6 scale (1 = the standard load).
