@@ -80,6 +80,12 @@ var config = new ServerConfig
 
 byte[] chunk = Encoding.ASCII.GetBytes(new string('x', chunkBytes - 1) + "\n");
 
+// Built once and shared by every request: WriteHeaders copies the headers out and keeps nothing.
+var plain = new Nghttp3Response { Status = 200 };
+plain.Headers.Add("content-type"u8.ToArray(), "text/plain"u8.ToArray());
+var feed = new Nghttp3Response { Status = 200 };
+feed.Headers.Add("content-type"u8.ToArray(), "text/event-stream"u8.ToArray());
+
 var threads = new Thread[config.ReactorCount];
 
 for (int i = 0; i < threads.Length; i++)
@@ -94,10 +100,7 @@ for (int i = 0; i < threads.Length; i++)
             // Headers first and once: HTTP/3 puts HEADERS before DATA and there is no correcting
             // it later. No Content-Length here - the length is not known yet, and for /feed never
             // will be.
-            var response = new Nghttp3Response { Status = 200 };
-            response.Headers.Add("content-type"u8.ToArray(),
-                endless ? "text/event-stream"u8.ToArray() : "text/plain"u8.ToArray());
-            writer.WriteHeaders(response);
+            writer.WriteHeaders(endless ? feed : plain);
 
             for (int n = 0; endless || n < chunkCount; n++)
             {
