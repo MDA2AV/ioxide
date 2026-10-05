@@ -72,8 +72,7 @@ await_port_free() {
 }
 trap cleanup EXIT
 
-binary() { ls "Playground/$1"/bin/Release/net11.0/Playground.* 2>/dev/null \
-             | grep -vE '\.(dll|pdb|json|so)$' | head -1; }
+binary() { bench_binary "$1"; }
 
 cpu_ticks() { awk '{print $14 + $15}' "/proc/$1/stat" 2>/dev/null || echo 0; }
 
@@ -118,7 +117,11 @@ start() { # start <role> <sample> <proto> <port> <path> <extra env...>
 
   for _ in $(seq 120); do
     kill -0 "$pid" 2>/dev/null || { echo "    $sample exited: $(tail -2 "$WORK/$role.log"|tr '\n' ' ')"; return 1; }
-    probe "$proto" "$port" "$path" && return 0
+    if probe "$proto" "$port" "$path"; then
+      local kind=tcp; case $proto in h3|echo) kind=udp ;; esac
+      bench_await_listeners "$port" "$REACTORS" "$kind" && return 0
+      echo "    $sample: not every reactor is listening"; return 1
+    fi
     sleep 0.1
   done
   echo "    $sample never answered on $port: $(tail -2 "$WORK/$role.log"|tr '\n' ' ')"
