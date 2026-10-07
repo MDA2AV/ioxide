@@ -212,6 +212,75 @@ internal static class QuicEngineTests
             Assert.Equal(1, client.FramesOn(stream));
         });
 
+        runner.Test("quic: a send on a stream the peer already finished does not leak send retention", () =>
+        {
+            // A handler that answers a request and, later, sends again on a stream that has since
+            // closed - a resume from a timer or a query that lands after the peer finished and
+            // acked. ngtcp2 has forgotten the stream (STREAM_NOT_FOUND), so nothing will ever ack
+            // or close those bytes: each one stayed counted in the engine's send retention, which
+            // drifted a long-lived connection toward the high-water and the backstop that closes it.
+            (string certPath, string keyPath) = TestCert.Ensure();
+            using var engine = new QuicEngine(certPath, keyPath, cidLength: 8);
+
+            RetentionProbe? probe = null;
+            (_, int udpPort) = TestServer.StartDatagram(
+                onDatagram: null,
+                quicFactory: engine.CreateFactory(_ => probe = new RetentionProbe(engine)),
+                quicHandle: static (_, conn) => ((RetentionProbe)conn).RunLateResend(lateBytes: 40 * 1024));
+
+            using var client = new QuicTestClient("127.0.0.1", udpPort);
+            client.Connect();
+            Assert.True(client.CompleteHandshake(timeoutMs: 5000), "handshake did not complete");
+
+            const int Rounds = 60;
+            for (int i = 0; i < Rounds; i++)
+            {
+                long sid = client.Send("go"u8.ToArray(), fin: true);
+                Assert.True(client.PumpUntil(() => client.FinOn(sid), timeoutMs: 5000), $"request {i} was not answered");
+            }
+            // One more exchange so the last late send is pumped and its purge (or leak) is settled.
+            client.PumpUntil(() => false, timeoutMs: 300);
+
+            Assert.True(probe!.LateSends >= Rounds - 2,
+                $"the handler only late-sent to {probe.LateSends} closed streams in {Rounds} rounds, so the path was barely exercised");
+            // A leak is Rounds x 40 KiB (2.4 MiB) of retention and one dead OutStream per round. The
+            // bound sits well under both so a couple of in-flight streams never trip it.
+            Assert.True(probe.OutRetained < 256 * 1024,
+                $"{probe.OutRetained} bytes still retained after {probe.LateSends} sends to closed streams: the bytes were never freed");
+            Assert.True(probe.OutStreamCount <= 4,
+                $"{probe.OutStreamCount} out-streams still tracked after {Rounds} rounds: a dead stream is never purged");
+        });
+
+        runner.Test("control: a handler that only answers live streams retains nothing between requests", () =>
+        {
+            // The same probe and the same rounds without the late send, so the bound above is a real
+            // discriminator: if the baseline did not return to zero, the leak test would prove nothing.
+            (string certPath, string keyPath) = TestCert.Ensure();
+            using var engine = new QuicEngine(certPath, keyPath, cidLength: 8);
+
+            RetentionProbe? probe = null;
+            (_, int udpPort) = TestServer.StartDatagram(
+                onDatagram: null,
+                quicFactory: engine.CreateFactory(_ => probe = new RetentionProbe(engine)),
+                quicHandle: static (_, conn) => ((RetentionProbe)conn).RunLateResend(lateBytes: 0));
+
+            using var client = new QuicTestClient("127.0.0.1", udpPort);
+            client.Connect();
+            Assert.True(client.CompleteHandshake(timeoutMs: 5000), "handshake did not complete");
+
+            const int Rounds = 60;
+            for (int i = 0; i < Rounds; i++)
+            {
+                long sid = client.Send("go"u8.ToArray(), fin: true);
+                Assert.True(client.PumpUntil(() => client.FinOn(sid), timeoutMs: 5000), $"request {i} was not answered");
+            }
+            client.PumpUntil(() => false, timeoutMs: 300);
+
+            Assert.Equal(0, probe!.LateSends);                       // the control makes no late send
+            Assert.True(probe.OutRetained < 256 * 1024,
+                $"{probe.OutRetained} bytes retained with no late send at all - the baseline itself drifts");
+        });
+
         runner.Test("quic: dual-pipe (PipeReader/PipeWriter) stream echo (loopback)", () =>
         {
             (string certPath, string keyPath) = TestCert.Ensure();
@@ -438,6 +507,70 @@ internal static class QuicEngineTests
         finally
         {
             conn.DecRef();
+        }
+    }
+}
+
+/// <summary>
+/// An engine connection that answers each request and, once a stream has been reported closed,
+/// sends to that stream again - the late-resume shape that reaches a stream ngtcp2 has forgotten.
+/// It reads the engine's private send-retention accounting back by reflection, since there is no
+/// public accessor and this is a test rather than a reason to add one.
+/// </summary>
+internal sealed class RetentionProbe(QuicEngine engine) : QuicEngineConnection(engine)
+{
+    private static readonly FieldInfo RetainedField =
+        typeof(QuicEngineConnection).GetField("_outRetained", BindingFlags.NonPublic | BindingFlags.Instance)!;
+    private static readonly FieldInfo StreamsField =
+        typeof(QuicEngineConnection).GetField("_outStreams", BindingFlags.NonPublic | BindingFlags.Instance)!;
+
+    private readonly Queue<long> _closed = new();
+
+    public long OutRetained => (long)RetainedField.GetValue(this)!;
+    public int OutStreamCount => ((System.Collections.ICollection)StreamsField.GetValue(this)!).Count;
+    public int LateSends { get; private set; }
+
+    protected override void OnStreamClosed(long streamId, ulong appErrorCode)
+    {
+        if ((streamId & 0x3) == 0x0)   // a peer-opened bidi stream we answered
+        {
+            _closed.Enqueue(streamId);
+        }
+    }
+
+    public async Task RunLateResend(int lateBytes)
+    {
+        try
+        {
+            while (true)
+            {
+                QuicRecvSnapshot snap = await ReadAsync();
+                while (TryGetDelivery(in snap, out QuicRecvRing.Delivery item))
+                {
+                    if (item.Kind == QuicStreamEvent.Data && item.Fin)
+                    {
+                        SendStream(item.StreamId, "ok"u8, fin: true);
+
+                        // Send onto a stream already reported closed: ngtcp2 has forgotten it, so
+                        // this is the STREAM_NOT_FOUND write whose bytes used to stay retained.
+                        if (lateBytes > 0 && _closed.TryDequeue(out long closed))
+                        {
+                            SendStream(closed, new byte[lateBytes], fin: false);
+                            LateSends++;
+                        }
+                    }
+                    ReturnBuffer(in item);
+                }
+                if (snap.IsClosed)
+                {
+                    break;
+                }
+                ResetRead();
+            }
+        }
+        finally
+        {
+            DecRef();
         }
     }
 }

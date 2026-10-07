@@ -269,9 +269,15 @@ public unsafe partial class QuicEngineConnection
             int code = (int)n;
             if (code < 0)
             {
-                if (code is Ngtcp2.NGTCP2_ERR_STREAM_SHUT_WR or Ngtcp2.NGTCP2_ERR_STREAM_NOT_FOUND)
+                if (code == Ngtcp2.NGTCP2_ERR_STREAM_SHUT_WR)
                 {
-                    os.Dead = true;   // finished or reset - chunks are freed at stream close
+                    os.Dead = true;   // write side closed - chunks are freed at stream close
+                    return;
+                }
+                if (code == Ngtcp2.NGTCP2_ERR_STREAM_NOT_FOUND)
+                {
+                    // Already closed: stream_close has fired, so nothing else will free these chunks.
+                    PurgeOutStream(sid);
                     return;
                 }
                 if (code == Ngtcp2.NGTCP2_ERR_STREAM_DATA_BLOCKED)
