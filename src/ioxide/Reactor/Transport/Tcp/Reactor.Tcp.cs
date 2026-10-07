@@ -245,7 +245,6 @@ public sealed unsafe partial class Reactor
                 return;
             }
 
-            SetNoDelay(clientFd);
             TcpConnection conn = _pool.TryPop(out var pooled)
                 ? pooled.SetFd(clientFd)
                 : new TcpConnection(this, clientFd, _tcp.WriteSlabSize, _tcp.RecvQueueEntries,
@@ -356,13 +355,6 @@ public sealed unsafe partial class Reactor
         return _port;
     }
 
-    // Per accepted socket - TCP_NODELAY doesn't reliably inherit from the listener.
-    private static void SetNoDelay(int fd)
-    {
-        int one = 1;
-        setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(int));
-    }
-
     private int[] _listenFds = [];
     private ushort[] _listenPorts = [];
 
@@ -432,6 +424,7 @@ public sealed unsafe partial class Reactor
         int one = 1;
         setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(int));
         setsockopt(fd, SOL_SOCKET, SO_REUSEPORT, &one, sizeof(int));
+        setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(int));   // accepted sockets inherit it
 
         if (dualStack)
         {
