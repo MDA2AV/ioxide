@@ -54,7 +54,10 @@ public sealed unsafe partial class Reactor
         long quicDue = _quicConnSet.Count == 0 ? long.MaxValue : _quicNextTimeoutMs;
         long wakeAt = Math.Min(_nextTickMs, quicDue);
 
+        // Not NowMs: that was read before this pass's work, and the wait would oversleep by all of it.
+        long now = Environment.TickCount64;
+
         // +1: the ms clock can read just short of the deadline when the kernel's timer wakes us.
-        return _ring.SubmitAndWait(1, Math.Max(0, wakeAt - NowMs) + 1);
+        return _ring.SubmitAndWait(1, Math.Max(0, wakeAt - now) + 1);
     }
 }
