@@ -35,6 +35,12 @@ public sealed unsafe partial class Reactor
     /// </summary>
     private void TcpSweep()
     {
+        foreach (int listenFd in _acceptPaused)
+        {
+            SubmitAcceptMultishot(listenFd);
+        }
+        _acceptPaused.Clear();
+
         long now = Environment.TickCount64;
         TcpConnection?[] conns = _connections;
 

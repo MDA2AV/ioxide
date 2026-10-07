@@ -469,8 +469,9 @@ public static class TestServer
 
     /// <summary>
     /// Starts a reactor with a UDP port (plain datagram handler, or the QUIC transport when a
-    /// factory is given). The TCP listener stays up solely so WaitForListen can probe readiness -
-    /// by the time it accepts, the UDP recv slots (armed earlier in Run) are live.
+    /// factory is given). The TCP listener stays up solely so WaitForListen can probe readiness;
+    /// the wait for OnStart is what makes the UDP sockets bound, since a probe connects as soon as
+    /// the TCP listener exists.
     /// </summary>
     public static (int TcpPort, int UdpPort) StartDatagram(
         UdpDatagramHandler? onDatagram,
@@ -518,11 +519,13 @@ public static class TestServer
             }),
         };
 
+        var started = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var reactor = new Reactor(0, config)
         {
             TcpHandle = static (_, _) => Task.CompletedTask,
             QuicHandle = quicHandle,
             OnDatagram = onDatagram,
+            OnStart = _ => started.TrySetResult(),
         };
 
         var thread = new Thread(RunGuarded(reactor, tcpPort))
@@ -534,6 +537,7 @@ public static class TestServer
         Track(reactor, thread);
 
         WaitForListen(tcpPort);
+        WaitForOnStart(tcpPort, started);
         return (tcpPort, udpPort);
     }
 
