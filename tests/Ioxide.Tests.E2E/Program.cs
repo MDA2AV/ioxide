@@ -49,6 +49,7 @@ internal static class Program
         Http2BodyTests.Register(runner);
         Http2StreamedFaultTests.Register(runner);
         StreamedPeerGoneTests.Register(runner);
+        QuicStreamingCreditTests.Register(runner);
         Http3BodyTests.Register(runner);
         H3LargeResponseTests.Register(runner);
 
