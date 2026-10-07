@@ -181,11 +181,13 @@ public sealed class RedisPool
         {
             for (int i = _connections.Count - 1; i >= 0; i--)
             {
-                if (_connections[i].CheckTimeout(now, timeoutMs, _options.Host, _options.Port))
+                RedisConnection c = _connections[i];
+                if (c.CheckTimeout(now, timeoutMs, _options.Host, _options.Port))
                 {
-                    RedisConnection c = _connections[i];
-                    _connections.RemoveAt(i);
+                    // Its failed waiters resumed inline, and a Pick of theirs may have removed it or others.
+                    _connections.Remove(c);
                     c.Dispose();   // closes the fd - unsticks the connection's stuck send/recv loops
+                    i = Math.Min(i, _connections.Count);
                 }
             }
         }
