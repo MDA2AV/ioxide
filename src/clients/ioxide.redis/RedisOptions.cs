@@ -26,7 +26,7 @@ public sealed record RedisOptions
     /// <summary>
     /// Per-command timeout in milliseconds: a connection whose oldest in-flight command exceeds this
     /// is torn down and its waiters fail with a diagnostic error, so a silent server can't park a
-    /// command forever. 0 disables. Default 30000.
+    /// command forever. It bounds a connect and its AUTH/SELECT the same way. 0 disables. Default 30000.
     /// </summary>
     public int CommandTimeoutMs { get; init; } = 30_000;
 }

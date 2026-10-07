@@ -50,7 +50,13 @@ public sealed partial class RedisConnection : IDisposable
     {
         RingSocket socket = RingSocket.CreateTcp(host);
         var connection = new RedisConnection(socket);
+        var deadline = new OpenDeadline(socket);
+        if (options.CommandTimeoutMs > 0)
+        {
+            host.SubmitTimeout(options.CommandTimeoutMs * 1_000_000L, deadline);
+        }
 
+        bool connected = false;
         try
         {
             int rc = await socket.ConnectAsync(options.Host, options.Port);
@@ -59,6 +65,7 @@ public sealed partial class RedisConnection : IDisposable
                 throw RedisException.Transport($"connect to {options.Host}:{options.Port}", rc);
             }
 
+            connected = true;
             if (!string.IsNullOrEmpty(options.Password))
             {
                 _ = options.User is { } user
@@ -71,12 +78,43 @@ public sealed partial class RedisConnection : IDisposable
                 await connection.ExecuteAsync("SELECT", options.Database);
             }
 
+            deadline.Disarm();
             return connection;
         }
         catch
         {
+            bool expired = deadline.Disarm();
             connection.Dispose();
+            if (expired)
+            {
+                string step = connected ? "answer the handshake" : "accept the connection";
+                throw new RedisException($"redis {options.Host}:{options.Port} did not {step} within {options.CommandTimeoutMs} ms");
+            }
+
             throw;
+        }
+    }
+
+    // Shuts an open that outlives the timeout down, which completes whatever ring op it is parked on.
+    private sealed class OpenDeadline(RingSocket socket) : IRingCompletion
+    {
+        private RingSocket? _socket = socket;
+        private bool _expired;
+
+        // Returns whether the deadline had already fired; a later expiry does nothing.
+        public bool Disarm()
+        {
+            _socket = null;
+            return _expired;
+        }
+
+        public void Complete(int result)
+        {
+            if (_socket != null && result is -62 or 0)   // -ETIME: the wait ran its course
+            {
+                _expired = true;
+                Native.shutdown(_socket.Fd, Native.SHUT_RDWR);
+            }
         }
     }
 
