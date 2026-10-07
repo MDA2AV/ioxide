@@ -250,13 +250,25 @@ public sealed unsafe partial class Reactor
                 ? pooled.SetFd(clientFd)
                 : new TcpConnection(this, clientFd, _tcp.WriteSlabSize, _tcp.RecvQueueEntries,
                                  _incremental ? WriteOverflowStrategy.Grow : _tcp.WriteOverflow);
+
+            if (_incremental && !SetupConnectionBufRing(conn))
+            {
+                // Never tracked nor handed out, so it goes straight back to the pool; shed as at the gid cap.
+                _pool.Push(conn);
+                close(clientFd);
+                if (!more)
+                {
+                    SubmitAcceptMultishot(listenFd);
+                }
+                return;
+            }
+
             Track(clientFd, conn);
             conn.InitRefs();
             conn.ListenerPort = PortOf(listenFd);
 
             if (_incremental)
             {
-                SetupConnectionBufRing(conn);
                 SubmitRecvMultishot(clientFd, (ushort)conn.Generation, conn.Bgid);
             }
             else
