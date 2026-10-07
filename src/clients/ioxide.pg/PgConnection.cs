@@ -509,7 +509,7 @@ public sealed class PgConnection : IDisposable
 
         try
         {
-            if (PgProtocol.TryReadMessage(buffered, ref position, out byte tag, out int bodyStart, out int bodyLength))
+            if (PgProtocol.TryReadMessage(buffered, ref position, _maxBufferSize, out byte tag, out int bodyStart, out int bodyLength))
             {
                 _scan = position;
                 message = new Message(tag, bodyStart, bodyLength);
