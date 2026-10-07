@@ -1,3 +1,4 @@
+using System.Buffers.Binary;
 using System.Net.Sockets;
 using System.Text;
 
@@ -15,10 +16,106 @@ public sealed class H2cClient : IDisposable
     // RFC 9113 3.4 - the connection preface every h2c client sends first.
     private static readonly byte[] Preface = "PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n"u8.ToArray();
 
-    private const byte Data = 0x0, Headers = 0x1, Settings = 0x4, GoAway = 0x7;
+    private const byte Data = 0x0, Headers = 0x1, Settings = 0x4, GoAway = 0x7, WindowUpdate = 0x8;
     private const byte EndStream = 0x1, EndHeaders = 0x4, Ack = 0x1;
+    private const ushort InitialWindowSizeSetting = 0x4;
 
     public const byte RstStream = 0x3, Continuation = 0x9;
+
+    /// <summary>RFC 9113 ENHANCE_YOUR_CALM, what both servers reset an oversized request body with.</summary>
+    public const uint EnhanceYourCalm = 0xb;
+
+    /// <summary>How an <see cref="Upload"/> ended.</summary>
+    public enum UploadEnd
+    {
+        /// <summary>HEADERS came back on the stream: the request was served.</summary>
+        Answered,
+
+        /// <summary>RST_STREAM on the stream. The error code says why.</summary>
+        Reset,
+
+        /// <summary>GOAWAY: the whole connection ended, not just the stream.</summary>
+        GoAway,
+
+        /// <summary>The connection closed, or nothing arrived in time.</summary>
+        Silent,
+    }
+
+    /// <summary>
+    /// POST <paramref name="length"/> body bytes within the server's flow-control windows, reading
+    /// what arrives before sending more, until the server answers, resets the stream or goes away.
+    /// Windows are counted from the connection's start: call it first, right after <see cref="Open"/>.
+    /// </summary>
+    /// <returns>How it ended, the RST_STREAM or GOAWAY error code, and the body bytes sent.</returns>
+    public (UploadEnd End, uint ErrorCode, long Sent) Upload(int streamId, long length, int timeoutMs = 30_000)
+    {
+        const int MaxFrame = 16384;   // RFC 9113's floor for SETTINGS_MAX_FRAME_SIZE; neither server raises it
+
+        long connectionWindow = 65535, streamWindow = 65535, initialWindow = 65535, sent = 0;
+        byte[] chunk = new byte[MaxFrame];
+
+        WriteFrame(Headers, EndHeaders, streamId, Hpack("POST", "/upload"));
+
+        long deadline = Environment.TickCount64 + timeoutMs;
+        while (Environment.TickCount64 < deadline)
+        {
+            long allowed = Math.Min(Math.Min(connectionWindow, streamWindow), Math.Min(MaxFrame, length - sent));
+            if (allowed > 0 && _tcp.Available == 0)
+            {
+                sent += allowed;
+                WriteFrame(Data, sent == length ? EndStream : (byte)0, streamId, chunk.AsSpan(0, (int)allowed));
+                connectionWindow -= allowed;
+                streamWindow -= allowed;
+                continue;
+            }
+
+            if (!TryReadFrame(out byte type, out byte flags, out int sid, out byte[] payload))
+            {
+                return (UploadEnd.Silent, 0, sent);
+            }
+
+            if (type == Settings && (flags & Ack) == 0)
+            {
+                for (int at = 0; at + 6 <= payload.Length; at += 6)
+                {
+                    if (BinaryPrimitives.ReadUInt16BigEndian(payload.AsSpan(at)) == InitialWindowSizeSetting)
+                    {
+                        // RFC 9113 6.9.2: a new initial window resizes streams that are already open.
+                        long initial = BinaryPrimitives.ReadUInt32BigEndian(payload.AsSpan(at + 2));
+                        streamWindow += initial - initialWindow;
+                        initialWindow = initial;
+                    }
+                }
+                WriteFrame(Settings, Ack, 0, ReadOnlySpan<byte>.Empty);
+            }
+            else if (type == WindowUpdate && payload.Length == 4)
+            {
+                long increment = BinaryPrimitives.ReadUInt32BigEndian(payload) & 0x7FFFFFFF;
+                if (sid == 0)
+                {
+                    connectionWindow += increment;
+                }
+                else if (sid == streamId)
+                {
+                    streamWindow += increment;
+                }
+            }
+            else if (type == RstStream && sid == streamId && payload.Length == 4)
+            {
+                return (UploadEnd.Reset, BinaryPrimitives.ReadUInt32BigEndian(payload), sent);
+            }
+            else if (type == Headers && sid == streamId)
+            {
+                return (UploadEnd.Answered, 0, sent);
+            }
+            else if (type == GoAway && payload.Length >= 8)
+            {
+                return (UploadEnd.GoAway, BinaryPrimitives.ReadUInt32BigEndian(payload.AsSpan(4)), sent);
+            }
+        }
+
+        return (UploadEnd.Silent, 0, sent);
+    }
 
     /// <summary>
     /// The stream id of the FIRST response to come back, whichever it is. Ordering rather than a
@@ -124,6 +221,7 @@ public sealed class H2cClient : IDisposable
 
     private readonly TcpClient _tcp;
     private readonly NetworkStream _s;
+    private Stream _out;   // where frames go: the socket, or the batch InOneWrite is gathering
 
     public H2cClient(int port, int timeoutMs = 6000)
     {
@@ -131,6 +229,7 @@ public sealed class H2cClient : IDisposable
         _tcp.Connect("127.0.0.1", port);
         _tcp.ReceiveTimeout = timeoutMs;
         _s = _tcp.GetStream();
+        _out = _s;
     }
 
     /// <summary>Preface plus an empty SETTINGS frame - a well-formed connection opening.</summary>
@@ -155,6 +254,25 @@ public sealed class H2cClient : IDisposable
         => WriteFrameHeader(type, flags, streamId, payload.Length, payload);
 
     /// <summary>
+    /// Every frame <paramref name="frames"/> writes goes out in ONE write, so the server reads them
+    /// in a single pass instead of acting on the first before the last arrives.
+    /// </summary>
+    public void InOneWrite(Action frames)
+    {
+        var batch = new MemoryStream();
+        _out = batch;
+        try
+        {
+            frames();
+        }
+        finally
+        {
+            _out = _s;
+        }
+        WriteRaw(batch.ToArray());
+    }
+
+    /// <summary>
     /// A frame header whose declared length may DISAGREE with the bytes that follow - the primitive
     /// behind the oversize-frame (declare huge, send nothing) and truncated-frame (declare N, send
     /// fewer) assaults.
@@ -171,12 +289,12 @@ public sealed class H2cClient : IDisposable
         hdr[6] = (byte)(streamId >> 16);
         hdr[7] = (byte)(streamId >> 8);
         hdr[8] = (byte)streamId;
-        _s.Write(hdr);
+        _out.Write(hdr);
         if (!actual.IsEmpty)
         {
-            _s.Write(actual);
+            _out.Write(actual);
         }
-        _s.Flush();
+        _out.Flush();
     }
 
     /// <summary>

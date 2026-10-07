@@ -118,8 +118,15 @@ public sealed partial class Nghttp2Connection
         try
         {
             Nghttp2Connection connection = From(user);
-            if (connection._pending.TryGetValue(streamId, out PendingRequest? pending))
+            if (connection._pending.TryGetValue(streamId, out PendingRequest? pending) && !pending.Overflowed)
             {
+                if (pending.BodyLength + (long)dataLength > connection._options.MaxRequestBytes)
+                {
+                    // Left pending, so a trailer later in this read cannot start a fresh request on the stream.
+                    pending.Overflowed = true;
+                    connection._readyThisPass.Add(pending);
+                    return;
+                }
                 pending.AppendBody(new ReadOnlySpan<byte>(data, (int)dataLength));
             }
         }
@@ -135,7 +142,9 @@ public sealed partial class Nghttp2Connection
         try
         {
             Nghttp2Connection connection = From(user);
-            if (connection._pending.Remove(streamId, out PendingRequest? pending))
+
+            // An overflowed request is in _readyThisPass already, waiting for its reset.
+            if (connection._pending.Remove(streamId, out PendingRequest? pending) && !pending.Overflowed)
             {
                 connection._readyThisPass.Add(pending);
             }

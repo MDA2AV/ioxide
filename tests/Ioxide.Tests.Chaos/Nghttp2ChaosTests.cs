@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using ioxide;
 using ioxide.nghttp2;
 
@@ -54,6 +55,67 @@ internal static class Nghttp2ChaosTests
         client.Request(streamId: 1);
         Assert.True(client.AwaitResponse(streamId: 1), "server did not answer a well-formed h2c request");
     }
+
+    private const int Cap = 1024 * 1024;
+    private const long Oversized = 16L * Cap;
+
+    /// <summary>A server capped at <paramref name="cap"/> that records every request its handler sees.</summary>
+    private static int StartCapped(ConcurrentQueue<(int Stream, int BodyBytes)> seen, bool streamed, int cap = Cap)
+        => TestServer.Start(async (_, conn) =>
+    {
+        try
+        {
+            var connection = new Nghttp2Connection(conn, new Nghttp2Options { MaxRequestBytes = cap });
+            if (streamed)
+            {
+                await connection.RunAsync((request, writer) =>
+                {
+                    seen.Enqueue((request.StreamId, request.Body.Length));
+                    writer.WriteHeaders(new Nghttp2Response { Status = 200 });
+                    return ValueTask.CompletedTask;
+                });
+            }
+            else
+            {
+                await connection.RunBufferedAsync(request =>
+                {
+                    seen.Enqueue((request.StreamId, request.Body.Length));
+                    return new Nghttp2Response { Status = 200 };
+                });
+            }
+        }
+        finally
+        {
+            conn.DecRef();
+        }
+    });
+
+    private static void AssertOversizedBodyReset(bool streamed)
+    {
+        var seen = new ConcurrentQueue<(int Stream, int BodyBytes)>();
+        using var client = new H2cClient(StartCapped(seen, streamed), timeoutMs: 30_000);
+        client.Open();
+
+        (H2cClient.UploadEnd end, uint error, long sent) = client.Upload(streamId: 1, Oversized);
+
+        Assert.True(end == H2cClient.UploadEnd.Reset && error == H2cClient.EnhanceYourCalm,
+            $"a {Oversized}-byte body against a {Cap}-byte cap ended {end} (error 0x{error:x}) after "
+            + $"{sent} bytes, and the handler saw {Describe(seen)}");
+        Assert.True(sent > Cap, $"the reset came after {sent} bytes, before the body reached the cap");
+        Assert.True(sent < Oversized,
+            "the reset came only after the whole body: the server absorbed it instead of stopping it");
+
+        // The reset belongs to the stream: the same connection still serves the next one.
+        client.Request(streamId: 3);
+        Assert.True(client.AwaitResponse(streamId: 3, timeoutMs: 30_000),
+            "the connection stopped serving after one of its streams was reset");
+        Assert.True(seen.Any(r => r.Stream == 3), $"the follow-up request never reached the handler: {Describe(seen)}");
+        Assert.True(seen.All(r => r.Stream != 1), $"the handler saw the oversized stream: {Describe(seen)}");
+    }
+
+    private static string Describe(ConcurrentQueue<(int Stream, int BodyBytes)> seen) => seen.IsEmpty
+        ? "nothing"
+        : string.Join(", ", seen.Select(r => $"stream {r.Stream} with {r.BodyBytes} body bytes"));
 
     public static void Register(Runner runner)
     {
@@ -203,6 +265,54 @@ internal static class Nghttp2ChaosTests
             Assert.True(ended, "the stream never ended - read_body deferred forever instead of flagging EOF");
             Assert.True(frames >= Chunks,
                 $"expected at least {Chunks} DATA frames, got {frames} - the body was coalesced, not streamed");
+        });
+
+        runner.Test("nghttp2: a request body past MaxRequestBytes is reset with ENHANCE_YOUR_CALM, unseen by the handler",
+            () => AssertOversizedBodyReset(streamed: false));
+
+        // RunAsync streams only the response; its requests are assembled by the same callbacks.
+        runner.Test("nghttp2: a request body past MaxRequestBytes is reset before a streamed handler sees it",
+            () => AssertOversizedBodyReset(streamed: true));
+
+        runner.Test("nghttp2: a trailer read in the same pass as an oversized body never reaches the handler", () =>
+        {
+            // The reset waits for the read pass to unwind, so the stream is still open when its trailer arrives.
+            var seen = new ConcurrentQueue<(int Stream, int BodyBytes)>();
+            using var client = new H2cClient(StartCapped(seen, streamed: false, cap: 1024), timeoutMs: 30_000);
+            client.Open();
+
+            client.InOneWrite(() =>
+            {
+                client.RequestHeadersOnly(streamId: 1, endHeaders: true, endStream: false);
+                client.WriteFrame(0x0, flags: 0, streamId: 1, new byte[2048]);              // DATA past the cap
+                client.WriteFrame(0x1, flags: 0x5, streamId: 1, ReadOnlySpan<byte>.Empty);  // trailers + END_STREAM
+            });
+
+            byte first = client.AwaitAnyOf([H2cClient.RstStream, 0x1], streamId: 1, timeoutMs: 30_000);
+            Assert.True(first == H2cClient.RstStream,
+                $"stream 1 got frame type 0x{first:x} instead of RST_STREAM: the oversized body was not refused");
+
+            client.Request(streamId: 3);
+            Assert.True(client.AwaitResponse(streamId: 3, timeoutMs: 30_000),
+                "the connection stopped serving after one of its streams was reset");
+            Assert.True(seen.Any(r => r.Stream == 3),
+                $"the follow-up request never reached the handler: {Describe(seen)}");
+            Assert.True(seen.All(r => r.Stream != 1),
+                $"the trailer reached the handler as a request: {Describe(seen)}");
+        });
+
+        runner.Test("nghttp2: control: a request body of exactly MaxRequestBytes is served whole", () =>
+        {
+            var seen = new ConcurrentQueue<(int Stream, int BodyBytes)>();
+            using var client = new H2cClient(StartCapped(seen, streamed: false), timeoutMs: 30_000);
+            client.Open();
+
+            (H2cClient.UploadEnd end, uint error, long sent) = client.Upload(streamId: 1, Cap);
+
+            Assert.True(end == H2cClient.UploadEnd.Answered,
+                $"a {Cap}-byte body against a {Cap}-byte cap ended {end} (error 0x{error:x}) after {sent} bytes");
+            Assert.True(seen.Contains((1, Cap)),
+                $"the handler saw {Describe(seen)}, not stream 1 with {Cap} body bytes");
         });
     }
 }

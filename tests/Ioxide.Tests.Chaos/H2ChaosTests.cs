@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using ioxide;
 using ioxide.http2;
 
@@ -11,11 +12,16 @@ namespace Ioxide.Tests;
 /// </summary>
 internal static class H2ChaosTests
 {
-    private static int StartH2c(Http2Options? options = null) => TestServer.Start(async (_, conn) =>
+    private static int StartH2c(Http2Options? options = null, ConcurrentQueue<int>? seen = null)
+        => TestServer.Start(async (_, conn) =>
     {
         try
         {
-            await new Http2Connection(conn, options).RunBufferedAsync(static _ => Http2Response.Text("ok"));
+            await new Http2Connection(conn, options).RunBufferedAsync(request =>
+            {
+                seen?.Enqueue(request.StreamId);
+                return Http2Response.Text("ok");
+            });
         }
         finally
         {
@@ -174,6 +180,32 @@ internal static class H2ChaosTests
             // Refusing must not have desynchronised HPACK - the block was still decoded - so a
             // stream opened afterwards on the same connection still parses.
             AssertServes(port);
+        });
+
+        runner.Test("h2c: a request body past MaxRequestBytes is reset with ENHANCE_YOUR_CALM, unseen by the handler", () =>
+        {
+            // The reference the nghttp2 binding is held to by its twin in Nghttp2ChaosTests.
+            const int Cap = 1024 * 1024;
+            const long Oversized = 16L * Cap;
+            var seen = new ConcurrentQueue<int>();
+
+            int port = StartH2c(new Http2Options { MaxRequestBytes = Cap }, seen);
+            using var client = new H2cClient(port, timeoutMs: 30_000);
+            client.Open();
+
+            (H2cClient.UploadEnd end, uint error, long sent) = client.Upload(streamId: 1, Oversized);
+
+            Assert.True(end == H2cClient.UploadEnd.Reset && error == H2cClient.EnhanceYourCalm,
+                $"a {Oversized}-byte body against a {Cap}-byte cap ended {end} (error 0x{error:x}) after {sent} bytes");
+            Assert.True(sent > Cap, $"the reset came after {sent} bytes, before the body reached the cap");
+            Assert.True(sent < Oversized,
+                "the reset came only after the whole body: the server absorbed it instead of stopping it");
+
+            client.Request(streamId: 3);
+            Assert.True(client.AwaitResponse(streamId: 3, timeoutMs: 30_000),
+                "the connection stopped serving after one of its streams was reset");
+            Assert.True(seen.Contains(3) && !seen.Contains(1),
+                $"the handler saw streams [{string.Join(", ", seen)}], not only 3");
         });
     }
 }
