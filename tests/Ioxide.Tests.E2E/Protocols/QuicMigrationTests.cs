@@ -342,6 +342,123 @@ internal static class QuicMigrationTests
             });
         }
 
+        runner.Test("quic/migration: a released claim closes its socket, so its address can connect again", () =>
+        {
+            // A claim outranks the wildcard binds, so a socket outliving its release swallows its peer's datagrams.
+            (string certPath, string keyPath) = TestCert.Ensure();
+            using var engine = new QuicEngine(certPath, keyPath, cidLength: 8, alpn: ["h3"]);
+            var evicted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+
+            (int serverPort, Reactor[] fleet) = TestServer.StartQuicSharded(4,
+                engine.CreateFactory(_ => new EvictionReporting(engine, evicted)),
+                quicHandle: static (_, conn) => new Nghttp3Connection(conn).RunBufferedAsync(
+                    static _ => Nghttp3Response.Text("ok")),
+                quicReadMs: VanishReadTimeoutMs,
+                routing: QuicRouting.Forward);
+
+            long Forwarded()
+            {
+                long n = 0;
+                foreach (Reactor reactor in fleet) { n += reactor.QuicForwardsSent; }
+                return n;
+            }
+
+            int PinsOpen()
+            {
+                int n = 0;
+                foreach (Reactor reactor in fleet) { n += reactor.QuicPinsOpen; }
+                return n;
+            }
+
+            using var forwarder = new UdpForwarder(serverPort);
+
+            using (var first = new H3TestClient("127.0.0.1", forwarder.Port))
+            {
+                first.Connect();
+                Assert.True(first.CompleteHandshake(10_000), "the handshake through the forwarder did not complete");
+                Assert.Equal(200, first.Request("GET", "/before", null, 10_000).Status);
+
+                int swaps = 0;
+                while (Forwarded() == 0 && swaps < 8)
+                {
+                    swaps++;
+                    forwarder.SwapUpstream();
+                    Assert.Equal(200, first.Request("GET", $"/after-{swaps}", null, 15_000).Status);
+                }
+
+                Assert.True(Forwarded() > 0,
+                    $"after {swaps} address changes nothing was forwarded, so no claim was needed and "
+                    + "this test proved nothing");
+
+                // The next client's address must be the one claimed; a claim on an earlier one passes regardless.
+                long deadline = Environment.TickCount64 + 15_000;
+                for (int i = 0; ConnectedSockets(serverPort, forwarder.UpstreamPort) == 0 &&
+                                Environment.TickCount64 < deadline; i++)
+                {
+                    Assert.Equal(200, first.Request("GET", $"/settle-{i}", null, 15_000).Status);
+                }
+
+                Assert.True(ConnectedSockets(serverPort, forwarder.UpstreamPort) > 0,
+                    "the client's current address was never claimed, so there was no claim to release");
+            }
+
+            // The client vanishes without a word, so only the read timeout can end its connection.
+            Assert.True(evicted.Task.Wait(30_000), "the vanished client's connection was never evicted");
+            Assert.Equal(0, PinsOpen());
+
+            // The same address again: the forwarder still relays through the socket that was claimed.
+            using var second = new H3TestClient("127.0.0.1", forwarder.Port);
+            second.Connect();
+            Assert.True(second.CompleteHandshake(10_000),
+                "a new connection from the address a released claim named never completed its handshake: "
+                + $"{ConnectedSockets(serverPort, forwarder.UpstreamPort)} socket(s) on the QUIC port are "
+                + "still connected to that address, receiving its datagrams for nobody");
+            Assert.Equal(200, second.Request("GET", "/again", null, 10_000).Status);
+
+            // Nothing of any claim is left either - including those on addresses the client moved through.
+            Assert.True(WaitUntil(() => ConnectedSockets(serverPort) == 0, 5_000),
+                $"{ConnectedSockets(serverPort)} released claim socket(s) still bound to the QUIC port");
+        });
+
+        runner.Test("control: a client that never moved can vanish and connect again from the same address", () =>
+        {
+            // The test above without a claim, which a server refusing a reconnecting address would fail too.
+            (string certPath, string keyPath) = TestCert.Ensure();
+            using var engine = new QuicEngine(certPath, keyPath, cidLength: 8, alpn: ["h3"]);
+            var evicted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+
+            (int serverPort, Reactor[] fleet) = TestServer.StartQuicSharded(4,
+                engine.CreateFactory(_ => new EvictionReporting(engine, evicted)),
+                quicHandle: static (_, conn) => new Nghttp3Connection(conn).RunBufferedAsync(
+                    static _ => Nghttp3Response.Text("ok")),
+                quicReadMs: VanishReadTimeoutMs,
+                routing: QuicRouting.Forward);
+
+            using var forwarder = new UdpForwarder(serverPort);
+
+            using (var first = new H3TestClient("127.0.0.1", forwarder.Port))
+            {
+                first.Connect();
+                Assert.True(first.CompleteHandshake(10_000), "the handshake through the forwarder did not complete");
+                for (int i = 0; i < 3; i++)
+                {
+                    Assert.Equal(200, first.Request("GET", $"/r{i}", null, 10_000).Status);
+                }
+            }
+
+            Assert.True(evicted.Task.Wait(30_000), "the vanished client's connection was never evicted");
+
+            long pins = 0;
+            foreach (Reactor reactor in fleet) { pins += reactor.QuicPinsCreated; }
+            Assert.Equal(0L, pins);
+
+            using var second = new H3TestClient("127.0.0.1", forwarder.Port);
+            second.Connect();
+            Assert.True(second.CompleteHandshake(10_000),
+                "a new connection from a vanished client's address never completed its handshake");
+            Assert.Equal(200, second.Request("GET", "/again", null, 10_000).Status);
+        });
+
         runner.Test("control: a fleet whose clients never move claims no addresses", () =>
         {
             // The cost side. The claim runs from the sweep, which visits every connection every
@@ -402,6 +519,63 @@ internal static class QuicMigrationTests
         });
     }
 
+    // Above the 2.5 s H3TestClient can sit silent inside a request (ten 250 ms settle reads).
+    private const int VanishReadTimeoutMs = 5_000;
+
+    // Sockets on the port connect()ed to a peer (remotePort 0 = any): a claim as the kernel sees it.
+    private static int ConnectedSockets(int localPort, int remotePort = 0)
+    {
+        int n = 0;
+        foreach (string table in new[] { "/proc/net/udp", "/proc/net/udp6" })
+        {
+            if (!File.Exists(table))
+            {
+                continue;
+            }
+
+            foreach (string line in File.ReadLines(table).Skip(1))
+            {
+                // sl local_address rem_address st ... - ports in hex, st 01 = connected.
+                string[] f = line.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+                if (f.Length < 4 || f[3] != "01")
+                {
+                    continue;
+                }
+
+                int local = Convert.ToInt32(f[1][(f[1].IndexOf(':') + 1)..], 16);
+                int remote = Convert.ToInt32(f[2][(f[2].IndexOf(':') + 1)..], 16);
+                if (local == localPort && (remotePort == 0 || remote == remotePort))
+                {
+                    n++;
+                }
+            }
+        }
+        return n;
+    }
+
+    private static bool WaitUntil(Func<bool> condition, int timeoutMs)
+    {
+        long deadline = Environment.TickCount64 + timeoutMs;
+        while (!condition())
+        {
+            if (Environment.TickCount64 >= deadline)
+            {
+                return false;
+            }
+            Thread.Sleep(50);
+        }
+        return true;
+    }
+
+    private sealed class EvictionReporting(QuicEngine engine, TaskCompletionSource evicted) : QuicEngineConnection(engine)
+    {
+        public override void OnEvicted(QuicEvictReason reason)
+        {
+            evicted.TrySetResult();
+            base.OnEvicted(reason);
+        }
+    }
+
     /// <summary>
     /// Relays UDP between one client and one server, and can change the socket it uses towards the
     /// server - which is what the server sees as its peer moving. Deliberately a single thread:
@@ -421,6 +595,7 @@ internal static class QuicMigrationTests
         private int _fromServerAfterSwap;
 
         public int Port { get; }
+        public int UpstreamPort => ((IPEndPoint)_upstream.LocalEndPoint!).Port;   // the address the server sees
         public int SwappedAt { get; private set; }
         public int RelayedAfterSwap { get; private set; }
         public int FromServerAfterSwap => _fromServerAfterSwap;
