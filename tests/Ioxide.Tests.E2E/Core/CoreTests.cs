@@ -2,6 +2,7 @@ using System.Net.Sockets;
 using System.Runtime.InteropServices;
 using System.Text;
 using ioxide;
+using ioxide.timer;
 using ioxide.utils;
 
 namespace Ioxide.Tests;
@@ -302,6 +303,57 @@ internal static class CoreTests
             Assert.True(leaked <= 3, $"{leaked} fds leaked across 10 DecRef-then-throw handlers");
         });
 
+        runner.Test("core: a flush from another thread that races the connection's close completes", () =>
+        {
+            // FlushAsync armed the flush, then reset the signal its caller waits on. A close on the reactor in
+            // between released the armed flush into that reset, so the caller waited forever. The window is a
+            // few instructions wide: each round races one off-reactor flush against one close on the reactor,
+            // on a connection never accepted (fd -1, so its queued flush finds no table entry, as a closed one's).
+            (_, Reactor reactor, _) = TestServer.StartConfigured(
+                static (_, conn) => { conn.DecRef(); return Task.CompletedTask; },
+                new ServerConfig
+                {
+                    RecvBufferSize = 64, RecvSlots = 16,
+                    Tcp = new TcpOptions { WriteSlabSize = 4096, PoolMax = 8, RecvQueueEntries = 8 },
+                });
+
+            const int rounds = 200_000;
+            var race = new FlushCloseRace();
+            var timer = new RingTimer(reactor);
+            reactor.ScheduleOnReactor(_ => _ = race.CloseSideAsync(timer, rounds), null);
+
+            byte[] one = [1];
+            int lost = 0, overlapped = 0;
+            for (int i = 1; i <= rounds; i++)
+            {
+                var conn = new TcpConnection(reactor, -1, 64, 8);
+                conn.Write(one);
+                race.Conn = conn;
+                race.Skew = i / 8 * 3 % 8;
+                Volatile.Write(ref race.Go, i);
+                for (int s = i * 7 % 8; s > 0; s--)
+                {
+                    Thread.SpinWait(1);
+                }
+
+                ValueTask flush = conn.FlushAsync();
+                if (!flush.Equals(default(ValueTask)) && Volatile.Read(ref race.Closed) == i)
+                {
+                    overlapped++;   // armed, and the close ran before FlushAsync returned
+                }
+                FlushCloseRace.WaitFor(ref race.Closed, i);
+
+                if (!flush.IsCompleted)
+                {
+                    lost++;   // both sides are done, so it never will
+                }
+                conn.Dispose();
+            }
+
+            Assert.True(overlapped >= 1_000, $"only {overlapped} closes landed while a flush was arming: the race never ran");
+            Assert.True(lost == 0, $"{lost} of {rounds} flushes never completed after a close raced their arming");
+        }, skip: Environment.ProcessorCount < 2);   // the two sides must run at once
+
         runner.Test("core: Stop() tears down cleanly (thread exits, fds released)", () =>
         {
             // Waits for the count to stop moving, which is what the old fixed sleep approximated.
@@ -463,5 +515,47 @@ internal static class CoreTests
         Assert.Equal(200, status);
         Assert.Equal(body.Length, got.Length);
         Assert.True(got.All(c => c == 'x'), $"{strategy} body corrupted");
+    }
+
+    // The reactor's side of the flush/close race: one close per round, on the reactor thread.
+    private sealed class FlushCloseRace
+    {
+        public TcpConnection? Conn;
+        public int Go, Closed, Skew;
+
+        public async Task CloseSideAsync(RingTimer timer, int rounds)
+        {
+            for (int i = 1; i <= rounds; i++)
+            {
+                if (i % 1_000 == 0)
+                {
+                    await timer.DelayNanosecondsAsync(1);   // a loop pass drains the queued flushes, which it holds 4096 of
+                }
+                WaitFor(ref Go, i);
+                for (int s = Skew; s > 0; s--)
+                {
+                    Thread.SpinWait(1);
+                }
+
+                Conn!.MarkClosed();
+                Volatile.Write(ref Closed, i);
+            }
+        }
+
+        // Spins, so the two sides meet within nanoseconds; yields past that, so a busy machine still gets through.
+        public static void WaitFor(ref int field, int value)
+        {
+            for (int spins = 0; Volatile.Read(ref field) != value; spins++)
+            {
+                if (spins < 1_000)
+                {
+                    Thread.SpinWait(1);
+                }
+                else
+                {
+                    Thread.Yield();
+                }
+            }
+        }
     }
 }
