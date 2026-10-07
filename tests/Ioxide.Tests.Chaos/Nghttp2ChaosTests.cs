@@ -145,6 +145,16 @@ internal static class Nghttp2ChaosTests
             AssertServes(port);
         });
 
+        runner.Test("nghttp2: a table size update past the 4096 the server allows is a COMPRESSION_ERROR", () =>
+        {
+            int port = StartH2c();
+
+            Assert.Equal("HEADERS 1", H2cClient.Verdict(port, c => c.RequestWithTableSize(streamId: 1, size: 4096)));
+            Assert.Equal("GOAWAY COMPRESSION_ERROR", H2cClient.Verdict(port, c => c.RequestWithTableSize(streamId: 1, size: 4097)));
+
+            AssertServes(port);
+        });
+
         runner.Test("nghttp2: a slow handler does not block another stream", () =>
         {
             // The binding kept the blocking dispatch loop long after the managed stack lost it:

@@ -193,6 +193,7 @@ internal sealed class HpackDecoder
     private sealed class DynamicTable(int maxSize)
     {
         private readonly List<(byte[] Name, byte[] Value)> _entries = [];
+        private readonly int _limit = maxSize;   // what we advertised: RFC 7541 6.3 lets a size update go no higher
         private int _size;
         private int _maxSize = maxSize;
 
@@ -226,6 +227,10 @@ internal sealed class HpackDecoder
 
         internal void Resize(int newMaxSize)
         {
+            if (newMaxSize > _limit)
+            {
+                throw new HpackException($"HPACK table size update to {newMaxSize} exceeds the {_limit} advertised");
+            }
             _maxSize = newMaxSize;
             Evict();
         }

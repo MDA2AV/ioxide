@@ -152,6 +152,17 @@ internal static class H2ChaosTests
             AssertServes(port);   // and the process is still there to serve the next connection
         });
 
+        runner.Test("h2c: a table size update past the 4096 the server allows is a COMPRESSION_ERROR", () =>
+        {
+            // RFC 7541 6.3. Unbounded, the peer picks the table's size, up to 2^28 bytes of entries.
+            int port = StartH2c();
+
+            Assert.Equal("HEADERS 1", H2cClient.Verdict(port, c => c.RequestWithTableSize(streamId: 1, size: 4096)));
+            Assert.Equal("GOAWAY COMPRESSION_ERROR", H2cClient.Verdict(port, c => c.RequestWithTableSize(streamId: 1, size: 4097)));
+
+            AssertServes(port);
+        });
+
         runner.Test("h2c: streams past MaxConcurrentStreams are refused, not allocated", () =>
         {
             // The limit was advertised in SETTINGS and never enforced, so "open a stream, reset it,
