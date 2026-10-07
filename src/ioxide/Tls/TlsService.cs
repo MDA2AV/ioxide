@@ -37,9 +37,8 @@ public sealed class TlsService
 
     private sealed class PendingHandshake
     {
-        public TcpConnection Conn = null!;
+        public TcpConnection? Conn;   // null once settled: behind a stalled entry it waits out the whole timeout
         public long DeadlineMs;
-        public bool Done;
     }
 
     /// <summary>
@@ -54,7 +53,7 @@ public sealed class TlsService
         {
             PendingHandshake head = _handshakes.Peek();
 
-            if (head.Done)
+            if (head.Conn is null)
             {
                 _handshakes.Dequeue();
                 continue;
@@ -66,7 +65,6 @@ public sealed class TlsService
             }
 
             _handshakes.Dequeue();
-            head.Done = true;
 
             // Both halves are needed, and neither is redundant.
             //
@@ -1234,11 +1232,11 @@ public sealed class TlsService
         finally
         {
             // However this ended - handshake done, peer gone, the sweep itself - the entry stops
-            // being a candidate. Flagged rather than removed: it may be anywhere in the queue, and
-            // the sweep drops flagged entries when they reach the front, which costs nothing.
+            // being a candidate. Emptied rather than removed: it may be anywhere in the queue, and
+            // the sweep drops empty entries when they reach the front, which costs nothing.
             if (pending is not null)
             {
-                pending.Done = true;
+                pending.Conn = null;
             }
         }
     }

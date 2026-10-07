@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Net.Security;
 using System.Net.Sockets;
 using System.Security.Authentication;
@@ -269,6 +270,63 @@ internal static class PostureTests
 
             Assert.True(timedOut, "with the sweep off the server should have held the connection");
         });
+
+        runner.Test("handshake timeout: a finished handshake does not keep its connection reachable behind a stalled one", () =>
+        {
+            // A small pool, so most of each burst is discarded on close and only the sweep's queue can keep it reachable.
+            const int poolMax = 4;
+            const int burst = 32;
+            (string certPath, string keyPath) = TestCert.Ensure();
+
+            var finished = new ConcurrentQueue<WeakReference>();
+            (int port, _, _) = TestServer.StartConfigured(async (r, connection) =>
+            {
+                TlsSession? session = null;
+                try
+                {
+                    session = await r.GetService<TlsService>().AcceptAsync(connection);
+                    await connection.ReadAsync();   // until the client hangs up
+                }
+                catch (IOException)
+                {
+                    // The harness's liveness probe, which hangs up mid-handshake.
+                }
+                finally
+                {
+                    session?.Dispose();
+                    connection.DecRef();
+                    if (session is not null)
+                    {
+                        finished.Enqueue(new WeakReference(connection));
+                    }
+                }
+            }, new ServerConfig
+            {
+                RecvBufferSize = 4096,
+                RecvSlots = 256,
+                Tcp = new TcpOptions { WriteSlabSize = 16 * 1024, PoolMax = poolMax, RecvQueueEntries = 64 },
+            }, r => TlsService.Start(r, new TlsOptions
+            {
+                CertificatePath = certPath,
+                KeyPath = keyPath,
+                HandshakeTimeoutMs = 120_000,
+            }));
+
+            // Control: with nothing stalled, all but the pool's worth are released.
+            List<WeakReference> control = Burst(port, burst, finished);
+            int controlAlive = AliveAfterCollect(control, poolMax);
+            Assert.True(controlAlive <= poolMax,
+                $"control: {controlAlive} of {burst} closed connections stayed reachable with no handshake stalled");
+
+            // Never sends a ClientHello, so its entry heads the sweep's queue for the rest of the test.
+            using var stalled = new TcpClient("127.0.0.1", port);
+            List<WeakReference> behind = Burst(port, burst, finished);
+            int behindAlive = AliveAfterCollect(behind, poolMax);
+
+            Assert.True(!stalled.Client.Poll(0, SelectMode.SelectRead), "the stalled handshake ended during the test");
+            Assert.True(behindAlive <= poolMax,
+                $"{behindAlive} of {burst} closed connections stayed reachable behind a stalled handshake");
+        });
     }
 
     private static SslClientAuthenticationOptions CipherSuitesPolicy(TlsCipherSuite suite)
@@ -351,5 +409,52 @@ internal static class PostureTests
         {
             return e.Message.Contains(because);
         }
+    }
+
+    /// <summary>Holds <paramref name="count"/> TLS connections open at once, then closes them and returns the server's objects for them.</summary>
+    private static List<WeakReference> Burst(int port, int count, ConcurrentQueue<WeakReference> finished)
+    {
+        var clients = new List<SslStream>();
+        try
+        {
+            for (int i = 0; i < count; i++)
+            {
+                var ssl = new SslStream(new TcpClient("127.0.0.1", port).GetStream(), false, (_, _, _, _) => true);
+                clients.Add(ssl);
+                ssl.AuthenticateAsClient("localhost");
+            }
+        }
+        finally
+        {
+            foreach (SslStream ssl in clients)
+            {
+                ssl.Dispose();
+            }
+        }
+
+        var connections = new List<WeakReference>();
+        Assert.True(SpinWait.SpinUntil(() =>
+        {
+            while (finished.TryDequeue(out WeakReference? connection))
+            {
+                connections.Add(connection);
+            }
+            return connections.Count == count;
+        }, 10_000), $"only {connections.Count} of {count} handlers finished");
+        return connections;
+    }
+
+    // Collects until at most the pool's worth is left, for a few seconds; the sweep that releases them runs every 250 ms.
+    private static int AliveAfterCollect(List<WeakReference> connections, int poolMax)
+    {
+        int alive = connections.Count;
+        for (int attempt = 0; attempt < 30 && alive > poolMax; attempt++)
+        {
+            Thread.Sleep(100);
+            GC.Collect();
+            GC.WaitForPendingFinalizers();
+            alive = connections.Count(c => c.IsAlive);
+        }
+        return alive;
     }
 }
