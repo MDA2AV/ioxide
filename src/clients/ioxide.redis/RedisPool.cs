@@ -185,7 +185,7 @@ public sealed class RedisPool
                 {
                     RedisConnection c = _connections[i];
                     _connections.RemoveAt(i);
-                    c.Dispose();   // closes the fd - unsticks the connection's stuck send/recv loops
+                    c.Dispose();   // shuts the socket down - unsticks the connection's stuck send/recv loops
                 }
             }
         }
