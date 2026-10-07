@@ -31,7 +31,7 @@ public sealed unsafe class RingSocket : IDisposable
     /// <summary>Create an IPv4 TCP socket (TCP_NODELAY) ready to connect over the ring.</summary>
     public static RingSocket CreateTcp(IRingHost host)
     {
-        int fd = socket(AF_INET, SOCK_STREAM, 0);
+        int fd = socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0);
         if (fd < 0)
         {
             throw new InvalidOperationException($"socket() failed: {fd}");

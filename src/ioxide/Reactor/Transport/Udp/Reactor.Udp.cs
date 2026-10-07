@@ -299,7 +299,7 @@ public sealed unsafe partial class Reactor
                 $"UdpOptions.SocketBufferBytes must be positive, got {socketBufferBytes}.");
         }
 
-        int fd = socket(dualStack ? AF_INET6 : AF_INET, SOCK_DGRAM, 0);
+        int fd = socket(dualStack ? AF_INET6 : AF_INET, SOCK_DGRAM | SOCK_CLOEXEC, 0);
         if (fd < 0)
         {
             throw new InvalidOperationException($"udp socket failed: {fd}");
