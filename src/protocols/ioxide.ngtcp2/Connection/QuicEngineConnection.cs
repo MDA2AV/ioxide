@@ -441,5 +441,12 @@ public unsafe partial class QuicEngineConnection : QuicConnection
         {
             _self.Free();
         }
+
+        // No ack will resume a producer paused at the high-water now: it wakes here to find the connection closed.
+        if (_sendAtCapacity)
+        {
+            _sendAtCapacity = false;
+            OnSendCapacityAvailable?.Invoke();
+        }
     }
 }

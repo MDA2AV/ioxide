@@ -1,22 +1,24 @@
 using System.Buffers;
 using System.IO.Pipelines;
+using System.Threading.Tasks.Sources;
 
 namespace ioxide;
 
 /// <summary>
 /// Adapts one stream of the <see cref="QuicConnection"/> write API to a <see cref="PipeWriter"/> -
 /// QUIC's mirror of <see cref="TcpConnectionPipeWriter"/>, no shared code. Simpler than TCP's:
-/// there is no flush to await (framing, encryption and pacing belong to the engine), so writes
-/// stage in a pooled buffer and <see cref="FlushAsync"/> is one synchronous
-/// <see cref="QuicConnection.SendStream"/> call. Backpressure is the engine's retained-send cap,
-/// not a parked flush. <see cref="Complete"/> sends fin (half-close); a faulted Complete discards
-/// staged bytes and resets the stream (application error 0).
+/// there is no send to await (framing, encryption and pacing belong to the engine), so writes
+/// stage in a pooled buffer and <see cref="FlushAsync"/> hands them over in one
+/// <see cref="QuicConnection.SendStream"/> call. Backpressure is the engine's retained-send cap:
+/// at its high-water the flush parks until acks drain it, and once the connection is closed it
+/// reports <see cref="FlushResult.IsCompleted"/>. <see cref="Complete"/> sends fin (half-close); a
+/// faulted Complete discards staged bytes and resets the stream (application error 0).
 ///
 /// The stream id comes from the constructor, or from the shared binding when the dual pipe's
 /// reader auto-binds - flushing bytes before any stream is bound throws. Reactor thread only,
 /// like SendStream itself (the inline-resume handler already runs there).
 /// </summary>
-public sealed class QuicConnectionPipeWriter : PipeWriter
+public sealed class QuicConnectionPipeWriter : PipeWriter, IValueTaskSource<FlushResult>
 {
     private readonly QuicConnection _conn;
     private readonly QuicStreamBinding _binding;
@@ -25,6 +27,12 @@ public sealed class QuicConnectionPipeWriter : PipeWriter
     private int _written;
     private bool _completed;
     private bool _cancelRequested;
+
+    private ManualResetValueTaskSourceCore<FlushResult> _core = new()
+    {
+        RunContinuationsAsynchronously = false,
+    };
+    private readonly Action _onCapacity;
 
     public QuicConnectionPipeWriter(QuicConnection connection, long streamId)
         : this(connection, new QuicStreamBinding { StreamId = streamId })
@@ -36,6 +44,7 @@ public sealed class QuicConnectionPipeWriter : PipeWriter
     {
         _conn = connection ?? throw new ArgumentNullException(nameof(connection));
         _binding = binding;
+        _onCapacity = OnCapacity;
     }
 
     public override bool CanGetUnflushedBytes => true;
@@ -64,11 +73,29 @@ public sealed class QuicConnectionPipeWriter : PipeWriter
         if (_cancelRequested)
         {
             _cancelRequested = false;
-            return new ValueTask<FlushResult>(new FlushResult(isCanceled: true, isCompleted: _completed));
+            return new ValueTask<FlushResult>(new FlushResult(isCanceled: true, isCompleted: _completed || _conn.IsClosed));
         }
 
         FlushStaged(fin: false);
-        return new ValueTask<FlushResult>(new FlushResult(isCanceled: false, isCompleted: _completed));
+
+        if (!_conn.CanQueueSend && !_conn.IsClosed)
+        {
+            _core.Reset();
+            _conn.OnSendCapacityAvailable += _onCapacity;   // added, not assigned: another writer on the connection may be parked too
+            return new ValueTask<FlushResult>(this, _core.Version);
+        }
+
+        return new ValueTask<FlushResult>(new FlushResult(isCanceled: false, isCompleted: _completed || _conn.IsClosed));
+    }
+
+    // Retention drained below the high-water, or the connection was torn down - runs inline on the reactor.
+    private void OnCapacity()
+    {
+        _conn.OnSendCapacityAvailable -= _onCapacity;
+
+        bool canceled = _cancelRequested;
+        _cancelRequested = false;
+        _core.SetResult(new FlushResult(canceled, _completed || _conn.IsClosed));
     }
 
     private void FlushStaged(bool fin)
@@ -157,5 +184,21 @@ public sealed class QuicConnectionPipeWriter : PipeWriter
         {
             throw new InvalidOperationException("Writing is not allowed after the writer was completed.");
         }
+    }
+
+    // IValueTaskSource<FlushResult> - forwards to the core armed in FlushAsync.
+    FlushResult IValueTaskSource<FlushResult>.GetResult(short token) => _core.GetResult(token);
+
+    ValueTaskSourceStatus IValueTaskSource<FlushResult>.GetStatus(short token) => _core.GetStatus(token);
+
+    void IValueTaskSource<FlushResult>.OnCompleted(
+        Action<object?> continuation,
+        object? state,
+        short token,
+        ValueTaskSourceOnCompletedFlags flags)
+    {
+        // Completes on the reactor thread only: strip the context-post so resumes stay inline.
+        _core.OnCompleted(continuation, state, token,
+            flags & ~ValueTaskSourceOnCompletedFlags.UseSchedulingContext);
     }
 }
