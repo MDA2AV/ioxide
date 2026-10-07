@@ -182,27 +182,39 @@ public sealed partial class RedisConnection : IDisposable
         _sendEnd += written;
     }
 
+    // Reclaims the sent prefix after every snapshot: a command appended during each send means it never drains fully.
     private async Task SenderLoopAsync()
     {
         try
         {
             while (_sendOffset < _sendEnd)
             {
-                int n = await _socket.SendAsync(_send + _sendOffset, _sendEnd - _sendOffset);
-                if (n <= 0)
+                int end = _sendEnd;   // snapshot; more may be appended (at _sendEnd) while we send
+                while (_sendOffset < end)
                 {
-                    IsBroken = true;
-                    throw RedisException.Transport("send", n);
+                    int n = await _socket.SendAsync(_send + _sendOffset, end - _sendOffset);
+                    if (n <= 0)
+                    {
+                        IsBroken = true;
+                        throw RedisException.Transport("send", n);
+                    }
+                    _sendOffset += n;
                 }
-                _sendOffset += n;
+
+                // Nothing is in flight, so slide what was appended during the send to the front.
+                int tail = _sendEnd - end;
+                if (tail > 0)
+                {
+                    CompactSend(end, tail);
+                }
+                _sendOffset = 0;
+                _sendEnd = tail;
             }
             // No re-check is needed before clearing _sending: there is no await between the final
             // drain check above and here, and send completions resume inline (synchronously) on the
             // reactor, so no SubmitCore can interleave between them. A command appended while a send
             // was in flight already advanced _sendEnd and was picked up by the loop condition. (This
             // invariant depends on RingOpSource keeping RunContinuationsAsynchronously = false.)
-            _sendOffset = 0;   // all staged bytes sent; reuse the buffer from the front
-            _sendEnd = 0;
             _sending = false;
         }
         catch (Exception ex)
@@ -211,6 +223,12 @@ public sealed partial class RedisConnection : IDisposable
             _sending = false;
             FailAll(ex);
         }
+    }
+
+    // Move [from, from+length) to the front of the send buffer; CopyTo is memmove-safe if they overlap.
+    private unsafe void CompactSend(int from, int length)
+    {
+        new Span<byte>((void*)(_send + from), length).CopyTo(new Span<byte>((void*)_send, length));
     }
 
     private async Task ReaderLoopAsync()
