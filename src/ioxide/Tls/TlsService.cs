@@ -1150,15 +1150,18 @@ public sealed class TlsService
             {
                 int ret = OpenSsl.Accept(ssl, out int err);
 
+                // Read before the alert's flush, during which other connections' OpenSSL calls clear this thread's queue.
+                string? failure = ret != 1 && err != OpenSsl.SSL_ERROR_WANT_READ ? OpenSsl.LastError() : null;
+
                 await FlushOutbound(conn, wbio);   // server flights stage into the slab
 
                 if (ret == 1)
                 {
                     break;
                 }
-                if (err != OpenSsl.SSL_ERROR_WANT_READ)
+                if (failure is not null)
                 {
-                    throw new IOException($"TLS handshake failed: {OpenSsl.LastError()}");
+                    throw new IOException($"TLS handshake failed: {failure}");
                 }
 
                 RecvSnapshot snapshot = await conn.ReadAsync();

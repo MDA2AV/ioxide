@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Net.Security;
 using System.Net.Sockets;
 using System.Security.Authentication;
@@ -66,6 +67,94 @@ internal static class PostureTests
                 "a client offering the one suite the server allows should be served");
             Assert.True(!Handshakes(port, SslProtocols.Tls13, CipherSuitesPolicy(TlsCipherSuite.TLS_CHACHA20_POLY1305_SHA256)),
                 "a client offering only a suite the server excluded should have been refused");
+        });
+
+        runner.Test("posture: two handshakes refused in one reactor turn each report their own reason", () =>
+        {
+            (string certPath, string keyPath) = TestCert.Ensure();
+
+            var reasons = new ConcurrentQueue<string>();
+            int started = 0;
+            Reactor? reactor = null;
+
+            int port = TestServer.Start(async (r, connection) =>
+            {
+                Interlocked.Increment(ref started);
+                try
+                {
+                    (await r.GetService<TlsService>().AcceptAsync(connection)).Dispose();
+                }
+                catch (IOException e) when (e.Message.StartsWith("TLS handshake failed", StringComparison.Ordinal))
+                {
+                    reasons.Enqueue(e.Message);
+                }
+                catch (IOException)
+                {
+                    // The harness's liveness probe connects and hangs up, which refuses nothing.
+                }
+                finally
+                {
+                    connection.DecRef();
+                }
+            }, r =>
+            {
+                reactor = r;
+                TlsService.Start(r, new TlsOptions
+                {
+                    CertificatePath = certPath,
+                    KeyPath = keyPath,
+                    MinProtocolVersion = TlsProtocolVersion.Tls13,
+                    CipherSuites = "TLS_AES_256_GCM_SHA384",
+                });
+            });
+
+            // Two different refusals from one server, so a reason that moved between connections shows.
+            byte[] tls12 = ClientHello(new SslClientAuthenticationOptions
+            {
+                TargetHost = "localhost",
+                EnabledSslProtocols = SslProtocols.Tls12,
+            });
+            SslClientAuthenticationOptions chachaOnly = CipherSuitesPolicy(TlsCipherSuite.TLS_CHACHA20_POLY1305_SHA256);
+            chachaOnly.EnabledSslProtocols = SslProtocols.Tls13;
+            byte[] chacha = ClientHello(chachaOnly);
+
+            // Control: one at a time, each names its own reason.
+            string alone12 = RefusedAlone(port, tls12, reasons);
+            string aloneChacha = RefusedAlone(port, chacha, reasons);
+            Assert.True(alone12.Contains("unsupported protocol", StringComparison.Ordinal),
+                $"control: a TLS 1.2 ClientHello on its own was refused with: {alone12}");
+            Assert.True(aloneChacha.Contains("no shared cipher", StringComparison.Ordinal),
+                $"control: a ChaCha20-only ClientHello on its own was refused with: {aloneChacha}");
+
+            // The reactor is held while both land, so one turn reads them and the second runs during the first's alert flush.
+            int before = Volatile.Read(ref started);
+            using var first = new TcpClient("127.0.0.1", port);
+            using var second = new TcpClient("127.0.0.1", port);
+            Assert.True(SpinWait.SpinUntil(() => Volatile.Read(ref started) == before + 2, 10_000),
+                "the server never started both handshakes");
+
+            var held = new ManualResetEventSlim();
+            var release = new ManualResetEventSlim();
+            reactor!.ScheduleOnReactor(_ =>
+            {
+                held.Set();
+                release.Wait(10_000);   // bounded, so a failing test cannot keep the reactor
+            }, null);
+            try
+            {
+                Assert.True(held.Wait(10_000), "the reactor never ran the hold");
+                first.GetStream().Write(tls12);
+                second.GetStream().Write(chacha);
+            }
+            finally
+            {
+                release.Set();
+            }
+
+            string[] pair = [NextReason(reasons), NextReason(reasons)];
+            Assert.True(pair.Any(p => p.Contains("unsupported protocol", StringComparison.Ordinal))
+                        && pair.Any(p => p.Contains("no shared cipher", StringComparison.Ordinal)),
+                $"each refusal should report its own reason, got: {string.Join(" | ", pair)}");
         });
 
         runner.Test("posture: a ciphersuite name OpenSSL does not know fails at startup", () =>
@@ -277,6 +366,58 @@ internal static class PostureTests
             TargetHost = "localhost",
             CipherSuitesPolicy = new CipherSuitesPolicy([suite]),
         };
+
+    /// <summary>The ClientHello a client with these options sends, taken without a server.</summary>
+    private static byte[] ClientHello(SslClientAuthenticationOptions options)
+    {
+        var flight = new FirstFlight();
+        using var ssl = new SslStream(flight, false, (_, _, _, _) => true);
+        try
+        {
+            ssl.AuthenticateAsClient(options);
+        }
+        catch (IOException)
+        {
+            // The first read sees end of stream: the ClientHello is all this is for.
+        }
+
+        byte[] hello = flight.Written.ToArray();
+        Assert.True(hello.Length > 5 && hello[0] == 0x16, "the client never wrote a handshake record");
+        return hello;
+    }
+
+    private static string RefusedAlone(int port, byte[] clientHello, ConcurrentQueue<string> reasons)
+    {
+        using var client = new TcpClient("127.0.0.1", port);
+        client.GetStream().Write(clientHello);
+        return NextReason(reasons);
+    }
+
+    private static string NextReason(ConcurrentQueue<string> reasons)
+    {
+        string? reason = null;
+        Assert.True(SpinWait.SpinUntil(() => reasons.TryDequeue(out reason), 10_000),
+            "the server never reported a refused handshake");
+        return reason!;
+    }
+
+    /// <summary>Keeps what is written and answers the first read with end of stream.</summary>
+    private sealed class FirstFlight : Stream
+    {
+        public readonly MemoryStream Written = new();
+
+        public override bool CanRead => true;
+        public override bool CanWrite => true;
+        public override bool CanSeek => false;
+        public override long Length => throw new NotSupportedException();
+        public override long Position { get => throw new NotSupportedException(); set => throw new NotSupportedException(); }
+
+        public override int Read(byte[] buffer, int offset, int count) => 0;
+        public override void Write(byte[] buffer, int offset, int count) => Written.Write(buffer, offset, count);
+        public override void Flush() { }
+        public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+        public override void SetLength(long value) => throw new NotSupportedException();
+    }
 
     /// <summary>
     /// Whether the handshake completed. A refusal returns false; a server that HANGS throws, so
