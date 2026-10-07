@@ -299,6 +299,12 @@ public sealed partial class Http2Connection
 
     private void HandleData(in FrameHeader header, ReadOnlySpan<byte> payload)
     {
+        if (header.StreamId == 0)
+        {
+            GoAway(Http2Error.ProtocolError);   // RFC 9113 6.1: DATA always belongs to a stream
+            return;
+        }
+
         ReadOnlySpan<byte> body = payload;
 
         if ((header.Flags & FrameFlags.Padded) != 0)
@@ -348,10 +354,7 @@ public sealed partial class Http2Connection
         if (credit > 0)
         {
             WriteWindowUpdate(0, credit);
-            if (header.StreamId != 0)
-            {
-                WriteWindowUpdate(header.StreamId, credit);
-            }
+            WriteWindowUpdate(header.StreamId, credit);
         }
 
         if ((header.Flags & FrameFlags.EndStream) != 0 && pending is not null)

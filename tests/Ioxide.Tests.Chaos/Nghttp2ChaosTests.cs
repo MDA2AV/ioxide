@@ -86,6 +86,29 @@ internal static class Nghttp2ChaosTests
             AssertServes(port);
         });
 
+        runner.Test("nghttp2: DATA on stream 0, or on an idle stream, is a PROTOCOL_ERROR", () =>
+        {
+            int port = StartH2c();
+
+            Assert.Equal("HEADERS 1", H2cClient.Verdict(port, c =>
+            {
+                c.RequestHeadersOnly(streamId: 1, endHeaders: true, endStream: false);
+                c.WriteFrame(0x0, flags: 0x1, streamId: 1, "x"u8);
+            }));
+            Assert.Equal("GOAWAY PROTOCOL_ERROR", H2cClient.Verdict(port, c =>
+            {
+                c.WriteFrame(0x0, flags: 0, streamId: 0, "x"u8);
+                c.Request(streamId: 1);
+            }));
+            Assert.Equal("GOAWAY PROTOCOL_ERROR", H2cClient.Verdict(port, c =>
+            {
+                c.WriteFrame(0x0, flags: 0, streamId: 5, "x"u8);
+                c.Request(streamId: 1);
+            }));
+
+            AssertServes(port);
+        });
+
         runner.Test("nghttp2: unknown frame types are ignored, the request still answers", () =>
         {
             int port = StartH2c();
