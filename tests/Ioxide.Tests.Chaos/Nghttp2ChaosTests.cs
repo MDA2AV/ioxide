@@ -98,6 +98,41 @@ internal static class Nghttp2ChaosTests
             Assert.True(client.AwaitResponse(streamId: 1), "an unknown frame type broke the connection");
         });
 
+        runner.Test("nghttp2: a WINDOW_UPDATE past 2^31-1 is a FLOW_CONTROL_ERROR, on the connection or a stream", () =>
+        {
+            int port = StartH2c();
+            const int ToMax = int.MaxValue - 65535;
+
+            using (var client = new H2cClient(port))
+            {
+                client.Open();
+                client.WriteWindowUpdate(streamId: 0, ToMax);
+                client.Request(streamId: 1);
+                Assert.Equal((1, 2, true), client.DrainBody(streamId: 1));
+            }
+            Assert.Equal("GOAWAY FLOW_CONTROL_ERROR", H2cClient.Verdict(port, c =>
+            {
+                c.WriteWindowUpdate(streamId: 0, ToMax + 1);
+                c.Request(streamId: 1);
+            }));
+
+            Assert.Equal("HEADERS 1", H2cClient.Verdict(port, c =>
+            {
+                c.RequestHeadersOnly(streamId: 1, endHeaders: true, endStream: false);
+                c.WriteWindowUpdate(streamId: 1, ToMax);
+                c.WriteFrame(0x0, flags: 0x1, streamId: 1, []);
+            }));
+            // A stream's window too ends the whole connection here, which RFC 9113 5.4.1 allows.
+            Assert.Equal("GOAWAY FLOW_CONTROL_ERROR", H2cClient.Verdict(port, c =>
+            {
+                c.RequestHeadersOnly(streamId: 1, endHeaders: true, endStream: false);
+                c.WriteWindowUpdate(streamId: 1, ToMax + 1);
+                c.WriteFrame(0x0, flags: 0x1, streamId: 1, []);
+            }));
+
+            AssertServes(port);
+        });
+
         runner.Test("nghttp2: a frame truncated mid-payload is handled, server survives", () =>
         {
             int port = StartH2c();
