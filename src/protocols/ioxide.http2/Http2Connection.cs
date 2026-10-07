@@ -48,7 +48,9 @@ public sealed partial class Http2Connection : IDisposable
     // HPACK in step with the peer, then thrown away. A block cannot interleave with another
     // stream's frames, so one of these is enough.
     private readonly PendingRequest _discardBlock = new();
-    private int _discardingStream;
+
+    // The stream whose header block is still open, or 0.
+    private int _headerBlockStream;
 
     private bool _prefaceSeen;
     private bool _disposed;

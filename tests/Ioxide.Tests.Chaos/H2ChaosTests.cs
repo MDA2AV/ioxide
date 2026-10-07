@@ -117,6 +117,50 @@ internal static class H2ChaosTests
             Assert.True(client.AwaitResponse(streamId: 1), "server dropped a multiplexed request burst");
         });
 
+        runner.Test("h2c: a frame inside an open header block, or a CONTINUATION outside one, is a PROTOCOL_ERROR", () =>
+        {
+            // RFC 9113 6.2 and 6.10: a block decodes whole, so nothing may land between its frames.
+            int port = StartH2c();
+
+            Assert.Equal("HEADERS 1", H2cClient.Verdict(port, c =>
+            {
+                c.RequestHeadersOnly(streamId: 1, endHeaders: false);
+                c.WriteFrame(H2cClient.Continuation, flags: 0x4, streamId: 1, []);
+            }));
+
+            // Control: a refused stream's block, split the same way, is still decoded and refused.
+            int limited = StartH2c(new Http2Options { MaxConcurrentStreams = 1 });
+            Assert.Equal("RST_STREAM 3 REFUSED_STREAM", H2cClient.Verdict(limited, c =>
+            {
+                c.RequestHeadersOnly(streamId: 1, endHeaders: true, endStream: false);
+                c.RequestHeadersOnly(streamId: 3, endHeaders: false);
+                c.WriteFrame(H2cClient.Continuation, flags: 0x4, streamId: 3, []);
+            }));
+
+            string verdicts = string.Join(", ",
+                H2cClient.Verdict(port, c =>
+                {
+                    c.RequestHeadersOnly(streamId: 1, endHeaders: false);
+                    c.Request(streamId: 3);                                             // another stream's block
+                }),
+                H2cClient.Verdict(port, c =>
+                {
+                    c.RequestHeadersOnly(streamId: 1, endHeaders: false);
+                    c.WriteFrame(0x6, flags: 0, streamId: 0, new byte[8]);               // PING
+                    c.WriteFrame(H2cClient.Continuation, flags: 0x4, streamId: 1, []);
+                }),
+                H2cClient.Verdict(port, c =>
+                {
+                    c.RequestHeadersOnly(streamId: 1, endHeaders: true, endStream: false);
+                    c.WriteFrame(H2cClient.Continuation, flags: 0x4, streamId: 1, []);   // after END_HEADERS
+                    c.WriteFrame(0x0, flags: 0x1, streamId: 1, []);
+                }),
+                H2cClient.Verdict(port, c => c.WriteFrame(H2cClient.Continuation, flags: 0x4, streamId: 0, [])));
+
+            Assert.Equal(string.Join(", ", Enumerable.Repeat("GOAWAY PROTOCOL_ERROR", 4)), verdicts);
+            AssertServes(port);
+        });
+
         runner.Test("h2c: a CONTINUATION flood is cut off instead of growing without bound", () =>
         {
             // MaxFrameSize bounds one frame; nothing bounds how MANY continuations follow a HEADERS
