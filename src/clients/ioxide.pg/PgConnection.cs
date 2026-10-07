@@ -353,8 +353,11 @@ public sealed class PgConnection : IDisposable
                         break;
 
                     case PgProtocol.ParseComplete:
+                        front.PreparedSql = null;   // the server holds the statement now, so a Bind or Execute error must not evict it
+                        break;
+
                     case PgProtocol.BindComplete:
-                        break;   // extended-protocol acks; nothing to collect
+                        break;   // extended-protocol ack; nothing to collect
 
                     case PgProtocol.ErrorResponse:
                         // Per-command: the stream resyncs at the next ReadyForQuery, so siblings still run.
@@ -432,7 +435,7 @@ public sealed class PgConnection : IDisposable
         public int Rows;
         public string CommandTag = "";
         public PgException? Error;
-        public string? PreparedSql;   // set when this command included a Parse, so it can be evicted on error
+        public string? PreparedSql;   // set until this command's Parse is acknowledged, so a Parse that fails can be evicted
         public string? Sql;           // SQL text (extended protocol) - for stale-statement cache eviction
         public PgColumn[]? Columns;   // captured from RowDescription for row-streaming queries
         public long EnqueuedAtMs;     // Environment.TickCount64 at enqueue - drives the command-timeout sweep
