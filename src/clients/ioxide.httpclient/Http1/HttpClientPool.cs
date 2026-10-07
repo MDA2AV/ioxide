@@ -115,7 +115,7 @@ public sealed class HttpClientPool : IDisposable
             {
                 HttpClientConnection candidate = _idle[^1];
                 _idle.RemoveAt(_idle.Count - 1);
-                if (!candidate.IsBroken)
+                if (candidate.IsReusable())
                 {
                     return candidate;
                 }
@@ -168,7 +168,7 @@ public sealed class HttpClientPool : IDisposable
             }
 
             HttpClientConnection? handed = await pending;
-            if (handed is not null && !handed.IsBroken)
+            if (handed is not null && handed.IsReusable())
             {
                 return handed;
             }

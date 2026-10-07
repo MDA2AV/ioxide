@@ -54,6 +54,14 @@ internal sealed class HttpClientConnection : IDisposable
     /// or the server asked to close). The pool drops these and opens replacements.</summary>
     public bool IsBroken => _broken;
 
+    /// <summary>Not broken, and not closed by the origin while it sat unread in the pool.</summary>
+    public unsafe bool IsReusable()
+    {
+        // POLLRDHUP rather than a read: TLS can leave a close_notify or ticket unread ahead of the FIN.
+        var fd = new PollFd { Fd = _transport.Fd, Events = POLLRDHUP };
+        return !_broken && poll(&fd, 1, 0) == 0;
+    }
+
     private unsafe HttpClientConnection(HttpClientOptions options, IClientTransport transport, byte[] hostHeaderLine)
     {
         _options = options;
@@ -367,6 +375,19 @@ internal sealed class HttpClientConnection : IDisposable
     // --- pointer helpers (no await inside any of these) ---------------------------------------
 
     private static unsafe nint PointerOf(MemoryHandle handle) => (nint)handle.Pointer;
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct PollFd
+    {
+        public int Fd;
+        public short Events;
+        public short Revents;
+    }
+
+    private const short POLLRDHUP = 0x2000;
+
+    [DllImport("libc")]
+    private static extern unsafe int poll(PollFd* fds, nuint count, int timeoutMs);
 
     private unsafe void CopyIntoSend(ReadOnlySpan<byte> data, int offset)
         => data.CopyTo(new Span<byte>((void*)(_send + offset), _sendCapacity - offset));
