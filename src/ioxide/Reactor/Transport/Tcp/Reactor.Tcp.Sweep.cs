@@ -17,7 +17,7 @@ public sealed unsafe partial class Reactor
     private readonly int _sendTimeoutMs;
 
     /// <summary>
-    /// Environment.TickCount64, refreshed once per loop pass rather than read per completion.
+    /// Native.MonotonicMs, refreshed once per loop pass rather than read per completion.
     ///
     /// The stamps this feeds are read by a sweep that runs four times a second, so a clock good to
     /// one batch of completions is far finer than anything that consumes it - while reading the

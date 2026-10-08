@@ -24,7 +24,7 @@ public unsafe partial class QuicEngineConnection
             return nowMs;
         }
 
-        // The sweep works in TickCount64 ms; convert the ns deadline to that clock's frame.
+        // The sweep works in nowMs's frame (Native.MonotonicMs); convert the ns deadline to it.
         return nowMs + (long)((expiryNs - now) / 1_000_000);
     }
 

@@ -269,7 +269,7 @@ internal sealed class TestQuicConnection : QuicConnection
 
     public TestQuicConnection()
     {
-        _deadline = ArmTimerDelayMs > 0 ? Environment.TickCount64 + ArmTimerDelayMs : long.MaxValue;
+        _deadline = ArmTimerDelayMs > 0 ? Native.MonotonicMs + ArmTimerDelayMs : long.MaxValue;
     }
 
     public static void Reset()
