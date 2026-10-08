@@ -84,11 +84,11 @@ public sealed unsafe partial class Reactor
     {
         lock (gate.Lock)
         {
-            long deadline = Environment.TickCount64 + QuicSteeringTurnTimeoutMs;
+            long deadline = Native.MonotonicMs + QuicSteeringTurnTimeoutMs;
 
             while (gate.Turn != ShardIndex && !gate.Abandoned)
             {
-                int remaining = (int)(deadline - Environment.TickCount64);
+                int remaining = (int)(deadline - Native.MonotonicMs);
                 if (remaining <= 0 || !Monitor.Wait(gate.Lock, remaining))
                 {
                     Console.Error.WriteLine(

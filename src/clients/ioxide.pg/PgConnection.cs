@@ -212,7 +212,7 @@ public sealed class PgConnection : IDisposable
             _prepared[sql] = name!;
         }
 
-        var pending = new Pending(onRow) { PreparedSql = cached ? sql : null, Sql = sql, EnqueuedAtMs = Environment.TickCount64 };
+        var pending = new Pending(onRow) { PreparedSql = cached ? sql : null, Sql = sql, EnqueuedAtMs = Native.MonotonicMs };
         _inflight.Enqueue(pending);
 
         if (!_sending)
@@ -247,7 +247,7 @@ public sealed class PgConnection : IDisposable
             return ValueTask.FromException<PgResult>(ex);
         }
 
-        var pending = new Pending(onRow) { EnqueuedAtMs = Environment.TickCount64 };
+        var pending = new Pending(onRow) { EnqueuedAtMs = Native.MonotonicMs };
         _inflight.Enqueue(pending);
 
         if (!_sending)

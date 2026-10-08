@@ -21,7 +21,7 @@ public sealed unsafe partial class Reactor
     // The first run is one interval after the loop starts.
     private void StartTicker()
     {
-        NowMs = Environment.TickCount64;
+        NowMs = Native.MonotonicMs;
         _nextTickMs = NowMs + TickMs;
     }
 
@@ -55,7 +55,7 @@ public sealed unsafe partial class Reactor
         long wakeAt = Math.Min(_nextTickMs, quicDue);
 
         // Not NowMs: that was read before this pass's work, and the wait would oversleep by all of it.
-        long now = Environment.TickCount64;
+        long now = Native.MonotonicMs;
 
         // +1: the ms clock can read just short of the deadline when the kernel's timer wakes us.
         return _ring.SubmitAndWait(1, Math.Max(0, wakeAt - now) + 1);
