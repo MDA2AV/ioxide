@@ -107,6 +107,62 @@ internal static class CoreTests
         runner.Test("core: response larger than the write slab (Segmented SENDMSG)",
             () => BigBodyRoundTrip(WriteOverflowStrategy.Segmented));
 
+        runner.Test("core: a span the write slab cannot grow to fails the write instead of spinning the reactor (Grow)", () =>
+        {
+            // Doubling the slab's int size past 1 GiB wrapped it to 0, so the growth never reached the size
+            // asked for and the reactor spun inside GetSpan forever. Nothing is allocated before the refusal.
+            string body = new string('x', 48 * 1024);
+            var refusal = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
+
+            (int port, _, _) = TestServer.StartConfigured(async (_, conn) =>
+            {
+                try
+                {
+                    RecvSnapshot snap = await conn.ReadAsync();
+                    Wire.ReadPath(conn, snap);
+                    if (snap.IsClosed)
+                    {
+                        return;   // the harness's listen probe
+                    }
+
+                    try
+                    {
+                        conn.GetSpan((1 << 30) + 1);
+                        refusal.TrySetResult("a span");
+                    }
+                    catch (OutOfMemoryException e)
+                    {
+                        refusal.TrySetResult("refused: " + e.Message);
+                    }
+
+                    Wire.Write(conn, 200, body);   // 48 KiB against the 4 KiB slab: it still grows for what it can hold
+                    await conn.FlushAsync();
+                }
+                finally
+                {
+                    conn.DecRef();
+                }
+            }, new ServerConfig
+            {
+                RecvBufferSize = 4096, RecvSlots = 64,
+                Tcp = new TcpOptions { WriteSlabSize = 4096, PoolMax = 8, RecvQueueEntries = 64 },
+            });
+
+            using var client = new TcpClient();
+            client.Connect("127.0.0.1", port);
+            client.ReceiveTimeout = 8000;
+            NetworkStream stream = client.GetStream();
+            Client.Send(stream, "/");
+
+            Assert.True(refusal.Task.Wait(TimeSpan.FromSeconds(10)), "GetSpan never returned: the slab's growth spun on the reactor");
+            Assert.True(refusal.Task.Result.StartsWith("refused", StringComparison.Ordinal),
+                $"a span past 1 GiB came back as {refusal.Task.Result}");
+
+            (int status, string got) = Client.ReadResponse(stream);
+            Assert.Equal(200, status);
+            Assert.Equal(body.Length, got.Length);
+        });
+
         runner.Test("core: zero-copy send (SEND_ZC + notif), keep-alive", () =>
         {
             string body = new string('z', 8 * 1024);
