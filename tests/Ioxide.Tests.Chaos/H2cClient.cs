@@ -208,6 +208,68 @@ public sealed class H2cClient : IDisposable
         return false;
     }
 
+    /// <summary>
+    /// Pump until the server answers a stream, resets one or ends the connection, answering SETTINGS
+    /// as they arrive. Returns which, as text a failed assertion prints: "HEADERS 1", "DATA 1",
+    /// "RST_STREAM 1 FLOW_CONTROL_ERROR", "GOAWAY PROTOCOL_ERROR" - or "nothing" on a timeout or a
+    /// closed connection.
+    /// </summary>
+    public string AwaitVerdict(int timeoutMs = 4000)
+    {
+        long deadline = Environment.TickCount64 + timeoutMs;
+        while (Environment.TickCount64 < deadline)
+        {
+            if (!TryReadFrame(out byte type, out byte flags, out int sid, out byte[] payload))
+            {
+                return "nothing";
+            }
+            if (type == Settings && (flags & Ack) == 0)
+            {
+                WriteFrame(Settings, Ack, 0, ReadOnlySpan<byte>.Empty);
+            }
+            else if (type == Headers)
+            {
+                return $"HEADERS {sid}";
+            }
+            else if (type == Data)
+            {
+                return $"DATA {sid}";
+            }
+            else if (type == RstStream && payload.Length == 4)
+            {
+                return $"RST_STREAM {sid} {ErrorName(payload, 0)}";
+            }
+            else if (type == GoAway && payload.Length >= 8)
+            {
+                return $"GOAWAY {ErrorName(payload, 4)}";
+            }
+        }
+        return "nothing";
+    }
+
+    /// <summary>The <see cref="AwaitVerdict"/> on <paramref name="frames"/>, sent on a fresh connection.</summary>
+    public static string Verdict(int port, Action<H2cClient> frames)
+    {
+        using var client = new H2cClient(port);
+        client.Open();
+        frames(client);
+        return client.AwaitVerdict();
+    }
+
+    // RFC 9113 section 7, for the codes these tests meet.
+    private static string ErrorName(byte[] payload, int at)
+    {
+        uint code = (uint)((payload[at] << 24) | (payload[at + 1] << 16) | (payload[at + 2] << 8) | payload[at + 3]);
+        return code switch
+        {
+            0x1 => "PROTOCOL_ERROR",
+            0x3 => "FLOW_CONTROL_ERROR",
+            0x7 => "REFUSED_STREAM",
+            0x9 => "COMPRESSION_ERROR",
+            _ => $"0x{code:x}",
+        };
+    }
+
     private bool TryReadFrame(out byte type, out byte flags, out int streamId, out byte[] payload)
     {
         type = 0;

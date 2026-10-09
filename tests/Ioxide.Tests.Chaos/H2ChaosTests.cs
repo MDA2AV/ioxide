@@ -83,6 +83,35 @@ internal static class H2ChaosTests
             Assert.True(client.AwaitResponse(streamId: 1), "server choked on an unknown frame type");
         });
 
+        runner.Test("h2c: DATA on stream 0 is a PROTOCOL_ERROR", () =>
+        {
+            // RFC 9113 6.1. It was credited to the connection and dropped.
+            int port = StartH2c();
+
+            Assert.Equal("HEADERS 1", H2cClient.Verdict(port, c =>
+            {
+                c.RequestHeadersOnly(streamId: 1, endHeaders: true, endStream: false);
+                c.WriteFrame(0x0, flags: 0x1, streamId: 1, "x"u8);
+            }));
+            Assert.Equal("GOAWAY PROTOCOL_ERROR", H2cClient.Verdict(port, c =>
+            {
+                c.WriteFrame(0x0, flags: 0, streamId: 0, "x"u8);
+                c.Request(streamId: 1);
+            }));
+
+            AssertServes(port);
+        });
+
+        runner.Pending("h2c: DATA on an idle stream is a PROTOCOL_ERROR", () =>
+        {
+            int port = StartH2c();
+            Assert.Equal("GOAWAY PROTOCOL_ERROR", H2cClient.Verdict(port, c =>
+            {
+                c.WriteFrame(0x0, flags: 0, streamId: 5, "x"u8);
+                c.Request(streamId: 1);
+            }));
+        }, "RFC 9113 5.1 - an idle stream differs from a closed one only by the highest stream id opened, which Http2Connection does not keep");
+
         runner.Test("h2c: a frame truncated mid-payload is handled, server survives", () =>
         {
             int port = StartH2c();
