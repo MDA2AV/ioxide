@@ -18,6 +18,7 @@ internal static class Program
         RecvBufferReclaimTests.Register(runner);
         SendInFlightRecycleTests.Register(runner);
         PipeReaderContractTests.Register(runner);
+        StreamContractTests.Register(runner);
         TcpTimeoutTests.Register(runner);
         AcceptExhaustionTests.Register(runner);
         ReactorSetupTeardownTests.Register(runner);
