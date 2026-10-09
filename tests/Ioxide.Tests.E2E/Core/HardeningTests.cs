@@ -1,4 +1,6 @@
+using System.Net;
 using System.Net.Sockets;
+using System.Runtime.InteropServices;
 using System.Text;
 using ioxide;
 using ioxide.utils;
@@ -182,6 +184,52 @@ internal static class HardeningTests
                 c.Close();
             }
         }, skip: !TestServer.KernelAtLeast(6, 12));
+
+        runner.Test("core: incremental accept whose buffer ring the kernel refuses sheds, reactor survives", () =>
+        {
+            // The accept registers the connection's buffer ring, and the kernel charges it to
+            // RLIMIT_MEMLOCK: a host short of locked memory gets -ENOMEM there. That threw out of the
+            // accept and ended the reactor, where the gid cap beside it sheds the connection (#92).
+            (int port, _, _) = TestServer.StartConfigured(Handlers.Raw,
+                new ServerConfig
+                {
+                    Incremental = new IncrementalOptions { MaxConnections = 8, RecvSlots = 4, RecvBufferSize = 1024 },
+                    Tcp = new TcpOptions
+                    {
+                        WriteSlabSize = 4096, PoolMax = 8, RecvQueueEntries = 64,
+                    },
+                });
+
+            // Served before the limit drops: the control, and a connection that must outlive the refusal.
+            using TcpClient held = ConnectServing(port, TimeSpan.FromSeconds(10));
+
+            Assert.Equal(0, getrlimit(RlimitMemlock, out RLimit original));
+            using var refused = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp)
+            {
+                ReceiveTimeout = 5_000,
+            };
+            bool shed;
+            try
+            {
+                // The soft limit only, so it can be put back. held's ring is already charged.
+                var none = new RLimit { Cur = 0, Max = original.Max };
+                Assert.Equal(0, setrlimit(RlimitMemlock, in none));
+
+                refused.Connect(IPAddress.Loopback, port);
+                refused.Send(Encoding.ASCII.GetBytes("GET / HTTP/1.1\r\nHost: t\r\n\r\n"));
+                shed = Shed(refused);   // returns once the reactor has dealt with the accept
+            }
+            finally
+            {
+                setrlimit(RlimitMemlock, in original);
+            }
+
+            Assert.True(shed, "the connection accepted under a zero memlock limit was served, so its ring was never refused and nothing was tested");
+
+            // The unfixed reactor died in that accept and closed held on its way down.
+            GetOk(held);
+            using TcpClient fresh = ConnectServing(port, TimeSpan.FromSeconds(10));
+        }, skip: !TestServer.KernelAtLeast(6, 12) || HoldsIpcLock());
     }
 
     /// <summary>
@@ -287,5 +335,40 @@ internal static class HardeningTests
         int n = stream.Read(reply, 0, 4);
         Assert.True(n == 4 && Encoding.ASCII.GetString(reply) == "done",
             "connection died during buffer-group exhaustion (expected it to stall and resume)");
+    }
+
+    private const int RlimitMemlock = 8;
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct RLimit
+    {
+        public ulong Cur;
+        public ulong Max;
+    }
+
+    [DllImport("libc", SetLastError = true)]
+    private static extern int getrlimit(int resource, out RLimit limit);
+
+    [DllImport("libc", SetLastError = true)]
+    private static extern int setrlimit(int resource, in RLimit limit);
+
+    // io_uring charges nothing to RLIMIT_MEMLOCK for a process with CAP_IPC_LOCK, so it cannot run out.
+    private static bool HoldsIpcLock()
+    {
+        string? caps = File.ReadLines("/proc/self/status").FirstOrDefault(l => l.StartsWith("CapEff:", StringComparison.Ordinal));
+        return caps is not null && (Convert.ToUInt64(caps["CapEff:".Length..].Trim(), 16) & (1UL << 14)) != 0;
+    }
+
+    // Closed without an answer: EOF, or a reset when the request was still unread at the close.
+    private static bool Shed(Socket client)
+    {
+        try
+        {
+            return client.Receive(new byte[256]) == 0;
+        }
+        catch (SocketException e) when (e.SocketErrorCode == SocketError.ConnectionReset)
+        {
+            return true;
+        }
     }
 }

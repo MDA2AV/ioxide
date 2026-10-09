@@ -31,8 +31,13 @@ public sealed unsafe partial class Reactor
     private ushort AllocGid() => _freeGids!.Pop();
     private void   FreeGid(ushort gid) => _freeGids!.Push(gid);
 
-    private void SetupConnectionBufRing(TcpConnection conn)
+    private bool SetupConnectionBufRing(TcpConnection conn)
     {
+        if (_freeGids!.Count == 0)
+        {
+            return false;   // at the gid cap (MaxConnections concurrent), where AllocGid would throw (#92)
+        }
+
         ushort gid = AllocGid();
         int entries = _connBufRingEntries;
 
@@ -63,6 +68,13 @@ public sealed unsafe partial class Reactor
             flags        = IOU_PBUF_RING_INC,
         };
         int ret = io_uring_register(_ring.Fd, IORING_REGISTER_PBUF_RING, &reg, 1);
+        if (ret == -ENOMEM)
+        {
+            // Out of locked memory is the host's limit, not a fault: the accept sheds this connection.
+            Console.Error.WriteLine($"[r{_id}] connection shed: registering its buffer ring failed with ENOMEM (raise RLIMIT_MEMLOCK, `ulimit -l`)");
+            FreeGid(gid);
+            return false;
+        }
         if (ret < 0)
         {
             throw new InvalidOperationException($"register pbuf_ring (inc) failed with errno {-ret}, gid={gid}");
@@ -81,6 +93,7 @@ public sealed unsafe partial class Reactor
             *(ushort*)(slot + 12) = bid;
         }
         Volatile.Write(ref *(ushort*)(conn.BufRing + 14), (ushort)entries);
+        return true;
     }
 
     private void TeardownConnectionBufRing(TcpConnection conn)
