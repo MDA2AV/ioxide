@@ -233,49 +233,38 @@ public sealed unsafe partial class Reactor
             int clientFd = res;
             _acceptPauseReported = false;
 
-            if (_incremental && _freeGids!.Count == 0)
-            {
-                // At the gid cap (MaxConnections concurrent): shed the connection instead of
-                // letting AllocGid throw and take the whole reactor down (#92).
-                close(clientFd);
-                if (!more)
-                {
-                    SubmitAcceptMultishot(listenFd);
-                }
-                return;
-            }
-
             SetNoDelay(clientFd);
             TcpConnection conn = _pool.TryPop(out var pooled)
                 ? pooled.SetFd(clientFd)
                 : new TcpConnection(this, clientFd, _tcp.WriteSlabSize, _tcp.RecvQueueEntries,
                                  _incremental ? WriteOverflowStrategy.Grow : _tcp.WriteOverflow);
 
-            if (_incremental && !SetupConnectionBufRing(conn))
+            ushort bgid;
+            if (_incremental)
             {
-                // Never tracked nor handed out, so it goes straight back to the pool; shed as at the gid cap.
-                _pool.Push(conn);
-                close(clientFd);
-                if (!more)
+                // No ring at the gid cap (#92) or short of locked memory: shed this connection, not the reactor.
+                if (!SetupConnectionBufRing(conn))
                 {
-                    SubmitAcceptMultishot(listenFd);
+                    _pool.Push(conn);   // never tracked nor handed out
+                    close(clientFd);
+                    if (!more)
+                    {
+                        SubmitAcceptMultishot(listenFd);
+                    }
+                    return;
                 }
-                return;
+                bgid = conn.Bgid;
+            }
+            else
+            {
+                conn.UseZc = _zeroCopySend;   // config default; kTLS overrides to plain on handshake
+                bgid = BgId;
             }
 
             Track(clientFd, conn);
             conn.InitRefs();
             conn.ListenerPort = PortOf(listenFd);
-
-            if (_incremental)
-            {
-                SubmitRecvMultishot(clientFd, (ushort)conn.Generation, conn.Bgid);
-            }
-            else
-            {
-                conn.UseZc = _zeroCopySend;   // config default; kTLS overrides to plain on handshake
-                SubmitRecvMultishot(clientFd, (ushort)conn.Generation, BgId);
-            }
+            SubmitRecvMultishot(clientFd, (ushort)conn.Generation, bgid);
 
             _ = RunHandlerAsync(conn);
         }

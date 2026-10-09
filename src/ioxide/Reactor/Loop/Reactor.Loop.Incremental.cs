@@ -33,6 +33,11 @@ public sealed unsafe partial class Reactor
 
     private bool SetupConnectionBufRing(TcpConnection conn)
     {
+        if (_freeGids!.Count == 0)
+        {
+            return false;   // at the gid cap (MaxConnections concurrent), where AllocGid would throw (#92)
+        }
+
         ushort gid = AllocGid();
         int entries = _connBufRingEntries;
 
