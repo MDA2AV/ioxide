@@ -149,6 +149,28 @@ public sealed class H2cClient : IDisposable
     public void Request(int streamId, string method = "GET", string path = "/")
         => WriteFrame(Headers, EndHeaders | EndStream, streamId, Hpack(method, path));
 
+    /// <summary>A complete request whose header block opens with a dynamic table size update (RFC 7541 6.3).</summary>
+    public void RequestWithTableSize(int streamId, int size)
+    {
+        // 001 and a 5-bit prefixed integer (RFC 7541 5.1).
+        var block = new List<byte>();
+        if (size < 31)
+        {
+            block.Add((byte)(0x20 | size));
+        }
+        else
+        {
+            block.Add(0x3F);
+            for (size -= 31; size >= 0x80; size >>= 7)
+            {
+                block.Add((byte)(0x80 | (size & 0x7F)));
+            }
+            block.Add((byte)size);
+        }
+        block.AddRange(Hpack("GET", "/"));
+        WriteFrame(Headers, EndHeaders | EndStream, streamId, block.ToArray());
+    }
+
     /// <summary>Raw preface bytes with no framing - for the bad-preface assault.</summary>
     public void WriteRaw(ReadOnlySpan<byte> bytes)
     {
