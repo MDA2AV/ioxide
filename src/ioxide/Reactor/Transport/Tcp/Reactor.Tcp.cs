@@ -150,7 +150,15 @@ public sealed unsafe partial class Reactor
 
 
         byte* ptr = hasBuf ? _bufSlab + (nuint)bid * (nuint)_recvBufferSize : null;
-        if (!conn.Complete(res, bid, hasBuf, ptr))
+        if (conn.HandlerReleased)
+        {
+            // Nobody reads a connection its handler let go: queued, this would hold the buffer until the peer closes.
+            if (hasBuf)
+            {
+                ReturnBufferDirect(bid);
+            }
+        }
+        else if (!conn.Complete(res, bid, hasBuf, ptr))
         {
             CloseFromRecvOverflow(conn, fd, gen);
             return;
@@ -212,7 +220,11 @@ public sealed unsafe partial class Reactor
             conn.KernelDone![bid] = true;
         }
 
-        if (!conn.Complete(res, bid, hasBuffer: true, ptr))
+        if (conn.HandlerReleased)
+        {
+            ApplyReturnIncremental(fd, gen, bid);   // nobody reads it: returned at once, the ring keeps cycling to the peer's close
+        }
+        else if (!conn.Complete(res, bid, hasBuffer: true, ptr))
         {
             CloseFromRecvOverflow(conn, fd, gen);
             return;

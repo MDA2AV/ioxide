@@ -182,6 +182,104 @@ internal static class HardeningTests
                 c.Close();
             }
         }, skip: !TestServer.KernelAtLeast(6, 12));
+
+        runner.Test("tcp/exit: a peer still sending after its handler let go does not starve the reactor's other connections", () =>
+        {
+            // Once the handler let go nobody reads the connection, but each delivery was still queued on it,
+            // holding a buffer of the reactor's shared group until the peer closed. One such peer took the
+            // whole group (16 here), and every other connection's recv parked with nothing to wake it.
+            int port = TestServer.StartConfigured(AnswerOnceThenLetGo, LingerConfig()).Port;
+
+            using TcpClient lingering = ServeAndLinger(port);
+            lingering.GetStream().Write(new byte[2048]);   // 64-byte buffers: 32 deliveries against 16
+
+            string second = TryGet(port, "/second");
+            Assert.True(second == "200 /second",
+                $"the reactor's next connection got {second} while the let-go one's peer kept sending");
+        });
+
+        runner.Test("tcp/exit: control: a peer lingering silently after its handler let go leaves the others served", () =>
+        {
+            int port = TestServer.StartConfigured(AnswerOnceThenLetGo, LingerConfig()).Port;
+
+            using TcpClient lingering = ServeAndLinger(port);
+
+            Assert.Equal("200 /second", TryGet(port, "/second"));
+        });
+
+        runner.Test("tcp/exit: a peer that overfills its let-go connection's ring is still seen to close (incremental)", () =>
+        {
+            // Queued after the handler let go, the deliveries filled the connection's own ring and parked its
+            // recv, so the peer's close went unseen and the connection stayed open until the read timeout.
+            int port = TestServer.StartConfigured(AnswerOnceThenLetGo, new ServerConfig
+            {
+                Incremental = new IncrementalOptions { MaxConnections = 16, RecvSlots = 4, RecvBufferSize = 1024 },
+                Tcp = new TcpOptions { WriteSlabSize = 4096, PoolMax = 16, RecvQueueEntries = 64 },
+            }).Port;
+
+            int before = FdCount.Stable();
+            for (int i = 0; i < 8; i++)
+            {
+                using TcpClient peer = ServeAndLinger(port);
+                peer.GetStream().Write(new byte[8 * 1024]);   // twice its 4 x 1 KiB ring
+            }
+
+            int held = FdCount.Stable() - before;
+            Assert.True(held <= 2, $"{held} of 8 connections were still open after their peers closed");
+        }, skip: !TestServer.KernelAtLeast(6, 12));
+    }
+
+    // Answers one request with its path, then lets go: the peer gets a FIN and the read side stays open.
+    private static async Task AnswerOnceThenLetGo(Reactor _, TcpConnection conn)
+    {
+        try
+        {
+            RecvSnapshot snapshot = await conn.ReadAsync();
+            string path = Wire.ReadPath(conn, snapshot);
+            if (!snapshot.IsClosed)
+            {
+                Wire.Write(conn, 200, path);
+                await conn.FlushAsync();
+            }
+        }
+        finally
+        {
+            conn.DecRef();
+        }
+    }
+
+    // One connection's queue (64) can hold the whole group (16), so only the group runs out.
+    private static ServerConfig LingerConfig() => new()
+    {
+        RecvBufferSize = 64, RecvSlots = 16,
+        Tcp = new TcpOptions { WriteSlabSize = 4096, PoolMax = 8, RecvQueueEntries = 64 },
+    };
+
+    // A peer served once, which then reads its handler's FIN and stays connected.
+    private static TcpClient ServeAndLinger(int port)
+    {
+        var client = new TcpClient();
+        client.Connect("127.0.0.1", port);
+        client.ReceiveTimeout = 8000;
+        NetworkStream stream = client.GetStream();
+        Client.Send(stream, "/linger");
+        (int status, _) = Client.ReadResponse(stream);
+        Assert.Equal(200, status);
+        Assert.Equal(0, stream.Read(new byte[1], 0, 1));   // the FIN: its handler let go
+        return client;
+    }
+
+    private static string TryGet(int port, string path)
+    {
+        try
+        {
+            (int status, string body) = Client.Get(port, path, timeoutMs: 8000);
+            return $"{status} {body}";
+        }
+        catch (Exception e)
+        {
+            return $"no answer ({e.Message})";
+        }
     }
 
     /// <summary>
