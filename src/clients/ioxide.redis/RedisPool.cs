@@ -62,7 +62,7 @@ public sealed class RedisPool
         catch (Exception e)
         {
             Console.Error.WriteLine($"[redis] connect to {_options.Host}:{_options.Port} failed: {e.Message}");
-            _reopenAtMs = Environment.TickCount64 + BackoffMs();   // jittered backoff before the next attempt
+            _reopenAtMs = Native.MonotonicMs + BackoffMs();   // jittered backoff before the next attempt
         }
         finally
         {
@@ -174,7 +174,7 @@ public sealed class RedisPool
     // Reactor-thread ticker (~250 ms): time out stuck connections and replenish toward PoolSize.
     private void Sweep()
     {
-        long now = Environment.TickCount64;
+        long now = Native.MonotonicMs;
 
         int timeoutMs = _options.CommandTimeoutMs;
         if (timeoutMs > 0)

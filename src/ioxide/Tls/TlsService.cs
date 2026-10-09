@@ -48,7 +48,7 @@ public sealed class TlsService
     /// </summary>
     private void SweepHandshakes()
     {
-        long now = Environment.TickCount64;
+        long now = Native.MonotonicMs;
 
         while (_handshakes.Count > 0)
         {
@@ -1139,7 +1139,7 @@ public sealed class TlsService
             pending = new PendingHandshake
             {
                 Conn = conn,
-                DeadlineMs = Environment.TickCount64 + _options.HandshakeTimeoutMs,
+                DeadlineMs = Native.MonotonicMs + _options.HandshakeTimeoutMs,
             };
             _handshakes.Enqueue(pending);
         }
