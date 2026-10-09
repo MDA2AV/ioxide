@@ -93,6 +93,11 @@ public sealed class H2cClient : IDisposable
         => WriteFrame(Headers, (byte)((endHeaders ? EndHeaders : 0) | (endStream ? EndStream : 0)),
                       streamId, Hpack("GET", "/"));
 
+    /// <summary>A WINDOW_UPDATE crediting <paramref name="increment"/> to a stream, or to the connection on stream 0.</summary>
+    public void WriteWindowUpdate(int streamId, int increment)
+        => WriteFrame(0x8, flags: 0, streamId,
+                      [(byte)(increment >> 24), (byte)(increment >> 16), (byte)(increment >> 8), (byte)increment]);
+
     /// <summary>
     /// Pump until the server sends one of <paramref name="wanted"/> (0 = any stream), answering
     /// SETTINGS as they arrive. Returns the frame type seen, or 0 on timeout or a closed connection.

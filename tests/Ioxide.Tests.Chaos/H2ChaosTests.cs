@@ -128,6 +128,101 @@ internal static class H2ChaosTests
             AssertServes(port);
         });
 
+        runner.Test("h2c: a WINDOW_UPDATE that takes the connection window past 2^31-1 is a FLOW_CONTROL_ERROR", () =>
+        {
+            // RFC 9113 6.9.1. The sum wrapped negative, and a response then had no credit to leave on.
+            int port = StartH2c();
+            const int ToMax = int.MaxValue - 65535;   // the peer's window starts at 65535
+
+            using (var client = new H2cClient(port))
+            {
+                client.Open();
+                client.WriteWindowUpdate(streamId: 0, ToMax);
+                client.Request(streamId: 1);
+                Assert.Equal((1, 2, true), client.DrainBody(streamId: 1));
+            }
+
+            Assert.Equal("GOAWAY FLOW_CONTROL_ERROR", H2cClient.Verdict(port, c =>
+            {
+                c.WriteWindowUpdate(streamId: 0, ToMax + 1);
+                c.Request(streamId: 1);
+            }));
+
+            AssertServes(port);
+        });
+
+        runner.Test("h2c: a WINDOW_UPDATE that takes a stream window past 2^31-1 resets the stream with FLOW_CONTROL_ERROR", () =>
+        {
+            // RFC 9113 6.9.1. A request still arriving keeps its window on its stream.
+            int port = StartH2c();
+            const int ToMax = int.MaxValue - 65535;
+
+            Assert.Equal("HEADERS 1", H2cClient.Verdict(port, c =>
+            {
+                c.RequestHeadersOnly(streamId: 1, endHeaders: true, endStream: false);
+                c.WriteWindowUpdate(streamId: 1, ToMax);
+                c.WriteFrame(0x0, flags: 0x1, streamId: 1, []);
+            }));
+            Assert.Equal("RST_STREAM 1 FLOW_CONTROL_ERROR", H2cClient.Verdict(port, c =>
+            {
+                c.RequestHeadersOnly(streamId: 1, endHeaders: true, endStream: false);
+                c.WriteWindowUpdate(streamId: 1, ToMax + 1);
+                c.WriteFrame(0x0, flags: 0x1, streamId: 1, []);
+            }));
+
+            AssertServes(port);
+        });
+
+        runner.Test("h2c: a WINDOW_UPDATE past 2^31-1 resets a streamed response instead of stalling it", () =>
+        {
+            // A response in flight keeps its own window, and the wrapped sum left it without credit for good.
+            const int ToMax = int.MaxValue - 65535;
+            int port = TestServer.Start(static async (_, conn) =>
+            {
+                try
+                {
+                    await new Http2Connection(conn, new Http2Options { StreamRequestBodies = true }).RunAsync(
+                        static async (request, writer) =>
+                        {
+                            writer.WriteHeaders(new Http2Response { Status = 200 });
+                            await writer.FlushAsync();
+                            while (!(await request.BodyReader!.ReadAsync()).IsEmpty)
+                            {
+                            }
+                            "ok"u8.CopyTo(writer.GetSpan(2));
+                            writer.Advance(2);
+                        });
+                }
+                finally
+                {
+                    conn.DecRef();
+                }
+            });
+
+            // The response's headers come first, so its window exists before the WINDOW_UPDATE lands.
+            H2cClient InFlight(int increment)
+            {
+                var client = new H2cClient(port);
+                client.Open();
+                client.RequestHeadersOnly(streamId: 1, endHeaders: true, endStream: false);
+                Assert.Equal("HEADERS 1", client.AwaitVerdict());
+                client.WriteWindowUpdate(streamId: 1, increment);
+                client.WriteFrame(0x0, flags: 0x1, streamId: 1, []);
+                return client;
+            }
+
+            using (H2cClient client = InFlight(ToMax))
+            {
+                Assert.Equal((1, 2, true), client.DrainBody(streamId: 1));
+            }
+            using (H2cClient client = InFlight(ToMax + 1))
+            {
+                Assert.Equal("RST_STREAM 1 FLOW_CONTROL_ERROR", client.AwaitVerdict());
+            }
+
+            AssertServes(port);
+        });
+
         runner.Test("h2c: a burst of streams on one connection are all framed", () =>
         {
             int port = StartH2c();
