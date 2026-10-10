@@ -5,6 +5,9 @@ namespace ioxide.redis;
 /// <summary>RESP2 wire format: write a command as an array of bulk strings; parse one reply.</summary>
 internal static class RespProtocol
 {
+    // Real replies nest a few arrays deep; the parser recurses per level, on the reactor's stack.
+    private const int MaxDepth = 512;
+
     /// <summary>
     /// Bytes needed to encode a command as a RESP array of bulk strings, given a pre-framed name
     /// token (<c>$len\r\nNAME\r\n</c>, see <see cref="FrameName"/>) plus the argument list.
@@ -95,7 +98,7 @@ internal static class RespProtocol
     {
         int pos = 0;
         needed = 0;
-        if (TryParseAt(buffer, ref pos, out value, ref needed))
+        if (TryParseAt(buffer, ref pos, out value, ref needed, depth: 0))
         {
             consumed = pos;
             return true;
@@ -104,7 +107,7 @@ internal static class RespProtocol
         return false;
     }
 
-    private static bool TryParseAt(ReadOnlySpan<byte> buffer, ref int pos, out RespValue value, ref int needed)
+    private static bool TryParseAt(ReadOnlySpan<byte> buffer, ref int pos, out RespValue value, ref int needed, int depth)
     {
         value = default;
         if (pos >= buffer.Length)
@@ -180,11 +183,16 @@ internal static class RespProtocol
                     throw new RedisException($"invalid array length {count}");
                 }
 
+                if (depth >= MaxDepth)
+                {
+                    throw new RedisException($"RESP reply nested more than {MaxDepth} arrays deep");
+                }
+
                 var items = new RespValue[count];
                 int p = afterLine;
                 for (int i = 0; i < count; i++)
                 {
-                    if (!TryParseAt(buffer, ref p, out RespValue item, ref needed))
+                    if (!TryParseAt(buffer, ref p, out RespValue item, ref needed, depth + 1))
                     {
                         return false;
                     }

@@ -18,6 +18,7 @@ internal static class Program
         Console.WriteLine($"redis {(up ? "up" : "down")} ({redis.Host}:{redis.Port})\n");
 
         RedisTests.Register(runner, redis, up);
+        RedisReplyTests.Register(runner);
         return runner.Summary();
     }
 }
