@@ -32,7 +32,12 @@ going. A cell is **discarded rather than reported** when
 - the sample served a different byte count than the row asks for,
 - more than one process is listening on the port. Under `SO_REUSEPORT` a leaked server from an
   earlier run will happily bind alongside the new one and take half the load, which has produced
-  phantom numbers here before.
+  phantom numbers here before,
+- the connection-tracking table filled up. With `nf_conntrack` loaded (Docker loads it) every
+  connection keeps an entry for 120 s after closing, and a full table drops new connections
+  silently, so a run that opens connections faster than that stalls. Ad-hoc connection-churn
+  tests hit it within seconds when every run uses new ports or addresses; reusing one port and a
+  few addresses lets the entries recycle.
 
 A number from a broken fixture is worse than no number.
 

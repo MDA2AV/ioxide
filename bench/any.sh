@@ -252,6 +252,8 @@ while read -r sample proto port path origin extra; do
   fi
   if bad=$(bad_run "$WORK/$STAMP.txt"); then note="discarded: $bad"; rps=0
   fi
+  if full=$(bench_conntrack_full); then note="discarded: conntrack table full ($full)"; rps=0
+  fi
 
   # As a percentage of REACTORS cores, not one - two pegged reactors burn 200% of a core.
   util=$(awk -v t="$((t1 - t0))" -v d="$SECONDS_" -v r="$REACTORS" \
