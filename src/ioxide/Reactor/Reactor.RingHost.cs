@@ -13,8 +13,8 @@ namespace ioxide;
 /// </summary>
 public sealed unsafe partial class Reactor : IRingHost
 {
-    // In-flight client ops: slot → completion. Reactor-thread-only; grows on demand.
-    private IRingCompletion?[] _opTargets = new IRingCompletion?[1024];
+    // In-flight client ops: slot → completion. Reactor-thread-only; starts at ServerConfig.OpSlots, grows on demand.
+    private IRingCompletion?[] _opTargets;
 
     // One timespec per op slot, for IORING_OP_TIMEOUT. The kernel reads it when it consumes the
     // SQE, so it has to outlive the submission; hanging it off the slot makes its lifetime

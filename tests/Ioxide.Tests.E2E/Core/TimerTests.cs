@@ -28,6 +28,17 @@ internal static class TimerTests
 
     private static unsafe void NativeFree(nint block) => NativeMemory.Free((void*)block);
 
+    // Pinned rather than the default, so the bursts below straddle it and the 16 KiB fence matches the block.
+    private const int PinnedOpSlots = 1024;
+
+    private static int StartQueueThenGrow() => TestServer.StartConfigured(QueueThenGrow, new ServerConfig
+    {
+        RecvBufferSize = 4096,
+        RecvSlots = 256,
+        OpSlots = PinnedOpSlots,
+        Tcp = new TcpOptions { WriteSlabSize = 16 * 1024, PoolMax = 64, RecvQueueEntries = 64 },
+    }).Port;
+
     // A 20ms wait, then the path's count of 1ms waits in one pass, so the 1025th grows the table.
     private static async Task QueueThenGrow(Reactor r, TcpConnection conn)
     {
@@ -196,7 +207,7 @@ internal static class TimerTests
             bool moved = false;
             for (int attempt = 0; attempt < 3 && !moved; attempt++)
             {
-                int port = TestServer.Start(QueueThenGrow);
+                int port = StartQueueThenGrow();
                 (string first, int ms, int expired, moved) = QueueThenGrowAt(port, 1100);
 
                 Assert.True(first == RingTimer.ETime.ToString(), first == "never"
@@ -207,13 +218,14 @@ internal static class TimerTests
             }
 
             Assert.True(moved,
-                "the deadline block grew in place on all three reactors, so nothing was ever left dangling");
+                "the deadline block never moved on three reactors (it grew in place, or the table never grew), "
+                + "so nothing was ever left dangling");
         });
 
         runner.Test("control: the same burst within the op table's first 1024 slots keeps every deadline", () =>
         {
             // 1 + 1000 + the bound: no growth, so nothing moves the block under the queued SQEs.
-            int port = TestServer.Start(QueueThenGrow);
+            int port = StartQueueThenGrow();
             (string first, int ms, int expired, bool moved) = QueueThenGrowAt(port, 1000);
 
             Assert.True(!moved, "the deadline block moved although the op table never grew");
