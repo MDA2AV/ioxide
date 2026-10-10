@@ -288,7 +288,7 @@ internal static class TlsClientTests
         return TestServer.Start(ProxyHandler, onStart: reactor => HttpClientPool.Start(reactor, options));
     }
 
-    private static async Task ProxyHandler(Reactor reactor, TcpConnection connection)
+    internal static async Task ProxyHandler(Reactor reactor, TcpConnection connection)
     {
         try
         {

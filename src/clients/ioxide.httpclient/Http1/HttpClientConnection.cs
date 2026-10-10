@@ -175,7 +175,9 @@ internal sealed class HttpClientConnection : IDisposable
             await ReadBodyAsync(response);
 
             response.Freeze();
-            if (response.ConnectionClose)
+
+            // Nothing is pipelined, so bytes past this response could only be misread as the next one.
+            if (response.ConnectionClose || _consumed < _received)
             {
                 _broken = true;   // the pool discards and replaces this connection
             }
