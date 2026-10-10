@@ -1,3 +1,4 @@
+using System.Net;
 using System.Net.Sockets;
 using System.Runtime.InteropServices;
 using System.Text;
@@ -359,6 +360,16 @@ internal static class CoreTests
             Assert.True(leaked <= 3, $"{leaked} fds leaked across 10 DecRef-then-throw handlers");
         });
 
+        runner.Test("core: accepted connections have TCP_NODELAY, over IPv4, IPv4-mapped and IPv6", () =>
+        {
+            (int v4, _, _) = TestServer.StartConfigured(NoDelayHandler, NoDelayConfig(dualStack: false));
+            (int dual, _, _) = TestServer.StartConfigured(NoDelayHandler, NoDelayConfig(dualStack: true));
+
+            Assert.Equal("1", AskNoDelay(IPAddress.Loopback, v4));
+            Assert.Equal("1", AskNoDelay(IPAddress.Loopback, dual));
+            Assert.Equal("1", AskNoDelay(IPAddress.IPv6Loopback, dual));
+        });
+
         runner.Test("core: a flush from another thread that races the connection's close completes", () =>
         {
             // FlushAsync armed the flush, then reset the signal its caller waits on. A close on the reactor in
@@ -550,6 +561,53 @@ internal static class CoreTests
             conn.DecRef();
         }
     };
+
+    [DllImport("libc", SetLastError = true)]
+    private static extern int getsockopt(int fd, int level, int optname, out int optval, ref int optlen);
+
+    // Answers with this connection's own TCP_NODELAY as the server sees it: "1", "0", or "error".
+    private static async Task NoDelayHandler(Reactor r, TcpConnection conn)
+    {
+        try
+        {
+            RecvSnapshot snap = await conn.ReadAsync();
+            Wire.ReadPath(conn, snap);
+            int len = sizeof(int);
+            Wire.Write(conn, 200, getsockopt(conn.ClientFd, 6 /* IPPROTO_TCP */, 1 /* TCP_NODELAY */, out int on, ref len) == 0
+                ? on.ToString()
+                : "error");
+            await conn.FlushAsync();
+        }
+        finally
+        {
+            conn.DecRef();
+        }
+    }
+
+    private static ServerConfig NoDelayConfig(bool dualStack) => new()
+    {
+        RecvBufferSize = 4096, RecvSlots = 64, DualStack = dualStack,
+        Tcp = new TcpOptions { WriteSlabSize = 4096, PoolMax = 8, RecvQueueEntries = 64 },
+    };
+
+    private static string AskNoDelay(IPAddress address, int port)
+    {
+        using var client = new Socket(address.AddressFamily, SocketType.Stream, ProtocolType.Tcp) { ReceiveTimeout = 6000 };
+        client.Connect(address, port);
+        client.Send("GET / HTTP/1.1\r\nHost: x\r\n\r\n"u8);
+
+        var response = new StringBuilder();
+        var buffer = new byte[1024];
+        int n;
+        while ((n = client.Receive(buffer)) > 0)
+        {
+            response.Append(Encoding.ASCII.GetString(buffer, 0, n));
+        }
+        string text = response.ToString();
+        int bodyAt = text.IndexOf("\r\n\r\n", StringComparison.Ordinal);
+        Assert.True(bodyAt >= 0, $"no response from {address}: '{text}'");
+        return text[(bodyAt + 4)..];
+    }
 
     // A 48 KiB body against a 4 KiB write slab forces the overflow machinery; the strategy picks
     // Grow (realloc, one SEND) or Segmented (pooled slabs, vectored SENDMSG).
