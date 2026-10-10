@@ -27,12 +27,21 @@ public sealed partial class Nghttp2Connection
             {
                 ReadResult read = await _pipe.Input.ReadAsync();
 
+                _inPass = true;
                 Feed(read.Buffer);
                 _pipe.Input.AdvanceTo(read.Buffer.End);
 
                 // Handlers run HERE, after ih2_read has unwound - see the callbacks file.
                 await DispatchReadyAsync(handler);
+
+                // Body chunks reach parked readers inside the pass, so the credit they return rides
+                // this pass's drain rather than a write of its own.
+                FireBodyWakes();
+                _inPass = false;
                 await FlushEgressAsync();
+
+                // A stream nghttp2 reset itself closes as the drain sends the RST_STREAM; its reader ends now.
+                FireBodyWakes();
 
                 if (read.IsCompleted || read.IsCanceled || Nghttp2.ih2_is_dead(_handle) != 0)
                 {
