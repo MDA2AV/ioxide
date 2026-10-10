@@ -306,8 +306,11 @@ public sealed unsafe partial class Reactor
         }
 
         int one = 1;
-        setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(int));
-        setsockopt(fd, SOL_SOCKET, SO_REUSEPORT, &one, sizeof(int));
+        if (port != 0)   // with either option a port-0 bind can be handed a port another socket holds
+        {
+            setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(int));
+            setsockopt(fd, SOL_SOCKET, SO_REUSEPORT, &one, sizeof(int));
+        }
         if (gro)
         {
             setsockopt(fd, SOL_UDP, UDP_GRO, &one, sizeof(int));

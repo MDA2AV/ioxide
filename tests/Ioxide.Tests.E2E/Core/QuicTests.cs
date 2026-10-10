@@ -204,6 +204,90 @@ internal static class QuicTests
             Assert.True(TestQuicConnection.TimerFired >= 1, "engine deadline never dispatched by the ticker");
             TestQuicConnection.ArmTimerDelayMs = 0;
         });
+
+        // IP_LOCAL_PORT_RANGE (6.3+) confines a socket's port-0 bind to one port, so the kernel's
+        // ephemeral pick - a 1-in-28,000 collision at full range - has a single outcome to choose.
+        bool confinable = TestServer.KernelAtLeast(6, 3);
+
+        runner.Test("quic/client: the kernel never gives the client socket's port to another socket", () =>
+        {
+            // A later socket with SO_REUSEADDR is preferred for the whole port, so sharing it takes
+            // every reply the server sends the client.
+            (ushort clientPort, Reactor client, int serverPort) = StartClientAndServer();
+
+            using Socket other = BindConfinedTo(clientPort, out bool given);
+            bool served = Handshakes(client, serverPort);
+
+            Assert.True(served, given
+                ? $"the client's handshake never completed: another socket was given its port {clientPort} and took the replies"
+                : "the client's handshake never completed, though no other socket was given its port");
+            Assert.True(!given, $"another socket was given port {clientPort}, which the client socket holds");
+        }, skip: !confinable);
+
+        runner.Test("control: a socket confined to a free port is given it, and the client still connects", () =>
+        {
+            // Without this the test above would also pass on a kernel that ignores the confinement.
+            (_, Reactor client, int serverPort) = StartClientAndServer();
+
+            int free = TestServer.DeadUdpPort();
+            using Socket other = BindConfinedTo(free, out bool given);
+
+            Assert.True(given && ((IPEndPoint)other.LocalEndPoint!).Port == free,
+                $"a port-0 bind confined to free port {free} was not given it, so confinement does not work here");
+            Assert.True(Handshakes(client, serverPort), "the client's handshake never completed");
+        }, skip: !confinable);
+    }
+
+    // A QUIC server, and a client-only reactor that has opened its ephemeral socket.
+    private static (ushort ClientPort, Reactor Client, int ServerPort) StartClientAndServer()
+    {
+        (string certPath, string keyPath) = TestCert.Ensure();
+        var engine = new QuicEngine(certPath, keyPath, cidLength: 8);   // outlives the test: connections hold it
+        (_, int serverPort) = TestServer.StartDatagram(onDatagram: null, quicFactory: engine.CreateFactory());
+
+        var opened = new TaskCompletionSource<(ushort, Reactor)>(TaskCreationOptions.RunContinuationsAsynchronously);
+        TestServer.StartQuicClientHost(
+            tcpHandle: static (_, _) => Task.CompletedTask,
+            onStart: reactor =>
+            {
+                reactor.QuicEnsureClientTransport();
+                opened.TrySetResult((reactor.QuicLocalPort, reactor));
+            });
+
+        Assert.True(opened.Task.Wait(10_000), "the client reactor never opened its socket");
+        (ushort port, Reactor client) = opened.Task.Result;
+        return (port, client, serverPort);
+    }
+
+    // What any program's socket gets from bind(:0) with SO_REUSEADDR, confined to one port.
+    private static Socket BindConfinedTo(int port, out bool given)
+    {
+        var socket = new Socket(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp);
+        socket.SetRawSocketOption(1, 2, BitConverter.GetBytes(1));                           // SOL_SOCKET, SO_REUSEADDR
+        socket.SetRawSocketOption(0, 51, BitConverter.GetBytes((uint)port << 16 | (uint)port)); // IPPROTO_IP, IP_LOCAL_PORT_RANGE
+        try
+        {
+            socket.Bind(new IPEndPoint(IPAddress.Any, 0));
+            given = true;
+        }
+        catch (SocketException e) when (e.SocketErrorCode == SocketError.AddressAlreadyInUse)
+        {
+            given = false;
+        }
+        return socket;
+    }
+
+    // Connect from the client reactor and wait for the handshake.
+    private static bool Handshakes(Reactor client, int serverPort)
+    {
+        var clientEngine = new QuicClientEngine("echo");   // never disposed: its connection outlives the test
+        var done = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        client.ScheduleOnReactor(_ =>
+        {
+            QuicEngineConnection connection = clientEngine.Connect(client, "127.0.0.1", (ushort)serverPort, "localhost");
+            connection.HandshakeCompleted = () => done.TrySetResult();
+        }, null);
+        return done.Task.Wait(5_000);
     }
 
     private static UdpClient NewClient(int udpPort, out IPEndPoint server, int receiveTimeoutMs = 4000)
