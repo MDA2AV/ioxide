@@ -181,6 +181,12 @@ public unsafe partial class QuicEngineConnection
         if (!_closed && bytes > 0)
         {
             Ngtcp2.iq_conn_consume(_conn, streamId, (ulong)bytes);
+
+            // Off-cycle (a handler resumed by a timer, not a datagram) nothing sends this credit before the peer's next packet.
+            if (!_inEngineCycle)
+            {
+                FlushConnection();
+            }
         }
     }
 
