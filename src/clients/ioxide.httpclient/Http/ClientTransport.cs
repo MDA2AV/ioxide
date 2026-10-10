@@ -22,6 +22,9 @@ internal interface IClientTransport : IDisposable
 
     /// <summary>True when this pipe is wrapped in TLS. Decides h2's :scheme pseudo-header.</summary>
     bool IsSecure { get; }
+
+    /// <summary>The socket underneath, for checking an idle connection without reading from it.</summary>
+    int Fd { get; }
 }
 
 /// <summary>Cleartext: the ring socket, unwrapped.</summary>
@@ -30,6 +33,8 @@ internal sealed class RingSocketTransport(RingSocket socket) : IClientTransport
     public string? NegotiatedAlpn => null;
 
     public bool IsSecure => false;
+
+    public int Fd => socket.Fd;
 
     public ValueTask<int> SendAsync(nint buffer, int length) => socket.SendAsync(buffer, length);
 
@@ -44,6 +49,8 @@ internal sealed class TlsClientTransport(TlsClientStream stream) : IClientTransp
     public string? NegotiatedAlpn => stream.NegotiatedAlpn;
 
     public bool IsSecure => true;
+
+    public int Fd => stream.Socket.Fd;
 
     public ValueTask<int> SendAsync(nint buffer, int length) => stream.SendAsync(buffer, length);
 
