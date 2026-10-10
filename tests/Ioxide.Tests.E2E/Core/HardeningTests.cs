@@ -98,6 +98,107 @@ internal static class HardeningTests
             DriveExhaustion(port, totalBytes, release);
         }, skip: !TestServer.KernelAtLeast(6, 12));
 
+        runner.Test("core: an incremental recv ended by a full completion queue still hands over the peer's bytes", () =>
+        {
+            // The kernel ends a multishot recv whose completion finds the CQ full, and that last
+            // completion still carries F_BUF_MORE: the buffer stays at the ring head, part filled, and
+            // the re-armed recv appends to it. Taken as done, it went back into the ring while the
+            // kernel was still filling it - from the second such ending on a connection, the handler
+            // was given the buffer's first bytes while the peer's new ones landed further along.
+            //
+            // RingEntries 4 is an 8-entry CQ. Each round sends one message on every connection from the
+            // reactor thread, so all 24 recvs complete in its next enter and most of them overflow it.
+            // Nine 32-byte messages never fill a 1 KiB buffer, so every ending leaves one part filled.
+            const int Connections = 24;
+            const int Rounds = 8;
+
+            var serverFds = new List<int>();
+            (int port, Reactor reactor, _) = TestServer.StartConfigured(EchoRecordingFd(serverFds),
+                new ServerConfig
+                {
+                    RingEntries = 4,
+                    Incremental = new IncrementalOptions { MaxConnections = 64, RecvSlots = 4, RecvBufferSize = 1024 },
+                    Tcp = new TcpOptions
+                    {
+                        WriteSlabSize = 4096, PoolMax = 64, RecvQueueEntries = 64,
+                    },
+                });
+
+            var clients = new Socket[Connections];
+            try
+            {
+                // One at a time, so nothing overflows yet: the control, echoed before any recv ended.
+                for (int i = 0; i < Connections; i++)
+                {
+                    clients[i] = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp)
+                    {
+                        NoDelay = true,
+                        ReceiveTimeout = 5_000,
+                    };
+                    clients[i].Connect(IPAddress.Loopback, port);
+                    byte[] hello = Message(i, 0);
+                    clients[i].Send(hello);
+                    AssertEchoed(clients[i], hello, $"before the rounds, connection {i}");
+                }
+
+                int[] fds;
+                lock (serverFds)
+                {
+                    fds = [.. serverFds];
+                }
+                Assert.Equal(Connections, fds.Length);
+
+                for (int round = 1; round <= Rounds; round++)
+                {
+                    var sent = new byte[Connections][];
+                    for (int i = 0; i < Connections; i++)
+                    {
+                        sent[i] = Message(i, round);
+                    }
+
+                    bool allWaiting = false;
+                    using var ran = new ManualResetEventSlim();
+                    reactor.ScheduleOnReactor(_ =>
+                    {
+                        try
+                        {
+                            for (int i = 0; i < Connections; i++)
+                            {
+                                clients[i].Send(sent[i]);
+                            }
+
+                            // Loopback delivers inside Send, unless a loaded box defers it to ksoftirqd.
+                            long deadline = Environment.TickCount64 + 2_000;
+                            while (!(allWaiting = AllWaiting(fds, MessageBytes)) && Environment.TickCount64 < deadline)
+                            {
+                                Thread.SpinWait(64);
+                            }
+                        }
+                        finally
+                        {
+                            ran.Set();
+                        }
+                    }, null);
+
+                    Assert.True(ran.Wait(10_000), $"round {round}: the reactor never ran the sends");
+                    Assert.True(allWaiting,
+                        $"round {round}: the messages were never all waiting at once, so the completion queue never overflowed and nothing was tested");
+
+                    for (int i = 0; i < Connections; i++)
+                    {
+                        AssertEchoed(clients[i], sent[i], $"round {round}, connection {i}");
+                    }
+                }
+            }
+            finally
+            {
+                foreach (Socket? client in clients)
+                {
+                    client?.Dispose();
+                }
+            }
+        }, skip: !TestServer.KernelAtLeast(6, 12));
+
         runner.Test("core: faulted handler releases the connection (#94)", () =>
         {
             (int port, _, _) = TestServer.StartConfigured(
@@ -273,6 +374,88 @@ internal static class HardeningTests
         Assert.True(n > 0 && Encoding.ASCII.GetString(buf, 0, n).Contains("200"),
             "keep-alive connection stopped responding");
     }
+
+    private const int MessageBytes = 32;
+
+    private const ulong Fionread = 0x541B;
+
+    [DllImport("libc", SetLastError = true)]
+    private static extern int ioctl(int fd, ulong request, out int value);
+
+    // Unique per connection and round, so a stale echo names the message it came from.
+    private static byte[] Message(int connection, int round)
+        => Encoding.ASCII.GetBytes($"connection {connection:D2}, round {round:D2}|".PadRight(MessageBytes, '.'));
+
+    // Every server socket holds a whole message the reactor has not received yet.
+    private static bool AllWaiting(int[] fds, int bytes)
+    {
+        foreach (int fd in fds)
+        {
+            if (ioctl(fd, Fionread, out int waiting) != 0 || waiting < bytes)
+            {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private static void AssertEchoed(Socket client, byte[] sent, string when)
+    {
+        byte[] echoed = new byte[sent.Length];
+        for (int got = 0; got < echoed.Length;)
+        {
+            int n = client.Receive(echoed, got, echoed.Length - got, SocketFlags.None);
+            if (n == 0)
+            {
+                throw new IOException($"{when}: EOF after {got} of {echoed.Length} echoed bytes");
+            }
+            got += n;
+        }
+
+        Assert.True(echoed.AsSpan().SequenceEqual(sent),
+            $"{when}: echoed \"{Encoding.ASCII.GetString(echoed)}\" for \"{Encoding.ASCII.GetString(sent)}\"");
+    }
+
+    // Echoes each slice and hands its buffer straight back, as a handler that copies out does. Records
+    // the server fd of every connection that sent something, which leaves out the readiness probe.
+    private static Func<Reactor, TcpConnection, Task> EchoRecordingFd(List<int> fds) => async (_, conn) =>
+    {
+        try
+        {
+            bool recorded = false;
+            while (true)
+            {
+                RecvSnapshot snapshot = await conn.ReadAsync();
+                while (conn.TryGetItem(snapshot, out SpscRecvRing.Item item))
+                {
+                    if (item.HasBuffer)
+                    {
+                        conn.Write(item.AsSpan());
+                        conn.ReturnBuffer(in item);
+                        if (!recorded)
+                        {
+                            recorded = true;
+                            lock (fds)
+                            {
+                                fds.Add(conn.ClientFd);
+                            }
+                        }
+                    }
+                }
+                await conn.FlushAsync();
+
+                if (snapshot.IsClosed)
+                {
+                    return;
+                }
+                conn.ResetRead();
+            }
+        }
+        finally
+        {
+            conn.DecRef();
+        }
+    };
 
     // Reads once and holds the buffers until released, then drains until totalBytes arrived and
     // answers "done" - the starvation-then-recovery shape both #93 tests share.

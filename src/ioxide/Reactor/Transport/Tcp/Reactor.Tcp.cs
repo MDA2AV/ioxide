@@ -207,7 +207,8 @@ public sealed unsafe partial class Reactor
         byte* ptr = conn.BufSlab + (nuint)bid * (nuint)_incRecvBufferSize + (nuint)conn.CumOffset![bid];
         conn.CumOffset[bid] += res;
         conn.RefCount![bid]++;
-        if (!bufMore || !more)
+        // F_BUF_MORE alone decides: a recv ended by a full CQ still has its buffer at the ring head, part filled.
+        if (!bufMore)
         {
             conn.KernelDone![bid] = true;
         }
