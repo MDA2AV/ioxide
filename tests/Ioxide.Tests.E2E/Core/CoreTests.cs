@@ -3,6 +3,7 @@ using System.Net.Sockets;
 using System.Runtime.InteropServices;
 using System.Text;
 using ioxide;
+using ioxide.timer;
 using ioxide.utils;
 
 namespace Ioxide.Tests;
@@ -107,6 +108,62 @@ internal static class CoreTests
 
         runner.Test("core: response larger than the write slab (Segmented SENDMSG)",
             () => BigBodyRoundTrip(WriteOverflowStrategy.Segmented));
+
+        runner.Test("core: a span the write slab cannot grow to fails the write instead of spinning the reactor (Grow)", () =>
+        {
+            // Doubling the slab's int size past 1 GiB wrapped it to 0, so the growth never reached the size
+            // asked for and the reactor spun inside GetSpan forever. Nothing is allocated before the refusal.
+            string body = new string('x', 48 * 1024);
+            var refusal = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
+
+            (int port, _, _) = TestServer.StartConfigured(async (_, conn) =>
+            {
+                try
+                {
+                    RecvSnapshot snap = await conn.ReadAsync();
+                    Wire.ReadPath(conn, snap);
+                    if (snap.IsClosed)
+                    {
+                        return;   // the harness's listen probe
+                    }
+
+                    try
+                    {
+                        conn.GetSpan((1 << 30) + 1);
+                        refusal.TrySetResult("a span");
+                    }
+                    catch (OutOfMemoryException e)
+                    {
+                        refusal.TrySetResult("refused: " + e.Message);
+                    }
+
+                    Wire.Write(conn, 200, body);   // 48 KiB against the 4 KiB slab: it still grows for what it can hold
+                    await conn.FlushAsync();
+                }
+                finally
+                {
+                    conn.DecRef();
+                }
+            }, new ServerConfig
+            {
+                RecvBufferSize = 4096, RecvSlots = 64,
+                Tcp = new TcpOptions { WriteSlabSize = 4096, PoolMax = 8, RecvQueueEntries = 64 },
+            });
+
+            using var client = new TcpClient();
+            client.Connect("127.0.0.1", port);
+            client.ReceiveTimeout = 8000;
+            NetworkStream stream = client.GetStream();
+            Client.Send(stream, "/");
+
+            Assert.True(refusal.Task.Wait(TimeSpan.FromSeconds(10)), "GetSpan never returned: the slab's growth spun on the reactor");
+            Assert.True(refusal.Task.Result.StartsWith("refused", StringComparison.Ordinal),
+                $"a span past 1 GiB came back as {refusal.Task.Result}");
+
+            (int status, string got) = Client.ReadResponse(stream);
+            Assert.Equal(200, status);
+            Assert.Equal(body.Length, got.Length);
+        });
 
         runner.Test("core: zero-copy send (SEND_ZC + notif), keep-alive", () =>
         {
@@ -312,6 +369,57 @@ internal static class CoreTests
             Assert.Equal("1", AskNoDelay(IPAddress.Loopback, dual));
             Assert.Equal("1", AskNoDelay(IPAddress.IPv6Loopback, dual));
         });
+
+        runner.Test("core: a flush from another thread that races the connection's close completes", () =>
+        {
+            // FlushAsync armed the flush, then reset the signal its caller waits on. A close on the reactor in
+            // between released the armed flush into that reset, so the caller waited forever. The window is a
+            // few instructions wide: each round races one off-reactor flush against one close on the reactor,
+            // on a connection never accepted (fd -1, so its queued flush finds no table entry, as a closed one's).
+            (_, Reactor reactor, _) = TestServer.StartConfigured(
+                static (_, conn) => { conn.DecRef(); return Task.CompletedTask; },
+                new ServerConfig
+                {
+                    RecvBufferSize = 64, RecvSlots = 16,
+                    Tcp = new TcpOptions { WriteSlabSize = 4096, PoolMax = 8, RecvQueueEntries = 8 },
+                });
+
+            const int rounds = 200_000;
+            var race = new FlushCloseRace();
+            var timer = new RingTimer(reactor);
+            reactor.ScheduleOnReactor(_ => _ = race.CloseSideAsync(timer, rounds), null);
+
+            byte[] one = [1];
+            int lost = 0, overlapped = 0;
+            for (int i = 1; i <= rounds; i++)
+            {
+                var conn = new TcpConnection(reactor, -1, 64, 8);
+                conn.Write(one);
+                race.Conn = conn;
+                race.Skew = i / 8 * 3 % 8;
+                Volatile.Write(ref race.Go, i);
+                for (int s = i * 7 % 8; s > 0; s--)
+                {
+                    Thread.SpinWait(1);
+                }
+
+                ValueTask flush = conn.FlushAsync();
+                if (!flush.Equals(default(ValueTask)) && Volatile.Read(ref race.Closed) == i)
+                {
+                    overlapped++;   // armed, and the close ran before FlushAsync returned
+                }
+                FlushCloseRace.WaitFor(ref race.Closed, i);
+
+                if (!flush.IsCompleted)
+                {
+                    lost++;   // both sides are done, so it never will
+                }
+                conn.Dispose();
+            }
+
+            Assert.True(overlapped >= 1_000, $"only {overlapped} closes landed while a flush was arming: the race never ran");
+            Assert.True(lost == 0, $"{lost} of {rounds} flushes never completed after a close raced their arming");
+        }, skip: Environment.ProcessorCount < 2);   // the two sides must run at once
 
         runner.Test("core: Stop() tears down cleanly (thread exits, fds released)", () =>
         {
@@ -521,5 +629,47 @@ internal static class CoreTests
         Assert.Equal(200, status);
         Assert.Equal(body.Length, got.Length);
         Assert.True(got.All(c => c == 'x'), $"{strategy} body corrupted");
+    }
+
+    // The reactor's side of the flush/close race: one close per round, on the reactor thread.
+    private sealed class FlushCloseRace
+    {
+        public TcpConnection? Conn;
+        public int Go, Closed, Skew;
+
+        public async Task CloseSideAsync(RingTimer timer, int rounds)
+        {
+            for (int i = 1; i <= rounds; i++)
+            {
+                if (i % 1_000 == 0)
+                {
+                    await timer.DelayNanosecondsAsync(1);   // a loop pass drains the queued flushes, which it holds 4096 of
+                }
+                WaitFor(ref Go, i);
+                for (int s = Skew; s > 0; s--)
+                {
+                    Thread.SpinWait(1);
+                }
+
+                Conn!.MarkClosed();
+                Volatile.Write(ref Closed, i);
+            }
+        }
+
+        // Spins, so the two sides meet within nanoseconds; yields past that, so a busy machine still gets through.
+        public static void WaitFor(ref int field, int value)
+        {
+            for (int spins = 0; Volatile.Read(ref field) != value; spins++)
+            {
+                if (spins < 1_000)
+                {
+                    Thread.SpinWait(1);
+                }
+                else
+                {
+                    Thread.Yield();
+                }
+            }
+        }
     }
 }

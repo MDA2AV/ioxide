@@ -64,7 +64,10 @@ public abstract class QuicConnection : IValueTaskSource<QuicRecvSnapshot>
     public virtual void OnDatagram(ReadOnlySpan<byte> payload, byte tos, nint peerAddr, int peerAddrLen)
         => OnDatagram(payload, tos);
 
-    /// <summary>Next engine deadline in <see cref="Environment.TickCount64"/> ms; long.MaxValue = none.</summary>
+    /// <summary>
+    /// Next engine deadline, in the frame of <paramref name="nowMs"/> (<see cref="Native.MonotonicMs"/>):
+    /// compute it as nowMs plus a delay. long.MaxValue = none.
+    /// </summary>
     public abstract long GetNextTimeout(long nowMs);
 
     /// <summary>Deadline passed - run loss/handshake/idle processing and flush whatever it produced.</summary>
