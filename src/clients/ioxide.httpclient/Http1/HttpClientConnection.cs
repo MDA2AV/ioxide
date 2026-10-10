@@ -304,7 +304,13 @@ internal sealed class HttpClientConnection : IDisposable
                 copied += AppendAvailable(response, chunkSize - copied);
             }
 
-            _consumed = await ReadLineAsync() + 2;   // the CRLF terminating the chunk
+            // The chunk's CRLF must come right after its data; a later one means the size was wrong.
+            int dataEnd = await ReadLineAsync();
+            if (dataEnd != _consumed)
+            {
+                throw new HttpClientException("malformed chunk: data runs past its size");
+            }
+            _consumed = dataEnd + 2;
         }
 
         response.SetBodyRange((bodyStart, (int)bodyLength));
@@ -388,9 +394,18 @@ internal sealed class HttpClientConnection : IDisposable
         int extension = line.IndexOf((byte)';');
         if (extension >= 0)
         {
-            line = line[..extension];
+            line = line[..extension].TrimEnd(" \t"u8);   // RFC 9112 allows whitespace before the ';'
         }
-        return Utf8Parser.TryParse(line, out size, out _, 'x');
+
+        // Unsigned and whole: as an int, 80000000 and up parsed negative, and "0x5" and "5zz" as 0 and 5.
+        size = 0;
+        if (!Utf8Parser.TryParse(line, out uint value, out int digits, 'x') || digits != line.Length
+            || value > int.MaxValue)
+        {
+            return false;
+        }
+        size = (int)value;
+        return true;
     }
 
     /// <summary>Copy up to <paramref name="limit"/> unconsumed bytes into the response's arena;
