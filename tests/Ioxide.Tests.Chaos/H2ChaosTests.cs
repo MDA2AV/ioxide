@@ -89,6 +89,35 @@ internal static class H2ChaosTests
             Assert.True(client.AwaitResponse(streamId: 1), "server choked on an unknown frame type");
         });
 
+        runner.Test("h2c: DATA on stream 0 is a PROTOCOL_ERROR", () =>
+        {
+            // RFC 9113 6.1. It was credited to the connection and dropped.
+            int port = StartH2c();
+
+            Assert.Equal("HEADERS 1", H2cClient.Verdict(port, c =>
+            {
+                c.RequestHeadersOnly(streamId: 1, endHeaders: true, endStream: false);
+                c.WriteFrame(0x0, flags: 0x1, streamId: 1, "x"u8);
+            }));
+            Assert.Equal("GOAWAY PROTOCOL_ERROR", H2cClient.Verdict(port, c =>
+            {
+                c.WriteFrame(0x0, flags: 0, streamId: 0, "x"u8);
+                c.Request(streamId: 1);
+            }));
+
+            AssertServes(port);
+        });
+
+        runner.Pending("h2c: DATA on an idle stream is a PROTOCOL_ERROR", () =>
+        {
+            int port = StartH2c();
+            Assert.Equal("GOAWAY PROTOCOL_ERROR", H2cClient.Verdict(port, c =>
+            {
+                c.WriteFrame(0x0, flags: 0, streamId: 5, "x"u8);
+                c.Request(streamId: 1);
+            }));
+        }, "RFC 9113 5.1 - an idle stream differs from a closed one only by the highest stream id opened, which Http2Connection does not keep");
+
         runner.Test("h2c: a frame truncated mid-payload is handled, server survives", () =>
         {
             int port = StartH2c();
@@ -100,6 +129,101 @@ internal static class H2ChaosTests
                 attacker.WriteFrameHeader(type: 0x1, flags: 0x4, streamId: 1, declaredLen: 100,
                     actual: new byte[10]);
                 Thread.Sleep(150);
+            }
+
+            AssertServes(port);
+        });
+
+        runner.Test("h2c: a WINDOW_UPDATE that takes the connection window past 2^31-1 is a FLOW_CONTROL_ERROR", () =>
+        {
+            // RFC 9113 6.9.1. The sum wrapped negative, and a response then had no credit to leave on.
+            int port = StartH2c();
+            const int ToMax = int.MaxValue - 65535;   // the peer's window starts at 65535
+
+            using (var client = new H2cClient(port))
+            {
+                client.Open();
+                client.WriteWindowUpdate(streamId: 0, ToMax);
+                client.Request(streamId: 1);
+                Assert.Equal((1, 2, true), client.DrainBody(streamId: 1));
+            }
+
+            Assert.Equal("GOAWAY FLOW_CONTROL_ERROR", H2cClient.Verdict(port, c =>
+            {
+                c.WriteWindowUpdate(streamId: 0, ToMax + 1);
+                c.Request(streamId: 1);
+            }));
+
+            AssertServes(port);
+        });
+
+        runner.Test("h2c: a WINDOW_UPDATE that takes a stream window past 2^31-1 resets the stream with FLOW_CONTROL_ERROR", () =>
+        {
+            // RFC 9113 6.9.1. A request still arriving keeps its window on its stream.
+            int port = StartH2c();
+            const int ToMax = int.MaxValue - 65535;
+
+            Assert.Equal("HEADERS 1", H2cClient.Verdict(port, c =>
+            {
+                c.RequestHeadersOnly(streamId: 1, endHeaders: true, endStream: false);
+                c.WriteWindowUpdate(streamId: 1, ToMax);
+                c.WriteFrame(0x0, flags: 0x1, streamId: 1, []);
+            }));
+            Assert.Equal("RST_STREAM 1 FLOW_CONTROL_ERROR", H2cClient.Verdict(port, c =>
+            {
+                c.RequestHeadersOnly(streamId: 1, endHeaders: true, endStream: false);
+                c.WriteWindowUpdate(streamId: 1, ToMax + 1);
+                c.WriteFrame(0x0, flags: 0x1, streamId: 1, []);
+            }));
+
+            AssertServes(port);
+        });
+
+        runner.Test("h2c: a WINDOW_UPDATE past 2^31-1 resets a streamed response instead of stalling it", () =>
+        {
+            // A response in flight keeps its own window, and the wrapped sum left it without credit for good.
+            const int ToMax = int.MaxValue - 65535;
+            int port = TestServer.Start(static async (_, conn) =>
+            {
+                try
+                {
+                    await new Http2Connection(conn, new Http2Options { StreamRequestBodies = true }).RunAsync(
+                        static async (request, writer) =>
+                        {
+                            writer.WriteHeaders(new Http2Response { Status = 200 });
+                            await writer.FlushAsync();
+                            while (!(await request.BodyReader!.ReadAsync()).IsEmpty)
+                            {
+                            }
+                            "ok"u8.CopyTo(writer.GetSpan(2));
+                            writer.Advance(2);
+                        });
+                }
+                finally
+                {
+                    conn.DecRef();
+                }
+            });
+
+            // The response's headers come first, so its window exists before the WINDOW_UPDATE lands.
+            H2cClient InFlight(int increment)
+            {
+                var client = new H2cClient(port);
+                client.Open();
+                client.RequestHeadersOnly(streamId: 1, endHeaders: true, endStream: false);
+                Assert.Equal("HEADERS 1", client.AwaitVerdict());
+                client.WriteWindowUpdate(streamId: 1, increment);
+                client.WriteFrame(0x0, flags: 0x1, streamId: 1, []);
+                return client;
+            }
+
+            using (H2cClient client = InFlight(ToMax))
+            {
+                Assert.Equal((1, 2, true), client.DrainBody(streamId: 1));
+            }
+            using (H2cClient client = InFlight(ToMax + 1))
+            {
+                Assert.Equal("RST_STREAM 1 FLOW_CONTROL_ERROR", client.AwaitVerdict());
             }
 
             AssertServes(port);
@@ -121,6 +245,50 @@ internal static class H2ChaosTests
             // At least the first stream must come back; the point is the multiplexer survives a
             // burst without losing the connection.
             Assert.True(client.AwaitResponse(streamId: 1), "server dropped a multiplexed request burst");
+        });
+
+        runner.Test("h2c: a frame inside an open header block, or a CONTINUATION outside one, is a PROTOCOL_ERROR", () =>
+        {
+            // RFC 9113 6.2 and 6.10: a block decodes whole, so nothing may land between its frames.
+            int port = StartH2c();
+
+            Assert.Equal("HEADERS 1", H2cClient.Verdict(port, c =>
+            {
+                c.RequestHeadersOnly(streamId: 1, endHeaders: false);
+                c.WriteFrame(H2cClient.Continuation, flags: 0x4, streamId: 1, []);
+            }));
+
+            // Control: a refused stream's block, split the same way, is still decoded and refused.
+            int limited = StartH2c(new Http2Options { MaxConcurrentStreams = 1 });
+            Assert.Equal("RST_STREAM 3 REFUSED_STREAM", H2cClient.Verdict(limited, c =>
+            {
+                c.RequestHeadersOnly(streamId: 1, endHeaders: true, endStream: false);
+                c.RequestHeadersOnly(streamId: 3, endHeaders: false);
+                c.WriteFrame(H2cClient.Continuation, flags: 0x4, streamId: 3, []);
+            }));
+
+            string verdicts = string.Join(", ",
+                H2cClient.Verdict(port, c =>
+                {
+                    c.RequestHeadersOnly(streamId: 1, endHeaders: false);
+                    c.Request(streamId: 3);                                             // another stream's block
+                }),
+                H2cClient.Verdict(port, c =>
+                {
+                    c.RequestHeadersOnly(streamId: 1, endHeaders: false);
+                    c.WriteFrame(0x6, flags: 0, streamId: 0, new byte[8]);               // PING
+                    c.WriteFrame(H2cClient.Continuation, flags: 0x4, streamId: 1, []);
+                }),
+                H2cClient.Verdict(port, c =>
+                {
+                    c.RequestHeadersOnly(streamId: 1, endHeaders: true, endStream: false);
+                    c.WriteFrame(H2cClient.Continuation, flags: 0x4, streamId: 1, []);   // after END_HEADERS
+                    c.WriteFrame(0x0, flags: 0x1, streamId: 1, []);
+                }),
+                H2cClient.Verdict(port, c => c.WriteFrame(H2cClient.Continuation, flags: 0x4, streamId: 0, [])));
+
+            Assert.Equal(string.Join(", ", Enumerable.Repeat("GOAWAY PROTOCOL_ERROR", 4)), verdicts);
+            AssertServes(port);
         });
 
         runner.Test("h2c: a CONTINUATION flood is cut off instead of growing without bound", () =>
@@ -156,6 +324,17 @@ internal static class H2ChaosTests
             }
 
             AssertServes(port);   // and the process is still there to serve the next connection
+        });
+
+        runner.Test("h2c: a table size update past the 4096 the server allows is a COMPRESSION_ERROR", () =>
+        {
+            // RFC 7541 6.3. Unbounded, the peer picks the table's size, up to 2^28 bytes of entries.
+            int port = StartH2c();
+
+            Assert.Equal("HEADERS 1", H2cClient.Verdict(port, c => c.RequestWithTableSize(streamId: 1, size: 4096)));
+            Assert.Equal("GOAWAY COMPRESSION_ERROR", H2cClient.Verdict(port, c => c.RequestWithTableSize(streamId: 1, size: 4097)));
+
+            AssertServes(port);
         });
 
         runner.Test("h2c: streams past MaxConcurrentStreams are refused, not allocated", () =>

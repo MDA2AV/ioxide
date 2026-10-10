@@ -79,6 +79,19 @@ public sealed partial class Http2Connection
 
     private void Handle(in FrameHeader header, ReadOnlySpan<byte> payload)
     {
+        // RFC 9113 6.2, 6.10: a CONTINUATION comes only inside its header block, and nothing else does.
+        bool continuation = header.Type == FrameType.Continuation;
+        if (continuation != (_headerBlockStream != 0)
+            || (_headerBlockStream != 0 && header.StreamId != _headerBlockStream))
+        {
+            GoAway(Http2Error.ProtocolError);
+            return;
+        }
+        if (continuation || header.Type == FrameType.Headers)
+        {
+            _headerBlockStream = (header.Flags & FrameFlags.EndHeaders) != 0 ? 0 : header.StreamId;
+        }
+
         switch (header.Type)
         {
             case FrameType.Headers:      HandleHeaders(header, payload); break;
@@ -145,7 +158,7 @@ public sealed partial class Http2Connection
                 // stream across the whole connection, so skipping it would desynchronise every
                 // later request - but it decodes into a scratch that is thrown away, and the peer
                 // is told REFUSED_STREAM, which RFC 9113 8.7 makes safe for it to retry elsewhere.
-                _discardingStream = header.StreamId;
+                _discardBlock.StreamId = header.StreamId;
                 DiscardHeaderBlock(header, block);
                 return;
             }
@@ -208,8 +221,8 @@ public sealed partial class Http2Connection
             return;   // more CONTINUATION to come
         }
 
-        int streamId = _discardingStream;
-        _discardingStream = 0;
+        int streamId = _discardBlock.StreamId;
+        _discardBlock.StreamId = 0;
 
         if (DecodeHeaderBlock(_discardBlock, discard: true))
         {
@@ -235,7 +248,7 @@ public sealed partial class Http2Connection
 
     private void HandleContinuation(in FrameHeader header, ReadOnlySpan<byte> payload)
     {
-        if (header.StreamId == _discardingStream)
+        if (header.StreamId == _discardBlock.StreamId)
         {
             DiscardHeaderBlock(header, payload);
             return;
@@ -299,6 +312,12 @@ public sealed partial class Http2Connection
 
     private void HandleData(in FrameHeader header, ReadOnlySpan<byte> payload)
     {
+        if (header.StreamId == 0)
+        {
+            GoAway(Http2Error.ProtocolError);   // RFC 9113 6.1: DATA always belongs to a stream
+            return;
+        }
+
         ReadOnlySpan<byte> body = payload;
 
         if ((header.Flags & FrameFlags.Padded) != 0)
@@ -348,10 +367,7 @@ public sealed partial class Http2Connection
         if (credit > 0)
         {
             WriteWindowUpdate(0, credit);
-            if (header.StreamId != 0)
-            {
-                WriteWindowUpdate(header.StreamId, credit);
-            }
+            WriteWindowUpdate(header.StreamId, credit);
         }
 
         if ((header.Flags & FrameFlags.EndStream) != 0 && pending is not null)
@@ -462,17 +478,38 @@ public sealed partial class Http2Connection
             return;
         }
 
+        // RFC 9113 6.9.1: a window past 2^31-1 is the peer's error, not a sum to wrap negative.
         if (header.StreamId == 0)
         {
+            if ((long)_peerConnectionWindow + increment > int.MaxValue)
+            {
+                GoAway(Http2Error.FlowControlError);
+                return;
+            }
             _peerConnectionWindow += increment;
         }
         else if (_responseWindows.TryGetValue(header.StreamId, out int window))
         {
-            _responseWindows[header.StreamId] = window + increment;
+            if ((long)window + increment > int.MaxValue)
+            {
+                _responseWindows.Remove(header.StreamId);   // its writer, once woken, must find the stream gone
+                ResetStream(header.StreamId, Http2Error.FlowControlError);
+            }
+            else
+            {
+                _responseWindows[header.StreamId] = window + increment;
+            }
         }
         else if (_streams.TryGetValue(header.StreamId, out PendingRequest? pending))
         {
-            pending.SendWindow += increment;
+            if ((long)pending.SendWindow + increment > int.MaxValue)
+            {
+                ResetStream(header.StreamId, Http2Error.FlowControlError);
+            }
+            else
+            {
+                pending.SendWindow += increment;
+            }
         }
 
         // Credit arrived, so a streamed response parked on it can carry on.
@@ -502,7 +539,7 @@ public sealed partial class Http2Connection
     {
         if (_streams.Remove(header.StreamId, out PendingRequest? pending))
         {
-            pending.Dispose();   // the peer gave up; there is nobody to answer
+            pending.Abort();   // the peer gave up; there is nobody to answer
         }
 
         // A response in flight may send nothing more on the stream (RFC 9113 5.1), and a writer parked
@@ -650,10 +687,26 @@ public sealed partial class Http2Connection
         private ReadOnlyMemory<byte> Slice((int Offset, int Length) range)
             => range.Length == 0 ? default : _arena.AsMemory(range.Offset, range.Length);
 
+        /// <summary>
+        /// The stream is gone - reset, or its connection with it. A streamed request's handler may
+        /// still be running on the arena and the chunk it holds, so only its body ends here; its
+        /// retire disposes the rest.
+        /// </summary>
+        public void Abort()
+        {
+            if (BodyReader is { } reader)
+            {
+                reader.Abort();
+            }
+            else
+            {
+                Dispose();
+            }
+        }
+
         public void Dispose()
         {
-            // Recycles any chunk still queued and wakes a handler parked on a body that will
-            // never finish arriving.
+            // Never under a running handler (see Abort), so the chunk it held goes back too.
             BodyReader?.Drop();
             BodyReader = null;
 

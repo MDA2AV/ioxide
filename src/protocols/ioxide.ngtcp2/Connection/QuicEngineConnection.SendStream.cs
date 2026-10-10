@@ -181,6 +181,12 @@ public unsafe partial class QuicEngineConnection
         if (!_closed && bytes > 0)
         {
             Ngtcp2.iq_conn_consume(_conn, streamId, (ulong)bytes);
+
+            // Off-cycle (a handler resumed by a timer, not a datagram) nothing sends this credit before the peer's next packet.
+            if (!_inEngineCycle)
+            {
+                FlushConnection();
+            }
         }
     }
 
@@ -269,9 +275,15 @@ public unsafe partial class QuicEngineConnection
             int code = (int)n;
             if (code < 0)
             {
-                if (code is Ngtcp2.NGTCP2_ERR_STREAM_SHUT_WR or Ngtcp2.NGTCP2_ERR_STREAM_NOT_FOUND)
+                if (code == Ngtcp2.NGTCP2_ERR_STREAM_SHUT_WR)
                 {
-                    os.Dead = true;   // finished or reset - chunks are freed at stream close
+                    os.Dead = true;   // write side closed - chunks are freed at stream close
+                    return;
+                }
+                if (code == Ngtcp2.NGTCP2_ERR_STREAM_NOT_FOUND)
+                {
+                    // Already closed: stream_close has fired, so nothing else will free these chunks.
+                    PurgeOutStream(sid);
                     return;
                 }
                 if (code == Ngtcp2.NGTCP2_ERR_STREAM_DATA_BLOCKED)

@@ -299,15 +299,18 @@ public sealed unsafe partial class Reactor
                 $"UdpOptions.SocketBufferBytes must be positive, got {socketBufferBytes}.");
         }
 
-        int fd = socket(dualStack ? AF_INET6 : AF_INET, SOCK_DGRAM, 0);
+        int fd = socket(dualStack ? AF_INET6 : AF_INET, SOCK_DGRAM | SOCK_CLOEXEC, 0);
         if (fd < 0)
         {
             throw new InvalidOperationException($"udp socket failed: {fd}");
         }
 
         int one = 1;
-        setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(int));
-        setsockopt(fd, SOL_SOCKET, SO_REUSEPORT, &one, sizeof(int));
+        if (port != 0)   // with either option a port-0 bind can be handed a port another socket holds
+        {
+            setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(int));
+            setsockopt(fd, SOL_SOCKET, SO_REUSEPORT, &one, sizeof(int));
+        }
         if (gro)
         {
             setsockopt(fd, SOL_UDP, UDP_GRO, &one, sizeof(int));

@@ -116,7 +116,7 @@ public sealed partial class RedisConnection : IDisposable
             return ValueTask.FromException<RespValue>(ex);
         }
 
-        var pending = new Pending { EnqueuedAtMs = Environment.TickCount64 };
+        var pending = new Pending { EnqueuedAtMs = Native.MonotonicMs };
         _inflight.Enqueue(pending);
 
         if (!_sending)
@@ -270,7 +270,7 @@ public sealed partial class RedisConnection : IDisposable
         private ManualResetValueTaskSourceCore<RespValue> _core = new() { RunContinuationsAsynchronously = false };
 
         public short Version => _core.Version;
-        public long EnqueuedAtMs;   // Environment.TickCount64 at enqueue - drives the command-timeout sweep
+        public long EnqueuedAtMs;   // Native.MonotonicMs at enqueue - drives the command-timeout sweep
         public void Complete(RespValue reply) => _core.SetResult(reply);
         public void Fail(RedisException ex) => _core.SetException(ex);
 

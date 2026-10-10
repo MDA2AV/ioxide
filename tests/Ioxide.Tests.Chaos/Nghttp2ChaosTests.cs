@@ -148,6 +148,29 @@ internal static class Nghttp2ChaosTests
             AssertServes(port);
         });
 
+        runner.Test("nghttp2: DATA on stream 0, or on an idle stream, is a PROTOCOL_ERROR", () =>
+        {
+            int port = StartH2c();
+
+            Assert.Equal("HEADERS 1", H2cClient.Verdict(port, c =>
+            {
+                c.RequestHeadersOnly(streamId: 1, endHeaders: true, endStream: false);
+                c.WriteFrame(0x0, flags: 0x1, streamId: 1, "x"u8);
+            }));
+            Assert.Equal("GOAWAY PROTOCOL_ERROR", H2cClient.Verdict(port, c =>
+            {
+                c.WriteFrame(0x0, flags: 0, streamId: 0, "x"u8);
+                c.Request(streamId: 1);
+            }));
+            Assert.Equal("GOAWAY PROTOCOL_ERROR", H2cClient.Verdict(port, c =>
+            {
+                c.WriteFrame(0x0, flags: 0, streamId: 5, "x"u8);
+                c.Request(streamId: 1);
+            }));
+
+            AssertServes(port);
+        });
+
         runner.Test("nghttp2: unknown frame types are ignored, the request still answers", () =>
         {
             int port = StartH2c();
@@ -160,6 +183,41 @@ internal static class Nghttp2ChaosTests
             Assert.True(client.AwaitResponse(streamId: 1), "an unknown frame type broke the connection");
         });
 
+        runner.Test("nghttp2: a WINDOW_UPDATE past 2^31-1 is a FLOW_CONTROL_ERROR, on the connection or a stream", () =>
+        {
+            int port = StartH2c();
+            const int ToMax = int.MaxValue - 65535;
+
+            using (var client = new H2cClient(port))
+            {
+                client.Open();
+                client.WriteWindowUpdate(streamId: 0, ToMax);
+                client.Request(streamId: 1);
+                Assert.Equal((1, 2, true), client.DrainBody(streamId: 1));
+            }
+            Assert.Equal("GOAWAY FLOW_CONTROL_ERROR", H2cClient.Verdict(port, c =>
+            {
+                c.WriteWindowUpdate(streamId: 0, ToMax + 1);
+                c.Request(streamId: 1);
+            }));
+
+            Assert.Equal("HEADERS 1", H2cClient.Verdict(port, c =>
+            {
+                c.RequestHeadersOnly(streamId: 1, endHeaders: true, endStream: false);
+                c.WriteWindowUpdate(streamId: 1, ToMax);
+                c.WriteFrame(0x0, flags: 0x1, streamId: 1, []);
+            }));
+            // A stream's window too ends the whole connection here, which RFC 9113 5.4.1 allows.
+            Assert.Equal("GOAWAY FLOW_CONTROL_ERROR", H2cClient.Verdict(port, c =>
+            {
+                c.RequestHeadersOnly(streamId: 1, endHeaders: true, endStream: false);
+                c.WriteWindowUpdate(streamId: 1, ToMax + 1);
+                c.WriteFrame(0x0, flags: 0x1, streamId: 1, []);
+            }));
+
+            AssertServes(port);
+        });
+
         runner.Test("nghttp2: a frame truncated mid-payload is handled, server survives", () =>
         {
             int port = StartH2c();
@@ -170,6 +228,40 @@ internal static class Nghttp2ChaosTests
                 bad.WriteFrameHeader(0x0, 0, 1, declaredLen: 256, actual: new byte[32]);
             }
 
+            AssertServes(port);
+        });
+
+        runner.Test("nghttp2: a frame inside an open header block, or a CONTINUATION outside one, is a PROTOCOL_ERROR", () =>
+        {
+            int port = StartH2c();
+
+            Assert.Equal("HEADERS 1", H2cClient.Verdict(port, c =>
+            {
+                c.RequestHeadersOnly(streamId: 1, endHeaders: false);
+                c.WriteFrame(H2cClient.Continuation, flags: 0x4, streamId: 1, []);
+            }));
+
+            string verdicts = string.Join(", ",
+                H2cClient.Verdict(port, c =>
+                {
+                    c.RequestHeadersOnly(streamId: 1, endHeaders: false);
+                    c.Request(streamId: 3);
+                }),
+                H2cClient.Verdict(port, c =>
+                {
+                    c.RequestHeadersOnly(streamId: 1, endHeaders: false);
+                    c.WriteFrame(0x6, flags: 0, streamId: 0, new byte[8]);
+                    c.WriteFrame(H2cClient.Continuation, flags: 0x4, streamId: 1, []);
+                }),
+                H2cClient.Verdict(port, c =>
+                {
+                    c.RequestHeadersOnly(streamId: 1, endHeaders: true, endStream: false);
+                    c.WriteFrame(H2cClient.Continuation, flags: 0x4, streamId: 1, []);
+                    c.WriteFrame(0x0, flags: 0x1, streamId: 1, []);
+                }),
+                H2cClient.Verdict(port, c => c.WriteFrame(H2cClient.Continuation, flags: 0x4, streamId: 0, [])));
+
+            Assert.Equal(string.Join(", ", Enumerable.Repeat("GOAWAY PROTOCOL_ERROR", 4)), verdicts);
             AssertServes(port);
         });
 
@@ -203,6 +295,16 @@ internal static class Nghttp2ChaosTests
 
                 Assert.True(seen != 0, "nghttp2 accepted an unbounded CONTINUATION block");
             }
+
+            AssertServes(port);
+        });
+
+        runner.Test("nghttp2: a table size update past the 4096 the server allows is a COMPRESSION_ERROR", () =>
+        {
+            int port = StartH2c();
+
+            Assert.Equal("HEADERS 1", H2cClient.Verdict(port, c => c.RequestWithTableSize(streamId: 1, size: 4096)));
+            Assert.Equal("GOAWAY COMPRESSION_ERROR", H2cClient.Verdict(port, c => c.RequestWithTableSize(streamId: 1, size: 4097)));
 
             AssertServes(port);
         });

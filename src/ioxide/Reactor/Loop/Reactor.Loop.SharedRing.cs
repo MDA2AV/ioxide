@@ -71,7 +71,7 @@ public sealed unsafe partial class Reactor
                     $"[r{_id}] io_uring_enter failed with errno {-rc}; this reactor cannot continue");
             }
 
-            NowMs = Environment.TickCount64;   // one read per batch; see Reactor.Tcp.Sweep.cs
+            NowMs = Native.MonotonicMs;   // one read per batch; see Reactor.Tcp.Sweep.cs
 
             uint ready = _ring.CqReady();
             for (uint i = 0; i < ready; i++)

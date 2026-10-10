@@ -116,15 +116,18 @@ public sealed class Http3BodyReader : IValueTaskSource<ReadOnlyMemory<byte>>
         }
     }
 
-    // Connection teardown while chunks may still be queued: recycle everything.
+    // Handler finished or connection teardown while chunks may still be queued: recycle everything.
     internal void Drop()
     {
         End();
         ReleaseHandedOut();
+        int unread = 0;
         while (_chunks.TryDequeue(out (byte[] Buf, int Len) chunk))
         {
+            unread += chunk.Len;
             ArrayPool<byte>.Shared.Return(chunk.Buf);
         }
+        _owner.CreditBody(_streamId, unread);   // unread bytes hold the connection window until credited
     }
 
     private void ReleaseHandedOut()

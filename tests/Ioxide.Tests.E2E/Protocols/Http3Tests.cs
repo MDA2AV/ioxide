@@ -2,6 +2,7 @@ using System.Text;
 using ioxide;
 using ioxide.http3;
 using ioxide.ngtcp2;
+using ioxide.timer;
 
 namespace Ioxide.Tests;
 
@@ -99,5 +100,92 @@ internal static class Http3Tests
             Assert.Equal(200, status);
             Assert.Equal("pure got 600000", text);
         });
+
+        runner.Test("http3: uploads a streaming handler never reads give their connection credit back", () =>
+            UnreadUploadsGiveCreditBack((conn, answer) => new Http3Connection(conn).RunAsync(
+                async req => new Http3Response { Status = await answer(req.Path, req.BodyReader!.ReadAsync) })));
+    }
+
+    /// <summary>The status a test handler answers once it is done with the body behind <c>readBody</c>.</summary>
+    internal delegate ValueTask<int> UploadAnswer(ReadOnlyMemory<byte> path, Func<ValueTask<ReadOnlyMemory<byte>>> readBody);
+
+    // Each upload fits its 256 KiB stream window and five cross the connection's 1 MiB one, so only
+    // connection credit that never comes back can wedge them.
+    private const int UploadBytes = 250 * 1024;
+    private const int Uploads = 5;
+
+    /// <summary>
+    /// Uploads on three connections to one server: "/read" reads every body to its end, "/unread"
+    /// never touches one, and "/unread-after-a-wait" leaves it after a wait on the ring.
+    /// </summary>
+    internal static void UnreadUploadsGiveCreditBack(Func<QuicConnection, UploadAnswer, Task> serve)
+    {
+        (string certPath, string keyPath) = TestCert.Ensure();
+        using var engine = new QuicEngine(certPath, keyPath, cidLength: 8, alpn: ["h3"]);
+
+        long read = 0;
+        int unread = 0;
+        (_, int udpPort) = TestServer.StartDatagram(
+            onDatagram: null,
+            quicFactory: engine.CreateFactory(),
+            quicHandle: (reactor, conn) =>
+            {
+                var timer = new RingTimer(reactor);
+                return serve(conn, async (path, readBody) =>
+                {
+                    if (path.Span.SequenceEqual("/read"u8))
+                    {
+                        ReadOnlyMemory<byte> chunk;
+                        while (!(chunk = await readBody()).IsEmpty)
+                        {
+                            Interlocked.Add(ref read, chunk.Length);
+                        }
+                    }
+                    else
+                    {
+                        Interlocked.Increment(ref unread);
+                        if (path.Span.SequenceEqual("/unread-after-a-wait"u8))
+                        {
+                            await timer.DelayAsync(50);
+                        }
+                    }
+                    return 401;
+                });
+            });
+
+        UploadsOnOneConnection(udpPort, "/read");   // control: the same uploads cross the window when read
+        UploadsOnOneConnection(udpPort, "/unread");
+        UploadsOnOneConnection(udpPort, "/unread-after-a-wait");
+
+        Assert.Equal(Uploads * (long)UploadBytes, Interlocked.Read(ref read));
+        Assert.Equal(2 * Uploads, Volatile.Read(ref unread));
+    }
+
+    /// <summary>The uploads to <paramref name="path"/> on one connection, each answered 401.</summary>
+    private static void UploadsOnOneConnection(int udpPort, string path)
+    {
+        Assert.True(Uploads * (long)UploadBytes > 1024 * 1024 && UploadBytes < 256 * 1024,
+            "the uploads must cross the connection window while each fits its stream window");
+
+        using var client = new H3TestClient("127.0.0.1", udpPort);
+        client.Connect();
+        Assert.True(client.CompleteHandshake(timeoutMs: 5000), "handshake did not complete");
+
+        var body = new byte[UploadBytes];
+        for (int i = 1; i <= Uploads; i++)
+        {
+            int status;
+            try
+            {
+                (status, _) = client.Request("POST", path, body, timeoutMs: 15_000);
+            }
+            catch (Exception e)
+            {
+                throw new Exception($"{path}: upload {i} of {Uploads}, {(i - 1) * UploadBytes / 1024} KiB already sent: {e.Message}");
+            }
+            Assert.True(status == 401, $"{path}: upload {i} of {Uploads} was answered {status}, not 401");
+        }
+
+        Assert.True(!client.PeerClosed, $"{path}: the server closed the connection");
     }
 }

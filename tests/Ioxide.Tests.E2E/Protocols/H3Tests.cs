@@ -79,6 +79,14 @@ internal static class H3Tests
             Assert.Equal("got 600000", text);
         });
 
+        runner.Test("h3: uploads a streaming handler never reads give their connection credit back", () =>
+            Http3Tests.UnreadUploadsGiveCreditBack((conn, answer) => new Nghttp3Connection(conn).RunStreamingAsync(
+                async req => new Nghttp3Response { Status = await answer(req.Path, req.BodyReader!.ReadAsync) })));
+
+        runner.Test("h3: uploads a streamed-response handler never reads give their connection credit back", () =>
+            Http3Tests.UnreadUploadsGiveCreditBack((conn, answer) => new Nghttp3Connection(conn).RunStreamedResponseAsync(
+                async (req, writer) => writer.WriteHeaders(new Nghttp3Response { Status = await answer(req.Path, req.BodyReader!.ReadAsync) }))));
+
         runner.Test("h3: a streamed response whose handler awaits between chunks still arrives", () =>
         {
             // Every other streamed test writes its chunks in a tight loop, so the handler never

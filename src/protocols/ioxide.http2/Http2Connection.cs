@@ -48,7 +48,9 @@ public sealed partial class Http2Connection : IDisposable
     // HPACK in step with the peer, then thrown away. A block cannot interleave with another
     // stream's frames, so one of these is enough.
     private readonly PendingRequest _discardBlock = new();
-    private int _discardingStream;
+
+    // The stream whose header block is still open, or 0.
+    private int _headerBlockStream;
 
     private bool _prefaceSeen;
     private bool _disposed;
@@ -92,16 +94,15 @@ public sealed partial class Http2Connection : IDisposable
 
         foreach (PendingRequest pending in _streams.Values)
         {
-            pending.Dispose();
+            pending.Abort();   // a dispatched handler may still be running on it
         }
         _streams.Clear();
 
         foreach (PendingRequest pending in _ready)
         {
-            pending.Dispose();
+            pending.Dispose();   // never dispatched: no handler will retire it
         }
         _ready.Clear();
-        _bodyWakes.Clear();
         _responseWindows.Clear();
 
         if (_inbound.Length > 0)
@@ -121,6 +122,9 @@ public sealed partial class Http2Connection : IDisposable
         // flush that would have completed its turn is never coming.
         _turnWaiter?.TrySetResult();
         _turnWaiter = null;
+
+        // Last: a handler parked on its body resumes into its end once everything above is released.
+        FireBodyWakes();
     }
 
     /// <summary>Serve until the peer goes away, answering each request with <paramref name="handler"/>.</summary>
@@ -176,9 +180,12 @@ public sealed partial class Http2Connection : IDisposable
         }
         finally
         {
-            // A writer parked on flow-control credit will never be woken by a dead connection.
-            ReleaseAllCreditWaiters();
             Dispose();
+
+            // A writer parked on flow-control credit will never be woken by a dead connection. After
+            // Dispose, so it wakes into IsBroken: a clean close breaks nothing first, and a writer
+            // woken before it finds no credit and parks again for good.
+            ReleaseAllCreditWaiters();
         }
     }
 
