@@ -299,6 +299,12 @@ public sealed partial class Http2Connection
 
     private void HandleData(in FrameHeader header, ReadOnlySpan<byte> payload)
     {
+        if (header.StreamId == 0)
+        {
+            GoAway(Http2Error.ProtocolError);   // RFC 9113 6.1: DATA always belongs to a stream
+            return;
+        }
+
         ReadOnlySpan<byte> body = payload;
 
         if ((header.Flags & FrameFlags.Padded) != 0)
@@ -348,10 +354,7 @@ public sealed partial class Http2Connection
         if (credit > 0)
         {
             WriteWindowUpdate(0, credit);
-            if (header.StreamId != 0)
-            {
-                WriteWindowUpdate(header.StreamId, credit);
-            }
+            WriteWindowUpdate(header.StreamId, credit);
         }
 
         if ((header.Flags & FrameFlags.EndStream) != 0 && pending is not null)
@@ -462,17 +465,38 @@ public sealed partial class Http2Connection
             return;
         }
 
+        // RFC 9113 6.9.1: a window past 2^31-1 is the peer's error, not a sum to wrap negative.
         if (header.StreamId == 0)
         {
+            if ((long)_peerConnectionWindow + increment > int.MaxValue)
+            {
+                GoAway(Http2Error.FlowControlError);
+                return;
+            }
             _peerConnectionWindow += increment;
         }
         else if (_responseWindows.TryGetValue(header.StreamId, out int window))
         {
-            _responseWindows[header.StreamId] = window + increment;
+            if ((long)window + increment > int.MaxValue)
+            {
+                _responseWindows.Remove(header.StreamId);   // first: the reset can resume this stream's writer inline
+                ResetStream(header.StreamId, Http2Error.FlowControlError);
+            }
+            else
+            {
+                _responseWindows[header.StreamId] = window + increment;
+            }
         }
         else if (_streams.TryGetValue(header.StreamId, out PendingRequest? pending))
         {
-            pending.SendWindow += increment;
+            if ((long)pending.SendWindow + increment > int.MaxValue)
+            {
+                ResetStream(header.StreamId, Http2Error.FlowControlError);
+            }
+            else
+            {
+                pending.SendWindow += increment;
+            }
         }
 
         // Credit arrived, so a streamed response parked on it can carry on.

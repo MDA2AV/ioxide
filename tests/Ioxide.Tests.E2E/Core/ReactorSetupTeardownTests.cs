@@ -107,5 +107,64 @@ internal static class ReactorSetupTeardownTests
             Assert.True(reported!.Message.Contains("32768"),
                 $"the message does not say what the kernel refused: {reported.Message}");
         });
+
+        runner.Test("reactor: OnFault is raised before the teardown, with the listener still open", () =>
+        {
+            // Run calls OnFault from its catch and tears down in its finally, so a host's handler
+            // runs against a reactor that is still whole - the doc said the opposite. A throw from
+            // OnStart reaches the same catch as a fault in the loop, after the listener is bound.
+            int port = TestServer.NextPort();
+            Exception? reported = null;
+            bool? listeningInOnFault = null;
+
+            var reactor = new Reactor(0, new ServerConfig
+            {
+                ReactorCount = 1,
+                RecvBufferSize = 4096,
+                RecvSlots = 256,
+                Tcp = new TcpOptions { Port = (ushort)port },
+            })
+            {
+                TcpHandle = (_, connection) =>
+                {
+                    connection.DecRef();
+                    return Task.CompletedTask;
+                },
+                OnStart = _ => throw new InvalidOperationException("fault-on-purpose"),
+                OnFault = (_, e) =>
+                {
+                    reported = e;
+                    listeningInOnFault = Accepts(port);
+                },
+            };
+
+            var thread = new Thread(reactor.Run) { IsBackground = true };
+            thread.Start();
+
+            Assert.True(thread.Join(TimeSpan.FromSeconds(10)), "Run should have returned after OnStart threw");
+            Assert.True(reported is InvalidOperationException { Message: "fault-on-purpose" },
+                $"OnFault was not told of the fault: {reported}");
+            Assert.True(listeningInOnFault == true,
+                "the listener was already closed when OnFault ran, so the teardown came first");
+
+            // Control: the same probe sees the listener gone once the teardown has run.
+            Assert.True(!Accepts(port), "the listener still accepted after Run returned, so the probe cannot tell");
+        });
+    }
+
+    // A connect completes into a listener's backlog without anyone accepting, so it succeeds exactly
+    // while the listening socket is open.
+    private static bool Accepts(int port)
+    {
+        using var probe = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp);
+        try
+        {
+            probe.Connect(IPAddress.Loopback, port);
+            return true;
+        }
+        catch (SocketException e) when (e.SocketErrorCode == SocketError.ConnectionRefused)
+        {
+            return false;
+        }
     }
 }

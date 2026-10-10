@@ -102,7 +102,7 @@ public sealed unsafe partial class Reactor
 
         if (_quicConns.TryGetValue(dcid, out QuicConnection? conn))
         {
-            conn.LastSeenMs = Environment.TickCount64;
+            conn.LastSeenMs = Native.MonotonicMs;
             conn.OnDatagram(datagram.Payload, datagram.Tos, datagram.PeerAddr, datagram.PeerAddrLen);
             QuicArmTimer(conn);   // reads/handler sends (inline above) moved the engine deadline
             return;
@@ -151,7 +151,7 @@ public sealed unsafe partial class Reactor
             UdpNameCap,
             datagram.PeerAddrLen);
 
-        freshQuicConnection.LastSeenMs = Environment.TickCount64;
+        freshQuicConnection.LastSeenMs = Native.MonotonicMs;
 
         freshQuicConnection.Cids.Add(dcid);
         _quicConns[dcid] = freshQuicConnection;
@@ -293,7 +293,7 @@ public sealed unsafe partial class Reactor
     // QuicFireDueTimers, and bound the loop's wait (WaitForCompletions).
     private void QuicSweep()
     {
-        long now = Environment.TickCount64;
+        long now = Native.MonotonicMs;
         int readMs = QuicReadTimeoutMs;
 
         _quicSweepScratch.Clear();
@@ -320,12 +320,12 @@ public sealed unsafe partial class Reactor
 
     private void QuicFireDueTimers()
     {
-        if (_quicConnSet.Count == 0 || Environment.TickCount64 < _quicNextTimeoutMs)
+        if (_quicConnSet.Count == 0 || Native.MonotonicMs < _quicNextTimeoutMs)
         {
             return;
         }
 
-        long now = Environment.TickCount64;
+        long now = Native.MonotonicMs;
         long next = long.MaxValue;
         _quicNextTimeoutMs = long.MaxValue;   // a send during the scan can arm another connection: keep it
         _quicSweepScratch.Clear();
@@ -375,7 +375,7 @@ public sealed unsafe partial class Reactor
     // fires - one wasted scan, never a missed timer.
     internal void QuicArmTimer(QuicConnection conn)
     {
-        long deadline = conn.GetNextTimeout(Environment.TickCount64);
+        long deadline = conn.GetNextTimeout(Native.MonotonicMs);
         if (deadline < _quicNextTimeoutMs)
         {
             _quicNextTimeoutMs = deadline;

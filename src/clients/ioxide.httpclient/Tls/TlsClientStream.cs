@@ -141,7 +141,7 @@ public sealed class TlsClientStream : IDisposable
 
     private async ValueTask RunHandshakeAsync(TlsClientOptions options)
     {
-        long deadlineMs = Environment.TickCount64 + options.HandshakeTimeoutMs;
+        long deadlineMs = Native.MonotonicMs + options.HandshakeTimeoutMs;
 
         while (true)
         {
@@ -162,7 +162,7 @@ public sealed class TlsClientStream : IDisposable
             // operation cannot be abandoned mid-flight without its completion landing on a source
             // someone else has since taken. A peer that goes completely silent is bounded by the
             // caller's own acquire timeout instead.
-            if (Environment.TickCount64 >= deadlineMs)
+            if (Native.MonotonicMs >= deadlineMs)
             {
                 throw new IOException(
                     $"TLS handshake to '{options.ServerName}' did not complete within {options.HandshakeTimeoutMs} ms");

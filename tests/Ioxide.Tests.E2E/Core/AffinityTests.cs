@@ -1,3 +1,6 @@
+using System.Diagnostics;
+using System.Runtime.CompilerServices;
+using System.Runtime.InteropServices;
 using System.Text;
 using ioxide;
 
@@ -130,6 +133,97 @@ internal static class AffinityTests
                 Assert.Equal("alive", body);
             }
         });
+
+        runner.Test("affinity: a post that races the drain is either run by it or keeps its wake", () =>
+        {
+            // ScheduleOnReactor enqueues, then wakes the loop only if the pending flag was clear;
+            // DrainPostQ clears the flag, then drains. Each side is a store then a load, so each needs
+            // a full fence: after a plain store the drain can read the queue empty before its clear
+            // lands, the poster still reads the flag set and skips its wake, and the post waits for
+            // some unrelated wake - up to a tick. Too narrow to hit through a running loop, so the two
+            // halves race directly here, on a reactor that never runs, from the state a post landing
+            // mid-drain leaves behind: flag set, queue empty.
+            var reactor = new Reactor(0, new ServerConfig { ReactorCount = 1, Tcp = null, Udp = null });
+            var race = new PostRace();
+            Action<object?> post = _ => Volatile.Write(ref race.Ran, 1);
+
+            var poster = new Thread(() =>
+            {
+                for (long t = 1; ; t++)
+                {
+                    long go;
+                    while ((go = Volatile.Read(ref race.Go)) < t) { }
+                    if (go == long.MaxValue)
+                    {
+                        return;
+                    }
+                    reactor.ScheduleOnReactor(post, null);
+                    Volatile.Write(ref race.Posted, t);
+                    while (Volatile.Read(ref race.Checked) < t) { }
+                }
+            }) { IsBackground = true };
+            poster.Start();
+
+            long races = 0, missed = 0, stranded = 0;
+            var headStart = new Random(1);
+            var budget = Stopwatch.StartNew();
+            try
+            {
+                while (races < 20_000_000 && budget.ElapsedMilliseconds < 30_000)
+                {
+                    long t = ++races;
+                    PendingFlag(reactor) = 1;
+                    Volatile.Write(ref race.Ran, 0);
+                    Interlocked.Exchange(ref race.Go, t);
+
+                    // A random head start for the poster, so its post lands on every part of the drain.
+                    int spin = 0;
+                    for (int i = headStart.Next(0, 250); i > 0; i--)
+                    {
+                        spin += i;
+                    }
+
+                    DrainPostQ(reactor);
+                    while (Volatile.Read(ref race.Posted) < t) { }
+                    if (Volatile.Read(ref race.Ran) == 0)
+                    {
+                        missed++;
+                        stranded += Volatile.Read(ref PendingFlag(reactor)) == 0 ? 1 : 0;
+                    }
+
+                    DrainPostQ(reactor);   // takes the post if the racing drain left it
+                    race.Sink = spin;
+                    Volatile.Write(ref race.Checked, t);
+                }
+            }
+            finally
+            {
+                Volatile.Write(ref race.Go, long.MaxValue);
+                poster.Join();
+            }
+
+            // Vacuity guard: the post has to have landed both before and after the drain looked.
+            Assert.True(missed > 0 && missed < races, $"the drain missed {missed} of {races} posts, so they never raced");
+            Assert.True(stranded == 0,
+                $"{stranded} of the {missed} posts the drain missed were left with the flag clear: queued, with no wake coming");
+        }, skip: Environment.ProcessorCount < 2);
+    }
+
+    [UnsafeAccessor(UnsafeAccessorKind.Field, Name = "_postSignalPending")]
+    private static extern ref int PendingFlag(Reactor reactor);
+
+    [UnsafeAccessor(UnsafeAccessorKind.Method, Name = "DrainPostQ")]
+    private static extern void DrainPostQ(Reactor reactor);
+
+    // Each counter on its own line, so the race's own bookkeeping does not share one with the flag.
+    [StructLayout(LayoutKind.Explicit, Size = 320)]
+    private sealed class PostRace
+    {
+        [FieldOffset(64)] public long Go;
+        [FieldOffset(128)] public long Posted;
+        [FieldOffset(192)] public long Checked;
+        [FieldOffset(256)] public int Ran;
+        [FieldOffset(260)] public int Sink;
     }
 
     // Runs `work` inside a handler and reports whether execution came back to the reactor thread
