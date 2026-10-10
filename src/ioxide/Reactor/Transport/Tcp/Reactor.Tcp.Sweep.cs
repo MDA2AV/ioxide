@@ -17,14 +17,14 @@ public sealed unsafe partial class Reactor
     private readonly int _sendTimeoutMs;
 
     /// <summary>
-    /// Environment.TickCount64, refreshed once per loop pass rather than read per completion.
+    /// Native.MonotonicMs, refreshed once per loop pass rather than read per completion.
     ///
     /// The stamps this feeds are read by a sweep that runs four times a second, so a clock good to
     /// one batch of completions is far finer than anything that consumes it - while reading the
     /// real one per CQE put a vDSO call on both the recv and the send hot path, three per request,
     /// and measured as a 4-9% throughput cost on the small-response samples.
     /// </summary>
-    internal long NowMs = Environment.TickCount64;
+    internal long NowMs = Native.MonotonicMs;
 
     // Whenever TCP is on: the deferred FIN (TcpConnection.DecRef) is sent from here, clocks or not.
     private bool TcpSweepEnabled => _tcpEnabled;
@@ -41,7 +41,7 @@ public sealed unsafe partial class Reactor
         }
         _acceptPaused.Clear();
 
-        long now = Environment.TickCount64;
+        long now = Native.MonotonicMs;
         TcpConnection?[] conns = _connections;
 
         for (int fd = 0; fd < conns.Length; fd++)

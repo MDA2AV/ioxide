@@ -8,6 +8,7 @@ namespace ioxide;
 /// </summary>
 public static unsafe partial class Native {
     public const int O_RDONLY = 0;
+    public const int O_CLOEXEC = 0x80000;
     private const int SEEK_SET = 0;
     private const int SEEK_END = 2;
 

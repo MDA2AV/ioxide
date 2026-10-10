@@ -99,7 +99,7 @@ public sealed class HttpClientPool : IDisposable
         // One deadline for the whole acquire, not one per attempt. A refused connect completes in
         // microseconds and wakes this waiter, so a per-attempt timer would be re-armed faster than
         // it could ever elapse - the caller would spin here forever instead of failing.
-        long deadlineMs = Environment.TickCount64 + _options.AcquireTimeoutMs;
+        long deadlineMs = Native.MonotonicMs + _options.AcquireTimeoutMs;
 
         while (true)
         {
@@ -125,12 +125,12 @@ public sealed class HttpClientPool : IDisposable
             // Honour the same backoff gate Sweep() does. Without it, a dead origin turns this loop
             // into a connect() storm: open, refuse, wake, reopen - thousands of syscalls a second
             // on the reactor thread. Behind the gate the ticker paces the retries instead.
-            if (_live < _options.PoolSize && _opening == 0 && Environment.TickCount64 >= _reopenAtMs)
+            if (_live < _options.PoolSize && _opening == 0 && Native.MonotonicMs >= _reopenAtMs)
             {
                 StartOpen();
             }
 
-            int remainingMs = (int)(deadlineMs - Environment.TickCount64);
+            int remainingMs = (int)(deadlineMs - Native.MonotonicMs);
             if (remainingMs <= 0)
             {
                 throw new HttpClientException(AcquireTimeoutMessage());
@@ -234,7 +234,7 @@ public sealed class HttpClientPool : IDisposable
         catch (Exception e)
         {
             _live--;
-            _reopenAtMs = Environment.TickCount64 + BackoffMs();
+            _reopenAtMs = Native.MonotonicMs + BackoffMs();
 
             // Keep the reason, not just the log line. A caller that times out acquiring otherwise
             // sees only "no connection within N ms", which cannot tell a rejected certificate from
@@ -280,7 +280,7 @@ public sealed class HttpClientPool : IDisposable
             }
         }
 
-        if (_live < _options.PoolSize && _opening == 0 && Environment.TickCount64 >= _reopenAtMs)
+        if (_live < _options.PoolSize && _opening == 0 && Native.MonotonicMs >= _reopenAtMs)
         {
             StartOpen();
         }
