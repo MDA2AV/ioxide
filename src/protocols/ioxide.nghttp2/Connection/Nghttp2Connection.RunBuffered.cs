@@ -88,6 +88,18 @@ public sealed partial class Nghttp2Connection
 
         foreach (PendingRequest pending in ready)
         {
+            if (pending.Overflowed)
+            {
+                // A queued reset closes the stream inside nghttp2, so none of its later frames call back.
+                if (Nghttp2.ih2_submit_rst_stream(_handle, pending.StreamId, EnhanceYourCalm) != 0)
+                {
+                    _failed = true;
+                }
+                _pending.Remove(pending.StreamId);
+                pending.Dispose();
+                continue;
+            }
+
             ValueTask<Nghttp2Response> inFlight;
 
             try

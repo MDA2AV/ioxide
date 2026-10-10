@@ -37,6 +37,8 @@ public sealed partial class Nghttp2Connection : IDisposable
 
     // RFC 9113 INTERNAL_ERROR: a stream this server could not finish.
     private const uint InternalError = 0x2;
+    // RFC 9113 ENHANCE_YOUR_CALM: a request body past MaxRequestBytes, as the managed stack resets it.
+    private const uint EnhanceYourCalm = 0xb;
     private const int  ErrInvalidArgument = -501;   // NGHTTP2_ERR_INVALID_ARGUMENT
 
     private readonly IDuplexPipe _pipe;
@@ -142,6 +144,11 @@ public sealed partial class Nghttp2Connection : IDisposable
         private (int Offset, int Length) _body = (0, 0);
 
         public int StreamId;
+
+        // The body passed MaxRequestBytes: the stream is reset once ih2_read unwinds, never dispatched.
+        public bool Overflowed;
+
+        public int BodyLength => _body.Length;
 
         // Pseudo-header ranges, lifted out of the field list as they arrive.
         public (int Offset, int Length) Method;
