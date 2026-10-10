@@ -539,6 +539,27 @@ internal sealed class HttpClientConnection : IDisposable
         _receiveView = new UnmanagedMemoryManager((byte*)_receive, _receiveCapacity);
     }
 
+    /// <summary>Refuses a CR, LF or NUL anywhere in the head, which BuildHead would write as given.</summary>
+    internal static void ValidateHead(HttpClientRequest request)
+    {
+        ThrowIfLineBreak(request.Method.Span, "method");
+        ThrowIfLineBreak(request.Path.Span, "target");
+        foreach (KeyValuePair<ReadOnlyMemory<byte>, ReadOnlyMemory<byte>> field in request.Headers.AsSpan())
+        {
+            ThrowIfLineBreak(field.Key.Span, "header name");
+            ThrowIfLineBreak(field.Value.Span, "header value");
+        }
+    }
+
+    // CR or LF ends the line early, adding field lines or a second request; servers disagree on NUL.
+    private static void ThrowIfLineBreak(ReadOnlySpan<byte> part, string what)
+    {
+        if (part.IndexOfAny((byte)'\r', (byte)'\n', (byte)0) >= 0)
+        {
+            throw new ArgumentException($"request {what} contains CR, LF or NUL", "request");
+        }
+    }
+
     private unsafe int BuildHead(HttpClientRequest request)
     {
         int needed = request.Method.Length + request.Path.Length + _hostHeaderLine.Length + 64;

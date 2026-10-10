@@ -77,6 +77,7 @@ public sealed class HttpClientPool : IDisposable
     /// </summary>
     public async ValueTask<HttpClientResponse> SendAsync(HttpClientRequest request)
     {
+        HttpClientConnection.ValidateHead(request);   // before acquiring: a refused request must not cost a connection
         HttpClientConnection connection = await AcquireAsync();
 
         try
