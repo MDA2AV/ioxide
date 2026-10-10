@@ -13,11 +13,11 @@ namespace ioxide;
 /// </summary>
 public sealed unsafe partial class Reactor : IRingHost
 {
-    // In-flight client ops: slot → completion. Reactor-thread-only; grows on demand.
-    private IRingCompletion?[] _opTargets = new IRingCompletion?[1024];
+    // In-flight client ops: slot → completion. Reactor-thread-only; starts at ServerConfig.OpSlots, grows on demand.
+    private IRingCompletion?[] _opTargets;
 
-    // One timespec per op slot, for IORING_OP_TIMEOUT. The kernel reads it while the op is in
-    // flight, so it has to outlive the submission; hanging it off the slot makes its lifetime
+    // One timespec per op slot, for IORING_OP_TIMEOUT. The kernel reads it when it consumes the
+    // SQE, so it has to outlive the submission; hanging it off the slot makes its lifetime
     // exactly the operation's, with no allocation per wait.
     private __kernel_timespec* _opTimespecs;
     private int _opTimespecCapacity;
@@ -210,6 +210,11 @@ public sealed unsafe partial class Reactor : IRingHost
         if (_opTimespecCapacity >= _opTargets.Length)
         {
             return;
+        }
+
+        // Queued timeouts point into this block until submitted; a failed prep ends a submit early.
+        while (_opTimespecs != null && _ring.SubmitAndWait(0) > 0)
+        {
         }
 
         nuint bytes = (nuint)(_opTargets.Length * sizeof(__kernel_timespec));

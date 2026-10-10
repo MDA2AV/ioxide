@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Reflection;
 using System.Runtime.InteropServices;
 using ioxide;
 using ioxide.timer;
@@ -8,12 +9,92 @@ namespace Ioxide.Tests;
 
 /// <summary>
 /// RingTimer: the wait actually waits, it reports expiry rather than an error, a single timer is
-/// reusable across requests on its connection, and two connections waiting different amounts get
-/// their own deadlines rather than each other's. And the reactor's ticker: a long pass does not
-/// push its next run a whole interval out.
+/// reusable across requests on its connection, two connections waiting different amounts get
+/// their own deadlines rather than each other's, and a wait keeps its deadline when the reactor
+/// grows its op table before the wait has reached the kernel. And the reactor's ticker: a long
+/// pass does not push its next run a whole interval out.
 /// </summary>
 internal static class TimerTests
 {
+    // Read only to tell whether the growth moved the deadline block, without which nothing dangled.
+    private static readonly FieldInfo Deadlines =
+        typeof(Reactor).GetField("_opTimespecs", BindingFlags.NonPublic | BindingFlags.Instance)
+        ?? throw new Exception("could not reflect Reactor._opTimespecs");
+
+    private static unsafe nint DeadlinesAt(Reactor r)
+        => Deadlines.GetValue(r) is { } boxed ? (nint)Pointer.Unbox(boxed) : 0;
+
+    private static unsafe nint NativeAlloc(int bytes) => (nint)NativeMemory.Alloc((nuint)bytes);
+
+    private static unsafe void NativeFree(nint block) => NativeMemory.Free((void*)block);
+
+    // Pinned rather than the default, so the bursts below straddle it and the 16 KiB fence matches the block.
+    private const int PinnedOpSlots = 1024;
+
+    private static int StartQueueThenGrow() => TestServer.StartConfigured(QueueThenGrow, new ServerConfig
+    {
+        RecvBufferSize = 4096,
+        RecvSlots = 256,
+        OpSlots = PinnedOpSlots,
+        Tcp = new TcpOptions { WriteSlabSize = 16 * 1024, PoolMax = 64, RecvQueueEntries = 64 },
+    }).Port;
+
+    // A 20ms wait, then the path's count of 1ms waits in one pass, so the 1025th grows the table.
+    private static async Task QueueThenGrow(Reactor r, TcpConnection conn)
+    {
+        try
+        {
+            RecvSnapshot snapshot = await conn.ReadAsync();
+            if (!int.TryParse(Wire.ReadPath(conn, snapshot).TrimStart('/'), out int others))
+            {
+                return;   // the harness's readiness probe, which sends no request
+            }
+
+            long armed = Stopwatch.GetTimestamp();
+            Task<string> first = Timed(new RingTimer(r).DelayAsync(20), armed);
+            nint block = DeadlinesAt(r);
+
+            // Right behind the block, so the growth normally cannot extend it and has to move it.
+            nint fence = NativeAlloc(16 * 1024);
+
+            var rest = new Task<int>[others];
+            for (int i = 0; i < others; i++)
+            {
+                rest[i] = new RingTimer(r).DelayAsync(1).AsTask();
+            }
+            bool moved = DeadlinesAt(r) != block;
+
+            // Armed after the growth, so it fires: a wait that never does is reported, not hung.
+            Task<int> bound = new RingTimer(r).DelayAsync(5_000).AsTask();
+            await Task.WhenAny(Task.WhenAll(rest.Append<Task>(first)), bound);
+            NativeFree(fence);
+
+            int expired = rest.Count(t => t.IsCompleted && RingTimer.Expired(t.Result));
+            Wire.Write(conn, 200, $"{(first.IsCompleted ? first.Result : "never -1")} {expired} {moved}");
+            await conn.FlushAsync();
+        }
+        finally
+        {
+            conn.DecRef();
+        }
+    }
+
+    // "<result> <whole ms>", stamped inline on the reactor as the wait completes.
+    private static async Task<string> Timed(ValueTask<int> wait, long since)
+    {
+        int result = await wait;
+        return $"{result} {(int)Stopwatch.GetElapsedTime(since).TotalMilliseconds}";
+    }
+
+    private static (string First, int Ms, int Expired, bool Moved) QueueThenGrowAt(int port, int others)
+    {
+        (int status, string body) = Client.Get(port, $"/{others}", timeoutMs: 30_000);
+        Assert.Equal(200, status);
+
+        string[] fields = body.Split(' ');
+        return (fields[0], int.Parse(fields[1]), int.Parse(fields[2]), bool.Parse(fields[3]));
+    }
+
     // Answers after the milliseconds named in the path, holding one timer for the connection and
     // re-arming it per request - the shape a caller is meant to use.
     private static async Task Delay(Reactor r, TcpConnection conn)
@@ -118,6 +199,39 @@ internal static class TimerTests
                 Assert.True(results[i].Ms >= delays[i],
                     $"/{delays[i]} answered in {results[i].Ms:F1}ms");
             }
+        });
+
+        runner.Test("timer: a wait queued before the op table grows keeps its deadline", () =>
+        {
+            // Past the first 1024 slots; a block that grew in place anyway left nothing dangling.
+            bool moved = false;
+            for (int attempt = 0; attempt < 3 && !moved; attempt++)
+            {
+                int port = StartQueueThenGrow();
+                (string first, int ms, int expired, moved) = QueueThenGrowAt(port, 1100);
+
+                Assert.True(first == RingTimer.ETime.ToString(), first == "never"
+                    ? "the 20ms wait queued before the growth had still not fired 5s later"
+                    : $"the 20ms wait queued before the growth completed with {first} after {ms}ms, not ETIME (-62)");
+                Assert.True(ms >= 20, $"the 20ms wait queued before the growth expired after {ms}ms");
+                Assert.Equal(1100, expired);
+            }
+
+            Assert.True(moved,
+                "the deadline block never moved on three reactors (it grew in place, or the table never grew), "
+                + "so nothing was ever left dangling");
+        });
+
+        runner.Test("control: the same burst within the op table's first 1024 slots keeps every deadline", () =>
+        {
+            // 1 + 1000 + the bound: no growth, so nothing moves the block under the queued SQEs.
+            int port = StartQueueThenGrow();
+            (string first, int ms, int expired, bool moved) = QueueThenGrowAt(port, 1000);
+
+            Assert.True(!moved, "the deadline block moved although the op table never grew");
+            Assert.Equal(RingTimer.ETime.ToString(), first);
+            Assert.True(ms >= 20, $"the 20ms wait expired after {ms}ms");
+            Assert.Equal(1000, expired);
         });
 
         runner.Test("ticker: the wait after a pass that ran into the interval asks only for what is left of it", () =>
