@@ -253,6 +253,25 @@ internal static class Http2FlowControlTests
             client.Close(run);
         });
 
+        runner.Test("h2 flow: a writer parked on credit is released when the peer closes the connection cleanly", () =>
+        {
+            bool finished = false;
+
+            using var client = new StrictClient();
+            Task run = client.Connection.RunAsync(async (_, writer) =>
+            {
+                await AnswerWith(writer, new byte[64 * 1024]);
+                finished = true;
+            });
+
+            client.ReleaseFlush();
+            client.Feed([.. Open((InitialWindowSize, 16384)), .. WindowUpdate(0, 1 << 20), .. Get(1)]);
+            Assert.Equal(16384, Frame.Body(client.Drain(), 1).Length);       // one stream window, then parked
+
+            client.Close(run);                                       // end of input, no GOAWAY: nothing broke the connection first
+            Assert.True(finished, "the peer closed the connection under a writer parked on credit, and its handler never finished");
+        });
+
         runner.Pending("h2 flow: a buffered response waits on the peer's stream window instead of overrunning it", () =>
         {
             using var client = new StrictClient();
