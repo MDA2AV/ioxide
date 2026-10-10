@@ -99,7 +99,8 @@ public abstract class QuicConnection : IValueTaskSource<QuicRecvSnapshot>
     /// <see cref="CanQueueSend"/> had gone false - the signal for a paused producer (e.g. an h3
     /// response pump) to resume queueing. Fires from the ack/timer egress path, which the read loop
     /// does not see (a downloading peer sends only acks), so it is the only resume trigger for a
-    /// response larger than the retention window.
+    /// response larger than the retention window. A connection torn down while a producer is paused
+    /// fires it too, and the producer finds <see cref="IsClosed"/> set.
     /// </summary>
     public Action? OnSendCapacityAvailable { get; set; }
 
@@ -203,6 +204,9 @@ public abstract class QuicConnection : IValueTaskSource<QuicRecvSnapshot>
     private int _pending;
     private int _closed;
     private int _generation;
+
+    /// <summary>Whether this connection has been torn down: nothing a writer stages from then on is sent.</summary>
+    public bool IsClosed => Volatile.Read(ref _closed) != 0;
 
     // Two owners: the reactor (engine side) and the handler. Init 2 on adopt; teardown runs only
     // at 0, so a connection is never freed under a live handler.

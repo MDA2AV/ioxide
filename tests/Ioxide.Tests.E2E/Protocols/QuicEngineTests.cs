@@ -1,4 +1,5 @@
 using System.Buffers;
+using System.IO.Pipelines;
 using System.Net;
 using System.Net.Sockets;
 using System.Reflection;
@@ -6,6 +7,7 @@ using System.Runtime.InteropServices;
 using System.Text;
 using ioxide;
 using ioxide.ngtcp2;
+using ioxide.timer;
 
 namespace Ioxide.Tests;
 
@@ -299,6 +301,170 @@ internal static class QuicEngineTests
             string echoed = client.RequestEcho(sent, timeoutMs: 5000);
             Assert.Equal("hello-quic-pipe-echo", echoed);
         });
+
+        RegisterPipeWriter(runner);
+    }
+
+    // The lowest high-water the engine allows and a ceiling twice it, so a few 64 KiB chunks cross both.
+    private static QuicOptions SmallRetention(QuicOptions options)
+        => options with { SendRetentionBytes = 256L << 10, SendRetentionCeilingBytes = 512L << 10 };
+
+    /// <summary>The dual pipe's writer under a producer that awaits every flush and stops at the first IsCompleted.</summary>
+    private static void RegisterPipeWriter(Runner runner)
+    {
+        runner.Test("quic pipe: FlushAsync waits at the send-retention high-water, so a response past the ceiling arrives whole", () =>
+        {
+            // Four times the ceiling: a flush that never waits takes it all into retention and trips the backstop.
+            const int Chunks = 32;
+            const int ChunkBytes = 64 * 1024;
+
+            (string certPath, string keyPath) = TestCert.Ensure();
+            using var engine = new QuicEngine(certPath, keyPath, cidLength: 8);
+            var producer = new PipeProducer(Chunks, ChunkBytes, pauseMs: 0);
+
+            (_, int udpPort) = TestServer.StartDatagram(
+                onDatagram: null,
+                quicFactory: engine.CreateFactory(),
+                quicHandle: producer.Serve,
+                quicOptions: SmallRetention);
+
+            using var client = new QuicTestClient("127.0.0.1", udpPort);
+            client.Connect();
+            Assert.True(client.CompleteHandshake(timeoutMs: 5000), "handshake did not complete");
+
+            long stream = client.Send("go"u8.ToArray(), fin: true);
+            client.PumpUntil(() => client.FinOn(stream) || producer.Gone.Task.IsCompleted, timeoutMs: 30_000);
+
+            Assert.True(client.FinOn(stream) && client.BytesOn(stream) == Chunks * ChunkBytes,
+                $"got {client.BytesOn(stream)} of {Chunks * ChunkBytes} bytes "
+                + (producer.Gone.Task.IsCompleted ? "before the server closed the connection" : "and no end")
+                + $": FlushAsync waited {Volatile.Read(ref producer.Waits)} times in {Volatile.Read(ref producer.Flushes)} flushes");
+            Assert.True(Volatile.Read(ref producer.Waits) > 0,
+                "FlushAsync never waited, so the high-water was never reached and nothing was shown about backpressure");
+        });
+
+        foreach (bool atHighWater in new[] { false, true })
+        {
+            string when = atHighWater ? "while it waits at the high-water" : "between two flushes";
+
+            runner.Test($"quic pipe: FlushAsync reports IsCompleted once the connection is gone, {when}", () =>
+            {
+                // 1 KiB every 20 ms never reaches the high-water; 64 KiB chunks do at once, and stay there once acks stop.
+                (string certPath, string keyPath) = TestCert.Ensure();
+                using var engine = new QuicEngine(certPath, keyPath, cidLength: 8);
+                PipeProducer producer = atHighWater
+                    ? new PipeProducer(chunks: 64, chunkBytes: 64 * 1024, pauseMs: 0)
+                    : new PipeProducer(chunks: 750, chunkBytes: 1024, pauseMs: 20);
+
+                (_, int udpPort) = TestServer.StartDatagram(
+                    onDatagram: null,
+                    quicFactory: engine.CreateFactory(),
+                    quicReadMs: 1000,
+                    quicHandle: producer.Serve,
+                    quicOptions: SmallRetention);
+
+                using var client = new QuicTestClient("127.0.0.1", udpPort);
+                client.Connect();
+                Assert.True(client.CompleteHandshake(timeoutMs: 5000), "handshake did not complete");
+
+                // The client takes the start of the response and vanishes: nothing more from it, not even an ack.
+                long stream = client.Send("go"u8.ToArray(), fin: true);
+                Assert.True(client.PumpUntil(() => client.BytesOn(stream) > 0, timeoutMs: 10_000),
+                    "the response never started, so there was no producer to tell");
+
+                Assert.True(producer.Gone.Task.Wait(15_000), "the connection never went, so there was nothing to report");
+                Assert.True(producer.Told.Task.Wait(10_000),
+                    $"FlushAsync never reported the connection gone: after {Volatile.Read(ref producer.Flushes)} flushes "
+                    + $"({Volatile.Read(ref producer.Waits)} of them waited) the producer is writing to nobody, or waiting on nobody");
+
+                (bool waited, bool afterGone) = producer.Told.Task.Result;
+                Assert.True(afterGone, "FlushAsync reported IsCompleted while the connection was still up");
+                Assert.True(waited == atHighWater, atHighWater
+                    ? "the producer was not waiting at the high-water when the connection went, so no waiting flush was released"
+                    : "the producer was waiting at the high-water, so a flush that did not wait was never asked");
+            });
+        }
+    }
+
+    /// <summary>Answers through a dual pipe with up to <c>chunks</c> flushed chunks, stopping at the first IsCompleted.</summary>
+    private sealed class PipeProducer(int chunks, int chunkBytes, int pauseMs)
+    {
+        /// <summary>The connection's read surface reported its end - an eviction and a teardown alike.</summary>
+        public readonly TaskCompletionSource Gone = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        /// <summary>A flush reported IsCompleted: whether that flush had waited, and whether the connection was gone by then.</summary>
+        public readonly TaskCompletionSource<(bool Waited, bool AfterGone)> Told = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public int Flushes;
+        public int Waits;
+
+        public async Task Serve(Reactor reactor, QuicConnection conn)
+        {
+            var timer = new RingTimer(reactor);
+            var pipe = new QuicConnectionDualPipe(conn);
+            try
+            {
+                ReadResult request;
+                do
+                {
+                    request = await pipe.Input.ReadAsync();
+                    pipe.Input.AdvanceTo(request.Buffer.End);
+                }
+                while (!request.IsCompleted);
+                pipe.Input.Complete();
+
+                _ = WatchAsync(conn);
+
+                for (int i = 0; i < chunks; i++)
+                {
+                    pipe.Output.GetSpan(chunkBytes)[..chunkBytes].Fill((byte)'x');
+                    pipe.Output.Advance(chunkBytes);
+
+                    ValueTask<FlushResult> flush = pipe.Output.FlushAsync();
+                    bool waited = !flush.IsCompleted;
+                    Interlocked.Increment(ref Flushes);
+                    if (waited)
+                    {
+                        Interlocked.Increment(ref Waits);
+                    }
+
+                    if ((await flush).IsCompleted)
+                    {
+                        Told.TrySetResult((waited, Gone.Task.IsCompleted));
+                        break;
+                    }
+                    if (pauseMs > 0)
+                    {
+                        await timer.DelayAsync(pauseMs);
+                    }
+                }
+
+                pipe.Output.Complete();
+            }
+            finally
+            {
+                conn.DecRef();
+            }
+        }
+
+        // The pipe reader has finished with the connection's read surface, which still reports its end.
+        private async Task WatchAsync(QuicConnection conn)
+        {
+            while (true)
+            {
+                QuicRecvSnapshot snap = await conn.ReadAsync();
+                while (conn.TryGetDelivery(in snap, out QuicRecvRing.Delivery item))
+                {
+                    conn.ReturnBuffer(in item);
+                }
+                if (snap.IsClosed)
+                {
+                    Gone.TrySetResult();
+                    return;
+                }
+                conn.ResetRead();
+            }
+        }
     }
 
     // Server side, the dual-pipe model: auto-bind to the client's stream, echo until fin, then
