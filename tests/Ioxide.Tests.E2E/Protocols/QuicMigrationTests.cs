@@ -342,6 +342,88 @@ internal static class QuicMigrationTests
             });
         }
 
+        runner.Test("quic/migration: a connection accepted on a migrated peer's pin sends from the serving socket", () =>
+        {
+            // When a peer migrates, the owning reactor claims its new address with a connected
+            // socket (the pin). A NEW Initial from that same address then lands on the pin, not the
+            // wildcard - and the pin's fd is closed when its claim is released, so a connection that
+            // recorded the pin's fd would later send through a closed, maybe reused, descriptor.
+            // The accepted connection must send from the shared serving socket instead.
+            (string certPath, string keyPath) = TestCert.Ensure();
+            using var engine = new QuicEngine(certPath, keyPath, cidLength: 8, alpn: ["h3"]);
+
+            var accepts = new List<(Reactor R, int ArrivalFd, QuicConnection Conn)>();
+            var gate = new object();
+
+            (int serverPort, Reactor[] fleet) = TestServer.StartQuicSharded(4,
+                (Reactor r, in UdpDatagram d, in QuicCid cid) =>
+                {
+                    QuicConnection? conn = engine.CreateFactory()(r, in d, in cid);
+                    if (conn is not null)
+                    {
+                        lock (gate) { accepts.Add((r, d.SocketFd, conn)); }
+                    }
+                    return conn;
+                },
+                quicHandle: static (_, conn) => new Nghttp3Connection(conn).RunBufferedAsync(
+                    static _ => Nghttp3Response.Text("ok")),
+                routing: QuicRouting.Forward);
+
+            long Pins() { long n = 0; foreach (Reactor r in fleet) n += r.QuicPinsCreated; return n; }
+
+            // A reactor's first-ever accept is always on the wildcard (a pin needs a prior migrated
+            // connection on it), so the earliest arrival fd seen for a reactor IS its serving fd.
+            int ServingFdOf(Reactor r)
+            {
+                lock (gate)
+                {
+                    foreach ((Reactor rr, int fd, _) in accepts)
+                    {
+                        if (ReferenceEquals(rr, r)) return fd;
+                    }
+                    return -1;
+                }
+            }
+
+            using var forwarder = new FanInForwarder(serverPort);
+
+            using var first = new H3TestClient("127.0.0.1", forwarder.Port);
+            first.Connect();
+            Assert.True(first.CompleteHandshake(10_000), "the first handshake did not complete");
+            Assert.Equal(200, first.Request("GET", "/before", null, 10_000).Status);
+
+            // One address change, then settle: the single new address is the only one a claim can
+            // name, and the pin's owner is the reactor that accepted the first client - so the
+            // second client's Initial, arriving from that same address, lands on that pin.
+            forwarder.SwapUpstream();
+            int settle = 0;
+            while (Pins() == 0 && settle < 40)
+            {
+                settle++;
+                Assert.Equal(200, first.Request("GET", $"/settle-{settle}", null, 15_000).Status);
+            }
+            Assert.True(Pins() > 0, $"after {settle} requests no address was claimed, so there is no pin to accept onto");
+
+            int acceptsBefore = Count(accepts, gate);
+
+            using var second = new H3TestClient("127.0.0.1", forwarder.Port);
+            second.Connect();
+            Assert.True(second.CompleteHandshake(10_000),
+                "the second handshake did not complete - its Initial never reached a server");
+            Assert.Equal(200, second.Request("GET", "/second", null, 10_000).Status);
+
+            Assert.True(Count(accepts, gate) > acceptsBefore, "the second connection was never accepted");
+            (Reactor r2, int arrivalFd, QuicConnection secondConn) = Last(accepts, gate);
+            int servingFd = ServingFdOf(r2);
+
+            // The second Initial landed on a socket that is NOT r2's wildcard - the pin - or this
+            // proves nothing. (A fresh accept on the wildcard would make arrival == serving.)
+            Assert.True(arrivalFd != servingFd,
+                $"the second Initial arrived on r{r2.ShardIndex}'s serving fd {arrivalFd}, not a pin, so this proves nothing");
+            // The fix: it sends from the serving socket, not the pin it arrived on.
+            Assert.Equal(servingFd, secondConn.SocketFd);
+        });
+
         runner.Test("control: a fleet whose clients never move claims no addresses", () =>
         {
             // The cost side. The claim runs from the sweep, which visits every connection every
@@ -400,6 +482,100 @@ internal static class QuicMigrationTests
             Assert.Equal(200, client.Request("GET", "/one", null, 10_000).Status);
             Assert.Equal(200, client.Request("GET", "/two", null, 10_000).Status);
         });
+    }
+
+    private static int Count(List<(Reactor, int, QuicConnection)> list, object gate) { lock (gate) { return list.Count; } }
+    private static (Reactor R, int ArrivalFd, QuicConnection Conn) Last(List<(Reactor, int, QuicConnection)> list, object gate) { lock (gate) { return list[^1]; } }
+
+    /// <summary>
+    /// Like <see cref="UdpForwarder"/>, but fans several clients onto ONE upstream socket and
+    /// broadcasts each server reply to every client it has seen - so two connections appear to the
+    /// server to come from the same (swappable) source address. Each client's ngtcp2 drops the
+    /// datagrams whose connection id is not its own, so the broadcast is harmless.
+    /// </summary>
+    private sealed class FanInForwarder : IDisposable
+    {
+        private readonly Socket _front;
+        private readonly IPEndPoint _server;
+        private readonly Thread _pump;
+        private volatile bool _running = true;
+        private volatile Socket _upstream;
+        private readonly object _swapGate = new();
+        private readonly HashSet<EndPoint> _clients = [];
+
+        public int Port { get; }
+
+        public FanInForwarder(int serverPort)
+        {
+            _server = new IPEndPoint(IPAddress.Loopback, serverPort);
+            _front = new Socket(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp);
+            _front.Bind(new IPEndPoint(IPAddress.Loopback, 0));
+            _front.ReceiveTimeout = 50;
+            Port = ((IPEndPoint)_front.LocalEndPoint!).Port;
+            _upstream = NewUpstream();
+            _pump = new Thread(Pump) { IsBackground = true, Name = "fanin-forwarder" };
+            _pump.Start();
+        }
+
+        public void SwapUpstream()
+        {
+            lock (_swapGate)
+            {
+                Socket old = _upstream;
+                _upstream = NewUpstream();
+                old.Dispose();
+            }
+        }
+
+        private static Socket NewUpstream()
+        {
+            var s = new Socket(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp);
+            s.Bind(new IPEndPoint(IPAddress.Loopback, 0));
+            s.ReceiveTimeout = 50;
+            return s;
+        }
+
+        private void Pump()
+        {
+            byte[] buffer = new byte[2048];
+            while (_running)
+            {
+                Socket upstream = _upstream;
+                upstream.ReceiveTimeout = 50;
+
+                try
+                {
+                    EndPoint from = new IPEndPoint(IPAddress.Any, 0);
+                    int n = _front.ReceiveFrom(buffer, ref from);
+                    lock (_clients) { _clients.Add(from); }
+                    upstream.SendTo(buffer, 0, n, SocketFlags.None, _server);
+                }
+                catch (SocketException) { }
+                catch (ObjectDisposedException) { }
+
+                try
+                {
+                    EndPoint from = new IPEndPoint(IPAddress.Any, 0);
+                    int n = upstream.ReceiveFrom(buffer, ref from);
+                    EndPoint[] clients;
+                    lock (_clients) { clients = [.. _clients]; }
+                    foreach (EndPoint client in clients)
+                    {
+                        _front.SendTo(buffer, 0, n, SocketFlags.None, client);
+                    }
+                }
+                catch (SocketException) { }
+                catch (ObjectDisposedException) { }
+            }
+        }
+
+        public void Dispose()
+        {
+            _running = false;
+            _pump.Join(2_000);
+            _front.Dispose();
+            _upstream.Dispose();
+        }
     }
 
     /// <summary>

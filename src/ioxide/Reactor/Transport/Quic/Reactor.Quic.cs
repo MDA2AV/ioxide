@@ -141,7 +141,8 @@ public sealed unsafe partial class Reactor
         }
 
         freshQuicConnection.Reactor     = this;
-        freshQuicConnection.SocketFd    = datagram.SocketFd;
+        // The serving socket, not the arrival one: an Initial can land on a pin, whose fd closes when its claim is released.
+        freshQuicConnection.SocketFd    = _quicServingFd >= 0 ? _quicServingFd : datagram.SocketFd;
         freshQuicConnection.PeerAddr    = (nint)NativeMemory.Alloc(UdpNameCap);
         freshQuicConnection.PeerAddrLen = datagram.PeerAddrLen;
 
