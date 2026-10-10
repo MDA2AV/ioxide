@@ -92,16 +92,15 @@ public sealed partial class Http2Connection : IDisposable
 
         foreach (PendingRequest pending in _streams.Values)
         {
-            pending.Dispose();
+            pending.Abort();   // a dispatched handler may still be running on it
         }
         _streams.Clear();
 
         foreach (PendingRequest pending in _ready)
         {
-            pending.Dispose();
+            pending.Dispose();   // never dispatched: no handler will retire it
         }
         _ready.Clear();
-        _bodyWakes.Clear();
         _responseWindows.Clear();
 
         if (_inbound.Length > 0)
@@ -121,6 +120,9 @@ public sealed partial class Http2Connection : IDisposable
         // flush that would have completed its turn is never coming.
         _turnWaiter?.TrySetResult();
         _turnWaiter = null;
+
+        // Last: a handler parked on its body resumes into its end once everything above is released.
+        FireBodyWakes();
     }
 
     /// <summary>Serve until the peer goes away, answering each request with <paramref name="handler"/>.</summary>
