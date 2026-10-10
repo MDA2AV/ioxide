@@ -181,7 +181,7 @@ public sealed partial class Http2Connection
         {
             // Trailers for a request already being served: its arena backs what the handler holds,
             // so the block is decoded aside and dropped, and only its END_STREAM is kept.
-            _discardingStream = header.StreamId;
+            _discardBlock.StreamId = header.StreamId;
             DiscardHeaderBlock(header, block);
             if ((header.Flags & FrameFlags.EndStream) != 0)
             {
@@ -274,9 +274,7 @@ public sealed partial class Http2Connection
             return;
         }
 
-        // A request being served ended its block at dispatch, so nothing continues it (RFC 9113
-        // 6.10) - and its arena backs what the handler holds.
-        if (!_streams.TryGetValue(header.StreamId, out PendingRequest? pending) || pending.BodyReader is not null)
+        if (!_streams.TryGetValue(header.StreamId, out PendingRequest? pending))
         {
             GoAway(Http2Error.ProtocolError);
             return;
