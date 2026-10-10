@@ -152,7 +152,9 @@ public sealed partial class Http2Connection
 
         if (!_streams.TryGetValue(header.StreamId, out PendingRequest? pending))
         {
-            if (_streams.Count >= _options.MaxConcurrentStreams)
+            // An id at or below one already opened opens nothing (RFC 9113 5.1.1) - it is trailers
+            // for a request already answered - so it is decoded like a refused block, but not reset.
+            if (header.StreamId <= _highestStream || _streams.Count >= _options.MaxConcurrentStreams)
             {
                 // Past the limit we advertised. The block still has to be DECODED - HPACK is one
                 // stream across the whole connection, so skipping it would desynchronise every
@@ -173,6 +175,20 @@ public sealed partial class Http2Connection
                 SendWindow = _peerInitialStreamWindow,
             };
             _streams[header.StreamId] = pending;
+            _highestStream = header.StreamId;
+        }
+        else if (pending.BodyReader is { } reader)
+        {
+            // Trailers for a request already being served: its arena backs what the handler holds,
+            // so the block is decoded aside and dropped, and only its END_STREAM is kept.
+            _discardBlock.StreamId = header.StreamId;
+            DiscardHeaderBlock(header, block);
+            if ((header.Flags & FrameFlags.EndStream) != 0)
+            {
+                pending.RequestEnded = true;
+                reader.End();
+            }
+            return;
         }
 
         // A header block can span HEADERS + CONTINUATION frames, and HPACK cannot be decoded
@@ -203,8 +219,9 @@ public sealed partial class Http2Connection
     }
 
     /// <summary>
-    /// A refused stream's header block: decoded to keep the HPACK table in step with the peer, and
-    /// thrown away. Bounded like any other block, so refusing a stream cannot itself be the way in.
+    /// A header block that opens no request - a refused stream's, or trailers: decoded to keep the
+    /// HPACK table in step with the peer, and thrown away. Bounded like any other block, so refusing
+    /// a stream cannot itself be the way in.
     /// </summary>
     private void DiscardHeaderBlock(in FrameHeader header, ReadOnlySpan<byte> block)
     {
@@ -224,9 +241,12 @@ public sealed partial class Http2Connection
         int streamId = _discardBlock.StreamId;
         _discardBlock.StreamId = 0;
 
-        if (DecodeHeaderBlock(_discardBlock, discard: true))
+        // Only a new id was refused; nothing of another stream can arrive mid-block to move the
+        // highest. Trailers are not reset: REFUSED_STREAM says the request went unprocessed.
+        if (DecodeHeaderBlock(_discardBlock, discard: true) && streamId > _highestStream)
         {
             ResetStream(streamId, Http2Error.RefusedStream);
+            _highestStream = streamId;   // refused, but used
         }
     }
 
