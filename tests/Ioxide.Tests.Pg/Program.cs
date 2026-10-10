@@ -20,6 +20,7 @@ internal static class Program
         Console.WriteLine($"postgres {(up ? "up" : "down")} ({pg.Host}:{pg.Port})\n");
 
         PgTests.Register(runner, pg, up);
+        PgFramingTests.Register(runner);
         return runner.Summary();
     }
 }
