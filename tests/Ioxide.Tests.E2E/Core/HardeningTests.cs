@@ -9,7 +9,8 @@ namespace Ioxide.Tests;
 
 /// <summary>
 /// Regression tests for the hardening issues: #92 (gid-exhaustion reactor crash), #93 (-ENOBUFS
-/// teardown of healthy connections, both loop modes), #94 (faulted handlers leaking connections).
+/// teardown of healthy connections, both loop modes), #94 (faulted handlers leaking connections),
+/// #242 (a handler released twice, so teardown closed a number it had given back).
 /// Each of these failed (or killed the process) before its fix.
 /// </summary>
 internal static class HardeningTests
@@ -231,6 +232,21 @@ internal static class HardeningTests
             Assert.True(leaked <= 3, $"{leaked} fds leaked by 10 faulted handlers (CLOSE_WAIT sockets)");
         });
 
+        runner.Test("core: a handler that lets go and then throws is released once, so teardown closes no number it gave back (#242)", () =>
+        {
+            // try { throw } finally { DecRef }: released by the handler and again by the fault path, the
+            // connection was recycled under the reactor's ref, and its table slot outlived it.
+            int[] closed = NumbersClosedUnderTheirNextOwner(throwAfterLettingGo: true);
+            Assert.True(closed.Length == 0,
+                $"the server's teardown closed {string.Join(", ", closed)}, numbers its connections had already given back");
+        });
+
+        runner.Test("core: control: a handler that only lets go leaves a number it gave back alone at teardown", () =>
+        {
+            int[] closed = NumbersClosedUnderTheirNextOwner(throwAfterLettingGo: false);
+            Assert.True(closed.Length == 0, $"the server's teardown closed {string.Join(", ", closed)}");
+        });
+
         runner.Test("core: incremental accept past MaxConnections sheds, reactor survives (#92)", () =>
         {
             (int port, _, _) = TestServer.StartConfigured(Handlers.Raw,
@@ -381,6 +397,72 @@ internal static class HardeningTests
 
     [DllImport("libc", SetLastError = true)]
     private static extern int ioctl(int fd, ulong request, out int value);
+
+    [DllImport("libc", SetLastError = true)]
+    private static extern int fcntl(int fd, int command);
+
+    [DllImport("libc", SetLastError = true)]
+    private static extern int dup2(int from, int to);
+
+    private const int FGetFd = 1;
+
+    private static bool IsOpen(int fd) => fcntl(fd, FGetFd) != -1;
+
+    /// <summary>
+    /// Serve one connection with a handler that lets go (and then throws, or not), wait for the server
+    /// to close every connection it handled, give those numbers to someone else - /dev/null, dup2'd onto
+    /// them - and stop the server. Returns the numbers its teardown closed under their new owner.
+    /// </summary>
+    private static int[] NumbersClosedUnderTheirNextOwner(bool throwAfterLettingGo)
+    {
+        // Opened before any connection, so its number cannot be one of theirs.
+        int devNull = ioxide.Native.open("/dev/null", 0, 0);
+
+        // WaitForListen's probe connection runs the handler too, so every number it is given counts.
+        var handled = new System.Collections.Concurrent.ConcurrentQueue<int>();
+        int port = TestServer.Start(async (_, connection) =>
+        {
+            handled.Enqueue(connection.ClientFd);
+            try
+            {
+                await Task.CompletedTask;
+                if (throwAfterLettingGo)
+                {
+                    throw new InvalidOperationException("thrown after the handler let go (test)");
+                }
+            }
+            finally
+            {
+                connection.DecRef();
+            }
+        });
+
+        using (var client = new TcpClient())
+        {
+            client.Connect("127.0.0.1", port);
+            client.ReceiveTimeout = 5_000;
+            Assert.True(client.Client.Receive(new byte[1]) == 0, "the handler never let go");   // its FIN
+        }
+
+        int[] numbers = [.. handled.Distinct()];
+        Assert.True(SpinWait.SpinUntil(() => numbers.All(n => !IsOpen(n)), 5_000),
+            $"the server never closed {string.Join(", ", numbers.Where(IsOpen))}");
+
+        foreach (int number in numbers)
+        {
+            Assert.True(dup2(devNull, number) == number, $"dup2 onto {number} failed");
+        }
+        ioxide.Native.close(devNull);
+
+        TestServer.StopAll();   // the teardown under test
+
+        int[] closed = [.. numbers.Where(n => !IsOpen(n))];
+        foreach (int number in numbers.Except(closed))
+        {
+            ioxide.Native.close(number);
+        }
+        return closed;
+    }
 
     // Unique per connection and round, so a stale echo names the message it came from.
     private static byte[] Message(int connection, int round)
