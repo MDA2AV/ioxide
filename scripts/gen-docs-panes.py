@@ -386,10 +386,10 @@ PANES = {
         "is a property no amount of benchmarking substitutes for: nghttp2 is continuously fuzzed, "
         "patched by people whose job it is when the next HTTP/2 CVE lands, and has a decade of "
         "interop against every other stack. "
-        "It streams responses too now - see "
-        "<label for=\"tab-h2ngs\" class=\"ex-jump\">response streamed (nghttp2)</label> - though not "
-        "request bodies, where <label for=\"tab-h2sreq\" class=\"ex-jump\">the managed stack</label> "
-        "is still the only one. Measured as a client on this rig, the managed "
+        "It streams both directions too now - see "
+        "<label for=\"tab-h2ngs\" class=\"ex-jump\">response streamed (nghttp2)</label> and "
+        "<label for=\"tab-h2ngreq\" class=\"ex-jump\">request streamed (nghttp2)</label>. "
+        "Measured as a client on this rig, the managed "
         "stack runs <b>1.35&times;-1.39&times;</b> it. Take this one when you want the reference "
         "implementation's coverage; take "
         "<label for=\"tab-h2cs\" class=\"ex-jump\">buffered</label> for everything else."),
@@ -408,6 +408,21 @@ PANES = {
         "That difference is the whole reason this needed new native entry points "
         "(<code>ih2_submit_response_stream</code>, <code>ih2_stream_write</code>, "
         "<code>ih2_stream_close</code>) rather than being a C# change."),
+    "h2ngreq": (
+        "Http2/Nghttp2StreamedRequest", "HTTP/2 &middot; nghttp2, request streamed", "ioxide + ioxide.nghttp2",
+        ["head -c 50000000 /dev/zero | curl --http2-prior-knowledge --data-binary @- \\",
+         "  http://127.0.0.1:8080/upload"],
+        "The same streamed request body as "
+        "<label for=\"tab-h2sreq\" class=\"ex-jump\">the managed one</label>, and nearly the same "
+        "sample: <code>StreamRequestBodies</code> dispatches at the HEADERS and hands the handler an "
+        "<code>Nghttp2BodyReader</code>. What makes it hold is underneath. nghttp2 "
+        "credits DATA the moment it arrives unless told otherwise, which would put the bound back on "
+        "the whole body, so a streaming session runs with its automatic WINDOW_UPDATE off and the "
+        "reader hands credit back only as the handler <em>reads</em>. Every byte nghttp2 delivers is "
+        "then credited exactly once - read, left unread by a handler that returned, or on a stream "
+        "that was reset - because one that never is shrinks the connection window for every stream on "
+        "it. That took one native entry point (<code>ih2_consume</code>) and a flag on "
+        "<code>ih2_server_new</code>."),
     "h3": (
         "Http3/Nghttp3Request", "HTTP/3 &middot; request streamed (nghttp3)", "ioxide + ioxide.ngtcp2 + ioxide.nghttp3",
         ["curl --http3-only -k https://127.0.0.1:8443/"],

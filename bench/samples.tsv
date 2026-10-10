@@ -44,6 +44,7 @@ Http2/Nghttp2Buffered         h2c     8080  /           -                   -
 Http2/ManagedBuffered         h2c     8080  /           -                   -
 Http2/Nghttp2Response         h2c     8080  /           -                   PLAYGROUND_CHUNKS=8 PLAYGROUND_CHUNK_BYTES=1024
 Http2/ManagedStreamedRequest  h2c     8080  /           -                   -
+Http2/Nghttp2StreamedRequest  h2c     8080  /           -                   -
 Http2/ManagedStreamedResponse h2c     8080  /           -                   PLAYGROUND_CHUNKS=8 PLAYGROUND_CHUNK_BYTES=1024
 Http2/ManagedStreamedBoth     h2c     8080  /           -                   -
 Http2/Tls                     h2      8443  /           -                   -

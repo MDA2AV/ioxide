@@ -83,6 +83,7 @@ the handler code is the same either way.
 | [`Http2.ManagedStreamedResponse`](Http2/ManagedStreamedResponse/Program.cs) | 128 | The response body pushed as it is produced - each flush becomes a DATA frame. | `ioxide.http2` |
 | [`Http2.ManagedStreamedBoth`](Http2/ManagedStreamedBoth/Program.cs) | 136 | Both directions streamed in one handler. | `ioxide.http2` |
 | [`Http2.Nghttp2Response`](Http2/Nghttp2Response/Program.cs) | 105 | The streamed response on the reference implementation. | `ioxide.nghttp2` |
+| [`Http2.Nghttp2StreamedRequest`](Http2/Nghttp2StreamedRequest/Program.cs) | 119 | The streamed request body on the reference implementation. | `ioxide.nghttp2` |
 | [`Http2.Tls`](Http2/Tls/Program.cs) | 234 | h2 **and** http/1.1 on one port, chosen by ALPN. The HTTP/2 code is unchanged - only the pipe differs. | `ioxide.http2` |
 | [`Http2.Sni`](Http2/Sni/Program.cs) | 167 | A certificate per host name under h2, and why the handshake name and `:authority` are not the same question. | `ioxide.http2` |
 | [`Http2.Rotate`](Http2/Rotate/Program.cs) | 247 | Renewing a certificate on a running server: one `TlsService` per reactor, so every one of them has to be rotated. | `ioxide.http2` |

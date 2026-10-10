@@ -243,6 +243,7 @@ nav.top .links a.gh svg { display: block; }
 #tab-h2sboth:checked ~ .ex-menu label[for="tab-h2sboth"],
 #tab-h2ng:checked ~ .ex-menu label[for="tab-h2ng"],
 #tab-h2ngs:checked ~ .ex-menu label[for="tab-h2ngs"],
+#tab-h2ngreq:checked ~ .ex-menu label[for="tab-h2ngreq"],
 #tab-pxmatrix:checked ~ .ex-menu label[for="tab-pxmatrix"],
 #tab-pxh1toh1:checked ~ .ex-menu label[for="tab-pxh1toh1"],
 #tab-pxh1toh2:checked ~ .ex-menu label[for="tab-pxh1toh2"],
@@ -387,6 +388,7 @@ nav.top .links a.gh svg { display: block; }
 #tab-h2sboth:checked ~ .pane-h2sboth { display: block; }
 #tab-h2ng:checked ~ .pane-h2ng { display: block; }
 #tab-h2ngs:checked ~ .pane-h2ngs { display: block; }
+#tab-h2ngreq:checked ~ .pane-h2ngreq { display: block; }
 #tab-pxmatrix:checked ~ .pane-pxmatrix { display: block; }
 #tab-pxh1toh1:checked ~ .pane-pxh1toh1 { display: block; }
 #tab-pxh1toh2:checked ~ .pane-pxh1toh2 { display: block; }
@@ -536,6 +538,7 @@ nav.top .links a.gh svg { display: block; }
 #tab-h2sboth:checked ~ .ex-menu label[for="tab-h2sboth"],
 #tab-h2ng:checked ~ .ex-menu label[for="tab-h2ng"],
 #tab-h2ngs:checked ~ .ex-menu label[for="tab-h2ngs"],
+#tab-h2ngreq:checked ~ .ex-menu label[for="tab-h2ngreq"],
     #tab-pxmatrix:checked ~ .ex-menu label[for="tab-pxmatrix"],
   #tab-pxh1toh1:checked ~ .ex-menu label[for="tab-pxh1toh1"],
   #tab-pxh1toh2:checked ~ .ex-menu label[for="tab-pxh1toh2"],
