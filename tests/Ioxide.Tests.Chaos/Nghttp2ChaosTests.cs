@@ -169,6 +169,40 @@ internal static class Nghttp2ChaosTests
             AssertServes(port);
         });
 
+        runner.Test("nghttp2: a frame inside an open header block, or a CONTINUATION outside one, is a PROTOCOL_ERROR", () =>
+        {
+            int port = StartH2c();
+
+            Assert.Equal("HEADERS 1", H2cClient.Verdict(port, c =>
+            {
+                c.RequestHeadersOnly(streamId: 1, endHeaders: false);
+                c.WriteFrame(H2cClient.Continuation, flags: 0x4, streamId: 1, []);
+            }));
+
+            string verdicts = string.Join(", ",
+                H2cClient.Verdict(port, c =>
+                {
+                    c.RequestHeadersOnly(streamId: 1, endHeaders: false);
+                    c.Request(streamId: 3);
+                }),
+                H2cClient.Verdict(port, c =>
+                {
+                    c.RequestHeadersOnly(streamId: 1, endHeaders: false);
+                    c.WriteFrame(0x6, flags: 0, streamId: 0, new byte[8]);
+                    c.WriteFrame(H2cClient.Continuation, flags: 0x4, streamId: 1, []);
+                }),
+                H2cClient.Verdict(port, c =>
+                {
+                    c.RequestHeadersOnly(streamId: 1, endHeaders: true, endStream: false);
+                    c.WriteFrame(H2cClient.Continuation, flags: 0x4, streamId: 1, []);
+                    c.WriteFrame(0x0, flags: 0x1, streamId: 1, []);
+                }),
+                H2cClient.Verdict(port, c => c.WriteFrame(H2cClient.Continuation, flags: 0x4, streamId: 0, [])));
+
+            Assert.Equal(string.Join(", ", Enumerable.Repeat("GOAWAY PROTOCOL_ERROR", 4)), verdicts);
+            AssertServes(port);
+        });
+
         runner.Test("nghttp2: a CONTINUATION flood is refused, server survives", () =>
         {
             // The managed server needed MaxHeaderListSize taught to it. nghttp2 has defended

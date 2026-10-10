@@ -79,6 +79,19 @@ public sealed partial class Http2Connection
 
     private void Handle(in FrameHeader header, ReadOnlySpan<byte> payload)
     {
+        // RFC 9113 6.2, 6.10: a CONTINUATION comes only inside its header block, and nothing else does.
+        bool continuation = header.Type == FrameType.Continuation;
+        if (continuation != (_headerBlockStream != 0)
+            || (_headerBlockStream != 0 && header.StreamId != _headerBlockStream))
+        {
+            GoAway(Http2Error.ProtocolError);
+            return;
+        }
+        if (continuation || header.Type == FrameType.Headers)
+        {
+            _headerBlockStream = (header.Flags & FrameFlags.EndHeaders) != 0 ? 0 : header.StreamId;
+        }
+
         switch (header.Type)
         {
             case FrameType.Headers:      HandleHeaders(header, payload); break;
@@ -145,7 +158,7 @@ public sealed partial class Http2Connection
                 // stream across the whole connection, so skipping it would desynchronise every
                 // later request - but it decodes into a scratch that is thrown away, and the peer
                 // is told REFUSED_STREAM, which RFC 9113 8.7 makes safe for it to retry elsewhere.
-                _discardingStream = header.StreamId;
+                _discardBlock.StreamId = header.StreamId;
                 DiscardHeaderBlock(header, block);
                 return;
             }
@@ -208,8 +221,8 @@ public sealed partial class Http2Connection
             return;   // more CONTINUATION to come
         }
 
-        int streamId = _discardingStream;
-        _discardingStream = 0;
+        int streamId = _discardBlock.StreamId;
+        _discardBlock.StreamId = 0;
 
         if (DecodeHeaderBlock(_discardBlock, discard: true))
         {
@@ -235,7 +248,7 @@ public sealed partial class Http2Connection
 
     private void HandleContinuation(in FrameHeader header, ReadOnlySpan<byte> payload)
     {
-        if (header.StreamId == _discardingStream)
+        if (header.StreamId == _discardBlock.StreamId)
         {
             DiscardHeaderBlock(header, payload);
             return;
