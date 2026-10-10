@@ -71,6 +71,7 @@ public sealed unsafe partial class Reactor
         sqe->opcode    = IORING_OP_ACCEPT;
         sqe->ioprio    = IORING_ACCEPT_MULTISHOT;
         sqe->fd        = listenFd;
+        sqe->op_flags  = SOCK_CLOEXEC;   // accept_flags
         sqe->user_data = Tag(KindTcpAccept, 0, listenFd);
     }
 
@@ -425,7 +426,7 @@ public sealed unsafe partial class Reactor
 
     private static int OpenReusePortListener(ushort port, int backlog, bool dualStack)
     {
-        int fd = socket(dualStack ? AF_INET6 : AF_INET, SOCK_STREAM, 0);
+        int fd = socket(dualStack ? AF_INET6 : AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0);
         if (fd < 0)
         {
             throw new InvalidOperationException($"socket failed: {fd}");
