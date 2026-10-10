@@ -16,6 +16,8 @@ namespace Ioxide.Tests;
 /// </summary>
 internal static class Http2StreamedRequestTests
 {
+    private const uint Cancel = 0x8;
+
     public static void Register(Runner runner)
     {
         runner.Test("h2 streamed request: credit is returned on read, not on arrival", () =>
@@ -108,6 +110,105 @@ internal static class Http2StreamedRequestTests
 
             peer.Close(run);
         });
+
+        runner.Test("h2 streamed request: the request and the chunk a handler holds stay its own when the peer resets the stream under it", () =>
+        {
+            var holder = new Holder();
+
+            using var peer = new Peer(new Http2Options { StreamRequestBodies = true });
+            Task run = peer.Connection.RunBufferedAsync(holder.Handle);
+
+            peer.OpenRequest(streamId: 1, endStream: false);
+            peer.SendData(streamId: 1, bytes: 400, endStream: false);
+            peer.SendRst(streamId: 1, Cancel);                     // an aborted upload
+            holder.Release();
+
+            Assert.True(holder.Ended, "the reset never reached the handler's body");
+            Assert.True(holder.Verdict == Holder.Kept,
+                $"the peer reset the stream under a running handler, and {holder.Verdict}");
+            peer.Close(run);
+        });
+
+        runner.Test("h2 streamed request: the request and the chunk a handler holds stay its own when the server resets the stream under it", () =>
+        {
+            var holder = new Holder();
+
+            using var peer = new Peer(new Http2Options { StreamRequestBodies = true });
+            Task run = peer.Connection.RunBufferedAsync(holder.Handle);
+
+            peer.OpenRequest(streamId: 1, endStream: false);
+            peer.SendData(streamId: 1, bytes: 400, endStream: false);
+            peer.SendWindowUpdate(streamId: 1, int.MaxValue);      // past 2^31-1: the stream is reset (RFC 9113 6.9.1)
+            holder.Release();
+
+            Assert.True(holder.Ended, "the reset never reached the handler's body");
+            Assert.True(holder.Verdict == Holder.Kept,
+                $"the server reset the stream under a running handler, and {holder.Verdict}");
+            peer.Close(run);
+        });
+
+        runner.Test("h2 streamed request: the request and the chunk a handler holds stay its own when the connection goes away under it", () =>
+        {
+            var holder = new Holder();
+
+            using var peer = new Peer(new Http2Options { StreamRequestBodies = true });
+            Task run = peer.Connection.RunBufferedAsync(holder.Handle);
+
+            peer.OpenRequest(streamId: 1, endStream: false);
+            peer.SendData(streamId: 1, bytes: 400, endStream: false);
+            peer.Close(run);                                       // the client drops mid-upload
+            holder.Release();
+
+            Assert.True(holder.Ended, "the teardown never reached the handler's body");
+            Assert.True(holder.Verdict == Holder.Kept,
+                $"the connection went away under a running handler, and {holder.Verdict}");
+        });
+
+        runner.Test("h2 streamed request: a handler parked on its body when the peer resets the stream reads the end of it", () =>
+        {
+            var drainer = new Drainer();
+
+            using var peer = new Peer(new Http2Options { StreamRequestBodies = true });
+            Task run = peer.Connection.RunBufferedAsync(drainer.Handle);
+
+            peer.OpenRequest(streamId: 1, endStream: false);
+            peer.SendData(streamId: 1, bytes: 400, endStream: false);
+            Assert.Equal(400L, drainer.Read);                      // all of it: parked on the next read
+            peer.SendRst(streamId: 1, Cancel);
+
+            Assert.True(drainer.Ended, "the handler stayed parked on a body the peer had reset");
+            peer.Close(run);
+        });
+
+        runner.Test("h2 streamed request: a handler parked on its body when the connection goes away reads the end of it", () =>
+        {
+            var drainer = new Drainer();
+
+            using var peer = new Peer(new Http2Options { StreamRequestBodies = true });
+            Task run = peer.Connection.RunBufferedAsync(drainer.Handle);
+
+            peer.OpenRequest(streamId: 1, endStream: false);
+            peer.SendData(streamId: 1, bytes: 400, endStream: false);
+            Assert.Equal(400L, drainer.Read);                      // all of it: parked on the next read
+            peer.Close(run);
+
+            Assert.True(drainer.Ended, "the handler stayed parked on a body that stopped arriving");
+        });
+
+        runner.Test("h2 streamed request: a stream the peer resets in the same read as its headers reads an ended body, and the connection serves on", () =>
+        {
+            var drainer = new Drainer();
+
+            using var peer = new Peer(new Http2Options { StreamRequestBodies = true });
+            Task run = peer.Connection.RunBufferedAsync(drainer.Handle);
+
+            // Reset before its dispatch: the request is still waiting for its handler when the reset lands.
+            peer.OpenRequest(streamId: 1, endStream: false, resetWith: Cancel);
+
+            Assert.True(!run.IsCompleted, "the connection went down over one stream the peer reset");
+            Assert.True(drainer.Ended, "the handler never read the end of a body the peer had reset");
+            peer.Close(run);
+        });
     }
 
     /// <summary>
@@ -153,8 +254,11 @@ internal static class Http2StreamedRequestTests
             return total;
         }
 
-        /// <summary>Preface, an empty SETTINGS, then one indexed-HPACK POST that opens a stream.</summary>
-        public void OpenRequest(int streamId, bool endStream)
+        /// <summary>
+        /// Preface, an empty SETTINGS, then one indexed-HPACK POST that opens a stream - and with
+        /// <paramref name="resetWith"/>, the peer's RST_STREAM for it in the same read.
+        /// </summary>
+        public void OpenRequest(int streamId, bool endStream, uint? resetWith = null)
         {
             var bytes = new List<byte>("PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n"u8.ToArray());
             bytes.AddRange(Header(0, 0x4, 0, 0));
@@ -164,6 +268,10 @@ internal static class Http2StreamedRequestTests
             byte flags = (byte)(0x4 | (endStream ? 0x1 : 0));
             bytes.AddRange(Header(3, 0x1, flags, streamId));
             bytes.AddRange([0x83, 0x86, 0x84]);
+            if (resetWith is uint code)
+            {
+                bytes.AddRange(Word(0x3, streamId, code));
+            }
             Feed(bytes.ToArray());
         }
 
@@ -176,6 +284,10 @@ internal static class Http2StreamedRequestTests
 
         /// <summary>Let the connection loop run whatever the last feed made possible.</summary>
         public void Pump() => Feed([]);
+
+        public void SendRst(int streamId, uint code) => Feed(Word(0x3, streamId, code));
+
+        public void SendWindowUpdate(int streamId, int increment) => Feed(Word(0x8, streamId, (uint)increment));
 
         public void Close(Task run)
         {
@@ -203,6 +315,10 @@ internal static class Http2StreamedRequestTests
             type, flags,
             (byte)(streamId >> 24), (byte)(streamId >> 16), (byte)(streamId >> 8), (byte)streamId,
         ];
+
+        // A frame whose payload is one 32-bit word: RST_STREAM's error code, WINDOW_UPDATE's increment.
+        private static byte[] Word(byte type, int streamId, uint word) =>
+            [.. Header(4, type, 0, streamId), (byte)(word >> 24), (byte)(word >> 16), (byte)(word >> 8), (byte)word];
     }
 
     /// <summary>Keeps every byte the server wrote, so the test can walk the frames afterwards.</summary>
@@ -249,6 +365,88 @@ internal static class Http2StreamedRequestTests
             {
                 Array.Resize(ref _scratch, Math.Max(_scratch.Length * 2, _pending + Math.Max(sizeHint, 4096)));
             }
+        }
+    }
+
+    /// <summary>
+    /// A handler that takes its path and a chunk and holds both until the test releases it, then looks
+    /// for their buffers in the pool. The request is its own until it returns and the chunk until its
+    /// next read, whatever happened to the stream or the connection meanwhile.
+    /// </summary>
+    private sealed class Holder
+    {
+        public const string Kept = "its request was still its own and its chunk still its own";
+
+        private readonly TaskCompletionSource _release = new();
+
+        public string? Verdict { get; private set; }
+
+        public bool Ended { get; private set; }
+
+        public async ValueTask<Http2Response> Handle(Http2Request request)
+        {
+            ReadOnlyMemory<byte> path = request.Path;
+            ReadOnlyMemory<byte> chunk = await request.BodyReader!.ReadAsync();
+            await _release.Task;
+
+            Verdict = $"its request was {Fate(path)} and its chunk {Fate(chunk)}";
+            Ended = (await request.BodyReader.ReadAsync()).IsEmpty;
+            return Http2Response.Text("done");
+        }
+
+        public void Release() => _release.SetResult();
+
+        private static string Fate(ReadOnlyMemory<byte> memory)
+        {
+            if (!System.Runtime.InteropServices.MemoryMarshal.TryGetArray(memory, out ArraySegment<byte> segment)
+                || segment.Count == 0)
+            {
+                return "empty";   // nothing to look for, so no verdict either way
+            }
+            return InPool(segment.Array!) ? "back in the pool" : "still its own";
+        }
+
+        // Whether the pool hands this very array out again. Everything rented on the way goes back, but
+        // not the array itself: its owner still returns that one.
+        private static bool InPool(byte[] array)
+        {
+            var rented = new List<byte[]>();
+            bool found = false;
+            for (int i = 0; i < 64 && !found; i++)
+            {
+                byte[] next = ArrayPool<byte>.Shared.Rent(array.Length);
+                found = ReferenceEquals(next, array);
+                if (!found)
+                {
+                    rented.Add(next);
+                }
+            }
+
+            foreach (byte[] next in rented)
+            {
+                ArrayPool<byte>.Shared.Return(next);
+            }
+            return found;
+        }
+    }
+
+    /// <summary>A handler that reads its body to the end, counting what it read.</summary>
+    private sealed class Drainer
+    {
+        public long Read { get; private set; }
+
+        public bool Ended { get; private set; }
+
+        public async ValueTask<Http2Response> Handle(Http2Request request)
+        {
+            ReadOnlyMemory<byte> chunk;
+            while (!(chunk = await request.BodyReader!.ReadAsync()).IsEmpty)
+            {
+                Read += chunk.Length;
+            }
+
+            Ended = true;
+            return Http2Response.Text("done");
         }
     }
 }

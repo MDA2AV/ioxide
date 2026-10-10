@@ -492,7 +492,7 @@ public sealed partial class Http2Connection
         {
             if ((long)window + increment > int.MaxValue)
             {
-                _responseWindows.Remove(header.StreamId);   // first: the reset can resume this stream's writer inline
+                _responseWindows.Remove(header.StreamId);   // its writer, once woken, must find the stream gone
                 ResetStream(header.StreamId, Http2Error.FlowControlError);
             }
             else
@@ -539,7 +539,7 @@ public sealed partial class Http2Connection
     {
         if (_streams.Remove(header.StreamId, out PendingRequest? pending))
         {
-            pending.Dispose();   // the peer gave up; there is nobody to answer
+            pending.Abort();   // the peer gave up; there is nobody to answer
         }
 
         // A response in flight may send nothing more on the stream (RFC 9113 5.1), and a writer parked
@@ -687,10 +687,26 @@ public sealed partial class Http2Connection
         private ReadOnlyMemory<byte> Slice((int Offset, int Length) range)
             => range.Length == 0 ? default : _arena.AsMemory(range.Offset, range.Length);
 
+        /// <summary>
+        /// The stream is gone - reset, or its connection with it. A streamed request's handler may
+        /// still be running on the arena and the chunk it holds, so only its body ends here; its
+        /// retire disposes the rest.
+        /// </summary>
+        public void Abort()
+        {
+            if (BodyReader is { } reader)
+            {
+                reader.Abort();
+            }
+            else
+            {
+                Dispose();
+            }
+        }
+
         public void Dispose()
         {
-            // Recycles any chunk still queued and wakes a handler parked on a body that will
-            // never finish arriving.
+            // Never under a running handler (see Abort), so the chunk it held goes back too.
             BodyReader?.Drop();
             BodyReader = null;
 
