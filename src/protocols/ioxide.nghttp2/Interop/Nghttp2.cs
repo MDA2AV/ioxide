@@ -41,8 +41,15 @@ internal static unsafe partial class Nghttp2
     [DllImport(Lib)] internal static extern nint ih2_client_new(Callbacks callbacks, void* user);
 
     /// <summary>Create a server session and queue SETTINGS. The peer's connection preface is
-    /// validated out of <see cref="ih2_read"/>. Returns the handle, or 0 on failure.</summary>
-    [DllImport(Lib)] internal static extern nint ih2_server_new(Callbacks callbacks, void* user);
+    /// validated out of <see cref="ih2_read"/>. With <paramref name="manualFlow"/> non-zero nghttp2
+    /// sends no WINDOW_UPDATE for DATA by itself - every byte handed to OnData is credited once,
+    /// through <see cref="ih2_consume"/> - and OnStreamError reports every close, NO_ERROR included.
+    /// Returns the handle, or 0 on failure.</summary>
+    [DllImport(Lib)] internal static extern nint ih2_server_new(Callbacks callbacks, void* user, int manualFlow);
+
+    /// <summary>Credit DATA the application is done with: the connection window, and the stream's
+    /// while it is open. Manual flow control only. Returns 0, or a negative nghttp2 error.</summary>
+    [DllImport(Lib)] internal static extern int ih2_consume(nint connection, int streamId, nuint length);
 
     /// <summary>Answer the request on <paramref name="streamId"/>. Headers are packed the same way
     /// as a request's, <c>:status</c> first. The body is copied natively and freed on stream

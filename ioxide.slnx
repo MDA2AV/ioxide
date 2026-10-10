@@ -66,6 +66,7 @@
     <Project Path="Playground/Http2/ManagedBuffered/Playground.Http2.ManagedBuffered.csproj" />
     <Project Path="Playground/Http2/Nghttp2Buffered/Playground.Http2.Nghttp2Buffered.csproj" />
     <Project Path="Playground/Http2/Nghttp2Response/Playground.Http2.Nghttp2Response.csproj" />
+    <Project Path="Playground/Http2/Nghttp2StreamedRequest/Playground.Http2.Nghttp2StreamedRequest.csproj" />
     <Project Path="Playground/Http2/ManagedStreamedResponse/Playground.Http2.ManagedStreamedResponse.csproj" />
     <Project Path="Playground/Http2/ManagedStreamedRequest/Playground.Http2.ManagedStreamedRequest.csproj" />
     <Project Path="Playground/Http2/ManagedStreamedBoth/Playground.Http2.ManagedStreamedBoth.csproj" />

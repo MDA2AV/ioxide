@@ -96,7 +96,8 @@ public sealed partial class Nghttp2Connection : IDisposable
             OnStreamError  = &CallbackStreamError,
         };
 
-        _handle = Nghttp2.ih2_server_new(callbacks, (void*)GCHandle.ToIntPtr(_self));
+        _handle = Nghttp2.ih2_server_new(callbacks, (void*)GCHandle.ToIntPtr(_self),
+            _options.StreamRequestBodies ? 1 : 0);
         if (_handle == 0)
         {
             _failed = true;
@@ -126,9 +127,19 @@ public sealed partial class Nghttp2Connection : IDisposable
 
         foreach (PendingRequest pending in _pending.Values)
         {
-            pending.Dispose();
+            // A dispatched request's arena and held chunk back its running handler, which returns them;
+            // only its body ends here.
+            if (pending.BodyReader is { } reader)
+            {
+                reader.Abort();
+            }
+            else
+            {
+                pending.Dispose();
+            }
         }
         _pending.Clear();
+        FireBodyWakes();
     }
 
     /// <summary>
@@ -147,6 +158,12 @@ public sealed partial class Nghttp2Connection : IDisposable
 
         // The body passed MaxRequestBytes: the stream is reset once ih2_read unwinds, never dispatched.
         public bool Overflowed;
+
+        /// <summary>
+        /// Set once a streamed body's request is dispatched at its headers, and kept after its handler
+        /// returns: until the stream ends, its DATA and trailers still resolve here.
+        /// </summary>
+        public Nghttp2BodyReader? BodyReader;
 
         public int BodyLength => _body.Length;
 
@@ -206,12 +223,13 @@ public sealed partial class Nghttp2Connection : IDisposable
         {
             var request = new Nghttp2Request
             {
-                StreamId  = StreamId,
-                Method    = Slice(Method),
-                Path      = Slice(Path),
-                Scheme    = Slice(Scheme),
-                Authority = Slice(Authority),
-                Body      = Slice(_body),
+                StreamId   = StreamId,
+                Method     = Slice(Method),
+                Path       = Slice(Path),
+                Scheme     = Slice(Scheme),
+                Authority  = Slice(Authority),
+                Body       = Slice(_body),
+                BodyReader = BodyReader,
             };
 
             foreach ((int nameOffset, int nameLength, int valueOffset, int valueLength) in _fields)
@@ -228,6 +246,8 @@ public sealed partial class Nghttp2Connection : IDisposable
 
         public void Dispose()
         {
+            BodyReader?.Drop();   // what the handler left unread still owes the peer its credit
+
             _fields.Clear();
             if (_arena.Length > 0)
             {

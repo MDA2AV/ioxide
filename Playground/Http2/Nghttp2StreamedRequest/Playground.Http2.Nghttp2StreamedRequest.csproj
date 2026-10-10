@@ -1,0 +1,19 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net11.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <RootNamespace>Playground.Http2.Nghttp2StreamedRequest</RootNamespace>
+    <AssemblyName>Playground.Http2.Nghttp2StreamedRequest</AssemblyName>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="../../Shared/Playground.Shared.csproj" />
+    <ProjectReference Include="../../../src/ioxide/ioxide.csproj" />
+    <ProjectReference Include="../../../src/protocols/ioxide.nghttp2/ioxide.nghttp2.csproj" />
+  </ItemGroup>
+
+</Project>

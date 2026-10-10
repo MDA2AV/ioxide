@@ -65,7 +65,9 @@ public sealed partial class Nghttp2Connection
         try
         {
             Nghttp2Connection connection = From(user);
-            if (!connection._pending.TryGetValue(streamId, out PendingRequest? pending))
+
+            // A dispatched request's trailers are dropped: its arena backs memories a handler holds.
+            if (!connection._pending.TryGetValue(streamId, out PendingRequest? pending) || pending.BodyReader is not null)
             {
                 return;
             }
@@ -101,10 +103,15 @@ public sealed partial class Nghttp2Connection
     {
         try
         {
-            // Nothing to do: the request is not dispatchable until the stream ends, because a body may
-            // still follow. Registered so the shim's callback table is fully populated.
-            _ = user;
-            _ = streamId;
+            // A buffered request is not dispatchable until the stream ends, because a body may still
+            // follow. A streamed one is dispatched here, once: trailers end a header block too.
+            Nghttp2Connection connection = From(user);
+            if (connection._options.StreamRequestBodies &&
+                connection._pending.TryGetValue(streamId, out PendingRequest? pending) && pending.BodyReader is null)
+            {
+                pending.BodyReader = new Nghttp2BodyReader(connection, streamId);
+                connection._readyThisPass.Add(pending);
+            }
         }
         catch (Exception e)
         {
@@ -118,6 +125,18 @@ public sealed partial class Nghttp2Connection
         try
         {
             Nghttp2Connection connection = From(user);
+            if (connection._options.StreamRequestBodies)
+            {
+                // Each byte handed out here is credited exactly once: by the reader as its handler
+                // takes it, or right now when no handler ever will.
+                if (!connection._pending.TryGetValue(streamId, out PendingRequest? streamed) ||
+                    streamed.BodyReader?.Push(new ReadOnlySpan<byte>(data, (int)dataLength)) != true)
+                {
+                    connection.CreditBody(streamId, (int)dataLength);
+                }
+                return;
+            }
+
             if (connection._pending.TryGetValue(streamId, out PendingRequest? pending) && !pending.Overflowed)
             {
                 if (pending.BodyLength + (long)dataLength > connection._options.MaxRequestBytes)
@@ -143,10 +162,18 @@ public sealed partial class Nghttp2Connection
         {
             Nghttp2Connection connection = From(user);
 
-            // An overflowed request is in _readyThisPass already, waiting for its reset.
-            if (connection._pending.Remove(streamId, out PendingRequest? pending) && !pending.Overflowed)
+            // An overflowed request is in _readyThisPass already, waiting for its reset, and a
+            // streamed one was dispatched at its headers.
+            if (connection._pending.Remove(streamId, out PendingRequest? pending))
             {
-                connection._readyThisPass.Add(pending);
+                if (pending.BodyReader is not null)
+                {
+                    pending.BodyReader.End();
+                }
+                else if (!pending.Overflowed)
+                {
+                    connection._readyThisPass.Add(pending);
+                }
             }
         }
         catch (Exception e)
@@ -163,10 +190,18 @@ public sealed partial class Nghttp2Connection
             Nghttp2Connection connection = From(user);
 
             // The peer gave up on this stream (RST_STREAM, or the connection is going away). Drop what
-            // was assembled; there is nobody left to answer.
+            // was assembled; there is nobody left to answer. A streamed body's handler may still be
+            // running on its arena, so only the body ends here and the handler retires the rest.
             if (connection._pending.Remove(streamId, out PendingRequest? pending))
             {
-                pending.Dispose();
+                if (pending.BodyReader is not null)
+                {
+                    pending.BodyReader.Abort();
+                }
+                else
+                {
+                    pending.Dispose();
+                }
             }
             if (connection._writers.TryGetValue(streamId, out Nghttp2ResponseWriter? writer))
             {
