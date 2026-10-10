@@ -231,6 +231,7 @@ public sealed partial class Nghttp3Connection
             catch (Exception exception)
             {
                 Console.Error.WriteLine($"[ioxide.nghttp3] request handler faulted: {exception.GetBaseException().Message}");
+                RetireBody(request);
                 FailStreamed(streamId, writer, request);
                 HandlerExited(writer);
                 continue;
@@ -248,11 +249,13 @@ public sealed partial class Nghttp3Connection
         try
         {
             await pending;
+            RetireBody(request);
             await writer.CompleteAsync();
         }
         catch (Exception exception)
         {
             Console.Error.WriteLine($"[ioxide.nghttp3] request handler faulted: {exception.GetBaseException().Message}");
+            RetireBody(request);
             FailStreamed(writer.StreamId, writer, request);
             HandlerExited(writer);
             return;
