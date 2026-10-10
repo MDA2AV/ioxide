@@ -180,9 +180,12 @@ public sealed partial class Http2Connection : IDisposable
         }
         finally
         {
-            // A writer parked on flow-control credit will never be woken by a dead connection.
-            ReleaseAllCreditWaiters();
             Dispose();
+
+            // A writer parked on flow-control credit will never be woken by a dead connection. After
+            // Dispose, so it wakes into IsBroken: a clean close breaks nothing first, and a writer
+            // woken before it finds no credit and parks again for good.
+            ReleaseAllCreditWaiters();
         }
     }
 
