@@ -35,6 +35,11 @@ internal static class PgHandlers
                         await pool.QueryAsync("SELECT * FROM no_such_table");
                         Wire.Write(conn, 200, "unreachable");
                     }
+                    else if (path.StartsWith("/sleep/", StringComparison.Ordinal) && int.TryParse(path["/sleep/".Length..], out int seconds))
+                    {
+                        await pool.QueryAsync($"SELECT pg_sleep({seconds})");
+                        Wire.Write(conn, 200, "slept");
+                    }
                     else
                     {
                         PgResult result = await pool.QueryAsync("SELECT 42");
@@ -43,7 +48,7 @@ internal static class PgHandlers
                 }
                 catch (PgException e)
                 {
-                    Wire.Write(conn, 500, e.SqlState ?? "error");
+                    Wire.Write(conn, 500, e.SqlState ?? e.Message);
                 }
 
                 await conn.FlushAsync();

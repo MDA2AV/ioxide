@@ -305,6 +305,11 @@ public sealed class PgConnection : IDisposable
             _sending = false;
             FailAll(ex);
         }
+
+        if (IsBroken)
+        {
+            Dispose();   // a Dispose that found this send in flight left the teardown to here
+        }
     }
 
     // Move [from, from+length) to the front of the send buffer. CopyTo is memmove-safe for the
@@ -387,6 +392,11 @@ public sealed class PgConnection : IDisposable
             _reading = false;
             FailAll(ex is PgException p ? p : new PgException(ex.Message));
         }
+
+        if (IsBroken)
+        {
+            Dispose();   // a Dispose that found this recv in flight left the teardown to here
+        }
     }
 
     private void FailAll(Exception ex)
@@ -400,7 +410,7 @@ public sealed class PgConnection : IDisposable
 
     // Reactor-thread (pool ticker): if the oldest in-flight command is older than the timeout, tear
     // the connection down - fail its waiters with a diagnostic error and mark it broken. The pool then
-    // disposes it, and closing the fd cancels the stuck ring recv/send. Returns true if it timed out.
+    // disposes it, and shutting the socket down completes the stuck ring recv/send. Returns true if it timed out.
     internal bool CheckTimeout(long nowMs, int timeoutMs, string host, ushort port)
     {
         if (timeoutMs <= 0 || _inflight.Count == 0)
@@ -677,6 +687,15 @@ public sealed class PgConnection : IDisposable
 
     public unsafe void Dispose()
     {
+        IsBroken = true;
+
+        // close() would leave an armed op holding the socket open and using the buffers freed below.
+        if (_reading || _sending)
+        {
+            Native.shutdown(_socket.Fd, Native.SHUT_RDWR);
+            return;
+        }
+
         _socket.Dispose();
 
         if (_send != 0)

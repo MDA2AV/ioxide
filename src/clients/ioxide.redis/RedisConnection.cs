@@ -211,6 +211,11 @@ public sealed partial class RedisConnection : IDisposable
             _sending = false;
             FailAll(ex);
         }
+
+        if (IsBroken)
+        {
+            Dispose();   // a Dispose that found this send in flight left the teardown to here
+        }
     }
 
     private async Task ReaderLoopAsync()
@@ -230,6 +235,11 @@ public sealed partial class RedisConnection : IDisposable
             _reading = false;
             FailAll(ex);
         }
+
+        if (IsBroken)
+        {
+            Dispose();   // a Dispose that found this recv in flight left the teardown to here
+        }
     }
 
     private void FailAll(Exception ex)
@@ -243,7 +253,7 @@ public sealed partial class RedisConnection : IDisposable
 
     // Reactor-thread (pool ticker): tear the connection down if its oldest in-flight command is
     // overdue - fail waiters with a diagnostic error and mark it broken; the pool disposes it, and
-    // closing the fd cancels the stuck ring recv/send. Returns true if it timed out.
+    // shutting the socket down completes the stuck ring recv/send. Returns true if it timed out.
     internal bool CheckTimeout(long nowMs, int timeoutMs, string host, ushort port)
     {
         if (timeoutMs <= 0 || _inflight.Count == 0)
@@ -356,6 +366,15 @@ public sealed partial class RedisConnection : IDisposable
 
     public unsafe void Dispose()
     {
+        IsBroken = true;
+
+        // close() would leave an armed op holding the socket open and using the buffers freed below.
+        if (_reading || _sending)
+        {
+            Native.shutdown(_socket.Fd, Native.SHUT_RDWR);
+            return;
+        }
+
         _socket.Dispose();
         if (_send != 0)
         {

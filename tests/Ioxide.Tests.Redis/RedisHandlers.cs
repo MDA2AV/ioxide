@@ -31,6 +31,18 @@ internal static class RedisHandlers
                         new RedisCommand("GET", "e2e:p"));
                     Wire.Write(conn, 200, replies[2].AsString() ?? "");
                 }
+                else if (path.StartsWith("/block/", StringComparison.Ordinal) && int.TryParse(path["/block/".Length..], out int seconds))
+                {
+                    try
+                    {
+                        await pool.ExecuteAsync("BLPOP", "e2e:never-pushed", seconds);   // nothing pushes it: blocks the full time
+                        Wire.Write(conn, 200, "unblocked");
+                    }
+                    catch (RedisException e)
+                    {
+                        Wire.Write(conn, 500, e.Message);
+                    }
+                }
                 else
                 {
                     await pool.SetExAsync("e2e:k", "hello", 60);
