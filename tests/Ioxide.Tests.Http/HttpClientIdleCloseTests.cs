@@ -119,13 +119,13 @@ internal static class HttpClientIdleCloseTests
         return TestServer.Start(TlsClientTests.ProxyHandler, onStart: reactor => HttpClientPool.Start(reactor, options));
     }
 
-    private const string Established = "01";
-    private const string CloseWait = "08";   // the origin's FIN has reached the socket
+    internal const string Established = "01";
+    internal const string CloseWait = "08";   // the origin's FIN has reached the socket
 
     // Waiting on the pooled socket's own state, by both of its ports, rather than sleeping, is what
     // makes "closed while idle" and "closed by the pool" true when the next request goes. Gone counts
     // as null.
-    private static void WaitForSocket(int originPort, int clientPort, Func<string?, bool> condition, string failure)
+    internal static void WaitForSocket(int originPort, int clientPort, Func<string?, bool> condition, string failure)
     {
         long deadlineMs = Environment.TickCount64 + 10_000;
         while (!condition(Sockets().FirstOrDefault(s => s.Local == clientPort && s.Remote == originPort).State))
@@ -135,7 +135,7 @@ internal static class HttpClientIdleCloseTests
         }
     }
 
-    private static IEnumerable<(int Local, int Remote, string State)> Sockets()
+    internal static IEnumerable<(int Local, int Remote, string State)> Sockets()
         => File.ReadLines("/proc/net/tcp").Skip(1)
             .Select(line => line.Split(' ', StringSplitOptions.RemoveEmptyEntries))
             .Select(fields => (Port(fields[1]), Port(fields[2]), fields[3]));

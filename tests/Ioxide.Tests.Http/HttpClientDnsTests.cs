@@ -57,23 +57,24 @@ internal static class HttpClientDnsTests
         });
     }
 
-    private static int StartProxy(HttpClientOptions options)
+    internal static int StartProxy(HttpClientOptions options)
         => TestServer.Start(TlsClientTests.ProxyHandler, onStart: reactor => HttpClientPool.Start(reactor, options));
 
     // ClientTransport on a reactor of its own, with the outcome handed back to the test thread.
-    private static string ConnectOnReactor(IPAddress[] addresses, int port)
+    internal static string ConnectOnReactor(IPAddress[] addresses, int port, int connectTimeoutMs = 10_000)
     {
         var outcome = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
         TestServer.Start((_, connection) => { connection.DecRef(); return Task.CompletedTask; },
             onStart: reactor => _ = ConnectAsync(reactor));
-        Assert.True(outcome.Task.Wait(10_000), "the connect never finished");
+        Assert.True(outcome.Task.Wait(connectTimeoutMs + 10_000), "the connect never finished");
         return outcome.Task.Result;
 
         async Task ConnectAsync(Reactor reactor)
         {
             try
             {
-                IClientTransport transport = await ClientTransport.ConnectAsync(reactor, addresses, (ushort)port, tls: null);
+                IClientTransport transport = await ClientTransport.ConnectAsync(reactor, addresses, (ushort)port,
+                    tls: null, serverName: null, connectTimeoutMs);
                 transport.Dispose();
                 outcome.TrySetResult("connected");
             }

@@ -32,21 +32,26 @@ public sealed class HttpClientPool : IDisposable
     private int _ticksToSweep; // reactor ticks until the next sweep (SweepIntervalMs)
     private bool _disposed;
 
+    // Warm: PoolSize connections opened up front and kept that way, the long-lived upstream shape.
+    // Otherwise connections open as requests need them, which is how RingHttpClient's pools run.
+    private readonly bool _warm;
+
     // Why the most recent connect failed, so an acquire timeout can say something more useful than
     // that it waited. Cleared on success.
     private string? _lastOpenFailure;
 
-    private HttpClientPool(IRingHost host, HttpClientOptions options)
+    private HttpClientPool(IRingHost host, HttpClientOptions options, bool warm)
     {
         _host = host;
         _options = options;
+        _warm = warm;
     }
 
     /// <summary>Open <see cref="HttpClientOptions.PoolSize"/> connections and register the pool as
     /// a reactor service.</summary>
     public static HttpClientPool Start(Reactor reactor, HttpClientOptions options)
     {
-        var pool = new HttpClientPool(reactor, options);
+        var pool = new HttpClientPool(reactor, options, warm: true);
         for (int i = 0; i < options.PoolSize; i++)
         {
             pool.StartOpen();
@@ -56,11 +61,29 @@ public sealed class HttpClientPool : IDisposable
         return pool;
     }
 
+    // A pool that opens nothing until asked and is swept by its owner, not a ticker of its own.
+    internal static HttpClientPool CreateOnDemand(IRingHost host, HttpClientOptions options)
+        => new(host, options, warm: false);
+
     /// <summary>Connections currently open or opening (for diagnostics).</summary>
     public int ConnectionCount => _live;
 
     /// <summary>Connections sitting idle in the pool right now.</summary>
     public int IdleCount => _idle.Count;
+
+    // Nothing open, opening or waiting: an on-demand pool its owner can drop.
+    internal bool IsUnused => _live == 0 && !AnyWaiter();
+
+    // A waiter that timed out stays queued until a Release passes it; one at the head is dropped
+    // here, so a pool with nobody waiting does not open connections for them.
+    private bool AnyWaiter()
+    {
+        while (_waiters.Count > 0 && _waiters.Peek().Task.IsCompleted)
+        {
+            _waiters.Dequeue();
+        }
+        return _waiters.Count > 0;
+    }
 
     // --- request API ---------------------------------------------------------------------------
 
@@ -126,8 +149,9 @@ public sealed class HttpClientPool : IDisposable
 
             // Honour the same backoff gate Sweep() does. Without it, a dead origin turns this loop
             // into a connect() storm: open, refuse, wake, reopen - thousands of syscalls a second
-            // on the reactor thread. Behind the gate the ticker paces the retries instead.
-            if (_live < _options.PoolSize && _opening == 0 && Native.MonotonicMs >= _reopenAtMs)
+            // on the reactor thread. Behind the gate the ticker paces the retries instead. One open
+            // in flight per waiting request, so a burst that finds no connection opens in parallel.
+            if (_live < _options.PoolSize && _opening <= _waiters.Count && Native.MonotonicMs >= _reopenAtMs)
             {
                 StartOpen();
             }
@@ -185,8 +209,10 @@ public sealed class HttpClientPool : IDisposable
     private void Release(HttpClientConnection connection)
     {
         // A disposed pool takes nothing back: this is how connections still checked out at Dispose
-        // are closed - whenever their request finishes.
-        if (connection.IsBroken || _disposed)
+        // are closed - whenever their request finishes. Nor one past MaxLifetimeMs, whose replacement
+        // resolves the origin again.
+        if (connection.IsBroken || _disposed
+            || (_options.MaxLifetimeMs > 0 && Native.MonotonicMs - connection.OpenedAtMs >= _options.MaxLifetimeMs))
         {
             Discard(connection);
             return;
@@ -263,9 +289,10 @@ public sealed class HttpClientPool : IDisposable
         }
     }
 
-    // Ticker, every SweepIntervalMs: drop idle connections that are broken, closed by the origin or
-    // idle past IdleTimeoutMs, and replenish toward PoolSize behind a jittered backoff.
-    private void Sweep()
+    // Ticker, every SweepIntervalMs: drop idle connections that are broken, closed by the origin, idle
+    // past IdleTimeoutMs or older than MaxLifetimeMs, and replenish behind a jittered backoff - toward
+    // PoolSize when warm, for waiting requests only when on demand.
+    internal void Sweep()
     {
         if (_disposed)
         {
@@ -286,6 +313,7 @@ public sealed class HttpClientPool : IDisposable
             HttpClientConnection connection = _idle[i];
             if (connection.IsBroken
                 || (_options.IdleTimeoutMs > 0 && nowMs - connection.IdleSinceMs >= _options.IdleTimeoutMs)
+                || (_options.MaxLifetimeMs > 0 && nowMs - connection.OpenedAtMs >= _options.MaxLifetimeMs)
                 || connection.ClosedWhileIdle())
             {
                 _idle.RemoveAt(i);
@@ -293,7 +321,7 @@ public sealed class HttpClientPool : IDisposable
             }
         }
 
-        if (_live < _options.PoolSize && _opening == 0 && nowMs >= _reopenAtMs)
+        if (_live < _options.PoolSize && _opening == 0 && nowMs >= _reopenAtMs && (_warm || AnyWaiter()))
         {
             StartOpen();
         }

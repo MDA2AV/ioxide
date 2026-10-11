@@ -17,7 +17,7 @@ public sealed unsafe class RingSocket : IDisposable
     private readonly RingOpSource _rx = new();
     private readonly RingOpSource _tx = new();
 
-    private sockaddr_in* _connectAddr;   // must outlive the connect op
+    private sockaddr_in* _connectAddr;   // must outlive the connect op; sized for an IPv6 peer
     private int _disposed;
 
     public int Fd { get; }
@@ -28,10 +28,11 @@ public sealed unsafe class RingSocket : IDisposable
         Fd = fd;
     }
 
-    /// <summary>Create an IPv4 TCP socket (TCP_NODELAY) ready to connect over the ring.</summary>
-    public static RingSocket CreateTcp(IRingHost host)
+    /// <summary>Create a TCP socket (TCP_NODELAY) ready to connect over the ring: IPv4, or IPv6 when
+    /// <paramref name="family"/> asks for it.</summary>
+    public static RingSocket CreateTcp(IRingHost host, AddressFamily family = AddressFamily.InterNetwork)
     {
-        int fd = socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0);
+        int fd = socket(family == AddressFamily.InterNetworkV6 ? AF_INET6 : AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0);
         if (fd < 0)
         {
             throw new InvalidOperationException($"socket() failed: {fd}");
@@ -53,20 +54,40 @@ public sealed unsafe class RingSocket : IDisposable
             throw new ArgumentException($"'{ipv4}' is not an IPv4 literal.", nameof(ipv4));
         }
 
+        return ConnectAsync(address, port);
+    }
+
+    /// <summary>Connect on the ring to an IPv4 or IPv6 address, of the family the socket was created for.</summary>
+    public ValueTask<int> ConnectAsync(IPAddress address, ushort port)
+    {
         if (_connectAddr == null)
         {
-            _connectAddr = (sockaddr_in*)NativeMemory.AllocZeroed((nuint)sizeof(sockaddr_in));
+            _connectAddr = (sockaddr_in*)NativeMemory.AllocZeroed((nuint)sizeof(sockaddr_in6));
         }
 
-        Span<byte> bytes = stackalloc byte[4];
-        address.TryWriteBytes(bytes, out _);
+        int length;
+        if (address.AddressFamily == AddressFamily.InterNetworkV6)
+        {
+            var v6 = (sockaddr_in6*)_connectAddr;
+            v6->sin6_family = AF_INET6;
+            v6->sin6_port = Htons(port);
+            address.TryWriteBytes(new Span<byte>(v6->sin6_addr, 16), out _);
+            v6->sin6_scope_id = (uint)address.ScopeId;
+            length = sizeof(sockaddr_in6);
+        }
+        else
+        {
+            Span<byte> bytes = stackalloc byte[4];
+            address.TryWriteBytes(bytes, out _);
 
-        _connectAddr->sin_family = AF_INET;
-        _connectAddr->sin_port = Htons(port);
-        _connectAddr->sin_addr.s_addr = MemoryMarshal.Read<uint>(bytes);   // already network byte order
+            _connectAddr->sin_family = AF_INET;
+            _connectAddr->sin_port = Htons(port);
+            _connectAddr->sin_addr.s_addr = MemoryMarshal.Read<uint>(bytes);   // already network byte order
+            length = sizeof(sockaddr_in);
+        }
 
         ValueTask<int> pending = _rx.Prepare();
-        _host.SubmitConnect(Fd, (nint)_connectAddr, sizeof(sockaddr_in), _rx);
+        _host.SubmitConnect(Fd, (nint)_connectAddr, length, _rx);
         return pending;
     }
 

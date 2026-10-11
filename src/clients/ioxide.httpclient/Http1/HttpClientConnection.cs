@@ -57,6 +57,9 @@ internal sealed class HttpClientConnection : IDisposable
     /// <summary>When the pool last put this connection on its idle list.</summary>
     public long IdleSinceMs { get; set; }
 
+    /// <summary>When this connection was opened, for <see cref="HttpClientOptions.MaxLifetimeMs"/>.</summary>
+    public long OpenedAtMs { get; } = Native.MonotonicMs;
+
     /// <summary>Whether the origin closed or reset this connection while it sat in the pool, where
     /// nothing reads it. One poll, from the pool's sweep rather than per request.</summary>
     public unsafe bool ClosedWhileIdle()
@@ -93,12 +96,14 @@ internal sealed class HttpClientConnection : IDisposable
 
     public static async Task<HttpClientConnection> ConnectAsync(IRingHost host, HttpClientOptions options)
     {
-        // "host: <authority>\r\n" is fixed for the connection's life - build it once.
-        string authority = options.Port is 80 or 443 ? options.Host : $"{options.Host}:{options.Port}";
+        // "host: <authority>\r\n" is fixed for the connection's life - build it once. An IPv6 address
+        // goes in brackets, and the port only when it is not the scheme's own.
+        string name = options.Host.Contains(':') && options.Host[0] != '[' ? $"[{options.Host}]" : options.Host;
+        string authority = options.Port == (options.Tls is null ? 80 : 443) ? name : $"{name}:{options.Port}";
         byte[] hostHeaderLine = System.Text.Encoding.ASCII.GetBytes($"host: {authority}\r\n");
 
         IClientTransport transport = await ClientTransport.ConnectAsync(
-            host, options.Host, options.Port, options.Tls);
+            host, options.Host, options.Port, options.Tls, options.ConnectTimeoutMs);
 
         return new HttpClientConnection(options, transport, hostHeaderLine);
     }

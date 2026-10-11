@@ -63,28 +63,49 @@ internal sealed class TlsClientTransport(TlsClientStream stream) : IClientTransp
 
 /// <summary>
 /// Connect a transport for an origin: plain TCP, or TCP plus a TLS handshake when the caller
-/// supplied <see cref="TlsClientOptions"/>. The origin is an IPv4 address or a name to resolve.
+/// supplied <see cref="TlsClientOptions"/>. The origin is an IPv4 or IPv6 address, or a name to resolve.
 /// </summary>
 internal static class ClientTransport
 {
-    public static async ValueTask<IClientTransport> ConnectAsync(IRingHost host, string origin, ushort port,
-        TlsClientContext? tls)
-        => await ConnectAsync(host, await ResolveAsync(origin), port, tls);
+    private const int TCP_USER_TIMEOUT = 18;
+    private const int ETIMEDOUT = 110;
 
-    // Each address in the resolver's order, the next only when a connect fails. A failed TLS handshake
-    // is not retried elsewhere: the origin was reached and refused.
+    public static async ValueTask<IClientTransport> ConnectAsync(IRingHost host, string origin, ushort port,
+        TlsClientContext? tls, int connectTimeoutMs)
+    {
+        string name = Unbracketed(origin);
+        string? serverName = ServerNameFor(tls, name);
+        return await ConnectAsync(host, await ResolveAsync(name), port, tls, serverName, connectTimeoutMs);
+    }
+
+    // Each address in the resolver's order, the next only when a connect fails or times out. A failed TLS
+    // handshake is not retried elsewhere: the origin was reached and refused.
     internal static async ValueTask<IClientTransport> ConnectAsync(IRingHost host, IPAddress[] addresses,
-        ushort port, TlsClientContext? tls)
+        ushort port, TlsClientContext? tls, string? serverName, int connectTimeoutMs)
     {
         for (int i = 0; ; i++)
         {
-            RingSocket socket = RingSocket.CreateTcp(host);
+            IPAddress address = addresses[i];
+            RingSocket socket = RingSocket.CreateTcp(host, address.AddressFamily);
             try
             {
-                int result = await socket.ConnectAsync(addresses[i].ToString(), port);
+                // The kernel's own bound on the SYN retries, cleared once connected: no timer to race the connect.
+                if (connectTimeoutMs > 0)
+                {
+                    SetUserTimeout(socket.Fd, connectTimeoutMs);
+                }
+
+                int result = await socket.ConnectAsync(address, port);
                 if (result < 0)
                 {
-                    throw new HttpClientException($"connect to {addresses[i]}:{port} failed: errno {-result}");
+                    throw new HttpClientException(result == -ETIMEDOUT && connectTimeoutMs > 0
+                        ? $"connect to {new IPEndPoint(address, port)} timed out after {connectTimeoutMs} ms"
+                        : $"connect to {new IPEndPoint(address, port)} failed: errno {-result}");
+                }
+
+                if (connectTimeoutMs > 0)
+                {
+                    SetUserTimeout(socket.Fd, 0);
                 }
             }
             catch (HttpClientException) when (i < addresses.Length - 1)
@@ -105,18 +126,16 @@ internal static class ClientTransport
 
             // The TLS stream takes ownership of the socket, including closing it if the handshake
             // fails, so there is nothing to unwind here.
-            TlsClientStream stream = await tls.ConnectAsync(socket);
+            TlsClientStream stream = await tls.ConnectAsync(socket, serverName!);
             return new TlsClientTransport(stream);
         }
     }
 
-    private static async ValueTask<IPAddress[]> ResolveAsync(string origin)
+    private static async ValueTask<IPAddress[]> ResolveAsync(string name)
     {
-        if (IPAddress.TryParse(origin, out IPAddress? literal))
+        if (IPAddress.TryParse(name, out IPAddress? literal))
         {
-            return literal.AddressFamily == AddressFamily.InterNetwork
-                ? [literal]
-                : throw new HttpClientException($"{origin} is not an IPv4 address; the client connects over IPv4 only");
+            return [literal];
         }
 
         // The system resolver (hosts file, resolv.conf) runs off the reactor thread; the await comes
@@ -124,15 +143,33 @@ internal static class ClientTransport
         IPAddress[] found;
         try
         {
-            found = await Dns.GetHostAddressesAsync(origin, AddressFamily.InterNetwork);
+            found = await Dns.GetHostAddressesAsync(name);
         }
         catch (SocketException e)
         {
-            throw new HttpClientException($"could not resolve {origin}: {e.Message}", e);
+            throw new HttpClientException($"could not resolve {name}: {e.Message}", e);
         }
 
-        return found.Length > 0
-            ? found
-            : throw new HttpClientException($"{origin} has no IPv4 address; the client connects over IPv4 only");
+        return found.Length > 0 ? found : throw new HttpClientException($"{name} resolved to no address");
     }
+
+    // The name the certificate is checked against: the configured one, else the one the connection
+    // was opened to. An address alone gives nothing to check.
+    private static string? ServerNameFor(TlsClientContext? tls, string name)
+    {
+        if (tls is null || tls.Options.ServerName is { } configured)
+        {
+            return tls?.Options.ServerName;
+        }
+
+        return IPAddress.TryParse(name, out _)
+            ? throw new HttpClientException(
+                $"connecting to {name} by address: set TlsClientOptions.ServerName to the name its certificate carries")
+            : name;
+    }
+
+    private static unsafe void SetUserTimeout(int fd, int ms)
+        => Native.setsockopt(fd, Native.IPPROTO_TCP, TCP_USER_TIMEOUT, &ms, sizeof(int));
+
+    internal static string Unbracketed(string origin) => origin is ['[', .., ']'] ? origin[1..^1] : origin;
 }
