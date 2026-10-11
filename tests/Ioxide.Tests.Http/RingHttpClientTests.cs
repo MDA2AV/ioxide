@@ -120,6 +120,18 @@ internal static class RingHttpClientTests
             Assert.True(elapsed < 900, $"six requests took {elapsed} ms, so their connections did not open together");
         });
 
+        runner.Test("ring client: an https URL by address fails with what to set, not with a dropped pool", () =>
+        {
+            // This connect fails inside the sweep's own refill, which empties the waiter queue - the
+            // pool must not look unused while the request it woke has yet to queue again.
+            using TlsTestOrigin origin = TlsTestOrigin.Start("http/1.1");
+            int client = StartClientHost(new RingHttpClientOptions { Pool = new HttpClientOptions { AcquireTimeoutMs = 1_000 } });
+
+            string body = Get(client, "get", $"https://127.0.0.1:{origin.Port}/", timeoutMs: 20_000);
+            Assert.True(body.StartsWith("599|") && body.Contains("set TlsClientOptions.ServerName"),
+                $"expected the missing name to be named, got: {body}");
+        });
+
         runner.Test("ring client: a request to an origin that refuses fails with the refusal", () =>
         {
             // A failed open wakes the requests waiting on it; the pool must still be there when they look again.
