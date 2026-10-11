@@ -15,6 +15,7 @@ internal static class Program
 
         HttpClientTests.Register(runner);
         HttpClientIdleCloseTests.Register(runner);
+        HttpClientDnsTests.Register(runner);
         TlsClientTests.Register(runner);
 
         // Areas reserved for the failing-test review pass; empty until one lands.
