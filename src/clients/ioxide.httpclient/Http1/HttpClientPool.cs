@@ -30,6 +30,7 @@ public sealed class HttpClientPool : IDisposable
     private int _opening;
     private long _reopenAtMs; // jittered backoff gate after a failed connect
     private int _ticksToSweep; // reactor ticks until the next sweep (SweepIntervalMs)
+    private int _requests;     // inside SendAsync: acquiring, waiting or sending
     private bool _disposed;
 
     // Warm: PoolSize connections opened up front and kept that way, the long-lived upstream shape.
@@ -71,8 +72,9 @@ public sealed class HttpClientPool : IDisposable
     /// <summary>Connections sitting idle in the pool right now.</summary>
     public int IdleCount => _idle.Count;
 
-    // Nothing open, opening or waiting: an on-demand pool its owner can drop.
-    internal bool IsUnused => _live == 0 && !AnyWaiter();
+    // Nothing open or opening, and no request inside: an on-demand pool its owner can drop. Not the
+    // waiter queue - a failed open empties it, and the requests it woke have yet to queue again.
+    internal bool IsUnused => _live == 0 && _requests == 0;
 
     // A waiter that timed out stays queued until a Release passes it; one at the head is dropped
     // here, so a pool with nobody waiting does not open connections for them.
@@ -102,18 +104,26 @@ public sealed class HttpClientPool : IDisposable
     /// </summary>
     public async ValueTask<HttpClientResponse> SendAsync(HttpClientRequest request)
     {
-        HttpClientConnection connection = await AcquireAsync();
-
+        _requests++;
         try
         {
-            HttpClientResponse response = await connection.SendAsync(request);
-            Release(connection);
-            return response;
+            HttpClientConnection connection = await AcquireAsync();
+
+            try
+            {
+                HttpClientResponse response = await connection.SendAsync(request);
+                Release(connection);
+                return response;
+            }
+            catch
+            {
+                Discard(connection);
+                throw;
+            }
         }
-        catch
+        finally
         {
-            Discard(connection);
-            throw;
+            _requests--;
         }
     }
 

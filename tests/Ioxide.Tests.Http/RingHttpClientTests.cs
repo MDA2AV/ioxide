@@ -110,12 +110,23 @@ internal static class RingHttpClientTests
 
         runner.Test("ring client: requests that find no connection open theirs in parallel", () =>
         {
-            // Four requests to an origin that takes 400 ms each: one after another would take 1.6 s.
+            // Six requests to an origin that takes 400 ms each, with the sweep held off so only the
+            // requests themselves open connections: one at a time would take 2.4 s.
             int origin = TestServer.Start(TestOrigins.Route(_ => (200, "", "slow"), delayMs: 400));
-            int client = StartClientHost();
+            int client = StartClientHost(new RingHttpClientOptions
+                { Pool = new HttpClientOptions { PoolSize = 64, SweepIntervalMs = 60_000 } });
 
             int elapsed = int.Parse(Get(client, "parallel", $"http://localhost:{origin}/"));
-            Assert.True(elapsed < 1_200, $"four requests took {elapsed} ms, so their connections opened one at a time");
+            Assert.True(elapsed < 900, $"six requests took {elapsed} ms, so their connections did not open together");
+        });
+
+        runner.Test("ring client: a request to an origin that refuses fails with the refusal", () =>
+        {
+            // A failed open wakes the requests waiting on it; the pool must still be there when they look again.
+            int client = StartClientHost(new RingHttpClientOptions { Pool = new HttpClientOptions { AcquireTimeoutMs = 1_000 } });
+
+            string body = Get(client, "get", $"http://127.0.0.1:{TestServer.DeadPort()}/");
+            Assert.True(body.StartsWith("599|") && body.Contains("errno 111"), $"expected the refusal, got: {body}");
         });
     }
 
@@ -194,7 +205,7 @@ internal static class RingHttpClientTests
             case "parallel":
             {
                 long start = Native.MonotonicMs;
-                HttpClientResponse[] responses = await Task.WhenAll(Enumerable.Range(0, 4).Select(_ => http.GetAsync(url).AsTask()));
+                HttpClientResponse[] responses = await Task.WhenAll(Enumerable.Range(0, 6).Select(_ => http.GetAsync(url).AsTask()));
                 long elapsed = Native.MonotonicMs - start;
                 foreach (HttpClientResponse response in responses)
                 {
