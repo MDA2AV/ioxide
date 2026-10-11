@@ -54,12 +54,16 @@ internal sealed class HttpClientConnection : IDisposable
     /// or the server asked to close). The pool drops these and opens replacements.</summary>
     public bool IsBroken => _broken;
 
-    /// <summary>Not broken, and not closed by the origin while it sat unread in the pool.</summary>
-    public unsafe bool IsReusable()
+    /// <summary>When the pool last put this connection on its idle list.</summary>
+    public long IdleSinceMs { get; set; }
+
+    /// <summary>Whether the origin closed or reset this connection while it sat in the pool, where
+    /// nothing reads it. One poll, from the pool's sweep rather than per request.</summary>
+    public unsafe bool ClosedWhileIdle()
     {
         // POLLRDHUP rather than a read: TLS can leave a close_notify or ticket unread ahead of the FIN.
         var fd = new PollFd { Fd = _transport.Fd, Events = POLLRDHUP };
-        return !_broken && poll(&fd, 1, 0) == 0;
+        return poll(&fd, 1, 0) != 0;
     }
 
     private unsafe HttpClientConnection(HttpClientOptions options, IClientTransport transport, byte[] hostHeaderLine)

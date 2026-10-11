@@ -2,8 +2,9 @@ namespace ioxide.httpclient;
 
 /// <summary>
 /// N keep-alive HTTP/1.1 connections to one origin on a single reactor's ring. Requests take a
-/// free connection, send, read the response, and hand it back; a broken connection is dropped and
-/// replaced in the background. One pool per reactor per origin - create it from
+/// free connection, send, read the response, and hand it back; a connection that broke, that the
+/// origin closed while it sat idle, or that sat idle past <see cref="HttpClientOptions.IdleTimeoutMs"/>
+/// is dropped and replaced in the background. One pool per reactor per origin - create it from
 /// <c>Reactor.OnStart</c> so the connections belong to that reactor's ring:
 ///
 /// <code>
@@ -28,6 +29,7 @@ public sealed class HttpClientPool : IDisposable
     private int _live;        // connected + connecting
     private int _opening;
     private long _reopenAtMs; // jittered backoff gate after a failed connect
+    private int _ticksToSweep; // reactor ticks until the next sweep (SweepIntervalMs)
     private bool _disposed;
 
     // Why the most recent connect failed, so an acquire timeout can say something more useful than
@@ -115,7 +117,7 @@ public sealed class HttpClientPool : IDisposable
             {
                 HttpClientConnection candidate = _idle[^1];
                 _idle.RemoveAt(_idle.Count - 1);
-                if (candidate.IsReusable())
+                if (!candidate.IsBroken)
                 {
                     return candidate;
                 }
@@ -168,7 +170,7 @@ public sealed class HttpClientPool : IDisposable
             }
 
             HttpClientConnection? handed = await pending;
-            if (handed is not null && handed.IsReusable())
+            if (handed is not null && !handed.IsBroken)
             {
                 return handed;
             }
@@ -200,6 +202,7 @@ public sealed class HttpClientPool : IDisposable
             }
         }
 
+        connection.IdleSinceMs = Native.MonotonicMs;
         _idle.Add(connection);
     }
 
@@ -260,7 +263,8 @@ public sealed class HttpClientPool : IDisposable
         }
     }
 
-    // Ticker: replenish toward PoolSize behind a jittered backoff, and drop idle corpses.
+    // Ticker, every SweepIntervalMs: drop idle connections that are broken, closed by the origin or
+    // idle past IdleTimeoutMs, and replenish toward PoolSize behind a jittered backoff.
     private void Sweep()
     {
         if (_disposed)
@@ -270,17 +274,26 @@ public sealed class HttpClientPool : IDisposable
                       // reactor's life.
         }
 
+        if (--_ticksToSweep > 0)
+        {
+            return;
+        }
+        _ticksToSweep = (_options.SweepIntervalMs + Reactor.TickMs - 1) / Reactor.TickMs;
+
+        long nowMs = Native.MonotonicMs;
         for (int i = _idle.Count - 1; i >= 0; i--)
         {
-            if (_idle[i].IsBroken)
+            HttpClientConnection connection = _idle[i];
+            if (connection.IsBroken
+                || (_options.IdleTimeoutMs > 0 && nowMs - connection.IdleSinceMs >= _options.IdleTimeoutMs)
+                || connection.ClosedWhileIdle())
             {
-                HttpClientConnection dead = _idle[i];
                 _idle.RemoveAt(i);
-                Discard(dead);
+                Discard(connection);
             }
         }
 
-        if (_live < _options.PoolSize && _opening == 0 && Native.MonotonicMs >= _reopenAtMs)
+        if (_live < _options.PoolSize && _opening == 0 && nowMs >= _reopenAtMs)
         {
             StartOpen();
         }
