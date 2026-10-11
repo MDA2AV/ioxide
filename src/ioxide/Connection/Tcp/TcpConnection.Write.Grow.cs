@@ -19,6 +19,11 @@ public sealed unsafe partial class TcpConnection
         int newSize = _writeSlabSize;
         do
         {
+            // Doubled past int.MaxValue the size wraps, to 0 at worst, and this loop would spin forever.
+            if (newSize > int.MaxValue / 2)
+            {
+                throw new OutOfMemoryException($"The write slab cannot grow past {newSize} bytes to hold {required}; flush before writing more.");
+            }
             newSize *= 2;
         }
         while (newSize < required);

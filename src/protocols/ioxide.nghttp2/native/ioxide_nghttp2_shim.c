@@ -9,8 +9,9 @@
  *   conn = ih2_client_new(cbs, user)          one per TCP connection (client preface queued)
  *          ih2_submit_request(hdrs, body)     headers packed [u16 nlen][name][u16 vlen][value]*
  *
- *   conn = ih2_server_new(cbs, user)          one per accepted connection (server SETTINGS queued)
+ *   conn = ih2_server_new(cbs, user, manual)  one per accepted connection (server SETTINGS queued)
  *          ih2_submit_response(sid, hdrs, body)
+ *          ih2_consume(sid, len)              manual flow control: credit DATA once it is read
  *
  *   both:  ih2_read(data, len)                feed received bytes; protocol events fire back
  *          ih2_write(buf, len)                drain one egress chunk per call until 0
@@ -64,6 +65,7 @@ typedef struct ih2_conn {
     ih2_callbacks    cbs;
     void            *user;
     ih2_stream      *streams;
+    int              manual_flow;   /* DATA is credited through ih2_consume, not by nghttp2 */
 } ih2_conn;
 
 static ih2_stream *ih2_stream_find(ih2_conn *c, int32_t stream_id)
@@ -165,8 +167,9 @@ static int on_stream_close(nghttp2_session *session, int32_t stream_id, uint32_t
     ih2_conn *c = user_data;
 
     /* NO_ERROR here is the normal end of a stream whose response already completed, so only a
-     * real error is worth waking the managed side for. */
-    if (error_code != NGHTTP2_NO_ERROR && c->cbs.on_stream_error != NULL) {
+     * real error is worth waking the managed side for - unless it reads request bodies itself:
+     * a peer's RST_STREAM(NO_ERROR) ends one of those too. */
+    if ((error_code != NGHTTP2_NO_ERROR || c->manual_flow) && c->cbs.on_stream_error != NULL) {
         c->cbs.on_stream_error(c->user, stream_id, error_code);
     }
 
@@ -235,7 +238,7 @@ static ssize_t read_body(nghttp2_session *session, int32_t stream_id, uint8_t *b
 
 /* Both directions register the same callbacks and differ only in which nghttp2 constructor runs
  * and which SETTINGS go out first, so the wiring lives here once. */
-static ih2_conn *ih2_new(ih2_callbacks cbs, void *user, int server)
+static ih2_conn *ih2_new(ih2_callbacks cbs, void *user, int server, int manual_flow)
 {
     ih2_conn *c = calloc(1, sizeof(*c));
     if (c == NULL) {
@@ -243,6 +246,7 @@ static ih2_conn *ih2_new(ih2_callbacks cbs, void *user, int server)
     }
     c->cbs  = cbs;
     c->user = user;
+    c->manual_flow = manual_flow;
 
     nghttp2_session_callbacks *callbacks;
     if (nghttp2_session_callbacks_new(&callbacks) != 0) {
@@ -255,8 +259,22 @@ static ih2_conn *ih2_new(ih2_callbacks cbs, void *user, int server)
     nghttp2_session_callbacks_set_on_data_chunk_recv_callback(callbacks, on_data_chunk_recv);
     nghttp2_session_callbacks_set_on_stream_close_callback(callbacks, on_stream_close);
 
-    int rv = server ? nghttp2_session_server_new(&c->session, callbacks, c)
+    int rv;
+    if (manual_flow) {
+        /* No WINDOW_UPDATE for DATA until ih2_consume says it was read, so a reader that falls
+         * behind keeps the peer's window shut instead of buffering for it. */
+        nghttp2_option *option;
+        rv = nghttp2_option_new(&option);
+        if (rv == 0) {
+            nghttp2_option_set_no_auto_window_update(option, 1);
+            rv = server ? nghttp2_session_server_new2(&c->session, callbacks, c, option)
+                        : nghttp2_session_client_new2(&c->session, callbacks, c, option);
+            nghttp2_option_del(option);
+        }
+    } else {
+        rv = server ? nghttp2_session_server_new(&c->session, callbacks, c)
                     : nghttp2_session_client_new(&c->session, callbacks, c);
+    }
     nghttp2_session_callbacks_del(callbacks);
     if (rv != 0) {
         free(c);
@@ -280,15 +298,16 @@ static ih2_conn *ih2_new(ih2_callbacks cbs, void *user, int server)
 }
 
 /* One per ACCEPTED connection. The peer is expected to have sent (or to be about to send) the
- * client connection preface; nghttp2 validates it out of ih2_read. */
-ih2_conn *ih2_server_new(ih2_callbacks cbs, void *user)
+ * client connection preface; nghttp2 validates it out of ih2_read. manual_flow non-zero: every
+ * DATA byte handed to on_data is credited through ih2_consume, once. */
+ih2_conn *ih2_server_new(ih2_callbacks cbs, void *user, int manual_flow)
 {
-    return ih2_new(cbs, user, 1);
+    return ih2_new(cbs, user, 1, manual_flow);
 }
 
 ih2_conn *ih2_client_new(ih2_callbacks cbs, void *user)
 {
-    return ih2_new(cbs, user, 0);
+    return ih2_new(cbs, user, 0, 0);
 }
 
 /* Headers arrive packed as [u16 namelen][name][u16 valuelen][value]... - the same format the
@@ -574,6 +593,18 @@ ssize_t ih2_read(ih2_conn *c, const uint8_t *data, size_t datalen)
         return NGHTTP2_ERR_INVALID_STATE;
     }
     return nghttp2_session_mem_recv(c->session, data, datalen);
+}
+
+/* Manual flow control: credit DATA the application is done with - the connection window, and the
+ * stream's while it is open. Only what on_data handed out: nghttp2 credits padding and the DATA it
+ * discards itself. Safe from inside a callback, as nghttp2 does the same for padding mid-recv.
+ * Returns 0, or a negative nghttp2 error. */
+int ih2_consume(ih2_conn *c, int32_t stream_id, size_t length)
+{
+    if (c == NULL || c->session == NULL) {
+        return NGHTTP2_ERR_INVALID_STATE;
+    }
+    return nghttp2_session_consume(c->session, stream_id, length);
 }
 
 /* Drain one egress chunk into buf. Returns bytes written (0 = nothing left), or negative on
