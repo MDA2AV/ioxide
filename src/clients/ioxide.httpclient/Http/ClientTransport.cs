@@ -1,3 +1,5 @@
+using System.Net;
+using System.Net.Sockets;
 
 namespace ioxide.httpclient;
 
@@ -54,36 +56,76 @@ internal sealed class TlsClientTransport(TlsClientStream stream) : IClientTransp
 
 /// <summary>
 /// Connect a transport for an origin: plain TCP, or TCP plus a TLS handshake when the caller
-/// supplied <see cref="TlsClientOptions"/>.
+/// supplied <see cref="TlsClientOptions"/>. The origin is an IPv4 address or a name to resolve.
 /// </summary>
 internal static class ClientTransport
 {
-    public static async ValueTask<IClientTransport> ConnectAsync(IRingHost host, string ip, ushort port,
+    public static async ValueTask<IClientTransport> ConnectAsync(IRingHost host, string origin, ushort port,
         TlsClientContext? tls)
+        => await ConnectAsync(host, await ResolveAsync(origin), port, tls);
+
+    // Each address in the resolver's order, the next only when a connect fails. A failed TLS handshake
+    // is not retried elsewhere: the origin was reached and refused.
+    internal static async ValueTask<IClientTransport> ConnectAsync(IRingHost host, IPAddress[] addresses,
+        ushort port, TlsClientContext? tls)
     {
-        RingSocket socket = RingSocket.CreateTcp(host);
+        for (int i = 0; ; i++)
+        {
+            RingSocket socket = RingSocket.CreateTcp(host);
+            try
+            {
+                int result = await socket.ConnectAsync(addresses[i].ToString(), port);
+                if (result < 0)
+                {
+                    throw new HttpClientException($"connect to {addresses[i]}:{port} failed: errno {-result}");
+                }
+            }
+            catch (HttpClientException) when (i < addresses.Length - 1)
+            {
+                socket.Dispose();
+                continue;
+            }
+            catch
+            {
+                socket.Dispose();
+                throw;
+            }
+
+            if (tls is null)
+            {
+                return new RingSocketTransport(socket);
+            }
+
+            // The TLS stream takes ownership of the socket, including closing it if the handshake
+            // fails, so there is nothing to unwind here.
+            TlsClientStream stream = await tls.ConnectAsync(socket);
+            return new TlsClientTransport(stream);
+        }
+    }
+
+    private static async ValueTask<IPAddress[]> ResolveAsync(string origin)
+    {
+        if (IPAddress.TryParse(origin, out IPAddress? literal))
+        {
+            return literal.AddressFamily == AddressFamily.InterNetwork
+                ? [literal]
+                : throw new HttpClientException($"{origin} is not an IPv4 address; the client connects over IPv4 only");
+        }
+
+        // The system resolver (hosts file, resolv.conf) runs off the reactor thread; the await comes
+        // back to the reactor through its synchronization context. Once per connection, never per request.
+        IPAddress[] found;
         try
         {
-            int result = await socket.ConnectAsync(ip, port);
-            if (result < 0)
-            {
-                throw new HttpClientException($"connect to {ip}:{port} failed: errno {-result}");
-            }
+            found = await Dns.GetHostAddressesAsync(origin, AddressFamily.InterNetwork);
         }
-        catch
+        catch (SocketException e)
         {
-            socket.Dispose();
-            throw;
+            throw new HttpClientException($"could not resolve {origin}: {e.Message}", e);
         }
 
-        if (tls is null)
-        {
-            return new RingSocketTransport(socket);
-        }
-
-        // The TLS stream takes ownership of the socket, including closing it if the handshake
-        // fails, so there is nothing to unwind here.
-        TlsClientStream stream = await tls.ConnectAsync(socket);
-        return new TlsClientTransport(stream);
+        return found.Length > 0
+            ? found
+            : throw new HttpClientException($"{origin} has no IPv4 address; the client connects over IPv4 only");
     }
 }

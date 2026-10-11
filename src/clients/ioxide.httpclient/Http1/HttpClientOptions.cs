@@ -7,8 +7,9 @@ namespace ioxide.httpclient;
 /// </summary>
 public sealed record HttpClientOptions
 {
-    /// <summary>IPv4 literal. DNS resolution would block the reactor, so resolve up front and
-    /// pass the address.</summary>
+    /// <summary>The origin's name or IPv4 address, sent as the request's <c>host</c>. A name is resolved
+    /// each time a connection opens, off the reactor thread, and its IPv4 addresses are tried in turn.
+    /// For https, <see cref="TlsClientOptions.ServerName"/> is the name the certificate must carry.</summary>
     public string Host { get; init; } = "127.0.0.1";
 
     public ushort Port { get; init; } = 80;
