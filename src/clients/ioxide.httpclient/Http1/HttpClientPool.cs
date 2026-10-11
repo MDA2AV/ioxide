@@ -24,7 +24,8 @@ public sealed class HttpClientPool : IDisposable
     private readonly HttpClientOptions _options;
 
     private readonly List<HttpClientConnection> _idle = [];
-    private readonly Queue<TaskCompletionSource<HttpClientConnection?>> _waiters = new();
+    // Requests waiting for a connection, each with the deadline the sweep fails it at.
+    private readonly Queue<(TaskCompletionSource<HttpClientConnection?> Waiter, long DeadlineMs)> _waiters = new();
 
     private int _live;        // connected + connecting
     private int _opening;
@@ -80,7 +81,7 @@ public sealed class HttpClientPool : IDisposable
     // here, so a pool with nobody waiting does not open connections for them.
     private bool AnyWaiter()
     {
-        while (_waiters.Count > 0 && _waiters.Peek().Task.IsCompleted)
+        while (_waiters.Count > 0 && _waiters.Peek().Waiter.Task.IsCompleted)
         {
             _waiters.Dequeue();
         }
@@ -166,44 +167,19 @@ public sealed class HttpClientPool : IDisposable
                 StartOpen();
             }
 
-            int remainingMs = (int)(deadlineMs - Native.MonotonicMs);
-            if (remainingMs <= 0)
+            if (Native.MonotonicMs >= deadlineMs)
             {
                 throw new HttpClientException(AcquireTimeoutMessage());
             }
 
+            // No timer of its own: the sweep fails a waiter at its deadline. A Task.WhenAny with a
+            // Task.Delay ran the hand-over through the thread pool and back for every request that
+            // waited - most of them, in a pool that is the bottleneck. Completed from the reactor,
+            // this continuation is posted to the reactor's own queue.
             var waiter = new TaskCompletionSource<HttpClientConnection?>(TaskCreationOptions.RunContinuationsAsynchronously);
-            _waiters.Enqueue(waiter);
+            _waiters.Enqueue((waiter, deadlineMs));
 
-            Task<HttpClientConnection?> pending = waiter.Task;
-
-            // Cancel the timer when the waiter wins, so a long-lived pool doesn't accumulate one
-            // pending delay per acquire.
-            using var timeoutCts = new CancellationTokenSource();
-            Task completed = await Task.WhenAny(pending, Task.Delay(remainingMs, timeoutCts.Token));
-            if (completed == pending)
-            {
-                timeoutCts.Cancel();
-            }
-            else
-            {
-                // Abandon the slot so a later Release can't hand a connection to a caller that has
-                // already given up: TrySetResult then fails and the connection goes to the next
-                // waiter or back to the idle list. Losing this race means one WAS handed to us
-                // between the timeout and the cancel - give it back rather than leak it.
-                if (!waiter.TrySetCanceled())
-                {
-                    HttpClientConnection? raced = await pending;
-                    if (raced is not null)
-                    {
-                        Release(raced);
-                    }
-                }
-
-                throw new HttpClientException(AcquireTimeoutMessage());
-            }
-
-            HttpClientConnection? handed = await pending;
+            HttpClientConnection? handed = await waiter.Task;
             if (handed is not null && !handed.IsBroken)
             {
                 return handed;
@@ -212,7 +188,8 @@ public sealed class HttpClientPool : IDisposable
             {
                 Discard(handed);   // handed a corpse: drop it so the slot is replenished
             }
-            // Woken by a failed open, or handed a corpse: loop and try again.
+            // Woken by a failed open, handed a corpse, or failed by the sweep at the deadline: loop,
+            // which throws once past it.
         }
     }
 
@@ -231,10 +208,9 @@ public sealed class HttpClientPool : IDisposable
         // Hand straight to a waiter when one is queued - it skips a trip through the idle list.
         while (_waiters.Count > 0)
         {
-            TaskCompletionSource<HttpClientConnection?> waiter = _waiters.Dequeue();
-            if (waiter.TrySetResult(connection))
+            if (_waiters.Dequeue().Waiter.TrySetResult(connection))
             {
-                return;
+                return;   // one the sweep already failed takes nothing, and the next is tried
             }
         }
 
@@ -295,7 +271,7 @@ public sealed class HttpClientPool : IDisposable
     {
         while (_waiters.Count > 0)
         {
-            _waiters.Dequeue().TrySetResult(null);
+            _waiters.Dequeue().Waiter.TrySetResult(null);
         }
     }
 
@@ -309,6 +285,16 @@ public sealed class HttpClientPool : IDisposable
             return;   // AddTicker has no removal API, so a disposed pool must no-op: replenishing
                       // here would reopen the connections Dispose just closed, for the rest of the
                       // reactor's life.
+        }
+
+        // Every tick, whatever SweepIntervalMs says: an acquire deadline is this pool's only timer.
+        long tickMs = Native.MonotonicMs;
+        foreach ((TaskCompletionSource<HttpClientConnection?> waiter, long deadlineMs) in _waiters)
+        {
+            if (tickMs >= deadlineMs)
+            {
+                waiter.TrySetResult(null);
+            }
         }
 
         if (--_ticksToSweep > 0)
