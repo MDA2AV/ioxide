@@ -3715,10 +3715,10 @@ ushort port     = 8080;                        // http://127.0.0.1:8080/get - cl
 int    reactors = Environment.ProcessorCount;  // one ring per reactor, one reactor per core
 
 
-// The https origin this calls OUT to. Point it somewhere real: &quot;93.184.216.34&quot; / &quot;example.com&quot;
-// / 443. The IP must be a literal - resolving a name would block the reactor - and the NAME is
-// what goes out as SNI and what the certificate has to match.
-string originIp   = &quot;127.0.0.1&quot;;
+// The https origin this calls OUT to. Point it somewhere real: &quot;example.com&quot; / &quot;example.com&quot; /
+// 443. The host can be a name - resolved off the reactor each time a connection opens - or an
+// address, and the NAME is what goes out as SNI and what the certificate has to match.
+string originHost = &quot;127.0.0.1&quot;;
 string originName = &quot;localhost&quot;;
 ushort originPort = 443;
 
@@ -3768,7 +3768,7 @@ for (int i = 0; i &lt; threads.Length; i++)
         // CA belongs in CaFile, not here.
         TlsClientContext tls = TlsClientContext.Create(new TlsClientOptions
         {
-            ServerName         = originName,             // sent as SNI, checked against the cert (required)
+            ServerName         = originName,             // sent as SNI, checked against the cert; null = Host
             AlpnProtocols      = [&quot;http/1.1&quot;],           // offered most-preferred first; [] offers none
             CaFile             = caFile,                 // PEM trust anchors; null = system store
             VerifyCertificate  = !insecure,              // off = encrypted but UNAUTHENTICATED (tests only)
@@ -3778,7 +3778,7 @@ for (int i = 0; i &lt; threads.Length; i++)
 
         HttpClientPool.Start(r, new HttpClientOptions
         {
-            Host              = originIp,         // IPv4 literal - DNS would block the reactor
+            Host              = originHost,       // a name or an address; a name is resolved off the reactor
             Port              = originPort,       // origin port
             PoolSize          = 2,                // connections to the origin, per reactor
             MaxResponseBytes  = 8 * 1024 * 1024,  // per-request ceiling for headers + body
@@ -3851,7 +3851,7 @@ for (int i = 0; i &lt; threads.Length; i++)
 }
 
 Console.WriteLine($&quot;[tls-httpsclient] {config.ReactorCount} reactors on :{config.Tcp!.Port}, &quot;
-                + $&quot;origin https://{originName} ({originIp}:{originPort}), &quot;
+                + $&quot;origin https://{originName} ({originHost}:{originPort}), &quot;
                 + $&quot;verify={(insecure ? &quot;OFF&quot; : caFile ?? &quot;system store&quot;)}&quot;);
 
 foreach (Thread thread in threads)
@@ -6520,7 +6520,7 @@ for (int i = 0; i &lt; threads.Length; i++)
         // per-connection state, so every connection opened from it gets its own SSL.
         HttpClientPool.Start(r, new HttpClientOptions
         {
-            Host              = upstreamHost,     // origin address (IPv4 literal; DNS would block the reactor)
+            Host              = upstreamHost,     // origin name or address; a name is resolved off the reactor
             Port              = upstreamPort,     // origin port
             PoolSize          = upstreamPool,     // connections kept open; round-robin, one request each
             MaxResponseBytes  = 8 * 1024 * 1024,  // per-request ceiling for headers + body
@@ -6750,7 +6750,7 @@ for (int i = 0; i &lt; threads.Length; i++)
         // per-connection state, so every connection opened from it gets its own SSL.
         HttpClientPool.Start(r, new HttpClientOptions
         {
-            Host              = upstreamHost,     // origin address (IPv4 literal; DNS would block the reactor)
+            Host              = upstreamHost,     // origin name or address; a name is resolved off the reactor
             Port              = upstreamPort,     // origin port
             PoolSize          = upstreamPool,     // connections kept open; round-robin, one request each
             MaxResponseBytes  = 8 * 1024 * 1024,  // per-request ceiling for headers + body
@@ -6933,7 +6933,7 @@ for (int i = 0; i &lt; threads.Length; i++)
         // per-connection state, so every connection opened from it gets its own SSL.
         HttpClientPool.Start(r, new HttpClientOptions
         {
-            Host              = upstreamHost,     // origin address (IPv4 literal; DNS would block the reactor)
+            Host              = upstreamHost,     // origin name or address; a name is resolved off the reactor
             Port              = upstreamPort,     // origin port
             PoolSize          = upstreamPool,     // connections kept open; round-robin, one request each
             MaxResponseBytes  = 8 * 1024 * 1024,  // per-request ceiling for headers + body
@@ -7028,8 +7028,8 @@ ushort port     = 8090;                        // http://127.0.0.1:8090/ - what 
 int    reactors = Environment.ProcessorCount;  // one ring per reactor, one reactor per core
 
 
-// The origin this forwards to. The host must be an IPv4 literal - a DNS lookup would block the
-// reactor - and PoolSize is per protocol, per reactor.
+// The origin this forwards to. The host can be a name or an address - a name is resolved off the
+// reactor each time a connection opens - and PoolSize is per reactor.
 string upstreamHost = &quot;127.0.0.1&quot;;
 ushort upstreamPort = 8081;
 int    upstreamPool = 8;

@@ -103,7 +103,7 @@ for (int i = 0; i < threads.Length; i++)
         // per-connection state, so every connection opened from it gets its own SSL.
         HttpClientPool.Start(r, new HttpClientOptions
         {
-            Host              = upstreamHost,     // origin address (IPv4 literal; DNS would block the reactor)
+            Host              = upstreamHost,     // origin name or address; a name is resolved off the reactor
             Port              = upstreamPort,     // origin port
             PoolSize          = upstreamPool,     // connections kept open; round-robin, one request each
             MaxResponseBytes  = 8 * 1024 * 1024,  // per-request ceiling for headers + body
