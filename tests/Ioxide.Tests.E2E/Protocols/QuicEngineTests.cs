@@ -1,4 +1,5 @@
 using System.Buffers;
+using System.IO.Pipelines;
 using System.Net;
 using System.Net.Sockets;
 using System.Reflection;
@@ -6,6 +7,7 @@ using System.Runtime.InteropServices;
 using System.Text;
 using ioxide;
 using ioxide.ngtcp2;
+using ioxide.timer;
 
 namespace Ioxide.Tests;
 
@@ -212,6 +214,75 @@ internal static class QuicEngineTests
             Assert.Equal(1, client.FramesOn(stream));
         });
 
+        runner.Test("quic: a send on a stream the peer already finished does not leak send retention", () =>
+        {
+            // A handler that answers a request and, later, sends again on a stream that has since
+            // closed - a resume from a timer or a query that lands after the peer finished and
+            // acked. ngtcp2 has forgotten the stream (STREAM_NOT_FOUND), so nothing will ever ack
+            // or close those bytes: each one stayed counted in the engine's send retention, which
+            // drifted a long-lived connection toward the high-water and the backstop that closes it.
+            (string certPath, string keyPath) = TestCert.Ensure();
+            using var engine = new QuicEngine(certPath, keyPath, cidLength: 8);
+
+            RetentionProbe? probe = null;
+            (_, int udpPort) = TestServer.StartDatagram(
+                onDatagram: null,
+                quicFactory: engine.CreateFactory(_ => probe = new RetentionProbe(engine)),
+                quicHandle: static (_, conn) => ((RetentionProbe)conn).RunLateResend(lateBytes: 40 * 1024));
+
+            using var client = new QuicTestClient("127.0.0.1", udpPort);
+            client.Connect();
+            Assert.True(client.CompleteHandshake(timeoutMs: 5000), "handshake did not complete");
+
+            const int Rounds = 60;
+            for (int i = 0; i < Rounds; i++)
+            {
+                long sid = client.Send("go"u8.ToArray(), fin: true);
+                Assert.True(client.PumpUntil(() => client.FinOn(sid), timeoutMs: 5000), $"request {i} was not answered");
+            }
+            // One more exchange so the last late send is pumped and its purge (or leak) is settled.
+            client.PumpUntil(() => false, timeoutMs: 300);
+
+            Assert.True(probe!.LateSends >= Rounds - 2,
+                $"the handler only late-sent to {probe.LateSends} closed streams in {Rounds} rounds, so the path was barely exercised");
+            // A leak is Rounds x 40 KiB (2.4 MiB) of retention and one dead OutStream per round. The
+            // bound sits well under both so a couple of in-flight streams never trip it.
+            Assert.True(probe.OutRetained < 256 * 1024,
+                $"{probe.OutRetained} bytes still retained after {probe.LateSends} sends to closed streams: the bytes were never freed");
+            Assert.True(probe.OutStreamCount <= 4,
+                $"{probe.OutStreamCount} out-streams still tracked after {Rounds} rounds: a dead stream is never purged");
+        });
+
+        runner.Test("control: a handler that only answers live streams retains nothing between requests", () =>
+        {
+            // The same probe and the same rounds without the late send, so the bound above is a real
+            // discriminator: if the baseline did not return to zero, the leak test would prove nothing.
+            (string certPath, string keyPath) = TestCert.Ensure();
+            using var engine = new QuicEngine(certPath, keyPath, cidLength: 8);
+
+            RetentionProbe? probe = null;
+            (_, int udpPort) = TestServer.StartDatagram(
+                onDatagram: null,
+                quicFactory: engine.CreateFactory(_ => probe = new RetentionProbe(engine)),
+                quicHandle: static (_, conn) => ((RetentionProbe)conn).RunLateResend(lateBytes: 0));
+
+            using var client = new QuicTestClient("127.0.0.1", udpPort);
+            client.Connect();
+            Assert.True(client.CompleteHandshake(timeoutMs: 5000), "handshake did not complete");
+
+            const int Rounds = 60;
+            for (int i = 0; i < Rounds; i++)
+            {
+                long sid = client.Send("go"u8.ToArray(), fin: true);
+                Assert.True(client.PumpUntil(() => client.FinOn(sid), timeoutMs: 5000), $"request {i} was not answered");
+            }
+            client.PumpUntil(() => false, timeoutMs: 300);
+
+            Assert.Equal(0, probe!.LateSends);                       // the control makes no late send
+            Assert.True(probe.OutRetained < 256 * 1024,
+                $"{probe.OutRetained} bytes retained with no late send at all - the baseline itself drifts");
+        });
+
         runner.Test("quic: dual-pipe (PipeReader/PipeWriter) stream echo (loopback)", () =>
         {
             (string certPath, string keyPath) = TestCert.Ensure();
@@ -230,6 +301,170 @@ internal static class QuicEngineTests
             string echoed = client.RequestEcho(sent, timeoutMs: 5000);
             Assert.Equal("hello-quic-pipe-echo", echoed);
         });
+
+        RegisterPipeWriter(runner);
+    }
+
+    // The lowest high-water the engine allows and a ceiling twice it, so a few 64 KiB chunks cross both.
+    private static QuicOptions SmallRetention(QuicOptions options)
+        => options with { SendRetentionBytes = 256L << 10, SendRetentionCeilingBytes = 512L << 10 };
+
+    /// <summary>The dual pipe's writer under a producer that awaits every flush and stops at the first IsCompleted.</summary>
+    private static void RegisterPipeWriter(Runner runner)
+    {
+        runner.Test("quic pipe: FlushAsync waits at the send-retention high-water, so a response past the ceiling arrives whole", () =>
+        {
+            // Four times the ceiling: a flush that never waits takes it all into retention and trips the backstop.
+            const int Chunks = 32;
+            const int ChunkBytes = 64 * 1024;
+
+            (string certPath, string keyPath) = TestCert.Ensure();
+            using var engine = new QuicEngine(certPath, keyPath, cidLength: 8);
+            var producer = new PipeProducer(Chunks, ChunkBytes, pauseMs: 0);
+
+            (_, int udpPort) = TestServer.StartDatagram(
+                onDatagram: null,
+                quicFactory: engine.CreateFactory(),
+                quicHandle: producer.Serve,
+                quicOptions: SmallRetention);
+
+            using var client = new QuicTestClient("127.0.0.1", udpPort);
+            client.Connect();
+            Assert.True(client.CompleteHandshake(timeoutMs: 5000), "handshake did not complete");
+
+            long stream = client.Send("go"u8.ToArray(), fin: true);
+            client.PumpUntil(() => client.FinOn(stream) || producer.Gone.Task.IsCompleted, timeoutMs: 30_000);
+
+            Assert.True(client.FinOn(stream) && client.BytesOn(stream) == Chunks * ChunkBytes,
+                $"got {client.BytesOn(stream)} of {Chunks * ChunkBytes} bytes "
+                + (producer.Gone.Task.IsCompleted ? "before the server closed the connection" : "and no end")
+                + $": FlushAsync waited {Volatile.Read(ref producer.Waits)} times in {Volatile.Read(ref producer.Flushes)} flushes");
+            Assert.True(Volatile.Read(ref producer.Waits) > 0,
+                "FlushAsync never waited, so the high-water was never reached and nothing was shown about backpressure");
+        });
+
+        foreach (bool atHighWater in new[] { false, true })
+        {
+            string when = atHighWater ? "while it waits at the high-water" : "between two flushes";
+
+            runner.Test($"quic pipe: FlushAsync reports IsCompleted once the connection is gone, {when}", () =>
+            {
+                // 1 KiB every 20 ms never reaches the high-water; 64 KiB chunks do at once, and stay there once acks stop.
+                (string certPath, string keyPath) = TestCert.Ensure();
+                using var engine = new QuicEngine(certPath, keyPath, cidLength: 8);
+                PipeProducer producer = atHighWater
+                    ? new PipeProducer(chunks: 64, chunkBytes: 64 * 1024, pauseMs: 0)
+                    : new PipeProducer(chunks: 750, chunkBytes: 1024, pauseMs: 20);
+
+                (_, int udpPort) = TestServer.StartDatagram(
+                    onDatagram: null,
+                    quicFactory: engine.CreateFactory(),
+                    quicReadMs: 1000,
+                    quicHandle: producer.Serve,
+                    quicOptions: SmallRetention);
+
+                using var client = new QuicTestClient("127.0.0.1", udpPort);
+                client.Connect();
+                Assert.True(client.CompleteHandshake(timeoutMs: 5000), "handshake did not complete");
+
+                // The client takes the start of the response and vanishes: nothing more from it, not even an ack.
+                long stream = client.Send("go"u8.ToArray(), fin: true);
+                Assert.True(client.PumpUntil(() => client.BytesOn(stream) > 0, timeoutMs: 10_000),
+                    "the response never started, so there was no producer to tell");
+
+                Assert.True(producer.Gone.Task.Wait(15_000), "the connection never went, so there was nothing to report");
+                Assert.True(producer.Told.Task.Wait(10_000),
+                    $"FlushAsync never reported the connection gone: after {Volatile.Read(ref producer.Flushes)} flushes "
+                    + $"({Volatile.Read(ref producer.Waits)} of them waited) the producer is writing to nobody, or waiting on nobody");
+
+                (bool waited, bool afterGone) = producer.Told.Task.Result;
+                Assert.True(afterGone, "FlushAsync reported IsCompleted while the connection was still up");
+                Assert.True(waited == atHighWater, atHighWater
+                    ? "the producer was not waiting at the high-water when the connection went, so no waiting flush was released"
+                    : "the producer was waiting at the high-water, so a flush that did not wait was never asked");
+            });
+        }
+    }
+
+    /// <summary>Answers through a dual pipe with up to <c>chunks</c> flushed chunks, stopping at the first IsCompleted.</summary>
+    private sealed class PipeProducer(int chunks, int chunkBytes, int pauseMs)
+    {
+        /// <summary>The connection's read surface reported its end - an eviction and a teardown alike.</summary>
+        public readonly TaskCompletionSource Gone = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        /// <summary>A flush reported IsCompleted: whether that flush had waited, and whether the connection was gone by then.</summary>
+        public readonly TaskCompletionSource<(bool Waited, bool AfterGone)> Told = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public int Flushes;
+        public int Waits;
+
+        public async Task Serve(Reactor reactor, QuicConnection conn)
+        {
+            var timer = new RingTimer(reactor);
+            var pipe = new QuicConnectionDualPipe(conn);
+            try
+            {
+                ReadResult request;
+                do
+                {
+                    request = await pipe.Input.ReadAsync();
+                    pipe.Input.AdvanceTo(request.Buffer.End);
+                }
+                while (!request.IsCompleted);
+                pipe.Input.Complete();
+
+                _ = WatchAsync(conn);
+
+                for (int i = 0; i < chunks; i++)
+                {
+                    pipe.Output.GetSpan(chunkBytes)[..chunkBytes].Fill((byte)'x');
+                    pipe.Output.Advance(chunkBytes);
+
+                    ValueTask<FlushResult> flush = pipe.Output.FlushAsync();
+                    bool waited = !flush.IsCompleted;
+                    Interlocked.Increment(ref Flushes);
+                    if (waited)
+                    {
+                        Interlocked.Increment(ref Waits);
+                    }
+
+                    if ((await flush).IsCompleted)
+                    {
+                        Told.TrySetResult((waited, Gone.Task.IsCompleted));
+                        break;
+                    }
+                    if (pauseMs > 0)
+                    {
+                        await timer.DelayAsync(pauseMs);
+                    }
+                }
+
+                pipe.Output.Complete();
+            }
+            finally
+            {
+                conn.DecRef();
+            }
+        }
+
+        // The pipe reader has finished with the connection's read surface, which still reports its end.
+        private async Task WatchAsync(QuicConnection conn)
+        {
+            while (true)
+            {
+                QuicRecvSnapshot snap = await conn.ReadAsync();
+                while (conn.TryGetDelivery(in snap, out QuicRecvRing.Delivery item))
+                {
+                    conn.ReturnBuffer(in item);
+                }
+                if (snap.IsClosed)
+                {
+                    Gone.TrySetResult();
+                    return;
+                }
+                conn.ResetRead();
+            }
+        }
     }
 
     // Server side, the dual-pipe model: auto-bind to the client's stream, echo until fin, then
@@ -438,6 +673,70 @@ internal static class QuicEngineTests
         finally
         {
             conn.DecRef();
+        }
+    }
+}
+
+/// <summary>
+/// An engine connection that answers each request and, once a stream has been reported closed,
+/// sends to that stream again - the late-resume shape that reaches a stream ngtcp2 has forgotten.
+/// It reads the engine's private send-retention accounting back by reflection, since there is no
+/// public accessor and this is a test rather than a reason to add one.
+/// </summary>
+internal sealed class RetentionProbe(QuicEngine engine) : QuicEngineConnection(engine)
+{
+    private static readonly FieldInfo RetainedField =
+        typeof(QuicEngineConnection).GetField("_outRetained", BindingFlags.NonPublic | BindingFlags.Instance)!;
+    private static readonly FieldInfo StreamsField =
+        typeof(QuicEngineConnection).GetField("_outStreams", BindingFlags.NonPublic | BindingFlags.Instance)!;
+
+    private readonly Queue<long> _closed = new();
+
+    public long OutRetained => (long)RetainedField.GetValue(this)!;
+    public int OutStreamCount => ((System.Collections.ICollection)StreamsField.GetValue(this)!).Count;
+    public int LateSends { get; private set; }
+
+    protected override void OnStreamClosed(long streamId, ulong appErrorCode)
+    {
+        if ((streamId & 0x3) == 0x0)   // a peer-opened bidi stream we answered
+        {
+            _closed.Enqueue(streamId);
+        }
+    }
+
+    public async Task RunLateResend(int lateBytes)
+    {
+        try
+        {
+            while (true)
+            {
+                QuicRecvSnapshot snap = await ReadAsync();
+                while (TryGetDelivery(in snap, out QuicRecvRing.Delivery item))
+                {
+                    if (item.Kind == QuicStreamEvent.Data && item.Fin)
+                    {
+                        SendStream(item.StreamId, "ok"u8, fin: true);
+
+                        // Send onto a stream already reported closed: ngtcp2 has forgotten it, so
+                        // this is the STREAM_NOT_FOUND write whose bytes used to stay retained.
+                        if (lateBytes > 0 && _closed.TryDequeue(out long closed))
+                        {
+                            SendStream(closed, new byte[lateBytes], fin: false);
+                            LateSends++;
+                        }
+                    }
+                    ReturnBuffer(in item);
+                }
+                if (snap.IsClosed)
+                {
+                    break;
+                }
+                ResetRead();
+            }
+        }
+        finally
+        {
+            DecRef();
         }
     }
 }

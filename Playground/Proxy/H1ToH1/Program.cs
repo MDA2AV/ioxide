@@ -112,7 +112,7 @@ for (int i = 0; i < threads.Length; i++)
         // per-connection state, so every connection opened from it gets its own SSL.
         HttpClientPool.Start(r, new HttpClientOptions
         {
-            Host              = upstreamHost,     // origin address (IPv4 literal; DNS would block the reactor)
+            Host              = upstreamHost,     // origin name or address; a name is resolved off the reactor
             Port              = upstreamPort,     // origin port
             PoolSize          = upstreamPool,     // connections kept open; round-robin, one request each
             MaxResponseBytes  = 8 * 1024 * 1024,  // per-request ceiling for headers + body
@@ -237,6 +237,11 @@ static bool TryReadTarget(ReadOnlySpan<byte> request, out ReadOnlySpan<byte> tar
 {
     target = default;
 
+    // Only the request line, up to its first CR or LF - this target is forwarded, so nothing a
+    // client sends may add lines to the request the origin sees.
+    int lineEnd = request.IndexOfAny((byte)'\r', (byte)'\n');
+    if (lineEnd >= 0) request = request[..lineEnd];
+
     int firstSpace = request.IndexOf((byte)' ');
     if (firstSpace < 0) return false;
 
@@ -245,6 +250,7 @@ static bool TryReadTarget(ReadOnlySpan<byte> request, out ReadOnlySpan<byte> tar
     if (secondSpace < 0) return false;
 
     target = afterMethod[..secondSpace];
+    if (target.IsEmpty || target[0] != (byte)'/' || target.Contains((byte)0)) return false;
 
     int query = target.IndexOf((byte)'?');
     if (query >= 0) target = target[..query];

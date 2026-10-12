@@ -31,8 +31,8 @@ int    reactors = Environment.ProcessorCount;  // one ring per reactor, one reac
 
 Env.Override(ref port, ref reactors);
 
-// The origin this forwards to. The host must be an IPv4 literal - a DNS lookup would block the
-// reactor - and PoolSize is per protocol, per reactor.
+// The origin this forwards to. The host can be a name or an address - a name is resolved off the
+// reactor each time a connection opens - and PoolSize is per reactor.
 string upstreamHost = "127.0.0.1";
 ushort upstreamPort = 8081;
 int    upstreamPool = 8;

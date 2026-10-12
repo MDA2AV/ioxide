@@ -56,7 +56,8 @@ public sealed unsafe partial class Reactor
     private void DrainPostQ()
     {
         // Clear before draining so a producer enqueuing during/after the drain still races to wake.
-        Volatile.Write(ref _postSignalPending, 0);
+        // An exchange, not a store: otherwise the queue can read empty before the clear is visible.
+        Interlocked.Exchange(ref _postSignalPending, 0);
         while (_postQ.TryDequeue(out PostItem item))
         {
             // A faulted continuation (e.g. an async-void rethrow delivered via Post) must not
