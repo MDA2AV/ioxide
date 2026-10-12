@@ -1,3 +1,4 @@
+using System.Numerics;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using static ioxide.Native;
@@ -96,6 +97,13 @@ public sealed unsafe partial class Reactor
     private readonly int  _connBufRingEntries;
     private readonly uint _incRecvBufferSize;
 
+    // The kernel takes a provided-buffer ring of a power of two below 65536 entries.
+    private const int MaxBufRingEntries = 32768;
+
+    // Per-connection gids run 2..MaxConnections+1 in a ushort; one more wraps onto 0 and 1, the UDP and
+    // shared rings' ids.
+    private const int MaxIncrementalConnections = ushort.MaxValue - 1;
+
     // Transient io_uring_enter errnos, and ETIME: a bounded wait that ran out.
     private const int EINTR  = 4;
     private const int EAGAIN = 11;
@@ -115,6 +123,26 @@ public sealed unsafe partial class Reactor
         _port = _tcp.Port;
         _ringEntries = config.RingEntries;
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(config.OpSlots);
+
+        // Here rather than at first use, which for most of these is the first accept, inside CQE
+        // dispatch, where a bad value ends or hangs the reactor (#102).
+        ThrowUnlessPow2(_tcp.RecvQueueEntries, "config.Tcp.RecvQueueEntries");
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(_tcp.WriteSlabSize, "config.Tcp.WriteSlabSize");
+        if (config.Incremental is { } incremental)
+        {
+            ThrowUnlessPow2(incremental.RecvSlots, "config.Incremental.RecvSlots");
+            ArgumentOutOfRangeException.ThrowIfGreaterThan(incremental.RecvSlots, MaxBufRingEntries, "config.Incremental.RecvSlots");
+            ArgumentOutOfRangeException.ThrowIfNegativeOrZero(incremental.RecvBufferSize, "config.Incremental.RecvBufferSize");
+            ArgumentOutOfRangeException.ThrowIfNegativeOrZero(incremental.MaxConnections, "config.Incremental.MaxConnections");
+            ArgumentOutOfRangeException.ThrowIfGreaterThan(incremental.MaxConnections, MaxIncrementalConnections, "config.Incremental.MaxConnections");
+        }
+        else
+        {
+            ThrowUnlessPow2(config.RecvSlots, "config.RecvSlots");
+            ArgumentOutOfRangeException.ThrowIfGreaterThan(config.RecvSlots, MaxBufRingEntries, "config.RecvSlots");
+            ArgumentOutOfRangeException.ThrowIfNegativeOrZero(config.RecvBufferSize, "config.RecvBufferSize");
+        }
+
         _opTargets = new IRingCompletion?[config.OpSlots];
         _incremental = config.Incremental is not null;
         _recvBufferSize = (uint)config.RecvBufferSize;
@@ -128,6 +156,14 @@ public sealed unsafe partial class Reactor
         _zeroCopySend = _tcp.ZeroCopySend;
         _readTimeoutMs = _tcp.ReadTimeoutMs;
         _sendTimeoutMs = _tcp.SendTimeoutMs;
+    }
+
+    private static void ThrowUnlessPow2(int value, string paramName)
+    {
+        if (!BitOperations.IsPow2(value))
+        {
+            throw new ArgumentOutOfRangeException(paramName, value, $"{paramName} ('{value}') must be a power of two.");
+        }
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
