@@ -7,10 +7,11 @@ namespace ioxide.httpclient;
 public sealed record TlsClientOptions
 {
     /// <summary>
-    /// The name sent as SNI and checked against the certificate the origin presents. Required:
-    /// connecting by IP with no name means there is nothing to verify against.
+    /// The name sent as SNI and checked against the certificate the origin presents. Null: the name the
+    /// connection is opened to (<see cref="HttpClientOptions.Host"/>, or the URL's host), so one context
+    /// serves any number of origins. Set it to connect by address, which on its own has nothing to verify.
     /// </summary>
-    public required string ServerName { get; init; }
+    public string? ServerName { get; init; }
 
     /// <summary>
     /// ALPN protocols to offer, most preferred first, e.g. <c>["h2", "http/1.1"]</c>. Empty offers

@@ -247,7 +247,7 @@ internal static class HttpClientTests
     // Start a proxy server: its handler calls the origin through the ring-native client and writes
     // "<upstream status>|<detail>" back. The pool is created in OnStart, so it belongs to this
     // reactor's ring - the documented way to use it.
-    private static int StartProxy(int originPort, int poolSize = 4, int? acquireTimeoutMs = null,
+    internal static int StartProxy(int originPort, int poolSize = 4, int? acquireTimeoutMs = null,
         int? maxResponseBytes = null)
     {
         var options = new HttpClientOptions

@@ -6,14 +6,14 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
-    <RootNamespace>Playground.Clients.Redis</RootNamespace>
-    <AssemblyName>Playground.Clients.Redis</AssemblyName>
+    <RootNamespace>Playground.Clients.Gateway</RootNamespace>
+    <AssemblyName>Playground.Clients.Gateway</AssemblyName>
   </PropertyGroup>
 
   <ItemGroup>
     <ProjectReference Include="../../Shared/Playground.Shared.csproj" />
     <ProjectReference Include="../../../src/ioxide/ioxide.csproj" />
-    <ProjectReference Include="../../../src/clients/ioxide.redis/ioxide.redis.csproj" />
+    <ProjectReference Include="../../../src/clients/ioxide.httpclient/ioxide.httpclient.csproj" />
   </ItemGroup>
 
 </Project>

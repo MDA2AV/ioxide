@@ -128,27 +128,38 @@ public sealed class Http2BodyReader : IValueTaskSource<ReadOnlyMemory<byte>>
         }
     }
 
-    // Teardown while chunks may still be queued: recycle everything and wake anyone parked.
+    // The stream was reset, or the connection went away, under a running handler: what is queued
+    // will never be read, so it goes back now. The chunk the handler holds stays its own until its
+    // next read or its return, and a parked read wakes through the deferred list.
+    internal void Abort()
+    {
+        DropQueued();
+        End();
+    }
+
+    // The handler is done with the request, or never got it: recycle everything, the chunk it held
+    // included, and complete a read it left parked.
     internal void Drop()
     {
         ReleaseHandedOut();
+        DropQueued();
 
+        // Drained first, so the wake below reports end-of-body rather than handing out a chunk
+        // whose stream is already gone.
+        _ended = true;
+        FireIfReady();
+    }
+
+    // Every stream shares the connection window, so bytes dropped unread still owe it credit.
+    private void DropQueued()
+    {
         int unread = 0;
         while (_chunks.TryDequeue(out (byte[] Buffer, int Length) chunk))
         {
             unread += chunk.Length;
             ArrayPool<byte>.Shared.Return(chunk.Buffer);
         }
-
-        // Every stream shares the connection window, so bytes dropped unread still owe it credit.
         _owner.CreditConnection(unread);
-
-        // Drained first, so the wake below reports end-of-body rather than handing out a chunk
-        // whose stream is already gone. Woken directly rather than through the connection's
-        // deferred list: teardown is the last thing that happens, so nothing would fire it, and a
-        // handler parked mid-body would wait forever on a body that stopped arriving.
-        _ended = true;
-        FireIfReady();
     }
 
     private void ReleaseHandedOut()

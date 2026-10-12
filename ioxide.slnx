@@ -17,7 +17,6 @@
     <Project Path="src/clients/ioxide.file/ioxide.file.csproj" />
     <Project Path="src/clients/ioxide.timer/ioxide.timer.csproj" />
     <Project Path="src/clients/ioxide.pg/ioxide.pg.csproj" />
-    <Project Path="src/clients/ioxide.redis/ioxide.redis.csproj" />
   </Folder>
 
   <!-- Inbound: hosting integration. -->
@@ -66,6 +65,7 @@
     <Project Path="Playground/Http2/ManagedBuffered/Playground.Http2.ManagedBuffered.csproj" />
     <Project Path="Playground/Http2/Nghttp2Buffered/Playground.Http2.Nghttp2Buffered.csproj" />
     <Project Path="Playground/Http2/Nghttp2Response/Playground.Http2.Nghttp2Response.csproj" />
+    <Project Path="Playground/Http2/Nghttp2StreamedRequest/Playground.Http2.Nghttp2StreamedRequest.csproj" />
     <Project Path="Playground/Http2/ManagedStreamedResponse/Playground.Http2.ManagedStreamedResponse.csproj" />
     <Project Path="Playground/Http2/ManagedStreamedRequest/Playground.Http2.ManagedStreamedRequest.csproj" />
     <Project Path="Playground/Http2/ManagedStreamedBoth/Playground.Http2.ManagedStreamedBoth.csproj" />
@@ -101,10 +101,11 @@
 
   <Folder Name="/apps/playground/clients/">
     <Project Path="Playground/Clients/Pg/Playground.Clients.Pg.csproj" />
-    <Project Path="Playground/Clients/Redis/Playground.Clients.Redis.csproj" />
     <Project Path="Playground/Clients/File/Playground.Clients.File.csproj" />
     <Project Path="Playground/Clients/Https/Playground.Clients.Https.csproj" />
     <Project Path="Playground/Clients/Http/Playground.Clients.Http.csproj" />
+    <Project Path="Playground/Clients/Gateway/Playground.Clients.Gateway.csproj" />
+    <Project Path="Playground/Clients/GatewayTlsPipes/Playground.Clients.GatewayTlsPipes.csproj" />
     <Project Path="Playground/Clients/Quic/Playground.Clients.Quic.csproj" />
     <Project Path="Playground/Clients/Timer/Playground.Clients.Timer.csproj" />
   </Folder>
