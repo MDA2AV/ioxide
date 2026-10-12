@@ -212,7 +212,7 @@ public sealed class PgConnection : IDisposable
             _prepared[sql] = name!;
         }
 
-        var pending = new Pending(onRow) { PreparedSql = cached ? sql : null, Sql = sql, EnqueuedAtMs = Environment.TickCount64 };
+        var pending = new Pending(onRow) { PreparedSql = cached ? sql : null, Sql = sql, EnqueuedAtMs = Native.MonotonicMs };
         _inflight.Enqueue(pending);
 
         if (!_sending)
@@ -247,7 +247,7 @@ public sealed class PgConnection : IDisposable
             return ValueTask.FromException<PgResult>(ex);
         }
 
-        var pending = new Pending(onRow) { EnqueuedAtMs = Environment.TickCount64 };
+        var pending = new Pending(onRow) { EnqueuedAtMs = Native.MonotonicMs };
         _inflight.Enqueue(pending);
 
         if (!_sending)
@@ -305,6 +305,11 @@ public sealed class PgConnection : IDisposable
             _sending = false;
             FailAll(ex);
         }
+
+        if (IsBroken)
+        {
+            Dispose();   // a Dispose that found this send in flight left the teardown to here
+        }
     }
 
     // Move [from, from+length) to the front of the send buffer. CopyTo is memmove-safe for the
@@ -353,8 +358,11 @@ public sealed class PgConnection : IDisposable
                         break;
 
                     case PgProtocol.ParseComplete:
+                        front.PreparedSql = null;   // the server holds the statement now, so a Bind or Execute error must not evict it
+                        break;
+
                     case PgProtocol.BindComplete:
-                        break;   // extended-protocol acks; nothing to collect
+                        break;   // extended-protocol ack; nothing to collect
 
                     case PgProtocol.ErrorResponse:
                         // Per-command: the stream resyncs at the next ReadyForQuery, so siblings still run.
@@ -387,6 +395,11 @@ public sealed class PgConnection : IDisposable
             _reading = false;
             FailAll(ex is PgException p ? p : new PgException(ex.Message));
         }
+
+        if (IsBroken)
+        {
+            Dispose();   // a Dispose that found this recv in flight left the teardown to here
+        }
     }
 
     private void FailAll(Exception ex)
@@ -400,7 +413,7 @@ public sealed class PgConnection : IDisposable
 
     // Reactor-thread (pool ticker): if the oldest in-flight command is older than the timeout, tear
     // the connection down - fail its waiters with a diagnostic error and mark it broken. The pool then
-    // disposes it, and closing the fd cancels the stuck ring recv/send. Returns true if it timed out.
+    // disposes it, and shutting the socket down completes the stuck ring recv/send. Returns true if it timed out.
     internal bool CheckTimeout(long nowMs, int timeoutMs, string host, ushort port)
     {
         if (timeoutMs <= 0 || _inflight.Count == 0)
@@ -432,10 +445,10 @@ public sealed class PgConnection : IDisposable
         public int Rows;
         public string CommandTag = "";
         public PgException? Error;
-        public string? PreparedSql;   // set when this command included a Parse, so it can be evicted on error
+        public string? PreparedSql;   // set until this command's Parse is acknowledged, so a Parse that fails can be evicted
         public string? Sql;           // SQL text (extended protocol) - for stale-statement cache eviction
         public PgColumn[]? Columns;   // captured from RowDescription for row-streaming queries
-        public long EnqueuedAtMs;     // Environment.TickCount64 at enqueue - drives the command-timeout sweep
+        public long EnqueuedAtMs;     // Native.MonotonicMs at enqueue - drives the command-timeout sweep
 
         public Pending(PgRowHandler? onRow) => OnRow = onRow;
         public short Version => _core.Version;
@@ -677,6 +690,15 @@ public sealed class PgConnection : IDisposable
 
     public unsafe void Dispose()
     {
+        IsBroken = true;
+
+        // close() would leave an armed op holding the socket open and using the buffers freed below.
+        if (_reading || _sending)
+        {
+            Native.shutdown(_socket.Fd, Native.SHUT_RDWR);
+            return;
+        }
+
         _socket.Dispose();
 
         if (_send != 0)

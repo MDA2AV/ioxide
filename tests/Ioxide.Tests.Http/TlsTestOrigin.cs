@@ -39,6 +39,15 @@ internal sealed class TlsTestOrigin : IDisposable
     /// </summary>
     public string? LastClientSubject { get; private set; }
 
+    /// <summary>
+    /// When true, each connection ends after its first response - close_notify, then the FIN - the
+    /// way a keep-alive timeout ends a connection the client still holds.
+    /// </summary>
+    public bool CloseAfterResponse { get; set; }
+
+    /// <summary>The client's port on the most recent connection, which names its socket.</summary>
+    public int LastClientPort { get; private set; }
+
     private TlsTestOrigin(TcpListener listener, X509Certificate2 certificate, string[] alpn)
     {
         _listener = listener;
@@ -124,6 +133,8 @@ internal sealed class TlsTestOrigin : IDisposable
     {
         using (client)
         {
+            LastClientPort = ((IPEndPoint)client.Client.RemoteEndPoint!).Port;
+
             SslStream? tls = null;
             try
             {
@@ -166,6 +177,12 @@ internal sealed class TlsTestOrigin : IDisposable
                         body);
 
                     await tls.WriteAsync(response, _stopping.Token);
+
+                    if (CloseAfterResponse)
+                    {
+                        await tls.ShutdownAsync();
+                        return;
+                    }
                 }
             }
             catch

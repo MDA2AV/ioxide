@@ -139,12 +139,13 @@ public sealed unsafe partial class TcpConnection : IValueTaskSource
             return default;
         }
 
+        // Before arming: once armed, a close on the reactor can complete the flush, and a Reset after it would lose that.
+        _flushSignal.Reset();
         if (Interlocked.CompareExchange(ref _flushArmed, 1, 0) != 0)
         {
             throw new InvalidOperationException("FlushAsync already armed.");
         }
 
-        _flushSignal.Reset();
         WriteInFlight = target;
         Volatile.Write(ref FlushArmedMs, _reactor.NowMs);
 

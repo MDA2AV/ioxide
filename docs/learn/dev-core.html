@@ -23,7 +23,6 @@
     <div class="group">Guide</div>
     <a href="overview.html">Introduction</a>
     <a href="postgres.html">Postgres</a>
-    <a href="redis.html">Redis</a>
     <a href="tls.html">TLS</a>
     <a href="files.html">Static files</a>
     <a href="multiport.html">Multi-port</a>
@@ -34,7 +33,6 @@
     <div class="group sub">Packages</div>
     <a href="dev-core.html" class="pkg here">ioxide <span class="muted">core</span></a>
     <a href="dev-pg.html" class="pkg">ioxide.pg</a>
-    <a href="dev-redis.html" class="pkg">ioxide.redis</a>
     <a href="dev-tls.html" class="pkg">ioxide <span class="muted">tls</span></a>
     <a href="dev-file.html" class="pkg">ioxide.file</a>
   </aside>
@@ -196,7 +194,7 @@ int    fd   = (int)(uint)cqe.user_data;</code></pre>
     <p>A single-shot <code>IORING_OP_TIMEOUT</code> (a native <code>__kernel_timespec</code> the
     reactor owns) fires every ~250&nbsp;ms, re-armed each time. On fire, <code>OnTimerTick</code> runs
     every callback registered via <code>AddTicker(Action)</code> - on the reactor thread - then
-    re-arms. This is how the pg/redis pools sweep per-command timeouts and replenish connections
+    re-arms. This is how the pg pools sweep per-command timeouts and replenish connections
     without a thread-per-command or any cross-thread timer: one timeout SQE per reactor, negligible
     cost, and the tickers see reactor-owned state directly.</p>
 <p class="src"><b>Reactor.cs</b> · a single-shot IORING_OP_TIMEOUT, re-armed after every tick</p>
@@ -213,7 +211,7 @@ private void OnTimerTick()
 {
     for (int i = 0; i &lt; _tickers.Count; i++)
     {
-        _tickers[i]();                    // pg/redis pools sweep timeouts + replenish here
+        _tickers[i]();                    // pg pools sweep timeouts + replenish here
     }
     ArmTimer();                           // single-shot: re-arm for the next interval
 }</code></pre>
@@ -343,7 +341,7 @@ internal void Clear()
     false sharing. Used for the buffer-return and flush hand-off queues.</p>
 
     <h2>The ring-native client plumbing</h2>
-    <p>How Postgres, Redis, and file I/O run on the same ring as the server.</p>
+    <p>How Postgres and file I/O run on the same ring as the server.</p>
     <ul>
       <li><b>IRingHost</b> (<code>IRingHost.cs</code>) - the contract a reactor implements so clients
       can submit on it: <code>SubmitConnect/Send/Recv/Read/Write(fd, nint buffer, ..., completion)</code>.
@@ -444,7 +442,8 @@ memory directly; <code>Stream</code> cannot.</p>
 
     <h2>Configuration &middot; <span class="dim">ServerConfig.cs, IoxideRuntime.cs</span></h2>
     <p><code>ServerConfig</code> is the record of tunables. At the root, the engine and its recv
-    machinery: <code>ReactorCount</code>, <code>RingEntries</code> (SQ/CQ depth),
+    machinery: <code>ReactorCount</code>, <code>RingEntries</code> (SQ/CQ depth), <code>OpSlots</code>
+    (where the table of in-flight timer and client operations starts; it doubles on demand),
     <code>DualStack</code>, the shared-ring knobs (<code>RecvBufferSize</code>,
     <code>RecvSlots</code>) and <code>Incremental</code> - a nullable
     <code>IncrementalOptions</code> (<code>MaxConnections</code>, <code>RecvSlots</code>,

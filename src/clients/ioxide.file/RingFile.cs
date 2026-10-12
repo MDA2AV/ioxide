@@ -27,7 +27,7 @@ public sealed class RingFile : IDisposable
     /// <summary>Open <paramref name="path"/> read-only. Blocking open, one-time.</summary>
     public static RingFile Open(IRingHost host, string path)
     {
-        int fd = open(path, O_RDONLY, 0);
+        int fd = open(path, O_RDONLY | O_CLOEXEC, 0);
 
         if (fd < 0)
         {
