@@ -262,6 +262,7 @@ nav.top .links a.gh svg { display: block; }
 #tab-http:checked ~ .ex-menu label[for="tab-http"],
 #tab-pg:checked ~ .ex-menu label[for="tab-pg"],
 #tab-redis:checked ~ .ex-menu label[for="tab-redis"],
+#tab-redisse:checked ~ .ex-menu label[for="tab-redisse"],
 #tab-files:checked ~ .ex-menu label[for="tab-files"],
 #tab-tls:checked ~ .ex-menu label[for="tab-tls"],
 #tab-tlshybrid:checked ~ .ex-menu label[for="tab-tlshybrid"],
@@ -409,6 +410,7 @@ nav.top .links a.gh svg { display: block; }
 #tab-http:checked ~ .pane-http { display: block; }
 #tab-pg:checked ~ .pane-pg { display: block; }
 #tab-redis:checked ~ .pane-redis { display: block; }
+#tab-redisse:checked ~ .pane-redisse { display: block; }
 #tab-files:checked ~ .pane-files { display: block; }
 #tab-tls:checked ~ .pane-tls { display: block; }
 #tab-tlshybrid:checked ~ .pane-tlshybrid { display: block; }
@@ -561,6 +563,7 @@ nav.top .links a.gh svg { display: block; }
   #tab-http:checked ~ .ex-menu label[for="tab-http"],
   #tab-pg:checked ~ .ex-menu label[for="tab-pg"],
   #tab-redis:checked ~ .ex-menu label[for="tab-redis"],
+  #tab-redisse:checked ~ .ex-menu label[for="tab-redisse"],
   #tab-files:checked ~ .ex-menu label[for="tab-files"],
   #tab-tls:checked ~ .ex-menu label[for="tab-tls"],
   #tab-tlshybrid:checked ~ .ex-menu label[for="tab-tlshybrid"],

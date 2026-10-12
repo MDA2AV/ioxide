@@ -507,6 +507,16 @@ PANES = {
         "RESP2 with pipelining, one pool per reactor. Same shape as "
         "<label for=\"tab-pg\" class=\"ex-jump\">postgres</label> - the client is ring-native, so "
         "the round trip never leaves the core the request landed on."),
+    "redisse": (
+        "Clients/RedisStackExchange", "Redis &middot; StackExchange.Redis", "ioxide + ioxide.redis.stackexchange",
+        ["curl http://127.0.0.1:8080/",
+         "PLAYGROUND_REDIS_TRANSPORT=sockets dotnet run -c Release --project Playground/Clients/RedisStackExchange"],
+        "StackExchange.Redis's whole API with its connections on the reactor's ring. <code>IoxideTunnel</code> "
+        "hands the multiplexer a transport whose connect, sends and receives are io_uring operations on the "
+        "reactor, and StackExchange.Redis parses the replies and completes each command on that reactor's "
+        "thread - one multiplexer per reactor, so a handler's await never leaves it. Built on "
+        "StackExchange.Redis's experimental transport seam, and pinned to the version it was built "
+        "against. Compare <label for=\"tab-redis\" class=\"ex-jump\">redis</label>, ioxide's own client."),
     "qclient": (
         "Clients/Quic", "QUIC &middot; client", "ioxide + ioxide.ngtcp2",
         ["dotnet run -c Release --project Playground/Quic/Raw   # something to talk to",
