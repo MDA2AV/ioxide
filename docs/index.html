@@ -61,6 +61,7 @@
   <input type="radio" name="mode-tabs" id="tab-pxh3toh1">
   <input type="radio" name="mode-tabs" id="tab-http">
   <input type="radio" name="mode-tabs" id="tab-gateway">
+  <input type="radio" name="mode-tabs" id="tab-gatewaytls">
   <input type="radio" name="mode-tabs" id="tab-pg">
   <input type="radio" name="mode-tabs" id="tab-redis">
   <input type="radio" name="mode-tabs" id="tab-files">
@@ -154,6 +155,7 @@
       <label for="tab-pxh3toh1">h3 &rarr; h1</label>
       <label for="tab-http">auto &middot; alt-svc</label>
       <label for="tab-gateway">gateway &middot; several origins</label>
+      <label for="tab-gatewaytls">gateway &middot; tls + pipes</label>
     </details>
 
     <details class="ex-sect">
@@ -7222,21 +7224,21 @@ for (int id = 0; id &lt; threads.Length; id++)
 
                 // Drain the recv, pulling the request target out on the way past. The buffers must
                 // go back to the ring, so read what you need before returning them.
-                string target = &quot;/&quot;;
+                string? target = null;
                 while (conn.TryGetItem(snapshot, out SpscRecvRing.Item item))
                 {
                     if (item.HasBuffer)
                     {
-                        if (TryReadTarget(item.AsSpan(), out ReadOnlySpan&lt;byte&gt; found))
-                        {
-                            target = Encoding.ASCII.GetString(found);
-                        }
+                        target ??= RequestTarget(item.AsSpan());
                         conn.ReturnBuffer(in item);
                     }
                 }
 
-                Route? route = gateway.Match(target);
-                if (route is null)
+                if (target is null)
+                {
+                    conn.Write(&quot;HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\n\r\n&quot;u8);
+                }
+                else if (gateway.Match(target) is not Route route)
                 {
                     conn.Write(&quot;HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n&quot;u8);
                 }
@@ -7287,21 +7289,18 @@ foreach (Thread thread in threads)
     thread.Join();
 }
 
-// &quot;GET /users/42?x=1 HTTP/1.1&quot; -&gt; &quot;/users/42?x=1&quot;, forwarded whole. Your framework of choice
-// would do this for you; ioxide deliberately doesn&#x27;t, so here it is in full.
-static bool TryReadTarget(ReadOnlySpan&lt;byte&gt; request, out ReadOnlySpan&lt;byte&gt; target)
+// &quot;GET /users/42?x=1 HTTP/1.1&quot; -&gt; &quot;/users/42?x=1&quot;, forwarded whole; null when the line is not a
+// request. It is cut at the line&#x27;s first CR or LF, so nothing a client sends can add lines to the
+// request an origin sees. Your framework of choice would do this for you; ioxide deliberately
+// doesn&#x27;t, so here it is in full.
+static string? RequestTarget(ReadOnlySpan&lt;byte&gt; request)
 {
-    target = default;
-
-    int firstSpace = request.IndexOf((byte)&#x27; &#x27;);
-    if (firstSpace &lt; 0) return false;
-
-    ReadOnlySpan&lt;byte&gt; afterMethod = request[(firstSpace + 1)..];
-    int secondSpace = afterMethod.IndexOf((byte)&#x27; &#x27;);
-    if (secondSpace &lt; 0) return false;
-
-    target = afterMethod[..secondSpace];
-    return true;
+    int end = request.IndexOfAny((byte)&#x27;\r&#x27;, (byte)&#x27;\n&#x27;);
+    ReadOnlySpan&lt;byte&gt; line = end &lt; 0 ? request : request[..end];
+    int first = line.IndexOf((byte)&#x27; &#x27;);
+    int last = line.LastIndexOf((byte)&#x27; &#x27;);
+    if (first &lt; 0 || last &lt;= first + 1 || line[first + 1] != (byte)&#x27;/&#x27; || line.Contains((byte)0)) return null;
+    return Encoding.ASCII.GetString(line[(first + 1)..last]);
 }
 
 // An origin and the paths sent to it.
@@ -7323,6 +7322,242 @@ sealed class Gateway(Route[] routes)
     }
 }</code></pre>
     <p class="ex-foot">One front door, several origins, picked by path. Each origin gets its own <code>HttpClientPool</code> on every reactor, with its own options - pool size, TLS, timeouts - and an origin that goes down fails only its own routes. <code>Start</code> registers each pool as the reactor's <code>HttpClientPool</code> service, and services are keyed by type, so <code>GetService</code> would find only the last one started: keep the pools <code>Start</code> returns, in a service of your own. For origins not known up front, <code>RingHttpClient</code> opens a pool per origin on first use.</p>
+  </div>
+  <div class="pane pane-gatewaytls">
+    <div class="pane-head">
+      <h3>Gateway &middot; tls + pipes</h3>
+      <span class="pane-pkg">ioxide + ioxide.httpclient</span>
+    </div>
+<pre><code class="language-csharp">// dotnet add package ioxide
+// dotnet add package ioxide.httpclient
+//   PLAYGROUND_PORT=8444 dotnet run -c Release --project Playground/Tls/OpenSsl   # origin &quot;users&quot;, https
+//   PLAYGROUND_PORT=8082 dotnet run -c Release --project Playground/Tcp/Raw       # origin &quot;orders&quot;, http
+//   curl -ki https://127.0.0.1:8443/users/42
+
+using System.Buffers;
+using System.IO.Pipelines;
+using System.Text;
+using ioxide;
+using ioxide.httpclient;
+using ioxide.tls;
+
+// ── Knobs ────────────────────────────────────────────────────────────────────────────────────
+
+ushort port     = 8443;                        // https://127.0.0.1:8443/ - what this gateway serves
+int    reactors = Environment.ProcessorCount;  // one ring per reactor, one reactor per core
+
+
+// A real PEM pair for the front door, or null to generate a self-signed localhost cert on first run.
+string? certOverride = null;
+string? keyOverride  = null;
+
+const string certPath = &quot;cert.pem&quot;;   // any PEM pair
+const string keyPath  = &quot;key.pem&quot;;
+
+// The origins, matched by path prefix in this order, each with its own options. &quot;users&quot; is https
+// by name: the name is resolved off the reactor, sent as SNI and checked against the certificate -
+// here the playground&#x27;s self-signed one, trusted by file rather than the system store. &quot;orders&quot; is
+// plain http, by address.
+Origin[] origins =
+[
+    new(&quot;users&quot;,  &quot;/users/&quot;,  new HttpClientOptions { Host = &quot;localhost&quot;, Port = 8444, PoolSize = 8 },
+        new TlsClientOptions { CaFile = certPath, AlpnProtocols = [&quot;http/1.1&quot;] }),
+    new(&quot;orders&quot;, &quot;/orders/&quot;, new HttpClientOptions { Host = &quot;127.0.0.1&quot;, Port = 8082, PoolSize = 4 }),
+];
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+
+var config = new ServerConfig
+{
+    ReactorCount   = reactors,                             // io_uring rings/threads - one per core
+    RingEntries    = 8192,                                 // SQ/CQ depth per ring
+    DualStack      = false,                                // true = one IPv6 socket also accepts IPv4-mapped
+    RecvBufferSize = 32 * 1024,                            // bytes per shared recv buffer
+    RecvSlots      = 4096,                                 // shared recv buffer-ring depth
+    Incremental    = null,                                 // per-connection recv rings (6.12+) - see Tcp/Incremental
+    Udp            = null,                                 // no raw UDP sockets (TCP-only server)
+    Quic           = null,                                 // no QUIC transport - see Http3/* and Quic/Alpn
+    Tcp = new TcpOptions
+    {
+        Port             = port,
+        ExtraPorts       = [],                             // extra listener ports (one handler, several doors)
+        ListenBacklog    = 1024,                           // accept-queue depth per SO_REUSEPORT listener
+        WriteSlabSize    = 16 * 1024,                      // per-connection write buffer before overflow kicks in
+        PoolMax          = 1024,                           // pooled connection objects kept per reactor
+        WriteOverflow    = WriteOverflowStrategy.Grow,     // Grow = realloc one slab; Segmented = chain + vectored SENDMSG
+        ZeroCopySend     = false,                          // SEND_ZC: kernel copies less, wins on large writes
+        RecvQueueEntries = 4096,                           // per-connection recv completion queue depth
+        ReadTimeoutMs    = 60_000,                         // close a connection whose read waits this long on a silent peer; 0 = off
+        SendTimeoutMs    = 60_000,                         // close a connection whose flush takes this long to go out; 0 = off
+    },
+};
+
+var tlsOptions = new TlsOptions
+{
+    CertificatePath = certPath,                            // PEM chain file (or CertificatePem for in-memory)
+    KeyPath         = keyPath,                             // PEM key file (or KeyPem for in-memory)
+    Alpn            = [&quot;http/1.1&quot;],                        // the front door speaks one protocol, so it offers one
+};
+
+var threads = new Thread[config.ReactorCount];
+
+for (int id = 0; id &lt; threads.Length; id++)
+{
+    var reactor = new Reactor(id, config);
+
+    reactor.OnStart = r =&gt;
+    {
+        // Inbound: terminate TLS for clients, on this reactor.
+        TlsService.Start(r, tlsOptions);
+
+        // Outbound: a pool per origin, opened on THIS reactor&#x27;s ring, with a TLS context of its own
+        // when the origin is https - one per reactor, shared by that pool&#x27;s connections. Start also
+        // registers each pool as the reactor&#x27;s HttpClientPool service, every call replacing the
+        // last, so the handler finds the pools through Gateway instead.
+        r.AddService(new Gateway([.. origins.Select(origin =&gt; new Route(origin, HttpClientPool.Start(r,
+            origin.Options with { Tls = origin.Tls is null ? null : TlsClientContext.Create(origin.Tls) })))]));
+    };
+
+    reactor.TcpHandle = async (r, conn) =&gt;
+    {
+        Gateway gateway = r.GetService&lt;Gateway&gt;();
+        TlsSession? tls = null;
+
+        try
+        {
+            tls = await r.GetService&lt;TlsService&gt;().AcceptAsync(conn);
+
+            // From here down the connection is a pipe: plaintext in, plaintext out.
+            await using var pipe = new TlsConnectionDualPipe(conn, tls, ownsSession: false);
+
+            while (true)
+            {
+                ReadResult read = await pipe.Input.ReadAsync();
+
+                // TLS hands back RECORDS, so a request head can arrive split across reads. Take one
+                // whole head and leave the rest - a pipelined request - for the next read, or examine
+                // everything and wait for more.
+                if (TryReadHead(read.Buffer, out SequencePosition end, out string? target))
+                {
+                    pipe.Input.AdvanceTo(end);
+                    await ForwardAsync(pipe.Output, gateway, target);
+                    continue;
+                }
+
+                pipe.Input.AdvanceTo(read.Buffer.Start, read.Buffer.End);
+
+                if (read.IsCompleted || read.IsCanceled)
+                {
+                    return;
+                }
+            }
+        }
+        catch (Exception e)
+        {
+            Console.Error.WriteLine($&quot;[gateway-tls-pipes] connection failed: {e.Message}&quot;);
+        }
+        finally
+        {
+            tls?.Dispose();
+            conn.DecRef();
+        }
+    };
+
+    threads[id] = new Thread(reactor.Run) { Name = $&quot;reactor-{id}&quot; };
+    threads[id].Start();
+}
+
+Console.WriteLine($&quot;[gateway-tls-pipes] {config.ReactorCount} reactors, https on :{config.Tcp!.Port} -&gt; &quot;
+                + string.Join(&quot;, &quot;, origins.Select(o =&gt; $&quot;{o.Prefix} {(o.Tls is null ? &quot;http&quot; : &quot;https&quot;)}://{o.Options.Host}:{o.Options.Port}&quot;))
+                + &quot;, a pool each per reactor&quot;);
+
+foreach (Thread thread in threads)
+{
+    thread.Join();
+}
+
+// One request out to its origin, one response back through the pipe.
+static async ValueTask ForwardAsync(PipeWriter output, Gateway gateway, string? target)
+{
+    if (target is null)
+    {
+        output.Write(&quot;HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\n\r\n&quot;u8);
+    }
+    else if (gateway.Match(target) is not Route route)
+    {
+        output.Write(&quot;HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n&quot;u8);
+    }
+    else
+    {
+        try
+        {
+            // The same call whether the origin is http or https - its pool&#x27;s options decide.
+            using HttpClientResponse response = await route.Pool.GetAsync(target);
+
+            output.Write(Encoding.ASCII.GetBytes(
+                $&quot;HTTP/1.1 {response.Status} OK\r\nx-origin: {route.Origin.Name}\r\n&quot;
+              + $&quot;Content-Length: {response.Body.Length}\r\n\r\n&quot;));
+            output.Write(response.Body.Span);   // bytes straight through, no decode
+        }
+        catch (Exception e)
+        {
+            // A dead origin - or a certificate that does not check out, since the handshake is
+            // part of opening a connection - fails only that origin&#x27;s routes.
+            byte[] message = Encoding.ASCII.GetBytes($&quot;{route.Origin.Name}: {e.Message}&quot;);
+            output.Write(Encoding.ASCII.GetBytes(
+                $&quot;HTTP/1.1 502 Bad Gateway\r\nContent-Length: {message.Length}\r\n\r\n&quot;));
+            output.Write(message);
+        }
+    }
+
+    await output.FlushAsync();
+}
+
+// One whole request head: where it ends, and its target - &quot;GET /users/42?x=1 HTTP/1.1&quot; -&gt;
+// &quot;/users/42?x=1&quot;, forwarded whole - or null when its first line is not a request. The target is
+// cut at that line&#x27;s first CR or LF, so nothing a client sends can add lines to the request an
+// origin sees.
+static bool TryReadHead(ReadOnlySequence&lt;byte&gt; buffer, out SequencePosition end, out string? target)
+{
+    var reader = new SequenceReader&lt;byte&gt;(buffer);
+    if (!reader.TryReadTo(out ReadOnlySequence&lt;byte&gt; head, &quot;\r\n\r\n&quot;u8))
+    {
+        end = default;
+        target = null;
+        return false;
+    }
+
+    end = reader.Position;
+
+    ReadOnlySpan&lt;byte&gt; bytes = head.IsSingleSegment ? head.FirstSpan : head.ToArray();
+    int lineEnd = bytes.IndexOfAny((byte)&#x27;\r&#x27;, (byte)&#x27;\n&#x27;);
+    ReadOnlySpan&lt;byte&gt; line = lineEnd &lt; 0 ? bytes : bytes[..lineEnd];
+    int first = line.IndexOf((byte)&#x27; &#x27;);
+    int last = line.LastIndexOf((byte)&#x27; &#x27;);
+    target = first &lt; 0 || last &lt;= first + 1 || line[first + 1] != (byte)&#x27;/&#x27; || line.Contains((byte)0)
+        ? null
+        : Encoding.ASCII.GetString(line[(first + 1)..last]);
+    return true;
+}
+
+// An origin, the paths sent to it, and its TLS settings when it is https.
+record Origin(string Name, string Prefix, HttpClientOptions Options, TlsClientOptions? Tls = null);
+
+// An origin and this reactor&#x27;s pool for it.
+record Route(Origin Origin, HttpClientPool Pool);
+
+// One reactor&#x27;s routes: the first prefix that matches wins.
+sealed class Gateway(Route[] routes)
+{
+    public Route? Match(string target)
+    {
+        foreach (Route route in routes)
+        {
+            if (target.StartsWith(route.Origin.Prefix, StringComparison.Ordinal)) return route;
+        }
+        return null;
+    }
+}</code></pre>
+    <p class="ex-foot">The <label for="tab-gateway" class="ex-jump">gateway</label> behind an https front door, read and written through an <code>IDuplexPipe</code>: plaintext requests in, plaintext responses out, whichever backend encrypts them. Behind it the origins differ in kind as well as in options - <code>users</code> is https by name, resolved off the reactor and checked against its certificate, <code>orders</code> plain http by address - and each https origin gets a <code>TlsClientContext</code> of its own on every reactor. TLS hands back records, so the loop takes one whole request head at a time and leaves a pipelined one for the next read.</p>
   </div>
   <div class="pane pane-pg">
     <div class="pane-head">

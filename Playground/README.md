@@ -119,7 +119,8 @@ reference implementation. QUIC itself is always ngtcp2 + picotls, bundled as one
 | Project | Lines | Shows | Packages |
 | --- | --- | --- | --- |
 | [`Clients.Http`](Clients/Http/Program.cs) | 145 | Calling an origin over HTTP/1.1 from inside a handler - both hops on the same ring, resumed inline. | `ioxide.httpclient` |
-| [`Clients.Gateway`](Clients/Gateway/Program.cs) | 195 | Several origins behind one front door, picked by path - a pool per origin on every reactor, each with its own options. | `ioxide.httpclient` |
+| [`Clients.Gateway`](Clients/Gateway/Program.cs) | 192 | Several origins behind one front door, picked by path - a pool per origin on every reactor, each with its own options. | `ioxide.httpclient` |
+| [`Clients.GatewayTlsPipes`](Clients/GatewayTlsPipes/Program.cs) | 246 | The same gateway with an https front door read and written through an `IDuplexPipe`, and an https origin by name beside a plain http one. | `ioxide.httpclient` |
 | [`Clients.Https`](Clients/Https/Program.cs) | 198 | The other direction of ioxide TLS: speaking it outbound to reach an `https://` origin. | `ioxide.httpclient` |
 | [`Clients.Quic`](Clients/Quic/Program.cs) | 166 | The client half of QUIC, and the thing that drives `Quic/Raw`. No listener of any kind. | `ioxide.ngtcp2` |
 | [`Clients.File`](Clients/File/Program.cs) | 422 | A static file server: every file opened ONCE, descriptors shared across reactors, read positionally off the ring. | `ioxide.file` |
