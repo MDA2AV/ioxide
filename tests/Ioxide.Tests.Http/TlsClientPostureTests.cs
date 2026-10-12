@@ -15,14 +15,6 @@ namespace Ioxide.Tests;
 /// while one inside it is served - not that setting it was accepted.
 /// </summary>
 /// <remarks>
-/// Two live defects ride as Pending:
-///
-///   - BuildAlpnWire casts each UTF-16 unit to a byte, so a non-ASCII protocol name is OFFERED as
-///     a different protocol made of its chars' low bytes - the client twin of the server-side
-///     defect in TlsService.BuildAlpnWire, proven there today;
-///   - HandshakeTimeoutMs is only checked between handshake flights, so the one peer a handshake
-///     timeout exists for - accepted the connect, then went silent - is not bounded by it at all.
-///
 /// Examined without a failing result, stated so they are not re-litigated: MinimumVersion = 0 is
 /// accepted (OpenSSL's "no floor"), but this box's system-wide MinProtocol makes the weakened
 /// floor unobservable, so no test can discriminate it here; a ServerName over 255 bytes makes the
@@ -202,16 +194,16 @@ internal static class TlsClientPostureTests
          + "wire as the bytes 'h2' and the client negotiates - and NegotiatedAlpn reports - a "
          + "protocol nobody configured");
 
-        runner.Pending("tls client: HandshakeTimeoutMs bounds a handshake whose peer accepted and went silent", () =>
+        runner.Test("tls client: HandshakeTimeoutMs bounds a handshake whose peer accepted and went silent", () =>
         {
             // The option says "how long the handshake may take before the connect fails", but
-            // RunHandshakeAsync checks its deadline only BETWEEN flights. A peer that accepts the
-            // TCP connect and then never answers the ClientHello - the one peer a handshake
-            // timeout exists for - leaves the connect parked in RecvAsync, where the deadline is
-            // never consulted. Through the pool that surfaces as the ACQUIRE timeout with no
-            // reason (the open never failed - it is still parked); for a direct
-            // TlsClientContext.ConnectAsync caller there is no second timeout, and the await
-            // simply never completes.
+            // RunHandshakeAsync used to check its deadline only BETWEEN flights. A peer that accepts
+            // the TCP connect and then never answers the ClientHello - the one peer a handshake
+            // timeout exists for - left the connect parked in RecvAsync, where the deadline was
+            // never consulted. Through the pool that surfaced as the ACQUIRE timeout with no
+            // reason (the open never failed - it was still parked); for a direct
+            // TlsClientContext.ConnectAsync caller there was no second timeout, and the await
+            // never completed.
             using var tarpit = new TarpitOrigin();
             (string certPath, _) = TestCert.Ensure();
 
@@ -231,15 +223,35 @@ internal static class TlsClientPostureTests
             // Guard against passing vacuously: the tarpit really was reached and held the socket.
             Assert.True(tarpit.Accepted > 0, "the connect never reached the tarpit, so nothing was proven");
 
-            // The claim: the failure the caller sees names the handshake deadline (the message the
-            // dribbling-peer path already produces). Today it is the pool's own acquire timeout
-            // with no cause attached, because the open is still parked when it fires.
+            // The claim: the failure the caller sees names the handshake deadline. It used to be
+            // the pool's own acquire timeout with no cause attached, because the open was still
+            // parked when it fired.
             Assert.True(body.Contains("did not complete within"),
                 $"the handshake deadline should have fired and been named, got: {body}");
-        }, "the deadline is only checked between handshake flights, so a peer that accepts and "
-         + "goes silent parks the connect in RecvAsync forever - HandshakeTimeoutMs never fires, "
-         + "and only the pool's acquire timeout (which a direct ConnectAsync caller does not have) "
-         + "bounds it");
+        });
+
+        runner.Test("tls client: HandshakeTimeoutMs bounds a direct ConnectAsync whose peer accepted and went silent", () =>
+        {
+            // The same tarpit without the pool: a direct TlsClientContext.ConnectAsync has no
+            // acquire timeout behind it, so the handshake deadline is the only bound it has.
+            using var tarpit = new TarpitOrigin();
+            (string certPath, _) = TestCert.Ensure();
+            TlsClientContext tls = TlsClientContext.Create(new TlsClientOptions
+            {
+                ServerName = "localhost",
+                AlpnProtocols = ["http/1.1"],
+                CaFile = certPath,
+                HandshakeTimeoutMs = 750,
+            });
+
+            int port = TestServer.Start((reactor, connection) => DirectConnectHandler(reactor, connection, tarpit.Port, tls));
+
+            (int status, string body) = Client.Get(port, "/tarpit-direct", timeoutMs: 20_000);
+            Assert.Equal(200, status);
+            Assert.True(tarpit.Accepted > 0, "the connect never reached the tarpit, so nothing was proven");
+            Assert.True(body.Contains("did not complete within 750 ms"),
+                $"the handshake deadline should have ended the connect, got: {body}");
+        });
     }
 
     // ---------------------------------------------------------------------------------------------
@@ -453,6 +465,49 @@ internal static class TlsClientPostureTests
                 await connection.FlushAsync();
                 connection.ResetRead();
             }
+        }
+        finally
+        {
+            connection.DecRef();
+        }
+    }
+
+    // One TLS connect straight to the origin, no pool, answered with how it ended.
+    private static async Task DirectConnectHandler(Reactor reactor, TcpConnection connection, int originPort,
+        TlsClientContext tls)
+    {
+        try
+        {
+            RecvSnapshot snapshot = await connection.ReadAsync();
+            if (snapshot.IsClosed)
+            {
+                return;
+            }
+            Wire.ReadPath(connection, snapshot);
+
+            string detail;
+            RingSocket socket = RingSocket.CreateTcp(reactor);
+            int connected = await socket.ConnectAsync("127.0.0.1", (ushort)originPort);
+            if (connected < 0)
+            {
+                socket.Dispose();
+                detail = $"connect failed: errno {-connected}";
+            }
+            else
+            {
+                try
+                {
+                    using TlsClientStream stream = await tls.ConnectAsync(socket);   // owns the socket from here
+                    detail = "handshake completed";
+                }
+                catch (IOException e)
+                {
+                    detail = e.Message;
+                }
+            }
+
+            Wire.Write(connection, 200, detail);
+            await connection.FlushAsync();
         }
         finally
         {

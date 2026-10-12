@@ -22,6 +22,8 @@ public sealed unsafe class RingSocket : IDisposable
 
     public int Fd { get; }
 
+    public IRingHost Host => _host;
+
     private RingSocket(IRingHost host, int fd)
     {
         _host = host;
