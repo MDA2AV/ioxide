@@ -11,7 +11,7 @@ using Playground.Shared;
 //
 //  BUFFERED: dispatch waits for end-of-stream, so the whole body is already in request.Body when
 //  your handler runs - no BodyReader, no pacing - and the handler may still await (a PgPool query,
-//  Redis, anything ioxide-native resumes inline on the reactor).
+//  anything ioxide-native resumes inline on the reactor).
 //
 //  The trade: memory holds the entire body, so this suits normal-sized requests. Use Playground/Http3/Nghttp3Request
 //  when uploads can be large or hostile.
@@ -149,8 +149,8 @@ for (int i = 0; i < threads.Length; i++)
         {
             // Dispatch waited for end-of-stream, so the body is ALREADY here: request.Body is
             // complete and request.Body.Length is just a property read. No BodyReader, no pacing.
-            // This overload is synchronous, but the awaiting one exists too - a PgPool query or a
-            // Redis command resumes inline on this reactor, so you can await it right here.
+            // This overload is synchronous, but the awaiting one exists too - a PgPool query
+            // resumes inline on this reactor, so you can await it right here.
             _ = request.Body.Length;
 
             // One response object, reused for every request: zero allocations on this path. To
