@@ -14,6 +14,7 @@ internal static class Program
         var runner = new Runner();
 
         HttpClientTests.Register(runner);
+        HttpClientLeftoverTests.Register(runner);
         HttpClientIdleCloseTests.Register(runner);
         HttpClientDnsTests.Register(runner);
         HttpClientRequestHeadTests.Register(runner);
