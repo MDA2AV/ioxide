@@ -4,8 +4,10 @@ using System.Net.Sockets;
 using System.Runtime.InteropServices;
 using System.Text;
 using ioxide;
+using ioxide.http3;
 using ioxide.nghttp3;
 using ioxide.ngtcp2;
+using ioxide.timer;
 
 namespace Ioxide.Tests;
 
@@ -288,5 +290,77 @@ internal static class H3Tests
             Assert.Equal(200, status);
             Assert.Equal("bye after goaway", text);
         });
+
+        RegisterLateAnswer(runner);
+    }
+
+    private static void RegisterLateAnswer(Runner runner)
+    {
+        runner.Test("h3: a late buffered answer to a cancelled request leaves the connection serving", () =>
+            LateAnswerThenGet((conn, answer) => new Nghttp3Connection(conn).RunBufferedAsync(
+                async req => Nghttp3Response.Text(await answer(req.Path, req.StreamId)))));
+
+        runner.Test("h3: a late streaming answer to a cancelled request leaves the connection serving", () =>
+            LateAnswerThenGet((conn, answer) => new Nghttp3Connection(conn).RunStreamingAsync(
+                async req => Nghttp3Response.Text(await answer(req.Path, req.StreamId)))));
+
+        runner.Test("control: a late answer to a cancelled request leaves an ioxide.http3 connection serving", () =>
+            LateAnswerThenGet((conn, answer) => new Http3Connection(conn).RunAsync(
+                async req => Http3Response.Text(await answer(req.Path, req.StreamId)))));
+    }
+
+    // "/slow" is cancelled by the client and answered only once its stream has closed on the server.
+    private static void LateAnswerThenGet(Func<QuicConnection, Func<ReadOnlyMemory<byte>, long, ValueTask<string>>, Task> serve)
+    {
+        (string certPath, string keyPath) = TestCert.Ensure();
+        using var engine = new QuicEngine(certPath, keyPath, cidLength: 8, alpn: ["h3"]);
+        var answeredLate = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        (_, int udpPort) = TestServer.StartDatagram(
+            onDatagram: null,
+            quicFactory: engine.CreateFactory(_ => new ClosedStreamProbe(engine)),
+            quicHandle: (reactor, conn) => serve(conn, async (path, streamId) =>
+            {
+                if (!path.Span.SequenceEqual("/slow"u8))
+                {
+                    return "ok";
+                }
+
+                HashSet<long> closed = ((ClosedStreamProbe)conn).Closed;
+                var timer = new RingTimer(reactor);
+                for (int i = 0; i < 1_000 && !closed.Contains(streamId); i++)
+                {
+                    await timer.DelayAsync(10);
+                }
+                answeredLate.TrySetResult(closed.Contains(streamId));
+                return "late";
+            }));
+
+        using var client = new H3TestClient("127.0.0.1", udpPort);
+        client.Connect();
+        Assert.True(client.CompleteHandshake(timeoutMs: 5000), "handshake did not complete");
+
+        client.RequestThenCancel("/slow", readMs: 200);
+
+        // The stream closes only once the client acks the server's RESET_STREAM, so keep the connection turning.
+        long until = Environment.TickCount64 + 15_000;
+        while (!answeredLate.Task.IsCompleted && Environment.TickCount64 < until)
+        {
+            client.Pump(50);
+        }
+        Assert.True(answeredLate.Task.IsCompleted, "the /slow handler never answered");
+        Assert.True(answeredLate.Task.Result, "the cancelled stream never closed on the server, so its answer was not late and nothing was tested");
+
+        (int status, string body) = client.Get("/ok", timeoutMs: 5000);
+        Assert.True(status == 200 && body == "ok",
+            $"the next request on the connection got {status} [{body}]" + (client.PeerClosed ? ": the server closed the connection" : ""));
+    }
+
+    // Filled and read on the reactor thread only.
+    private sealed class ClosedStreamProbe(QuicEngine engine) : QuicEngineConnection(engine)
+    {
+        public readonly HashSet<long> Closed = [];
+
+        protected override void OnStreamClosed(long streamId, ulong appErrorCode) => Closed.Add(streamId);
     }
 }
