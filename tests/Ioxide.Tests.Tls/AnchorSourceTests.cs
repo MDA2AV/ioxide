@@ -17,14 +17,14 @@ namespace Ioxide.Tests;
 /// <remarks>
 /// The two sources reach OpenSSL by different doors, which is why the claim is worth testing at
 /// all: the path goes through SSL_CTX_load_verify_locations, which parses the bundle with
-/// PEM_X509_INFO_read_bio, while the text goes through a PEM_read_bio_X509 loop. Those two readers
-/// do NOT accept the same set of blocks, and the difference is silent - a block one of them does
-/// not recognise is skipped, not reported.
+/// PEM_X509_INFO_read_bio, while the text goes through a PEM_read_bio_X509_AUX loop. Those two
+/// readers have to accept the same set of blocks, and a difference is silent - a block one of them
+/// does not recognise is skipped, not reported.
 ///
 /// The clients are driven with a selection callback that presents the certificate it was handed
 /// whatever the server hinted. That is deliberate: the acceptable-CA hint is built by
 /// SSL_load_client_CA_file / SSL_CTX_add_client_CA, which is a SEPARATE question from what the
-/// store trusts, and neither source hints an anchor it read from a TRUSTED CERTIFICATE block. A
+/// store trusts, and the path's hint leaves out an anchor read from a TRUSTED CERTIFICATE block. A
 /// client that filtered on the hint would send nothing, and "sent nothing" is indistinguishable at
 /// the server from "was not trusted" - so the callback keeps these tests measuring the trust
 /// decision rather than a client-side heuristic.
@@ -57,7 +57,7 @@ internal static class AnchorSourceTests
             Assert.Equal("bob", bob);
         });
 
-        runner.Pending("anchors: a TRUSTED CERTIFICATE block is trusted from PEM text as it is from a path", () =>
+        runner.Test("anchors: a TRUSTED CERTIFICATE block is trusted from PEM text as it is from a path", () =>
         {
             Anchors anchors = Fixture.Value;
 
@@ -79,21 +79,16 @@ internal static class AnchorSourceTests
             (Client.TlsOutcome trusted, string alice) = Present(port, anchors.AliceCert, anchors.AliceKey);
             Assert.Equal(Client.TlsOutcome.Served, trusted);
             Assert.Equal("alice", alice);
-        },
-        "the PEM-text route reads the bundle with PEM_read_bio_X509, which SKIPS a block labelled "
-        + "TRUSTED CERTIFICATE and reports nothing; the file route reads the same block through "
-        + "load_verify_locations and trusts it, auxiliary trust settings and all. The bundle loads, "
-        + "the server starts, and one anchor of it is silently gone - the shape of a trusted-CA "
-        + "bundle from an OpenSSL trust store (ca-bundle.trust.crt) or 'openssl x509 -trustout'");
+        });
 
         RegisterIssuerHint(runner);
         RegisterEncoding(runner);
     }
 
     /// <summary>
-    /// What the PEM-text route does to bytes on the way in. It converts the string through
-    /// Encoding.ASCII, so every non-ASCII character becomes a question mark before OpenSSL is
-    /// handed anything - and OpenSSL knows what to do with one of those bytes.
+    /// What the PEM-text route does to bytes on the way in. It converts the string to UTF-8, so a
+    /// byte-order mark reaches OpenSSL as the three bytes it strips from a file; converted as ASCII
+    /// it was a question mark, which OpenSSL has no reason to strip.
     /// </summary>
     private static void RegisterEncoding(Runner runner)
     {
@@ -116,7 +111,7 @@ internal static class AnchorSourceTests
             Assert.Equal("alice", alice);
         });
 
-        runner.Pending("anchors: a bundle with a byte-order mark is trusted as PEM text as it is from a path", () =>
+        runner.Test("anchors: a bundle with a byte-order mark is trusted as PEM text as it is from a path", () =>
         {
             Anchors anchors = Fixture.Value;
 
@@ -131,13 +126,7 @@ internal static class AnchorSourceTests
             (Client.TlsOutcome outcome, string alice) = Present(port, anchors.AliceCert, anchors.AliceKey);
             Assert.Equal(Client.TlsOutcome.Served, outcome);
             Assert.Equal("alice", alice);
-        },
-        "AddTrustAnchorsPem converts with Encoding.ASCII, so U+FEFF reaches OpenSSL as '?' - and "
-        + "OpenSSL strips a UTF-8 byte-order mark from the first line of a bundle but has no reason "
-        + "to strip a question mark, so no block is ever recognised and the whole bundle reads as "
-        + "empty. The file route hands the same three bytes over untouched and they are stripped. "
-        + "The route documented for hosts that carry certificates as DATA is the one that cannot "
-        + "take what a secrets store filled from Windows tooling holds");
+        });
     }
 
     /// <summary>
@@ -168,7 +157,7 @@ internal static class AnchorSourceTests
             Assert.True(hint[0].Contains("ioxide test CA"), $"hinted something else: {hint[0]}");
         });
 
-        runner.Pending("anchors: an anchor written twice is hinted once from PEM text as it is from a path", () =>
+        runner.Test("anchors: an anchor written twice is hinted once from PEM text as it is from a path", () =>
         {
             Anchors anchors = Fixture.Value;
 
@@ -186,11 +175,7 @@ internal static class AnchorSourceTests
             // request to have been answered, so an empty or unparsed hint fails as loudly as a
             // wrong one - and it says "alice", so this anchor is genuinely trusted here.
             Assert.Equal(1, hint.Count);
-        },
-        "the file route builds the hint with SSL_load_client_CA_file, which drops a duplicate name; "
-        + "the PEM-text route pushes one with SSL_CTX_add_client_CA per certificate read and never "
-        + "compares, so the same bundle sends the same issuer twice - and a bundle that repeats a "
-        + "dozen anchors sends a CertificateRequest of twice the size to every client");
+        });
     }
 
     /// <summary>
@@ -323,8 +308,8 @@ internal static class AnchorSourceTests
     /// </summary>
     /// <remarks>
     /// The selection callback is the reason this is not <see cref="Client.GetTlsClientCert"/>.
-    /// Neither anchor source hints an anchor it read from a TRUSTED CERTIFICATE block -
-    /// SSL_load_client_CA_file uses the same reader as the PEM-text route - and a client that
+    /// The path route does not hint an anchor it read from a TRUSTED CERTIFICATE block -
+    /// SSL_load_client_CA_file reads with PEM_read_bio_X509, which skips one - and a client that
     /// picked its certificate by that hint would send nothing at all, which the server cannot tell
     /// apart from a certificate it refused. Presenting it regardless leaves exactly one thing
     /// deciding the outcome: whether the server trusts the anchor that issued it.

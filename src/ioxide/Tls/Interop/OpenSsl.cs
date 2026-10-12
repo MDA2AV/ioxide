@@ -125,6 +125,12 @@ internal static unsafe partial class OpenSsl
     /// <summary>Appends one issuer to the CertificateRequest hint. Takes its own reference.</summary>
     [LibraryImport(Ssl)] public static partial int SSL_CTX_add_client_CA(nint ctx, nint x509);
 
+    /// <summary>The hint as it stands: a stack of X509_NAME, borrowed.</summary>
+    [LibraryImport(Ssl)] public static partial nint SSL_CTX_get_client_CA_list(nint ctx);
+
+    /// <summary>Zero when two names are the same name, compared canonically.</summary>
+    [LibraryImport(Crypto)] public static partial int X509_NAME_cmp(nint a, nint b);
+
     /// <summary>The peer's leaf certificate, borrowed - no reference taken, so it is not freed.</summary>
     [LibraryImport(Ssl)] public static partial nint SSL_get0_peer_certificate(nint ssl);
 
@@ -149,6 +155,9 @@ internal static unsafe partial class OpenSsl
 
     /// <summary>OPENSSL_free. The macro passes __FILE__/__LINE__, which may be NULL/0.</summary>
     [LibraryImport(Crypto)] public static partial void CRYPTO_free(nint ptr, nint file, int line);
+
+    /// <summary>The element at <paramref name="index"/> of an OpenSSL stack, borrowed, or 0 past its end.</summary>
+    [LibraryImport(Crypto)] public static partial nint OPENSSL_sk_value(nint stack, int index);
 
     // Structural access to one attribute of a DN, so an identity can be compared as a value
     // instead of matched inside a rendered string. See TlsSession.PeerCommonName.
@@ -245,6 +254,8 @@ internal static unsafe partial class OpenSsl
     // PEM-from-memory loading: the same certificate/key material a chain file carries, read
     // through a memory BIO instead. The password-callback arguments are always null here.
     [LibraryImport(Crypto)] public static partial nint PEM_read_bio_X509(nint bio, nint x, nint cb, nint u);
+    /// <summary>Reads TRUSTED CERTIFICATE blocks as well as CERTIFICATE ones, as a CA file is read.</summary>
+    [LibraryImport(Crypto)] public static partial nint PEM_read_bio_X509_AUX(nint bio, nint x, nint cb, nint u);
     [LibraryImport(Crypto)] public static partial nint PEM_read_bio_PrivateKey(nint bio, nint pkey, nint cb, nint u);
     [LibraryImport(Crypto)] public static partial void X509_free(nint x509);
     [LibraryImport(Crypto)] public static partial void EVP_PKEY_free(nint pkey);
