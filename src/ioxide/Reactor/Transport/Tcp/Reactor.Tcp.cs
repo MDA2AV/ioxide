@@ -258,10 +258,10 @@ public sealed unsafe partial class Reactor
             }
             else
             {
-                conn.UseZc = _zeroCopySend;   // config default; kTLS overrides to plain on handshake
                 bgid = BgId;
             }
 
+            conn.UseZc = _zeroCopySend;   // config default; kTLS overrides to plain on handshake
             Track(clientFd, conn);
             conn.InitRefs();
             conn.ListenerPort = PortOf(listenFd);
