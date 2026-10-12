@@ -50,7 +50,9 @@ public sealed class HttpClientPool : IDisposable
     }
 
     /// <summary>Open <see cref="HttpClientOptions.PoolSize"/> connections and register the pool as
-    /// a reactor service.</summary>
+    /// a reactor service. Services are keyed by type, so a second pool started on the same reactor
+    /// replaces the first in <c>GetService&lt;HttpClientPool&gt;()</c> - with several origins, keep
+    /// the pools this returns.</summary>
     public static HttpClientPool Start(Reactor reactor, HttpClientOptions options)
     {
         var pool = new HttpClientPool(reactor, options, warm: true);
