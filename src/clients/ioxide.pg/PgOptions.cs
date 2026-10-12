@@ -33,7 +33,7 @@ public sealed record PgOptions
     /// <summary>
     /// Per-command timeout in milliseconds: a connection whose oldest in-flight command exceeds this
     /// is torn down and its waiters fail with a diagnostic error, so a silent backend can't park a
-    /// query forever. 0 disables. Default 30000.
+    /// query forever. It bounds a connect and its startup the same way. 0 disables. Default 30000.
     /// </summary>
     public int CommandTimeoutMs { get; init; } = 30_000;
 }
