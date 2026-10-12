@@ -1,5 +1,6 @@
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
+using ioxide.utils;
 using RESPite.Transports;
 
 namespace ioxide.redis.stackexchange;
@@ -15,14 +16,17 @@ namespace ioxide.redis.stackexchange;
 internal sealed partial class IoxideTransport : DuplexTransport
 {
     private readonly Reactor _reactor;
-    private readonly RingSocket _socket;
+    private readonly RingSocket _ringSocket;
 
-    private IoxideTransport(Reactor reactor, RingSocket socket, int receiveBufferSize)
+    // Wraps a connected socket and allocates the native buffer its receives land in.
+    private unsafe IoxideTransport(Reactor reactor, RingSocket ringSocket, int receiveBufferSize)
     {
         _reactor = reactor;
-        _socket = socket;
-        _received = GC.AllocateUninitializedArray<byte>(receiveBufferSize, pinned: true);
+        _ringSocket = ringSocket;
+        _received = (nint)NativeMemory.Alloc((nuint)receiveBufferSize);
+        _receivedView = new UnmanagedMemoryManager((byte*)_received, receiveBufferSize);
     }
 
+    // A pinned array's raw address, which is what the ring's operations take.
     private static unsafe nint Address(byte[] pinned) => (nint)Unsafe.AsPointer(ref MemoryMarshal.GetArrayDataReference(pinned));
 }

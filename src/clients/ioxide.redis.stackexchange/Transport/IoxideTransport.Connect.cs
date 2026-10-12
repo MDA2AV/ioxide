@@ -41,6 +41,7 @@ internal sealed partial class IoxideTransport
         throw new IOException(failure ?? $"{endpoint} resolved to no address");
     }
 
+    // Resolves the endpoint to the addresses to try and the port; only a hostname needs a DNS lookup.
     private static async ValueTask<(IPAddress[] Addresses, int Port)> ResolveAsync(
         EndPoint endpoint, CancellationToken cancellationToken)
     {
@@ -49,17 +50,12 @@ internal sealed partial class IoxideTransport
             return ([ip.Address], ip.Port);
         }
 
-        if (endpoint is DnsEndPoint dns)
-        {
-            if (IPAddress.TryParse(dns.Host, out IPAddress? literal))
-            {
-                return ([literal], dns.Port);
-            }
+        if (endpoint is not DnsEndPoint dns)
+            throw new NotSupportedException(
+                $"the ioxide transport connects over TCP only, not to a {endpoint.GetType().Name}");
 
+        return IPAddress.TryParse(dns.Host, out IPAddress? literal) ? ([literal], dns.Port) :
             // Off the reactor: a lookup blocks its thread.
-            return (await Dns.GetHostAddressesAsync(dns.Host, cancellationToken).ConfigureAwait(false), dns.Port);
-        }
-
-        throw new NotSupportedException($"the ioxide transport connects over TCP only, not to a {endpoint.GetType().Name}");
+            (await Dns.GetHostAddressesAsync(dns.Host, cancellationToken).ConfigureAwait(false), dns.Port);
     }
 }

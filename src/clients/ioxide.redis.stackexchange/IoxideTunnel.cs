@@ -28,10 +28,12 @@ public sealed class IoxideTunnel : Tunnel
     {
         ArgumentNullException.ThrowIfNull(reactor);
         ArgumentOutOfRangeException.ThrowIfLessThan(receiveBufferSize, 1024);
+
         _reactor = reactor;
         _receiveBufferSize = receiveBufferSize;
     }
 
+    // StackExchange.Redis calls this for every connection it opens; refuses TLS, connects on the ring.
     public override async ValueTask<DuplexTransport?> ConnectTransportAsync(
         EndPoint endpoint, ConnectionType connectionType, TlsOptions tls, CancellationToken cancellationToken)
     {
@@ -44,5 +46,6 @@ public sealed class IoxideTunnel : Tunnel
         return await IoxideTransport.ConnectAsync(_reactor, endpoint, _receiveBufferSize, cancellationToken).ConfigureAwait(false);
     }
 
+    // A short name for the tunnel wherever it is printed.
     public override string ToString() => "ioxide";
 }

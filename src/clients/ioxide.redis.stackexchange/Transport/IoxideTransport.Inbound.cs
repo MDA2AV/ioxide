@@ -1,13 +1,16 @@
+using ioxide.utils;
 using RESPite.Transports;
 
 namespace ioxide.redis.stackexchange;
 
 internal sealed partial class IoxideTransport
 {
-    private readonly byte[] _received;
+    private readonly nint _received;                        // native: Release frees it once nothing is in flight
+    private readonly UnmanagedMemoryManager _receivedView;  // spans over _received for StackExchange.Redis
     private TransportReceiver? _receiver;
     private bool _batchEndPosted;   // reactor thread only
 
+    // StackExchange.Redis hands over its receiver once, after the connect; starts the receive loop.
     public override void Start(TransportReceiver receiver)
     {
         if (Interlocked.CompareExchange(ref _receiver, receiver, null) is not null)
@@ -23,16 +26,17 @@ internal sealed partial class IoxideTransport
         _ = ReceiveAsync();
     }
 
+    // Receives on the ring until closed, pushing each chunk into StackExchange.Redis on the reactor.
     private async Task ReceiveAsync()
     {
         Exception? fault = null;
         try
         {
-            nint buffer = Address(_received);
+            int capacity = _receivedView.Memory.Length;
             while (Volatile.Read(ref _closing) == 0)
             {
                 // Resumes inline on the reactor thread when the receive completes.
-                int received = await _socket.RecvAsync(buffer, _received.Length);
+                int received = await _ringSocket.RecvAsync(_received, capacity);
                 if (received <= 0)
                 {
                     if (received < 0 && Volatile.Read(ref _closing) == 0)
@@ -42,7 +46,7 @@ internal sealed partial class IoxideTransport
                     break;
                 }
 
-                if (!_receiver!.OnReceived(_received.AsSpan(0, received)))
+                if (!_receiver!.OnReceived(_receivedView.GetSpan()[..received]))
                 {
                     break;   // the receiver asked to close
                 }
@@ -65,6 +69,7 @@ internal sealed partial class IoxideTransport
         Release();
     }
 
+    // After the turn's completions: tells StackExchange.Redis the burst is over, so it flushes once.
     private void EndBatch()
     {
         _batchEndPosted = false;

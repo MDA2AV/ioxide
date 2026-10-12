@@ -6,17 +6,21 @@ internal sealed partial class IoxideTransport
 
     // The send side. The writer owns _stage; a send in flight owns _wire; bytes flushed while it is
     // in flight wait in _queued and go next. Only the swaps between them take the lock.
-    private readonly object _gate = new();
+    private readonly Lock _gate = new();
     private Outbound _stage = new(), _wire = new(), _queued = new();
     private bool _sending;
     private int _sent;
 
+    // StackExchange.Redis writes its next command here: room at the end of the stage buffer.
     public override Memory<byte> GetMemory(int sizeHint = 0) => _stage.Reserve(sizeHint).AsMemory(_stage.Length);
 
+    // The same room as GetMemory, as a span.
     public override Span<byte> GetSpan(int sizeHint = 0) => _stage.Reserve(sizeHint).AsSpan(_stage.Length);
 
+    // StackExchange.Redis wrote count bytes into that room; they join the stage.
     public override void Advance(int count) => _stage.Length += count;
 
+    // Hands the staged bytes to the ring as one send, or queues them behind the send in flight.
     public override bool Flush()
     {
         if (Volatile.Read(ref _closing) != 0)
@@ -59,6 +63,7 @@ internal sealed partial class IoxideTransport
         return true;
     }
 
+    // Sends _wire until it is all out, then whatever queued meanwhile; stops when nothing is left.
     private async Task SendAsync()
     {
         try
@@ -66,13 +71,13 @@ internal sealed partial class IoxideTransport
             while (true)
             {
                 byte[] bytes;
-                int from, to;
+                int head, tail;
                 lock (_gate)
                 {
-                    (bytes, from, to) = (_wire.Bytes, _sent, _wire.Length);
+                    (bytes, head, tail) = (_wire.Bytes, _sent, _wire.Length);
                 }
 
-                int sent = await _socket.SendAsync(Address(bytes) + from, to - from);
+                int sent = await _ringSocket.SendAsync(Address(bytes) + head, tail - head);
                 if (sent <= 0)
                 {
                     Close(sent < 0 ? new IOException($"send failed: errno {-sent}") : null);
@@ -113,6 +118,7 @@ internal sealed partial class IoxideTransport
         public byte[] Bytes = GC.AllocateUninitializedArray<byte>(InitialOutbound, pinned: true);
         public int Length;
 
+        // Room for at least sizeHint more bytes; grows by doubling, copying what is there.
         public byte[] Reserve(int sizeHint)
         {
             int needed = Length + Math.Max(sizeHint, 1);
@@ -125,6 +131,7 @@ internal sealed partial class IoxideTransport
             return Bytes;
         }
 
+        // Copies bytes onto the end, growing first if needed.
         public void Append(ReadOnlySpan<byte> bytes)
         {
             bytes.CopyTo(Reserve(bytes.Length).AsSpan(Length));
