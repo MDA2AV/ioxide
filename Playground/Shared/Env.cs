@@ -147,15 +147,6 @@ public static class Env
         commandTimeoutMs = Int("PLAYGROUND_PG_TIMEOUT", commandTimeoutMs);
     }
 
-    /// <summary>The Redis sample's connection settings.</summary>
-    public static void OverrideRedis(ref string host, ref ushort redisPort, ref string? password, ref int poolSize)
-    {
-        host = Str("PLAYGROUND_REDIS_HOST", host);
-        redisPort = Port("PLAYGROUND_REDIS_PORT", redisPort);
-        password = StrOrNull("PLAYGROUND_REDIS_PASSWORD") ?? password;
-        poolSize = Int("PLAYGROUND_REDIS_POOL", poolSize);
-    }
-
     /// <summary>Where a proxy sample forwards to, and how it trusts the origin.</summary>
     public static void OverrideUpstream(ref string host, ref ushort upstreamPort, ref string serverName,
         ref int poolSize, ref string? caFile, ref bool insecure)

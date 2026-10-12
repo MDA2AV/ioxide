@@ -19,8 +19,9 @@ internal static class Program
         bool up = Sidecars.Reachable(pg.Host, pg.Port);
         Console.WriteLine($"postgres {(up ? "up" : "down")} ({pg.Host}:{pg.Port})\n");
 
-        PgTests.Register(runner, pg, up);
         PgOpenTests.Register(runner, pg, up);
+        PgTests.Register(runner, pg, up);
+        PgPreparedTests.Register(runner, pg, up);
         return runner.Summary();
     }
 }

@@ -115,9 +115,6 @@ jobs:
       - name: Pack ioxide.pg
         run: dotnet pack src/clients/ioxide.pg/ioxide.pg.csproj --configuration Release --no-build --output ./artifacts
 
-      - name: Pack ioxide.redis
-        run: dotnet pack src/clients/ioxide.redis/ioxide.redis.csproj --configuration Release --no-build --output ./artifacts
-
       - name: Pack ioxide.timer
         run: dotnet pack src/clients/ioxide.timer/ioxide.timer.csproj --configuration Release --no-build --output ./artifacts
 

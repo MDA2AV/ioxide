@@ -105,6 +105,17 @@ bench_await_listeners() {
     return 1
 }
 
+# With nf_conntrack loaded (Docker's NAT rules load it) every connection, loopback included, holds a
+# table entry for 120 s after it closes. A full table drops new SYNs without a word, so a cell that
+# opens connections faster than they expire stalls and reads as a slow server. Prints "count/max".
+bench_conntrack_full() {
+    local dir=${1:-/proc/sys/net/netfilter} count max
+    count=$(cat "$dir/nf_conntrack_count" 2>/dev/null) || return 1
+    max=$(cat "$dir/nf_conntrack_max" 2>/dev/null) || return 1
+    [ "$count" -ge $((max * 95 / 100)) ] || return 1
+    echo "$count/$max"
+}
+
 # A sample's apphost is named after its project; a renamed sample leaves the old one in bin/.
 bench_binary() {
     local dir=Playground/$1 proj name

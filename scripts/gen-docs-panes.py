@@ -501,12 +501,6 @@ PANES = {
         "response - so the hop it costs is measurable rather than asserted; "
         "<label for=\"tab-hop\" class=\"ex-jump\">leaving the reactor</label> is that hop on its "
         "own."),
-    "redis": (
-        "Clients/Redis", "Redis", "ioxide + ioxide.redis",
-        ["curl http://127.0.0.1:8080/"],
-        "RESP2 with pipelining, one pool per reactor. Same shape as "
-        "<label for=\"tab-pg\" class=\"ex-jump\">postgres</label> - the client is ring-native, so "
-        "the round trip never leaves the core the request landed on."),
     "qclient": (
         "Clients/Quic", "QUIC &middot; client", "ioxide + ioxide.ngtcp2",
         ["dotnet run -c Release --project Playground/Quic/Raw   # something to talk to",
