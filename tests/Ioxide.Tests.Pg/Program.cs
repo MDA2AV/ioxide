@@ -21,6 +21,7 @@ internal static class Program
 
         PgTests.Register(runner, pg, up);
         PgPreparedTests.Register(runner, pg, up);
+        PgFramingTests.Register(runner);
         return runner.Summary();
     }
 }

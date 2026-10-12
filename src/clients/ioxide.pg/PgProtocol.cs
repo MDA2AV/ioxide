@@ -222,9 +222,9 @@ internal static class PgProtocol
 
     /// <summary>
     /// Read one complete message at <paramref name="position"/>, advancing it. False if not fully
-    /// arrived; throws on malformed framing (unresynchronizable).
+    /// arrived; throws on malformed framing (unresynchronizable) or a length past <paramref name="maxLength"/>.
     /// </summary>
-    public static bool TryReadMessage(ReadOnlySpan<byte> buffer, ref int position, out byte tag, out int bodyStart, out int bodyLength)
+    public static bool TryReadMessage(ReadOnlySpan<byte> buffer, ref int position, int maxLength, out byte tag, out int bodyStart, out int bodyLength)
     {
         tag = 0;
         bodyStart = 0;
@@ -244,7 +244,12 @@ internal static class PgProtocol
             throw new PgException($"malformed backend message: tag '{(char)tag}' length {length}");
         }
 
-        if (position + 1 + length > buffer.Length)
+        if (length > maxLength)
+        {
+            throw new PgException($"backend message '{(char)tag}' of {length} bytes exceeds {maxLength} bytes");
+        }
+
+        if (length > buffer.Length - position - 1)   // not position + 1 + length, which can overflow
         {
             return false;   // not fully arrived; recv more
         }
