@@ -17,6 +17,7 @@ internal static class Program
         bool up = Sidecars.Reachable(redis.Host, redis.Port);
         Console.WriteLine($"redis {(up ? "up" : "down")} ({redis.Host}:{redis.Port})\n");
 
+        StackExchangeTransportTests.Register(runner, redis, up);
         return runner.Summary();
     }
 }

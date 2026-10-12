@@ -17,6 +17,7 @@
     <Project Path="src/clients/ioxide.file/ioxide.file.csproj" />
     <Project Path="src/clients/ioxide.timer/ioxide.timer.csproj" />
     <Project Path="src/clients/ioxide.pg/ioxide.pg.csproj" />
+    <Project Path="src/clients/ioxide.redis.stackexchange/ioxide.redis.stackexchange.csproj" />
   </Folder>
 
   <!-- Inbound: hosting integration. -->
@@ -101,6 +102,7 @@
 
   <Folder Name="/apps/playground/clients/">
     <Project Path="Playground/Clients/Pg/Playground.Clients.Pg.csproj" />
+    <Project Path="Playground/Clients/RedisStackExchange/Playground.Clients.RedisStackExchange.csproj" />
     <Project Path="Playground/Clients/File/Playground.Clients.File.csproj" />
     <Project Path="Playground/Clients/Https/Playground.Clients.Https.csproj" />
     <Project Path="Playground/Clients/Http/Playground.Clients.Http.csproj" />

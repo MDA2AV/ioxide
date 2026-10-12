@@ -501,6 +501,16 @@ PANES = {
         "response - so the hop it costs is measurable rather than asserted; "
         "<label for=\"tab-hop\" class=\"ex-jump\">leaving the reactor</label> is that hop on its "
         "own."),
+    "redisse": (
+        "Clients/RedisStackExchange", "Redis &middot; StackExchange.Redis", "ioxide + ioxide.redis.stackexchange",
+        ["curl http://127.0.0.1:8080/",
+         "PLAYGROUND_REDIS_TRANSPORT=sockets dotnet run -c Release --project Playground/Clients/RedisStackExchange"],
+        "StackExchange.Redis's whole API with its connections on the reactor's ring. <code>IoxideTunnel</code> "
+        "hands the multiplexer a transport whose connect, sends and receives are io_uring operations on the "
+        "reactor, and StackExchange.Redis parses the replies and completes each command on that reactor's "
+        "thread - one multiplexer per reactor, so a handler's await never leaves it. Built on "
+        "StackExchange.Redis's experimental transport seam, and pinned to the version it was built "
+        "against."),
     "qclient": (
         "Clients/Quic", "QUIC &middot; client", "ioxide + ioxide.ngtcp2",
         ["dotnet run -c Release --project Playground/Quic/Raw   # something to talk to",
