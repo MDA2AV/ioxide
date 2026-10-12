@@ -103,7 +103,7 @@ public sealed unsafe partial class Reactor
         connection.SocketFd    = socketFd;
         connection.PeerAddr    = peerAddr;
         connection.PeerAddrLen = peerAddrLen;
-        connection.LastSeenMs  = Environment.TickCount64;
+        connection.LastSeenMs  = Native.MonotonicMs;
 
         var cid = new QuicCid(localCid);
         connection.Cids.Add(cid);

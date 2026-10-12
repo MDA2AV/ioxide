@@ -23,6 +23,9 @@ public static unsafe partial class Native {
     public const int SHUT_RDWR    = 2;
 
     public const int AF_INET6     = 10;
+
+    /// <summary>socket(2) type flag, accept4(2) flag: not inherited by a process the host starts.</summary>
+    public const int SOCK_CLOEXEC = 0x80000;
     public const int IPPROTO_IPV6 = 41;
     public const int IPV6_V6ONLY  = 26;
 

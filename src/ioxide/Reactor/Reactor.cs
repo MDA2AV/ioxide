@@ -114,6 +114,8 @@ public sealed unsafe partial class Reactor
 
         _port = _tcp.Port;
         _ringEntries = config.RingEntries;
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(config.OpSlots);
+        _opTargets = new IRingCompletion?[config.OpSlots];
         _incremental = config.Incremental is not null;
         _recvBufferSize = (uint)config.RecvBufferSize;
         _bufferRingEntries = (uint)config.RecvSlots;

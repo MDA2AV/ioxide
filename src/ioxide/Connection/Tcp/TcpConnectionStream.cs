@@ -30,6 +30,9 @@ public sealed class TcpConnectionStream : Stream, IValueTaskSource<int>, IValueT
     private Memory<byte> _readBuffer;
     private readonly Action _onReadReady;
 
+    // Closed by a receive-queue overflow, which dropped data: an error, never the clean end a peer's close is.
+    private bool LostToOverflow => _eof && _conn.RecvOverflowed;
+
     // Write: a parked flush chains onto the connection's flush source.
     private ManualResetValueTaskSourceCore<bool> _writeCore = new() { RunContinuationsAsynchronously = false };
     private ValueTaskAwaiter _pendingFlush;
@@ -145,6 +148,10 @@ public sealed class TcpConnectionStream : Stream, IValueTaskSource<int>, IValueT
         while (true)
         {
             int served = TryServe(buffer.Span);
+            if (served == 0 && LostToOverflow)
+            {
+                return ValueTask.FromException<int>(TcpConnection.RecvOverflowError());
+            }
             if (served >= 0)
             {
                 return new ValueTask<int>(served);
@@ -174,6 +181,11 @@ public sealed class TcpConnectionStream : Stream, IValueTaskSource<int>, IValueT
         while (true)
         {
             int served = TryServe(_readBuffer.Span);
+            if (served == 0 && LostToOverflow)
+            {
+                _readCore.SetException(TcpConnection.RecvOverflowError());
+                return;
+            }
             if (served >= 0)
             {
                 _readCore.SetResult(served);

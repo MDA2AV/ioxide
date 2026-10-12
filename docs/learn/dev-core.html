@@ -444,7 +444,8 @@ memory directly; <code>Stream</code> cannot.</p>
 
     <h2>Configuration &middot; <span class="dim">ServerConfig.cs, IoxideRuntime.cs</span></h2>
     <p><code>ServerConfig</code> is the record of tunables. At the root, the engine and its recv
-    machinery: <code>ReactorCount</code>, <code>RingEntries</code> (SQ/CQ depth),
+    machinery: <code>ReactorCount</code>, <code>RingEntries</code> (SQ/CQ depth), <code>OpSlots</code>
+    (where the table of in-flight timer and client operations starts; it doubles on demand),
     <code>DualStack</code>, the shared-ring knobs (<code>RecvBufferSize</code>,
     <code>RecvSlots</code>) and <code>Incremental</code> - a nullable
     <code>IncrementalOptions</code> (<code>MaxConnections</code>, <code>RecvSlots</code>,

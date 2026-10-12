@@ -45,6 +45,7 @@
   <input type="radio" name="mode-tabs" id="tab-h2sboth">
   <input type="radio" name="mode-tabs" id="tab-h2ng">
   <input type="radio" name="mode-tabs" id="tab-h2ngs">
+  <input type="radio" name="mode-tabs" id="tab-h2ngreq">
   <input type="radio" name="mode-tabs" id="tab-h2cstls">
   <input type="radio" name="mode-tabs" id="tab-h2bcl">
   <input type="radio" name="mode-tabs" id="tab-h3">
@@ -59,6 +60,8 @@
   <input type="radio" name="mode-tabs" id="tab-pxh2toh1">
   <input type="radio" name="mode-tabs" id="tab-pxh3toh1">
   <input type="radio" name="mode-tabs" id="tab-http">
+  <input type="radio" name="mode-tabs" id="tab-gateway">
+  <input type="radio" name="mode-tabs" id="tab-gatewaytls">
   <input type="radio" name="mode-tabs" id="tab-pg">
   <input type="radio" name="mode-tabs" id="tab-redis">
   <input type="radio" name="mode-tabs" id="tab-files">
@@ -129,6 +132,7 @@
       <label for="tab-h2sboth">h2c &middot; both streamed (pure C#)</label>
       <label for="tab-h2ng">h2c &middot; buffered (nghttp2)</label>
       <label for="tab-h2ngs">h2c &middot; response streamed (nghttp2)</label>
+      <label for="tab-h2ngreq">h2c &middot; request streamed (nghttp2)</label>
       <label for="tab-h2cstls">h2 &middot; tls &amp; alpn</label>
       <label for="tab-h2bcl">h2 &middot; over sslstream</label>
     </details>
@@ -150,6 +154,8 @@
       <label for="tab-pxh2toh1">h2 &rarr; h1</label>
       <label for="tab-pxh3toh1">h3 &rarr; h1</label>
       <label for="tab-http">auto &middot; alt-svc</label>
+      <label for="tab-gateway">gateway &middot; several origins</label>
+      <label for="tab-gatewaytls">gateway &middot; tls + pipes</label>
     </details>
 
     <details class="ex-sect">
@@ -3711,10 +3717,10 @@ ushort port     = 8080;                        // http://127.0.0.1:8080/get - cl
 int    reactors = Environment.ProcessorCount;  // one ring per reactor, one reactor per core
 
 
-// The https origin this calls OUT to. Point it somewhere real: &quot;93.184.216.34&quot; / &quot;example.com&quot;
-// / 443. The IP must be a literal - resolving a name would block the reactor - and the NAME is
-// what goes out as SNI and what the certificate has to match.
-string originIp   = &quot;127.0.0.1&quot;;
+// The https origin this calls OUT to. Point it somewhere real: &quot;example.com&quot; / &quot;example.com&quot; /
+// 443. The host can be a name - resolved off the reactor each time a connection opens - or an
+// address, and the NAME is what goes out as SNI and what the certificate has to match.
+string originHost = &quot;127.0.0.1&quot;;
 string originName = &quot;localhost&quot;;
 ushort originPort = 443;
 
@@ -3764,7 +3770,7 @@ for (int i = 0; i &lt; threads.Length; i++)
         // CA belongs in CaFile, not here.
         TlsClientContext tls = TlsClientContext.Create(new TlsClientOptions
         {
-            ServerName         = originName,             // sent as SNI, checked against the cert (required)
+            ServerName         = originName,             // sent as SNI, checked against the cert; null = Host
             AlpnProtocols      = [&quot;http/1.1&quot;],           // offered most-preferred first; [] offers none
             CaFile             = caFile,                 // PEM trust anchors; null = system store
             VerifyCertificate  = !insecure,              // off = encrypted but UNAUTHENTICATED (tests only)
@@ -3774,7 +3780,7 @@ for (int i = 0; i &lt; threads.Length; i++)
 
         HttpClientPool.Start(r, new HttpClientOptions
         {
-            Host              = originIp,         // IPv4 literal - DNS would block the reactor
+            Host              = originHost,       // a name or an address; a name is resolved off the reactor
             Port              = originPort,       // origin port
             PoolSize          = 2,                // connections to the origin, per reactor
             MaxResponseBytes  = 8 * 1024 * 1024,  // per-request ceiling for headers + body
@@ -3847,7 +3853,7 @@ for (int i = 0; i &lt; threads.Length; i++)
 }
 
 Console.WriteLine($&quot;[tls-httpsclient] {config.ReactorCount} reactors on :{config.Tcp!.Port}, &quot;
-                + $&quot;origin https://{originName} ({originIp}:{originPort}), &quot;
+                + $&quot;origin https://{originName} ({originHost}:{originPort}), &quot;
                 + $&quot;verify={(insecure ? &quot;OFF&quot; : caFile ?? &quot;system store&quot;)}&quot;);
 
 foreach (Thread thread in threads)
@@ -5732,7 +5738,7 @@ foreach (Thread thread in threads)
 {
     thread.Join();
 }</code></pre>
-    <p class="ex-foot">The same h2c server on the <b>reference implementation</b>. Kept because being battle-tested is a property no amount of benchmarking substitutes for: nghttp2 is continuously fuzzed, patched by people whose job it is when the next HTTP/2 CVE lands, and has a decade of interop against every other stack. It streams responses too now - see <label for="tab-h2ngs" class="ex-jump">response streamed (nghttp2)</label> - though not request bodies, where <label for="tab-h2sreq" class="ex-jump">the managed stack</label> is still the only one. Measured as a client on this rig, the managed stack runs <b>1.35&times;-1.39&times;</b> it. Take this one when you want the reference implementation's coverage; take <label for="tab-h2cs" class="ex-jump">buffered</label> for everything else.</p>
+    <p class="ex-foot">The same h2c server on the <b>reference implementation</b>. Kept because being battle-tested is a property no amount of benchmarking substitutes for: nghttp2 is continuously fuzzed, patched by people whose job it is when the next HTTP/2 CVE lands, and has a decade of interop against every other stack. It streams both directions too now - see <label for="tab-h2ngs" class="ex-jump">response streamed (nghttp2)</label> and <label for="tab-h2ngreq" class="ex-jump">request streamed (nghttp2)</label>. Measured as a client on this rig, the managed stack runs <b>1.35&times;-1.39&times;</b> it. Take this one when you want the reference implementation's coverage; take <label for="tab-h2cs" class="ex-jump">buffered</label> for everything else.</p>
   </div>
   <div class="pane pane-h2ngs">
     <div class="pane-head">
@@ -5827,6 +5833,112 @@ foreach (Thread thread in threads)
     thread.Join();
 }</code></pre>
     <p class="ex-foot">The same streamed response as <label for="tab-h2sresp" class="ex-jump">the managed one</label>, and the sample code is nearly identical - but what happens underneath is the opposite. nghttp2 owns the framing, so it <b>PULLS</b>: it asks for body bytes when it is ready to emit DATA, and its read callback <em>defers</em> whenever nothing is buffered rather than ending the stream. Every write buffers a chunk natively and resumes the deferred stream. So a flush here means <em>handed over</em>, not <em>on the wire</em> - nghttp2 decides frame boundaries and timing - where the managed writer stages a DATA frame the moment you flush. That difference is the whole reason this needed new native entry points (<code>ih2_submit_response_stream</code>, <code>ih2_stream_write</code>, <code>ih2_stream_close</code>) rather than being a C# change.</p>
+  </div>
+  <div class="pane pane-h2ngreq">
+    <div class="pane-head">
+      <h3>HTTP/2 &middot; nghttp2, request streamed</h3>
+      <span class="pane-pkg">ioxide + ioxide.nghttp2</span>
+    </div>
+<pre><code class="language-csharp">// dotnet add package ioxide
+// dotnet add package ioxide.nghttp2
+//   head -c 50000000 /dev/zero | curl --http2-prior-knowledge --data-binary @- \
+//     http://127.0.0.1:8080/upload
+
+using System.Text;
+using ioxide;
+using ioxide.nghttp2;
+
+// ── Knobs ────────────────────────────────────────────────────────────────────────────────────
+
+ushort port     = 8080;
+int    reactors = Environment.ProcessorCount;
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+
+var config = new ServerConfig
+{
+    ReactorCount   = reactors,   // io_uring rings/threads - one per core
+    RingEntries    = 8192,                                                        // SQ/CQ depth per ring
+    DualStack      = false,                                                       // true = one IPv6 socket also accepts IPv4-mapped
+    RecvBufferSize = 32 * 1024,                                                   // bytes per shared recv buffer
+    RecvSlots      = 4096,                                                        // shared recv buffer-ring depth
+    Udp            = null,                                                        // no raw UDP sockets (TCP-only server)
+    Quic           = null,                                                        // no QUIC transport - see Http3/*
+    Tcp = new TcpOptions
+    {
+        Port             = port,
+        ListenBacklog    = 1024,                           // accept-queue depth per SO_REUSEPORT listener
+        WriteSlabSize    = 16 * 1024,                      // per-connection write buffer before overflow kicks in
+        PoolMax          = 1024,                           // pooled connection objects kept per reactor
+        WriteOverflow    = WriteOverflowStrategy.Grow,     // Grow = realloc one slab; Segmented = chain + vectored SENDMSG
+        ZeroCopySend     = false,                          // SEND_ZC: kernel copies less, wins on large writes
+        RecvQueueEntries = 4096,                           // per-connection recv completion queue depth
+        ReadTimeoutMs    = 60_000,                         // close a connection whose read waits this long on a silent peer; 0 = off
+        SendTimeoutMs    = 60_000,                         // close a connection whose flush takes this long to go out; 0 = off
+    },
+};
+
+var http2 = new Nghttp2Options
+{
+    StreamRequestBodies = true,          // the whole point: dispatch at the headers, body follows
+};
+
+var threads = new Thread[config.ReactorCount];
+
+for (int i = 0; i &lt; threads.Length; i++)
+{
+    var reactor = new Reactor(i, config);
+
+    reactor.TcpHandle = async (r, conn) =&gt;
+    {
+        try
+        {
+            await new Nghttp2Connection(conn, http2).RunBufferedAsync(async request =&gt;
+            {
+                // BodyReader is set because StreamRequestBodies is on; with it off the body would
+                // be in request.Body instead and this would be null.
+                long total = 0;
+                if (request.BodyReader is { } body)
+                {
+                    while (true)
+                    {
+                        // Empty means end of body. Each read hands back the peer&#x27;s credit for the
+                        // chunk it returns, which is what lets the next one arrive - and the
+                        // memory it points at is recycled by the NEXT read, so anything worth
+                        // keeping has to be copied out here.
+                        ReadOnlyMemory&lt;byte&gt; chunk = await body.ReadAsync();
+                        if (chunk.IsEmpty)
+                        {
+                            break;
+                        }
+                        total += chunk.Length;
+                    }
+                }
+
+                return new Nghttp2Response
+                {
+                    Status = 200,
+                    Body = Encoding.ASCII.GetBytes($&quot;{total} bytes\n&quot;),
+                };
+            });
+        }
+        finally
+        {
+            conn.DecRef();
+        }
+    };
+
+    threads[i] = new Thread(reactor.Run) { Name = $&quot;reactor-{i}&quot; };
+    threads[i].Start();
+}
+
+Console.WriteLine($&quot;[nghttp2-streamed-request] {config.ReactorCount} reactors on :{config.Tcp!.Port}, &quot;
+                + &quot;request bodies streamed&quot;);
+
+foreach (Thread thread in threads)
+{
+    thread.Join();
+}</code></pre>
+    <p class="ex-foot">The same streamed request body as <label for="tab-h2sreq" class="ex-jump">the managed one</label>, and nearly the same sample: <code>StreamRequestBodies</code> dispatches at the HEADERS and hands the handler an <code>Nghttp2BodyReader</code>. What makes it hold is underneath. nghttp2 credits DATA the moment it arrives unless told otherwise, which would put the bound back on the whole body, so a streaming session runs with its automatic WINDOW_UPDATE off and the reader hands credit back only as the handler <em>reads</em>. Every byte nghttp2 delivers is then credited exactly once - read, left unread by a handler that returned, or on a stream that was reset - because one that never is shrinks the connection window for every stream on it. That took one native entry point (<code>ih2_consume</code>) and a flag on <code>ih2_server_new</code>.</p>
   </div>
 
 
@@ -6410,7 +6522,7 @@ for (int i = 0; i &lt; threads.Length; i++)
         // per-connection state, so every connection opened from it gets its own SSL.
         HttpClientPool.Start(r, new HttpClientOptions
         {
-            Host              = upstreamHost,     // origin address (IPv4 literal; DNS would block the reactor)
+            Host              = upstreamHost,     // origin name or address; a name is resolved off the reactor
             Port              = upstreamPort,     // origin port
             PoolSize          = upstreamPool,     // connections kept open; round-robin, one request each
             MaxResponseBytes  = 8 * 1024 * 1024,  // per-request ceiling for headers + body
@@ -6535,6 +6647,11 @@ static bool TryReadTarget(ReadOnlySpan&lt;byte&gt; request, out ReadOnlySpan&lt;
 {
     target = default;
 
+    // Only the request line, up to its first CR or LF - this target is forwarded, so nothing a
+    // client sends may add lines to the request the origin sees.
+    int lineEnd = request.IndexOfAny((byte)&#x27;\r&#x27;, (byte)&#x27;\n&#x27;);
+    if (lineEnd &gt;= 0) request = request[..lineEnd];
+
     int firstSpace = request.IndexOf((byte)&#x27; &#x27;);
     if (firstSpace &lt; 0) return false;
 
@@ -6543,6 +6660,7 @@ static bool TryReadTarget(ReadOnlySpan&lt;byte&gt; request, out ReadOnlySpan&lt;
     if (secondSpace &lt; 0) return false;
 
     target = afterMethod[..secondSpace];
+    if (target.IsEmpty || target[0] != (byte)&#x27;/&#x27; || target.Contains((byte)0)) return false;
 
     int query = target.IndexOf((byte)&#x27;?&#x27;);
     if (query &gt;= 0) target = target[..query];
@@ -6640,7 +6758,7 @@ for (int i = 0; i &lt; threads.Length; i++)
         // per-connection state, so every connection opened from it gets its own SSL.
         HttpClientPool.Start(r, new HttpClientOptions
         {
-            Host              = upstreamHost,     // origin address (IPv4 literal; DNS would block the reactor)
+            Host              = upstreamHost,     // origin name or address; a name is resolved off the reactor
             Port              = upstreamPort,     // origin port
             PoolSize          = upstreamPool,     // connections kept open; round-robin, one request each
             MaxResponseBytes  = 8 * 1024 * 1024,  // per-request ceiling for headers + body
@@ -6677,6 +6795,15 @@ for (int i = 0; i &lt; threads.Length; i++)
             // streams interleave here, which is exactly why the h1 pool has to be deep.
             await new Http2Connection(pipe).RunBufferedAsync(async request =&gt;
             {
+                // The method and path are h2 field values, written back out below as an HTTP/1.1
+                // request line, so one holding a CR, LF, NUL or space could add lines to the request
+                // the origin sees. Refuse it here.
+                if (!IsRequestLineSafe(request.Method.Span) || !IsRequestLineSafe(request.Path.Span)
+                    || request.Path.Span[0] != (byte)&#x27;/&#x27;)
+                {
+                    return new Http2Response { Status = 400, Body = &quot;bad method or path\n&quot;u8.ToArray() };
+                }
+
                 try
                 {
                     // Method, path and body forward as the bytes they already are: h2 decoded
@@ -6735,7 +6862,12 @@ Console.WriteLine($&quot;[proxy h2-&gt;h1] {config.ReactorCount} reactors, h2 ov
 foreach (Thread thread in threads)
 {
     thread.Join();
-}</code></pre>
+}
+
+// Visible ASCII only - what an HTTP/1.1 request line can carry without a CR, LF, NUL or space
+// splitting it.
+static bool IsRequestLineSafe(ReadOnlySpan&lt;byte&gt; value)
+    =&gt; !value.IsEmpty &amp;&amp; !value.ContainsAnyExceptInRange((byte)0x21, (byte)0x7E);</code></pre>
     <p class="ex-foot">The classic edge: clients get multiplexing and header compression, the origin keeps speaking what it already speaks. The one combination here whose pool must size for concurrency - a hundred h2 streams need a hundred h1 connections, because h1 has no multiplexing to borrow.</p>
   </div>
   <div class="pane pane-pxh3toh1">
@@ -6823,7 +6955,7 @@ for (int i = 0; i &lt; threads.Length; i++)
         // per-connection state, so every connection opened from it gets its own SSL.
         HttpClientPool.Start(r, new HttpClientOptions
         {
-            Host              = upstreamHost,     // origin address (IPv4 literal; DNS would block the reactor)
+            Host              = upstreamHost,     // origin name or address; a name is resolved off the reactor
             Port              = upstreamPort,     // origin port
             PoolSize          = upstreamPool,     // connections kept open; round-robin, one request each
             MaxResponseBytes  = 8 * 1024 * 1024,  // per-request ceiling for headers + body
@@ -6850,6 +6982,15 @@ for (int i = 0; i &lt; threads.Length; i++)
         // await - the upstream round trip resumes inline on this reactor.
         return new Nghttp3Connection(conn).RunBufferedAsync(async request =&gt;
         {
+            // The method and path are h3 field values, written back out below as an HTTP/1.1
+            // request line, so one holding a CR, LF, NUL or space could add lines to the request
+            // the origin sees. Refuse it here.
+            if (!IsRequestLineSafe(request.Method.Span) || !IsRequestLineSafe(request.Path.Span)
+                || request.Path.Span[0] != (byte)&#x27;/&#x27;)
+            {
+                return new Nghttp3Response { Status = 400, Body = &quot;bad method or path\n&quot;u8.ToArray() };
+            }
+
             try
             {
                 // Method, path and body forward as the bytes they already are. The request&#x27;s
@@ -6894,7 +7035,12 @@ Console.WriteLine($&quot;[proxy h3-&gt;h1] {config.ReactorCount} reactors, h3 on
 foreach (Thread thread in threads)
 {
     thread.Join();
-}</code></pre>
+}
+
+// Visible ASCII only - what an HTTP/1.1 request line can carry without a CR, LF, NUL or space
+// splitting it.
+static bool IsRequestLineSafe(ReadOnlySpan&lt;byte&gt; value)
+    =&gt; !value.IsEmpty &amp;&amp; !value.ContainsAnyExceptInRange((byte)0x21, (byte)0x7E);</code></pre>
     <p class="ex-foot">QUIC-only frontend: <code>Tcp = null</code>, so every TCP socket this process owns is outbound. The h3 server and the h1 client share the reactor and nothing else.</p>
   </div>
   <div class="pane pane-http">
@@ -6918,8 +7064,8 @@ ushort port     = 8090;                        // http://127.0.0.1:8090/ - what 
 int    reactors = Environment.ProcessorCount;  // one ring per reactor, one reactor per core
 
 
-// The origin this forwards to. The host must be an IPv4 literal - a DNS lookup would block the
-// reactor - and PoolSize is per protocol, per reactor.
+// The origin this forwards to. The host can be a name or an address - a name is resolved off the
+// reactor each time a connection opens - and PoolSize is per reactor.
 string upstreamHost = &quot;127.0.0.1&quot;;
 ushort upstreamPort = 8081;
 int    upstreamPool = 8;
@@ -7029,6 +7175,423 @@ foreach (Thread thread in threads)
     thread.Join();
 }</code></pre>
     <p class="ex-foot">Both hops - the inbound connection and the outbound call - ride this reactor's ring and resume inline, so a request never leaves the thread it arrived on. The knob is <code>Policy</code>: <code>Negotiate</code> starts on HTTP/1.1 and moves to HTTP/3 once the origin advertises it via <b>Alt-Svc</b>, so the upgrade costs nothing at the call site. The nine <label for="tab-pxmatrix" class="ex-jump">proxy</label> samples pin a protocol instead.</p>
+  </div>
+  <div class="pane pane-gateway">
+    <div class="pane-head">
+      <h3>Gateway &middot; several origins</h3>
+      <span class="pane-pkg">ioxide + ioxide.httpclient</span>
+    </div>
+<pre><code class="language-csharp">// dotnet add package ioxide
+// dotnet add package ioxide.httpclient
+//   PLAYGROUND_PORT=8081 dotnet run -c Release --project Playground/Tcp/Raw   # origin &quot;users&quot;
+//   PLAYGROUND_PORT=8082 dotnet run -c Release --project Playground/Tcp/Raw   # origin &quot;orders&quot;
+//   curl -i http://127.0.0.1:8090/users/42
+
+using System.Text;
+using ioxide;
+using ioxide.httpclient;
+using ioxide.utils;
+
+// ── Knobs ────────────────────────────────────────────────────────────────────────────────────
+
+ushort port     = 8090;                        // http://127.0.0.1:8090/ - what this gateway serves
+int    reactors = Environment.ProcessorCount;  // one ring per reactor, one reactor per core
+
+
+// The origins, matched by path prefix in this order. Each has its own options, and PoolSize is
+// per origin, per reactor - the ceiling on requests in flight to it from one reactor. Host can be
+// a name: it is resolved off the reactor each time a connection opens.
+Origin[] origins =
+[
+    new(&quot;users&quot;,  &quot;/users/&quot;,  new HttpClientOptions { Host = &quot;127.0.0.1&quot;, Port = 8081, PoolSize = 8 }),
+    new(&quot;orders&quot;, &quot;/orders/&quot;, new HttpClientOptions { Host = &quot;127.0.0.1&quot;, Port = 8082, PoolSize = 4,
+                                                      IdleTimeoutMs = 0 }),   // idle connections stay until the origin closes them
+];
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+
+var config = new ServerConfig
+{
+    ReactorCount = reactors,
+    RingEntries  = 8192,                         // io_uring SQ/CQ depth
+    DualStack    = false,                        // true = one AF_INET6 socket takes v6 + v4-mapped
+
+    // Shared recv ring - the default mode, used while Incremental is null.
+    RecvBufferSize = 32 * 1024,
+    RecvSlots      = 4096,
+
+    Tcp = new TcpOptions
+    {
+        Port             = port,
+        ExtraPorts       = [],                   // more listeners; conn.ListenerPort says which
+        ListenBacklog    = 1024,                 // accept queue per SO_REUSEPORT listener
+        WriteSlabSize    = 16 * 1024,            // per-connection write buffer
+        PoolMax          = 1024,                 // connection objects recycled per reactor
+        WriteOverflow    = WriteOverflowStrategy.Grow,   // Segmented = chained slabs, one SENDMSG
+        ZeroCopySend     = false,                // SEND_ZC; only pays off on large responses
+        RecvQueueEntries = 4096,                 // per-connection SPSC queue, power of two
+        ReadTimeoutMs    = 60_000,               // close a connection whose read waits this long on a silent peer; 0 = off
+        SendTimeoutMs    = 60_000,               // close a connection whose flush takes this long to go out; 0 = off
+    },
+};
+
+var threads = new Thread[config.ReactorCount];
+
+for (int id = 0; id &lt; threads.Length; id++)
+{
+    var reactor = new Reactor(id, config);
+
+    // OnStart runs on the reactor thread, so each pool opens its connections on THIS ring. Start
+    // also registers each one as the reactor&#x27;s HttpClientPool service, every call replacing the
+    // last - so the handler finds the pools through Gateway instead.
+    reactor.OnStart = r =&gt; r.AddService(new Gateway(
+        [.. origins.Select(origin =&gt; new Route(origin, HttpClientPool.Start(r, origin.Options)))]));
+
+    reactor.TcpHandle = async (r, conn) =&gt;
+    {
+        Gateway gateway = r.GetService&lt;Gateway&gt;();
+
+        try
+        {
+            while (true)
+            {
+                RecvSnapshot snapshot = await conn.ReadAsync();
+
+                // Drain the recv, pulling the request target out on the way past. The buffers must
+                // go back to the ring, so read what you need before returning them.
+                string? target = null;
+                while (conn.TryGetItem(snapshot, out SpscRecvRing.Item item))
+                {
+                    if (item.HasBuffer)
+                    {
+                        target ??= RequestTarget(item.AsSpan());
+                        conn.ReturnBuffer(in item);
+                    }
+                }
+
+                if (target is null)
+                {
+                    conn.Write(&quot;HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\n\r\n&quot;u8);
+                }
+                else if (gateway.Match(target) is not Route route)
+                {
+                    conn.Write(&quot;HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n&quot;u8);
+                }
+                else
+                {
+                    try
+                    {
+                        // The same call as with one origin - only the pool it goes to changes.
+                        using HttpClientResponse response = await route.Pool.GetAsync(target);
+
+                        conn.Write(Encoding.ASCII.GetBytes(
+                            $&quot;HTTP/1.1 {response.Status} OK\r\nx-origin: {route.Origin.Name}\r\n&quot;
+                          + $&quot;Content-Length: {response.Body.Length}\r\n\r\n&quot;));
+                        conn.Write(response.Body.Span);   // bytes straight through, no decode
+                    }
+                    catch (Exception e)
+                    {
+                        // An origin that is down fails only its own routes; the other pools carry on.
+                        byte[] message = Encoding.ASCII.GetBytes($&quot;{route.Origin.Name}: {e.Message}&quot;);
+                        conn.Write(Encoding.ASCII.GetBytes(
+                            $&quot;HTTP/1.1 502 Bad Gateway\r\nContent-Length: {message.Length}\r\n\r\n&quot;));
+                        conn.Write(message);
+                    }
+                }
+
+                await conn.FlushAsync();
+
+                if (snapshot.IsClosed) return;
+                conn.ResetRead();
+            }
+        }
+        finally
+        {
+            conn.DecRef();
+        }
+    };
+
+    threads[id] = new Thread(reactor.Run) { Name = $&quot;reactor-{id}&quot; };
+    threads[id].Start();
+}
+
+Console.WriteLine($&quot;[gateway] {config.ReactorCount} reactors on :{config.Tcp!.Port} -&gt; &quot;
+                + string.Join(&quot;, &quot;, origins.Select(o =&gt; $&quot;{o.Prefix} {o.Options.Host}:{o.Options.Port}&quot;))
+                + &quot;, a pool each per reactor&quot;);
+
+foreach (Thread thread in threads)
+{
+    thread.Join();
+}
+
+// &quot;GET /users/42?x=1 HTTP/1.1&quot; -&gt; &quot;/users/42?x=1&quot;, forwarded whole; null when the line is not a
+// request. It is cut at the line&#x27;s first CR or LF, so nothing a client sends can add lines to the
+// request an origin sees. Your framework of choice would do this for you; ioxide deliberately
+// doesn&#x27;t, so here it is in full.
+static string? RequestTarget(ReadOnlySpan&lt;byte&gt; request)
+{
+    int end = request.IndexOfAny((byte)&#x27;\r&#x27;, (byte)&#x27;\n&#x27;);
+    ReadOnlySpan&lt;byte&gt; line = end &lt; 0 ? request : request[..end];
+    int first = line.IndexOf((byte)&#x27; &#x27;);
+    int last = line.LastIndexOf((byte)&#x27; &#x27;);
+    if (first &lt; 0 || last &lt;= first + 1 || line[first + 1] != (byte)&#x27;/&#x27; || line.Contains((byte)0)) return null;
+    return Encoding.ASCII.GetString(line[(first + 1)..last]);
+}
+
+// An origin and the paths sent to it.
+record Origin(string Name, string Prefix, HttpClientOptions Options);
+
+// An origin and this reactor&#x27;s pool for it.
+record Route(Origin Origin, HttpClientPool Pool);
+
+// One reactor&#x27;s routes: the first prefix that matches wins.
+sealed class Gateway(Route[] routes)
+{
+    public Route? Match(string target)
+    {
+        foreach (Route route in routes)
+        {
+            if (target.StartsWith(route.Origin.Prefix, StringComparison.Ordinal)) return route;
+        }
+        return null;
+    }
+}</code></pre>
+    <p class="ex-foot">One front door, several origins, picked by path. Each origin gets its own <code>HttpClientPool</code> on every reactor, with its own options - pool size, TLS, timeouts - and an origin that goes down fails only its own routes. <code>Start</code> registers each pool as the reactor's <code>HttpClientPool</code> service, and services are keyed by type, so <code>GetService</code> would find only the last one started: keep the pools <code>Start</code> returns, in a service of your own. For origins not known up front, <code>RingHttpClient</code> opens a pool per origin on first use.</p>
+  </div>
+  <div class="pane pane-gatewaytls">
+    <div class="pane-head">
+      <h3>Gateway &middot; tls + pipes</h3>
+      <span class="pane-pkg">ioxide + ioxide.httpclient</span>
+    </div>
+<pre><code class="language-csharp">// dotnet add package ioxide
+// dotnet add package ioxide.httpclient
+//   PLAYGROUND_PORT=8444 dotnet run -c Release --project Playground/Tls/OpenSsl   # origin &quot;users&quot;, https
+//   PLAYGROUND_PORT=8082 dotnet run -c Release --project Playground/Tcp/Raw       # origin &quot;orders&quot;, http
+//   curl -ki https://127.0.0.1:8443/users/42
+
+using System.Buffers;
+using System.IO.Pipelines;
+using System.Text;
+using ioxide;
+using ioxide.httpclient;
+using ioxide.tls;
+
+// ── Knobs ────────────────────────────────────────────────────────────────────────────────────
+
+ushort port     = 8443;                        // https://127.0.0.1:8443/ - what this gateway serves
+int    reactors = Environment.ProcessorCount;  // one ring per reactor, one reactor per core
+
+
+// A real PEM pair for the front door, or null to generate a self-signed localhost cert on first run.
+string? certOverride = null;
+string? keyOverride  = null;
+
+const string certPath = &quot;cert.pem&quot;;   // any PEM pair
+const string keyPath  = &quot;key.pem&quot;;
+
+// The origins, matched by path prefix in this order, each with its own options. &quot;users&quot; is https
+// by name: the name is resolved off the reactor, sent as SNI and checked against the certificate -
+// here the playground&#x27;s self-signed one, trusted by file rather than the system store. &quot;orders&quot; is
+// plain http, by address.
+Origin[] origins =
+[
+    new(&quot;users&quot;,  &quot;/users/&quot;,  new HttpClientOptions { Host = &quot;localhost&quot;, Port = 8444, PoolSize = 8 },
+        new TlsClientOptions { CaFile = certPath, AlpnProtocols = [&quot;http/1.1&quot;] }),
+    new(&quot;orders&quot;, &quot;/orders/&quot;, new HttpClientOptions { Host = &quot;127.0.0.1&quot;, Port = 8082, PoolSize = 4 }),
+];
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+
+var config = new ServerConfig
+{
+    ReactorCount   = reactors,                             // io_uring rings/threads - one per core
+    RingEntries    = 8192,                                 // SQ/CQ depth per ring
+    DualStack      = false,                                // true = one IPv6 socket also accepts IPv4-mapped
+    RecvBufferSize = 32 * 1024,                            // bytes per shared recv buffer
+    RecvSlots      = 4096,                                 // shared recv buffer-ring depth
+    Incremental    = null,                                 // per-connection recv rings (6.12+) - see Tcp/Incremental
+    Udp            = null,                                 // no raw UDP sockets (TCP-only server)
+    Quic           = null,                                 // no QUIC transport - see Http3/* and Quic/Alpn
+    Tcp = new TcpOptions
+    {
+        Port             = port,
+        ExtraPorts       = [],                             // extra listener ports (one handler, several doors)
+        ListenBacklog    = 1024,                           // accept-queue depth per SO_REUSEPORT listener
+        WriteSlabSize    = 16 * 1024,                      // per-connection write buffer before overflow kicks in
+        PoolMax          = 1024,                           // pooled connection objects kept per reactor
+        WriteOverflow    = WriteOverflowStrategy.Grow,     // Grow = realloc one slab; Segmented = chain + vectored SENDMSG
+        ZeroCopySend     = false,                          // SEND_ZC: kernel copies less, wins on large writes
+        RecvQueueEntries = 4096,                           // per-connection recv completion queue depth
+        ReadTimeoutMs    = 60_000,                         // close a connection whose read waits this long on a silent peer; 0 = off
+        SendTimeoutMs    = 60_000,                         // close a connection whose flush takes this long to go out; 0 = off
+    },
+};
+
+var tlsOptions = new TlsOptions
+{
+    CertificatePath = certPath,                            // PEM chain file (or CertificatePem for in-memory)
+    KeyPath         = keyPath,                             // PEM key file (or KeyPem for in-memory)
+    Alpn            = [&quot;http/1.1&quot;],                        // the front door speaks one protocol, so it offers one
+};
+
+var threads = new Thread[config.ReactorCount];
+
+for (int id = 0; id &lt; threads.Length; id++)
+{
+    var reactor = new Reactor(id, config);
+
+    reactor.OnStart = r =&gt;
+    {
+        // Inbound: terminate TLS for clients, on this reactor.
+        TlsService.Start(r, tlsOptions);
+
+        // Outbound: a pool per origin, opened on THIS reactor&#x27;s ring, with a TLS context of its own
+        // when the origin is https - one per reactor, shared by that pool&#x27;s connections. Start also
+        // registers each pool as the reactor&#x27;s HttpClientPool service, every call replacing the
+        // last, so the handler finds the pools through Gateway instead.
+        r.AddService(new Gateway([.. origins.Select(origin =&gt; new Route(origin, HttpClientPool.Start(r,
+            origin.Options with { Tls = origin.Tls is null ? null : TlsClientContext.Create(origin.Tls) })))]));
+    };
+
+    reactor.TcpHandle = async (r, conn) =&gt;
+    {
+        Gateway gateway = r.GetService&lt;Gateway&gt;();
+        TlsSession? tls = null;
+
+        try
+        {
+            tls = await r.GetService&lt;TlsService&gt;().AcceptAsync(conn);
+
+            // From here down the connection is a pipe: plaintext in, plaintext out.
+            await using var pipe = new TlsConnectionDualPipe(conn, tls, ownsSession: false);
+
+            while (true)
+            {
+                ReadResult read = await pipe.Input.ReadAsync();
+
+                // TLS hands back RECORDS, so a request head can arrive split across reads. Take one
+                // whole head and leave the rest - a pipelined request - for the next read, or examine
+                // everything and wait for more.
+                if (TryReadHead(read.Buffer, out SequencePosition end, out string? target))
+                {
+                    pipe.Input.AdvanceTo(end);
+                    await ForwardAsync(pipe.Output, gateway, target);
+                    continue;
+                }
+
+                pipe.Input.AdvanceTo(read.Buffer.Start, read.Buffer.End);
+
+                if (read.IsCompleted || read.IsCanceled)
+                {
+                    return;
+                }
+            }
+        }
+        catch (Exception e)
+        {
+            Console.Error.WriteLine($&quot;[gateway-tls-pipes] connection failed: {e.Message}&quot;);
+        }
+        finally
+        {
+            tls?.Dispose();
+            conn.DecRef();
+        }
+    };
+
+    threads[id] = new Thread(reactor.Run) { Name = $&quot;reactor-{id}&quot; };
+    threads[id].Start();
+}
+
+Console.WriteLine($&quot;[gateway-tls-pipes] {config.ReactorCount} reactors, https on :{config.Tcp!.Port} -&gt; &quot;
+                + string.Join(&quot;, &quot;, origins.Select(o =&gt; $&quot;{o.Prefix} {(o.Tls is null ? &quot;http&quot; : &quot;https&quot;)}://{o.Options.Host}:{o.Options.Port}&quot;))
+                + &quot;, a pool each per reactor&quot;);
+
+foreach (Thread thread in threads)
+{
+    thread.Join();
+}
+
+// One request out to its origin, one response back through the pipe.
+static async ValueTask ForwardAsync(PipeWriter output, Gateway gateway, string? target)
+{
+    if (target is null)
+    {
+        output.Write(&quot;HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\n\r\n&quot;u8);
+    }
+    else if (gateway.Match(target) is not Route route)
+    {
+        output.Write(&quot;HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n&quot;u8);
+    }
+    else
+    {
+        try
+        {
+            // The same call whether the origin is http or https - its pool&#x27;s options decide.
+            using HttpClientResponse response = await route.Pool.GetAsync(target);
+
+            output.Write(Encoding.ASCII.GetBytes(
+                $&quot;HTTP/1.1 {response.Status} OK\r\nx-origin: {route.Origin.Name}\r\n&quot;
+              + $&quot;Content-Length: {response.Body.Length}\r\n\r\n&quot;));
+            output.Write(response.Body.Span);   // bytes straight through, no decode
+        }
+        catch (Exception e)
+        {
+            // A dead origin - or a certificate that does not check out, since the handshake is
+            // part of opening a connection - fails only that origin&#x27;s routes.
+            byte[] message = Encoding.ASCII.GetBytes($&quot;{route.Origin.Name}: {e.Message}&quot;);
+            output.Write(Encoding.ASCII.GetBytes(
+                $&quot;HTTP/1.1 502 Bad Gateway\r\nContent-Length: {message.Length}\r\n\r\n&quot;));
+            output.Write(message);
+        }
+    }
+
+    await output.FlushAsync();
+}
+
+// One whole request head: where it ends, and its target - &quot;GET /users/42?x=1 HTTP/1.1&quot; -&gt;
+// &quot;/users/42?x=1&quot;, forwarded whole - or null when its first line is not a request. The target is
+// cut at that line&#x27;s first CR or LF, so nothing a client sends can add lines to the request an
+// origin sees.
+static bool TryReadHead(ReadOnlySequence&lt;byte&gt; buffer, out SequencePosition end, out string? target)
+{
+    var reader = new SequenceReader&lt;byte&gt;(buffer);
+    if (!reader.TryReadTo(out ReadOnlySequence&lt;byte&gt; head, &quot;\r\n\r\n&quot;u8))
+    {
+        end = default;
+        target = null;
+        return false;
+    }
+
+    end = reader.Position;
+
+    ReadOnlySpan&lt;byte&gt; bytes = head.IsSingleSegment ? head.FirstSpan : head.ToArray();
+    int lineEnd = bytes.IndexOfAny((byte)&#x27;\r&#x27;, (byte)&#x27;\n&#x27;);
+    ReadOnlySpan&lt;byte&gt; line = lineEnd &lt; 0 ? bytes : bytes[..lineEnd];
+    int first = line.IndexOf((byte)&#x27; &#x27;);
+    int last = line.LastIndexOf((byte)&#x27; &#x27;);
+    target = first &lt; 0 || last &lt;= first + 1 || line[first + 1] != (byte)&#x27;/&#x27; || line.Contains((byte)0)
+        ? null
+        : Encoding.ASCII.GetString(line[(first + 1)..last]);
+    return true;
+}
+
+// An origin, the paths sent to it, and its TLS settings when it is https.
+record Origin(string Name, string Prefix, HttpClientOptions Options, TlsClientOptions? Tls = null);
+
+// An origin and this reactor&#x27;s pool for it.
+record Route(Origin Origin, HttpClientPool Pool);
+
+// One reactor&#x27;s routes: the first prefix that matches wins.
+sealed class Gateway(Route[] routes)
+{
+    public Route? Match(string target)
+    {
+        foreach (Route route in routes)
+        {
+            if (target.StartsWith(route.Origin.Prefix, StringComparison.Ordinal)) return route;
+        }
+        return null;
+    }
+}</code></pre>
+    <p class="ex-foot">The <label for="tab-gateway" class="ex-jump">gateway</label> behind an https front door, read and written through an <code>IDuplexPipe</code>: plaintext requests in, plaintext responses out, whichever backend encrypts them. Behind it the origins differ in kind as well as in options - <code>users</code> is https by name, resolved off the reactor and checked against its certificate, <code>orders</code> plain http by address - and each https origin gets a <code>TlsClientContext</code> of its own on every reactor. TLS hands back records, so the loop takes one whole request head at a time and leaves a pipelined one for the next read.</p>
   </div>
   <div class="pane pane-pg">
     <div class="pane-head">

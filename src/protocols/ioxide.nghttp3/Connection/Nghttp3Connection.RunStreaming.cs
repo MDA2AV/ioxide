@@ -97,6 +97,7 @@ public sealed partial class Nghttp3Connection
             catch (Exception exception)
             {
                 Console.Error.WriteLine($"[ioxide.nghttp3] request handler faulted: {exception.GetBaseException().Message}");
+                RetireBody(request);
                 QueueResponse(streamId, new Nghttp3Response { Status = 500 });
                 request.HandlerDone = true;
                 continue;
@@ -104,6 +105,7 @@ public sealed partial class Nghttp3Connection
 
             if (pending.IsCompletedSuccessfully)
             {
+                RetireBody(request);
                 QueueResponse(streamId, pending.Result);   // fast path: no body awaited (GETs)
                 request.HandlerDone = true;
             }
@@ -132,6 +134,7 @@ public sealed partial class Nghttp3Connection
 
         long streamId = request.StreamId;
         request.HandlerDone = true;
+        RetireBody(request);
 
         if (_nghttp3Handle != 0 && !_protocolFailed)
         {
@@ -147,6 +150,16 @@ public sealed partial class Nghttp3Connection
 
     // Credit consumed bytes of a paced request stream back to the peer's flow-control window.
     internal void CreditBody(long streamId, int bytes) => _quicConnection.ConsumeStreamData(streamId, bytes);
+
+    // The handler is done with the body: credit what it left unread and let the engine credit the rest.
+    private void RetireBody(Nghttp3Request request)
+    {
+        request.BodyReader?.Drop();
+        if (_sinks.Remove(request.StreamId))
+        {
+            _quicConnection.SetStreamPaced(request.StreamId, false);
+        }
+    }
 
     // A sink with a parked reader became ready mid-PushToEngine; the wake is deferred to FireBodyWakes.
     internal void NoteBodyWake(Nghttp3BodyReader sink)

@@ -136,6 +136,13 @@ public sealed unsafe partial class TcpConnection
     /// </summary>
     public void DecRef()
     {
+        // Once per life: a handler that lets go and then throws would otherwise be let go again by the
+        // fault path, recycling the connection under the reactor's ref (#242).
+        if (Interlocked.Exchange(ref _handlerRefReleased, 1) != 0)
+        {
+            return;
+        }
+
         // Before the decrement, while our ref keeps the fd from being recycled. A FIN now would cut
         // a flush in flight short, so the sweep sends that one once it completes.
         if (Volatile.Read(ref _refs) == 2 && !FlushOutstanding)
@@ -223,20 +230,18 @@ public sealed unsafe partial class TcpConnection
         return true;
     }
 
-    // Guards the framework's fault-path release of the handler ref; reset per pool life (#94).
+    // Set by the handler's release, whoever makes it - the handler or the fault path; reset per pool life (#94).
     private int _handlerRefReleased;
 
     /// <summary>
     /// Release the handler's ref on behalf of a handler that faulted before its own DecRef, so the
     /// fd/slab/gid aren't leaked (#94). Generation-guarded - a fault observed after this connection
-    /// was recycled must not touch its next life - and idempotent within a life. A handler that
-    /// DecRefs and then throws is outside the refcount contract; the guards keep that from
-    /// corrupting a reused connection.
+    /// was recycled must not touch its next life - and a no-op when the handler let go before it
+    /// threw, as a try/finally DecRef does.
     /// </summary>
     internal void ReleaseHandlerRefOnFault(int generationAtStart)
     {
-        if (Volatile.Read(ref _generation) == generationAtStart &&
-            Interlocked.Exchange(ref _handlerRefReleased, 1) == 0)
+        if (Volatile.Read(ref _generation) == generationAtStart)
         {
             DecRef();
         }
