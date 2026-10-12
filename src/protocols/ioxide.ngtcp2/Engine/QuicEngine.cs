@@ -362,6 +362,11 @@ public sealed unsafe class QuicEngine : IDisposable
             {
                 throw new ArgumentException($"invalid ALPN token '{proto}'", nameof(alpn));
             }
+            // Encoding.ASCII sends '?' for anything else, so the token would admit a protocol nobody configured.
+            if (!System.Text.Ascii.IsValid(proto))
+            {
+                throw new ArgumentException($"ALPN token '{proto}' must be ASCII", nameof(alpn));
+            }
             wire.Add((byte)bytes.Length);
             wire.AddRange(bytes);
         }
