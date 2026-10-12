@@ -14,7 +14,9 @@ public static class IoxideRedis
     public static Task<ConnectionMultiplexer> ConnectAsync(Reactor reactor, ConfigurationOptions options)
     {
         ArgumentNullException.ThrowIfNull(options);
+
         options.Tunnel = new IoxideTunnel(reactor);
+
         return ConnectionMultiplexer.ConnectAsync(options);
     }
 
