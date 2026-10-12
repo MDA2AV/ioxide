@@ -30,6 +30,10 @@ public sealed unsafe partial class Reactor
     // The response-send strategy from config (ZeroCopySend), copied per-connection at accept into
     // TcpConnection.UseZc.
     private readonly bool _zeroCopySend;
+
+    // TcpOptions.SendWaitAll as op_flags, bound per connection at accept (TcpConnection.SendOpFlags).
+    private readonly uint _sendOpFlags;
+
     private readonly ushort _port;
     private readonly uint _ringEntries;
     private readonly uint _recvBufferSize;
@@ -126,6 +130,7 @@ public sealed unsafe partial class Reactor
         _incRecvBufferSize = (uint)inc.RecvBufferSize;
         _pool = new Stack<TcpConnection>(_tcp.PoolMax);
         _zeroCopySend = _tcp.ZeroCopySend;
+        _sendOpFlags = _tcp.SendWaitAll ? MSG_WAITALL : 0;
         _readTimeoutMs = _tcp.ReadTimeoutMs;
         _sendTimeoutMs = _tcp.SendTimeoutMs;
     }

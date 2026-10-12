@@ -68,11 +68,12 @@ public sealed unsafe partial class TcpConnection
     private uint _sendOpFlags = 0x100;   // MSG_WAITALL
 
     /// <summary>
-    /// op_flags for sends on this connection. Defaults to MSG_WAITALL (the kernel coalesces short
-    /// sends into one CQE). kTLS rejects MSG_WAITALL, so <c>ioxide.tls</c> clears this after the
-    /// handoff; the reactor's partial-send loop preserves correctness either way. Clearing it (the
-    /// kTLS marker) also pins this connection to plain SEND - SEND_ZC through the TLS ULP gives no
-    /// benefit and may be rejected.
+    /// op_flags for sends on this connection, bound at accept from <see cref="TcpOptions.SendWaitAll"/>:
+    /// MSG_WAITALL by default (the kernel coalesces short sends into one CQE). kTLS rejects
+    /// MSG_WAITALL, so <c>ioxide.tls</c> clears this after the handoff; the reactor's partial-send
+    /// loop preserves correctness either way. Clearing it through this setter (the kTLS marker) also
+    /// pins this connection to plain SEND - SEND_ZC through the TLS ULP gives no benefit and may be
+    /// rejected.
     /// </summary>
     public uint SendOpFlags
     {
@@ -86,6 +87,9 @@ public sealed unsafe partial class TcpConnection
             }
         }
     }
+
+    // The accept-time binding, past the setter: a 0 here is SendWaitAll off, not kTLS, so ZeroCopySend stays.
+    internal void BindSendOpFlags(uint opFlags) => _sendOpFlags = opFlags;
 
     // Bumped on Clear(); the low 16 bits serve as the IVTS token so stale awaiters
     // from a previous pool life are detectable.

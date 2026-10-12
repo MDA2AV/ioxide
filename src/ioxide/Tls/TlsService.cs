@@ -1202,7 +1202,7 @@ public sealed class TlsService
             else
             {
                 // No TLS ULP on this socket at all: OpenSSL encrypts, the reactor sends ordinary
-                // bytes, and MSG_WAITALL stays on because there is no kTLS to reject it. The raw
+                // bytes, and MSG_WAITALL stays as accepted: there is no kTLS to reject it. The raw
                 // secrets have no further use - and a TLS 1.2 handshake never produced them.
                 session.ZeroSecrets();
             }

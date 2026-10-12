@@ -25,6 +25,7 @@ internal static class Program
         Http2FlowControlTests.Register(runner);
         HpackEncodeTests.Register(runner);
         QpackStaticEncodeTests.Register(runner);
+        SendWaitAllTests.Register(runner);
 
         return runner.Summary();
     }

@@ -43,6 +43,15 @@ public sealed record TcpOptions
     // kernel re-buffers to encrypt, so zero-copy buys nothing there).
     public bool ZeroCopySend { get; init; } = false;
 
+    /// <summary>
+    /// Send with MSG_WAITALL (the default): the kernel carries a short send on itself, so a flush
+    /// completes as one CQE. Off, a short send completes as it is and the reactor submits the rest,
+    /// which costs a completion and a submit per short send. Bound per connection at accept
+    /// (<see cref="TcpConnection.SendOpFlags"/>); the kTLS handoff turns it off for its connection
+    /// either way, since kTLS rejects the flag.
+    /// </summary>
+    public bool SendWaitAll { get; init; } = true;
+
     // Per-connection SPSC recv queue depth (power of two), about 24 bytes a slot. Each queued delivery
     // holds one of the reactor's recv buffers until the handler reads it, so in shared mode one connection
     // can hold this many of RecvSlots. Overflow drops the delivery that did not fit and closes the
@@ -80,10 +89,11 @@ public sealed record TcpOptions
     /// </summary>
     /// <remarks>
     /// This is the deadline for the WHOLE flush, not for progress within it, because MSG_WAITALL
-    /// (the default - see <see cref="TcpConnection.SendOpFlags"/>) coalesces a flush into a single
-    /// completion: there is no per-chunk signal to measure progress against. So set it against the
-    /// slowest legitimate full response, not against a stall - a large body over a slow link is
-    /// the false positive to watch for.
+    /// (the default - see <see cref="SendWaitAll"/>) coalesces a flush into a single completion:
+    /// there is no per-chunk signal to measure progress against. With it off the clock still starts
+    /// once per flush, not at each short send. So set it against the slowest legitimate full
+    /// response, not against a stall - a large body over a slow link is the false positive to watch
+    /// for.
     ///
     /// It is deliberately not folded into <see cref="ReadTimeoutMs"/>: a peer that keeps SENDING
     /// while it has stopped READING restarts the read clock on every inbound completion, so it
