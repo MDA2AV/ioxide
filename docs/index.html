@@ -6795,6 +6795,15 @@ for (int i = 0; i &lt; threads.Length; i++)
             // streams interleave here, which is exactly why the h1 pool has to be deep.
             await new Http2Connection(pipe).RunBufferedAsync(async request =&gt;
             {
+                // The method and path are h2 field values, written back out below as an HTTP/1.1
+                // request line, so one holding a CR, LF, NUL or space could add lines to the request
+                // the origin sees. Refuse it here.
+                if (!IsRequestLineSafe(request.Method.Span) || !IsRequestLineSafe(request.Path.Span)
+                    || request.Path.Span[0] != (byte)&#x27;/&#x27;)
+                {
+                    return new Http2Response { Status = 400, Body = &quot;bad method or path\n&quot;u8.ToArray() };
+                }
+
                 try
                 {
                     // Method, path and body forward as the bytes they already are: h2 decoded
@@ -6853,7 +6862,12 @@ Console.WriteLine($&quot;[proxy h2-&gt;h1] {config.ReactorCount} reactors, h2 ov
 foreach (Thread thread in threads)
 {
     thread.Join();
-}</code></pre>
+}
+
+// Visible ASCII only - what an HTTP/1.1 request line can carry without a CR, LF, NUL or space
+// splitting it.
+static bool IsRequestLineSafe(ReadOnlySpan&lt;byte&gt; value)
+    =&gt; !value.IsEmpty &amp;&amp; !value.ContainsAnyExceptInRange((byte)0x21, (byte)0x7E);</code></pre>
     <p class="ex-foot">The classic edge: clients get multiplexing and header compression, the origin keeps speaking what it already speaks. The one combination here whose pool must size for concurrency - a hundred h2 streams need a hundred h1 connections, because h1 has no multiplexing to borrow.</p>
   </div>
   <div class="pane pane-pxh3toh1">
@@ -6968,6 +6982,15 @@ for (int i = 0; i &lt; threads.Length; i++)
         // await - the upstream round trip resumes inline on this reactor.
         return new Nghttp3Connection(conn).RunBufferedAsync(async request =&gt;
         {
+            // The method and path are h3 field values, written back out below as an HTTP/1.1
+            // request line, so one holding a CR, LF, NUL or space could add lines to the request
+            // the origin sees. Refuse it here.
+            if (!IsRequestLineSafe(request.Method.Span) || !IsRequestLineSafe(request.Path.Span)
+                || request.Path.Span[0] != (byte)&#x27;/&#x27;)
+            {
+                return new Nghttp3Response { Status = 400, Body = &quot;bad method or path\n&quot;u8.ToArray() };
+            }
+
             try
             {
                 // Method, path and body forward as the bytes they already are. The request&#x27;s
@@ -7012,7 +7035,12 @@ Console.WriteLine($&quot;[proxy h3-&gt;h1] {config.ReactorCount} reactors, h3 on
 foreach (Thread thread in threads)
 {
     thread.Join();
-}</code></pre>
+}
+
+// Visible ASCII only - what an HTTP/1.1 request line can carry without a CR, LF, NUL or space
+// splitting it.
+static bool IsRequestLineSafe(ReadOnlySpan&lt;byte&gt; value)
+    =&gt; !value.IsEmpty &amp;&amp; !value.ContainsAnyExceptInRange((byte)0x21, (byte)0x7E);</code></pre>
     <p class="ex-foot">QUIC-only frontend: <code>Tcp = null</code>, so every TCP socket this process owns is outbound. The h3 server and the h1 client share the reactor and nothing else.</p>
   </div>
   <div class="pane pane-http">

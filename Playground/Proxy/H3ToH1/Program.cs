@@ -130,6 +130,15 @@ for (int i = 0; i < threads.Length; i++)
         // await - the upstream round trip resumes inline on this reactor.
         return new Nghttp3Connection(conn).RunBufferedAsync(async request =>
         {
+            // The method and path are h3 field values, written back out below as an HTTP/1.1
+            // request line, so one holding a CR, LF, NUL or space could add lines to the request
+            // the origin sees. Refuse it here.
+            if (!IsRequestLineSafe(request.Method.Span) || !IsRequestLineSafe(request.Path.Span)
+                || request.Path.Span[0] != (byte)'/')
+            {
+                return new Nghttp3Response { Status = 400, Body = "bad method or path\n"u8.ToArray() };
+            }
+
             try
             {
                 // Method, path and body forward as the bytes they already are. The request's
@@ -175,3 +184,8 @@ foreach (Thread thread in threads)
 {
     thread.Join();
 }
+
+// Visible ASCII only - what an HTTP/1.1 request line can carry without a CR, LF, NUL or space
+// splitting it.
+static bool IsRequestLineSafe(ReadOnlySpan<byte> value)
+    => !value.IsEmpty && !value.ContainsAnyExceptInRange((byte)0x21, (byte)0x7E);

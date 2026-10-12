@@ -128,8 +128,8 @@ reference implementation. QUIC itself is always ngtcp2 + picotls, bundled as one
 | [`Clients.Redis`](Clients/Redis/Program.cs) | 236 | A `RedisPool` per reactor; concurrent requests share connections and pipeline automatically. | `ioxide.redis` |
 | [`Clients.Timer`](Clients/Timer/Program.cs) | 184 | A deadline that stays on the ring: `GET /<ms>` answers after that long, one `IORING_OP_TIMEOUT` per wait. A knob swaps in `Task.Delay` to price the difference. | `ioxide.timer` |
 | [`Proxy.H1ToH1`](Proxy/H1ToH1/Program.cs) | 259 | A reverse proxy with TLS on BOTH hops - ioxide TLS in, `TlsClientContext` out. Read this one first. | `ioxide.httpclient` |
-| [`Proxy.H2ToH1`](Proxy/H2ToH1/Program.cs) | 217 | The classic edge: h2 over TLS in (browsers refuse h2c), h1 origin behind. | `ioxide.http2`, `ioxide.httpclient` |
-| [`Proxy.H3ToH1`](Proxy/H3ToH1/Program.cs) | 172 | An HTTP/3 front door for an h1 upstream. `Tcp = null`, so every TCP socket the process owns is an outbound one. | `ioxide.ngtcp2`, `ioxide.nghttp3`, `ioxide.httpclient` |
+| [`Proxy.H2ToH1`](Proxy/H2ToH1/Program.cs) | 233 | The classic edge: h2 over TLS in (browsers refuse h2c), h1 origin behind. | `ioxide.http2`, `ioxide.httpclient` |
+| [`Proxy.H3ToH1`](Proxy/H3ToH1/Program.cs) | 191 | An HTTP/3 front door for an h1 upstream. `Tcp = null`, so every TCP socket the process owns is an outbound one. | `ioxide.ngtcp2`, `ioxide.nghttp3`, `ioxide.httpclient` |
 | [`AspNet`](AspNet/Program.cs) | 83 | ASP.NET Core on the ioxide Kestrel transport, or on stock sockets, or on msquic h3 - `TRANSPORT=` picks. | `ioxide.Kestrel` |
 
 The upstream client speaks HTTP/1.1 only, so there is no `Proxy/*ToH2` or `*ToH3`: those samples
