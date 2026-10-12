@@ -236,6 +236,7 @@ nav.top .links a.gh svg { display: block; }
 #tab-quicalpn:checked ~ .ex-menu label[for="tab-quicalpn"],
 #tab-qclient:checked ~ .ex-menu label[for="tab-qclient"],
 #tab-https:checked ~ .ex-menu label[for="tab-https"],
+#tab-gateway:checked ~ .ex-menu label[for="tab-gateway"],
 #tab-timer:checked ~ .ex-menu label[for="tab-timer"],
 #tab-h2cs:checked ~ .ex-menu label[for="tab-h2cs"],
 #tab-h2sresp:checked ~ .ex-menu label[for="tab-h2sresp"],
@@ -381,6 +382,7 @@ nav.top .links a.gh svg { display: block; }
 #tab-quicalpn:checked ~ .pane-quicalpn { display: block; }
 #tab-qclient:checked ~ .pane-qclient { display: block; }
 #tab-https:checked ~ .pane-https { display: block; }
+#tab-gateway:checked ~ .pane-gateway { display: block; }
 #tab-timer:checked ~ .pane-timer { display: block; }
 #tab-h2cs:checked ~ .pane-h2cs { display: block; }
 #tab-h2sresp:checked ~ .pane-h2sresp { display: block; }
@@ -531,6 +533,7 @@ nav.top .links a.gh svg { display: block; }
   #tab-quicalpn:checked ~ .ex-menu label[for="tab-quicalpn"],
   #tab-qclient:checked ~ .ex-menu label[for="tab-qclient"],
 #tab-https:checked ~ .ex-menu label[for="tab-https"],
+#tab-gateway:checked ~ .ex-menu label[for="tab-gateway"],
 #tab-timer:checked ~ .ex-menu label[for="tab-timer"],
     #tab-h2cs:checked ~ .ex-menu label[for="tab-h2cs"],
 #tab-h2sresp:checked ~ .ex-menu label[for="tab-h2sresp"],

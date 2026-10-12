@@ -106,6 +106,7 @@
     <Project Path="Playground/Clients/File/Playground.Clients.File.csproj" />
     <Project Path="Playground/Clients/Https/Playground.Clients.Https.csproj" />
     <Project Path="Playground/Clients/Http/Playground.Clients.Http.csproj" />
+    <Project Path="Playground/Clients/Gateway/Playground.Clients.Gateway.csproj" />
     <Project Path="Playground/Clients/Quic/Playground.Clients.Quic.csproj" />
     <Project Path="Playground/Clients/Timer/Playground.Clients.Timer.csproj" />
   </Folder>

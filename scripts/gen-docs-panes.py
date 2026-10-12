@@ -454,6 +454,18 @@ PANES = {
         "origin advertises it via <b>Alt-Svc</b>, so the upgrade costs nothing at the call site. The "
         "nine <label for=\"tab-pxmatrix\" class=\"ex-jump\">proxy</label> samples pin a protocol "
         "instead."),
+    "gateway": (
+        "Clients/Gateway", "Gateway &middot; several origins", "ioxide + ioxide.httpclient",
+        ["PLAYGROUND_PORT=8081 dotnet run -c Release --project Playground/Tcp/Raw   # origin \"users\"",
+         "PLAYGROUND_PORT=8082 dotnet run -c Release --project Playground/Tcp/Raw   # origin \"orders\"",
+         "curl -i http://127.0.0.1:8090/users/42"],
+        "One front door, several origins, picked by path. Each origin gets its own "
+        "<code>HttpClientPool</code> on every reactor, with its own options - pool size, TLS, "
+        "timeouts - and an origin that goes down fails only its own routes. <code>Start</code> "
+        "registers each pool as the reactor's <code>HttpClientPool</code> service, and services are "
+        "keyed by type, so <code>GetService</code> would find only the last one started: keep the "
+        "pools <code>Start</code> returns, in a service of your own. For origins not known up front, "
+        "<code>RingHttpClient</code> opens a pool per origin on first use."),
     "pg": (
         "Clients/Pg", "Postgres", "ioxide + ioxide.pg",
         ["curl http://127.0.0.1:8080/"],
