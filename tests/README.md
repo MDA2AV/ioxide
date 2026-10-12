@@ -16,7 +16,7 @@ done
 | `E2E` | Reactor lifecycle, TCP read/write paths, hardening, UDP, **QUIC and HTTP/3 including their TLS** | nothing |
 | `Http` | The HTTP client: h1, h2c, h3 and the negotiating layer | h2c tests need an HTTP/2 server |
 | `Pg` | The Postgres driver | a postgres |
-| `Redis` | The Redis client | a redis |
+| `Redis` | The Redis client, and StackExchange.Redis over the ioxide transport | a redis |
 | `Tls` | **TLS over TCP**: handshake, pipes, mutual TLS, SNI, rotation, posture, PEM formats | the `tls` kernel module for the kTLS cases (`sudo modprobe tls`) |
 | `File` | Static assets: cache, ring reads, revalidation | nothing |
 | `Chaos` | Malformed and hostile inputs across TCP, TLS, h2c and QUIC/HTTP/3 | nothing |

@@ -18,6 +18,7 @@
     <Project Path="src/clients/ioxide.timer/ioxide.timer.csproj" />
     <Project Path="src/clients/ioxide.pg/ioxide.pg.csproj" />
     <Project Path="src/clients/ioxide.redis/ioxide.redis.csproj" />
+    <Project Path="src/clients/ioxide.redis.stackexchange/ioxide.redis.stackexchange.csproj" />
   </Folder>
 
   <!-- Inbound: hosting integration. -->

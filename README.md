@@ -61,6 +61,7 @@ accepted the request.
 | [`ioxide.httpclient`](https://www.nuget.org/packages/ioxide.httpclient/) | The HTTP/1.1 upstream leg between a proxy and an origin, with client-side TLS and mutual TLS for `https://`. |
 | [`ioxide.pg`](https://www.nuget.org/packages/ioxide.pg/) | Postgres. Connect, query and stream rows on the owning ring. |
 | [`ioxide.redis`](https://www.nuget.org/packages/ioxide.redis/) | Redis. RESP2, pipelining, pub/sub. |
+| `ioxide.redis.stackexchange` | Experimental, not published: StackExchange.Redis's whole API with its connections on a reactor's ring, through StackExchange.Redis's experimental transport seam. |
 | [`ioxide.file`](https://www.nuget.org/packages/ioxide.file/) | Static assets. Immutable snapshots, baked responses, positional ring reads. |
 | [`ioxide.timer`](https://www.nuget.org/packages/ioxide.timer/) | Deadlines. A wait is one `IORING_OP_TIMEOUT` on the caller's own ring - no timer thread, nothing allocated per wait. |
 

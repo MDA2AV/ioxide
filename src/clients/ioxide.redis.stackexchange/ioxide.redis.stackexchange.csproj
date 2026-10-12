@@ -1,0 +1,36 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+	<TargetFrameworks>net10.0;net11.0</TargetFrameworks>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <RootNamespace>ioxide.redis.stackexchange</RootNamespace>
+
+    <!--
+      SER009 marks StackExchange.Redis's transport seam (Tunnel.ConnectTransportAsync and
+      RESPite.Transports.DuplexTransport) experimental: no stability between any two versions.
+      Implementing it is the point of this package, so the diagnostic is acknowledged here and the
+      StackExchange.Redis version below is pinned exactly.
+    -->
+    <NoWarn>$(NoWarn);SER009</NoWarn>
+
+    <PackageId>ioxide.redis.stackexchange</PackageId>
+    <Version>0.16.281</Version>
+    <Authors>MDA2AV</Authors>
+    <Description>Experimental: StackExchange.Redis over the ioxide io_uring runtime. A Tunnel whose transport is a socket on a reactor's ring, so a multiplexer's connections connect, send and receive on that reactor and complete commands on its thread. Built on StackExchange.Redis's experimental transport seam (SER009) and pinned to one StackExchange.Redis version.</Description>
+    <PackageLicenseExpression>MIT</PackageLicenseExpression>
+    <PackageProjectUrl>https://mda2av.github.io/ioxide/learn/clients.html</PackageProjectUrl>
+    <RepositoryUrl>https://github.com/MDA2AV/ioxide</RepositoryUrl>
+    <RepositoryType>git</RepositoryType>
+    <PackageTags>io_uring;redis;stackexchange.redis;client;linux;ioxide</PackageTags>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <None Include="../../../README.md" Pack="true" PackagePath="/" />
+    <ProjectReference Include="../../ioxide/ioxide.csproj" />
+    <PackageReference Include="StackExchange.Redis" Version="[3.4.0]" />
+  </ItemGroup>
+
+</Project>
