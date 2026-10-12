@@ -6647,6 +6647,11 @@ static bool TryReadTarget(ReadOnlySpan&lt;byte&gt; request, out ReadOnlySpan&lt;
 {
     target = default;
 
+    // Only the request line, up to its first CR or LF - this target is forwarded, so nothing a
+    // client sends may add lines to the request the origin sees.
+    int lineEnd = request.IndexOfAny((byte)&#x27;\r&#x27;, (byte)&#x27;\n&#x27;);
+    if (lineEnd &gt;= 0) request = request[..lineEnd];
+
     int firstSpace = request.IndexOf((byte)&#x27; &#x27;);
     if (firstSpace &lt; 0) return false;
 
@@ -6655,6 +6660,7 @@ static bool TryReadTarget(ReadOnlySpan&lt;byte&gt; request, out ReadOnlySpan&lt;
     if (secondSpace &lt; 0) return false;
 
     target = afterMethod[..secondSpace];
+    if (target.IsEmpty || target[0] != (byte)&#x27;/&#x27; || target.Contains((byte)0)) return false;
 
     int query = target.IndexOf((byte)&#x27;?&#x27;);
     if (query &gt;= 0) target = target[..query];
