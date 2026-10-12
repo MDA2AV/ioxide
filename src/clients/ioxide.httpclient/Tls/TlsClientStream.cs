@@ -58,7 +58,8 @@ public sealed class TlsClientStream : IDisposable
         _outbound = AllocateCiphertextBuffer();
     }
 
-    internal static async ValueTask<TlsClientStream> HandshakeAsync(RingSocket socket, TlsClientContext context)
+    internal static async ValueTask<TlsClientStream> HandshakeAsync(RingSocket socket, TlsClientContext context,
+        string serverName)
     {
         TlsClientOptions options = context.Options;
 
@@ -94,7 +95,7 @@ public sealed class TlsClientStream : IDisposable
             OpenSsl.SSL_set_bio(ssl, rbio, wbio);   // ssl owns both BIOs from here
             OpenSsl.SSL_set_connect_state(ssl);
 
-            ConfigureNames(ssl, options);   // throws when SSL_set1_host rejects the name
+            ConfigureNames(ssl, options, serverName);   // throws when SSL_set1_host rejects the name
 
             stream = new TlsClientStream(socket, ssl, rbio, wbio);
         }
@@ -107,7 +108,7 @@ public sealed class TlsClientStream : IDisposable
 
         try
         {
-            await stream.RunHandshakeAsync(options);
+            await stream.RunHandshakeAsync(options, serverName);
             return stream;
         }
         catch
@@ -120,9 +121,9 @@ public sealed class TlsClientStream : IDisposable
     // SNI and the verification name are two different things and both are needed: SNI tells the
     // origin which certificate to send, SSL_set1_host checks the one it actually sent. Setting only
     // the first is the classic way to end up with encryption and no authentication.
-    private static void ConfigureNames(nint ssl, TlsClientOptions options)
+    private static void ConfigureNames(nint ssl, TlsClientOptions options, string serverName)
     {
-        nint name = Marshal.StringToHGlobalAnsi(options.ServerName);
+        nint name = Marshal.StringToHGlobalAnsi(serverName);
         try
         {
             OpenSsl.SSL_ctrl(ssl, OpenSsl.SSL_CTRL_SET_TLSEXT_HOSTNAME,
@@ -133,15 +134,15 @@ public sealed class TlsClientStream : IDisposable
             Marshal.FreeHGlobal(name);
         }
 
-        if (options.VerifyCertificate && OpenSsl.SSL_set1_host(ssl, options.ServerName) != 1)
+        if (options.VerifyCertificate && OpenSsl.SSL_set1_host(ssl, serverName) != 1)
         {
-            throw new IOException($"SSL_set1_host('{options.ServerName}'): {OpenSsl.LastError()}");
+            throw new IOException($"SSL_set1_host('{serverName}'): {OpenSsl.LastError()}");
         }
     }
 
-    private async ValueTask RunHandshakeAsync(TlsClientOptions options)
+    private async ValueTask RunHandshakeAsync(TlsClientOptions options, string serverName)
     {
-        long deadlineMs = Environment.TickCount64 + options.HandshakeTimeoutMs;
+        long deadlineMs = Native.MonotonicMs + options.HandshakeTimeoutMs;
 
         while (true)
         {
@@ -155,17 +156,17 @@ public sealed class TlsClientStream : IDisposable
             }
             if (err != OpenSsl.SSL_ERROR_WANT_READ && err != OpenSsl.SSL_ERROR_WANT_WRITE)
             {
-                throw new IOException($"TLS handshake to '{options.ServerName}' failed: {OpenSsl.LastError()}");
+                throw new IOException($"TLS handshake to '{serverName}' failed: {OpenSsl.LastError()}");
             }
 
             // The deadline is checked between flights rather than raced against the recv: a ring
             // operation cannot be abandoned mid-flight without its completion landing on a source
             // someone else has since taken. A peer that goes completely silent is bounded by the
             // caller's own acquire timeout instead.
-            if (Environment.TickCount64 >= deadlineMs)
+            if (Native.MonotonicMs >= deadlineMs)
             {
                 throw new IOException(
-                    $"TLS handshake to '{options.ServerName}' did not complete within {options.HandshakeTimeoutMs} ms");
+                    $"TLS handshake to '{serverName}' did not complete within {options.HandshakeTimeoutMs} ms");
             }
 
             int n = await _socket.RecvAsync(_inbound, CiphertextBufferSize);
@@ -184,7 +185,7 @@ public sealed class TlsClientStream : IDisposable
             if (verify != OpenSsl.X509_V_OK)
             {
                 throw new IOException(
-                    $"certificate for '{options.ServerName}' was not accepted (X509 verify result {verify})");
+                    $"certificate for '{serverName}' was not accepted (X509 verify result {verify})");
             }
         }
 

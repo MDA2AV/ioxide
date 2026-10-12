@@ -83,6 +83,7 @@ the handler code is the same either way.
 | [`Http2.ManagedStreamedResponse`](Http2/ManagedStreamedResponse/Program.cs) | 128 | The response body pushed as it is produced - each flush becomes a DATA frame. | `ioxide.http2` |
 | [`Http2.ManagedStreamedBoth`](Http2/ManagedStreamedBoth/Program.cs) | 136 | Both directions streamed in one handler. | `ioxide.http2` |
 | [`Http2.Nghttp2Response`](Http2/Nghttp2Response/Program.cs) | 105 | The streamed response on the reference implementation. | `ioxide.nghttp2` |
+| [`Http2.Nghttp2StreamedRequest`](Http2/Nghttp2StreamedRequest/Program.cs) | 119 | The streamed request body on the reference implementation. | `ioxide.nghttp2` |
 | [`Http2.Tls`](Http2/Tls/Program.cs) | 234 | h2 **and** http/1.1 on one port, chosen by ALPN. The HTTP/2 code is unchanged - only the pipe differs. | `ioxide.http2` |
 | [`Http2.Sni`](Http2/Sni/Program.cs) | 167 | A certificate per host name under h2, and why the handshake name and `:authority` are not the same question. | `ioxide.http2` |
 | [`Http2.Rotate`](Http2/Rotate/Program.cs) | 247 | Renewing a certificate on a running server: one `TlsService` per reactor, so every one of them has to be rotated. | `ioxide.http2` |
@@ -118,15 +119,17 @@ reference implementation. QUIC itself is always ngtcp2 + picotls, bundled as one
 | Project | Lines | Shows | Packages |
 | --- | --- | --- | --- |
 | [`Clients.Http`](Clients/Http/Program.cs) | 145 | Calling an origin over HTTP/1.1 from inside a handler - both hops on the same ring, resumed inline. | `ioxide.httpclient` |
+| [`Clients.Gateway`](Clients/Gateway/Program.cs) | 192 | Several origins behind one front door, picked by path - a pool per origin on every reactor, each with its own options. | `ioxide.httpclient` |
+| [`Clients.GatewayTlsPipes`](Clients/GatewayTlsPipes/Program.cs) | 246 | The same gateway with an https front door read and written through an `IDuplexPipe`, and an https origin by name beside a plain http one. | `ioxide.httpclient` |
 | [`Clients.Https`](Clients/Https/Program.cs) | 198 | The other direction of ioxide TLS: speaking it outbound to reach an `https://` origin. | `ioxide.httpclient` |
 | [`Clients.Quic`](Clients/Quic/Program.cs) | 166 | The client half of QUIC, and the thing that drives `Quic/Raw`. No listener of any kind. | `ioxide.ngtcp2` |
 | [`Clients.File`](Clients/File/Program.cs) | 422 | A static file server: every file opened ONCE, descriptors shared across reactors, read positionally off the ring. | `ioxide.file` |
 | [`Clients.Pg`](Clients/Pg/Program.cs) | 224 | A Postgres-backed server, whole: a pool per reactor, connect/query/row streaming all ring operations. | `ioxide.pg` |
 | [`Clients.Redis`](Clients/Redis/Program.cs) | 236 | A `RedisPool` per reactor; concurrent requests share connections and pipeline automatically. | `ioxide.redis` |
 | [`Clients.Timer`](Clients/Timer/Program.cs) | 184 | A deadline that stays on the ring: `GET /<ms>` answers after that long, one `IORING_OP_TIMEOUT` per wait. A knob swaps in `Task.Delay` to price the difference. | `ioxide.timer` |
-| [`Proxy.H1ToH1`](Proxy/H1ToH1/Program.cs) | 251 | A reverse proxy with TLS on BOTH hops - ioxide TLS in, `TlsClientContext` out. Read this one first. | `ioxide.httpclient` |
-| [`Proxy.H2ToH1`](Proxy/H2ToH1/Program.cs) | 217 | The classic edge: h2 over TLS in (browsers refuse h2c), h1 origin behind. | `ioxide.http2`, `ioxide.httpclient` |
-| [`Proxy.H3ToH1`](Proxy/H3ToH1/Program.cs) | 172 | An HTTP/3 front door for an h1 upstream. `Tcp = null`, so every TCP socket the process owns is an outbound one. | `ioxide.ngtcp2`, `ioxide.nghttp3`, `ioxide.httpclient` |
+| [`Proxy.H1ToH1`](Proxy/H1ToH1/Program.cs) | 259 | A reverse proxy with TLS on BOTH hops - ioxide TLS in, `TlsClientContext` out. Read this one first. | `ioxide.httpclient` |
+| [`Proxy.H2ToH1`](Proxy/H2ToH1/Program.cs) | 233 | The classic edge: h2 over TLS in (browsers refuse h2c), h1 origin behind. | `ioxide.http2`, `ioxide.httpclient` |
+| [`Proxy.H3ToH1`](Proxy/H3ToH1/Program.cs) | 191 | An HTTP/3 front door for an h1 upstream. `Tcp = null`, so every TCP socket the process owns is an outbound one. | `ioxide.ngtcp2`, `ioxide.nghttp3`, `ioxide.httpclient` |
 | [`AspNet`](AspNet/Program.cs) | 83 | ASP.NET Core on the ioxide Kestrel transport, or on stock sockets, or on msquic h3 - `TRANSPORT=` picks. | `ioxide.Kestrel` |
 
 The upstream client speaks HTTP/1.1 only, so there is no `Proxy/*ToH2` or `*ToH3`: those samples

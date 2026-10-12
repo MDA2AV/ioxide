@@ -54,6 +54,21 @@ internal sealed class HttpClientConnection : IDisposable
     /// or the server asked to close). The pool drops these and opens replacements.</summary>
     public bool IsBroken => _broken;
 
+    /// <summary>When the pool last put this connection on its idle list.</summary>
+    public long IdleSinceMs { get; set; }
+
+    /// <summary>When this connection was opened, for <see cref="HttpClientOptions.MaxLifetimeMs"/>.</summary>
+    public long OpenedAtMs { get; } = Native.MonotonicMs;
+
+    /// <summary>Whether the origin closed or reset this connection while it sat in the pool, where
+    /// nothing reads it. One poll, from the pool's sweep rather than per request.</summary>
+    public unsafe bool ClosedWhileIdle()
+    {
+        // POLLRDHUP rather than a read: TLS can leave a close_notify or ticket unread ahead of the FIN.
+        var fd = new PollFd { Fd = _transport.Fd, Events = POLLRDHUP };
+        return poll(&fd, 1, 0) != 0;
+    }
+
     private unsafe HttpClientConnection(HttpClientOptions options, IClientTransport transport, byte[] hostHeaderLine)
     {
         _options = options;
@@ -81,12 +96,14 @@ internal sealed class HttpClientConnection : IDisposable
 
     public static async Task<HttpClientConnection> ConnectAsync(IRingHost host, HttpClientOptions options)
     {
-        // "host: <authority>\r\n" is fixed for the connection's life - build it once.
-        string authority = options.Port is 80 or 443 ? options.Host : $"{options.Host}:{options.Port}";
+        // "host: <authority>\r\n" is fixed for the connection's life - build it once. An IPv6 address
+        // goes in brackets, and the port only when it is not the scheme's own.
+        string name = options.Host.Contains(':') && options.Host[0] != '[' ? $"[{options.Host}]" : options.Host;
+        string authority = options.Port == (options.Tls is null ? 80 : 443) ? name : $"{name}:{options.Port}";
         byte[] hostHeaderLine = System.Text.Encoding.ASCII.GetBytes($"host: {authority}\r\n");
 
         IClientTransport transport = await ClientTransport.ConnectAsync(
-            host, options.Host, options.Port, options.Tls);
+            host, options.Host, options.Port, options.Tls, options.ConnectTimeoutMs);
 
         return new HttpClientConnection(options, transport, hostHeaderLine);
     }
@@ -175,7 +192,9 @@ internal sealed class HttpClientConnection : IDisposable
             await ReadBodyAsync(response);
 
             response.Freeze();
-            if (response.ConnectionClose)
+
+            // Nothing is pipelined, so bytes past this response could only be misread as the next one.
+            if (response.ConnectionClose || _consumed < _received)
             {
                 _broken = true;   // the pool discards and replaces this connection
             }
@@ -304,7 +323,13 @@ internal sealed class HttpClientConnection : IDisposable
                 copied += AppendAvailable(response, chunkSize - copied);
             }
 
-            _consumed = await ReadLineAsync() + 2;   // the CRLF terminating the chunk
+            // The chunk's CRLF must come right after its data; a later one means the size was wrong.
+            int dataEnd = await ReadLineAsync();
+            if (dataEnd != _consumed)
+            {
+                throw new HttpClientException("malformed chunk: data runs past its size");
+            }
+            _consumed = dataEnd + 2;
         }
 
         response.SetBodyRange((bodyStart, (int)bodyLength));
@@ -368,6 +393,19 @@ internal sealed class HttpClientConnection : IDisposable
 
     private static unsafe nint PointerOf(MemoryHandle handle) => (nint)handle.Pointer;
 
+    [StructLayout(LayoutKind.Sequential)]
+    private struct PollFd
+    {
+        public int Fd;
+        public short Events;
+        public short Revents;
+    }
+
+    private const short POLLRDHUP = 0x2000;
+
+    [DllImport("libc")]
+    private static extern unsafe int poll(PollFd* fds, nuint count, int timeoutMs);
+
     private unsafe void CopyIntoSend(ReadOnlySpan<byte> data, int offset)
         => data.CopyTo(new Span<byte>((void*)(_send + offset), _sendCapacity - offset));
 
@@ -388,9 +426,18 @@ internal sealed class HttpClientConnection : IDisposable
         int extension = line.IndexOf((byte)';');
         if (extension >= 0)
         {
-            line = line[..extension];
+            line = line[..extension].TrimEnd(" \t"u8);   // RFC 9112 allows whitespace before the ';'
         }
-        return Utf8Parser.TryParse(line, out size, out _, 'x');
+
+        // Unsigned and whole: as an int, 80000000 and up parsed negative, and "0x5" and "5zz" as 0 and 5.
+        size = 0;
+        if (!Utf8Parser.TryParse(line, out uint value, out int digits, 'x') || digits != line.Length
+            || value > int.MaxValue)
+        {
+            return false;
+        }
+        size = (int)value;
+        return true;
     }
 
     /// <summary>Copy up to <paramref name="limit"/> unconsumed bytes into the response's arena;
@@ -537,6 +584,27 @@ internal sealed class HttpClientConnection : IDisposable
         // Realloc can move the block, so the view handed to the parser has to be rebuilt. Reset is
         // internal to ioxide, and this only happens when the buffer actually grows.
         _receiveView = new UnmanagedMemoryManager((byte*)_receive, _receiveCapacity);
+    }
+
+    /// <summary>Refuses a CR, LF or NUL anywhere in the head, which BuildHead would write as given.</summary>
+    internal static void ValidateHead(HttpClientRequest request)
+    {
+        ThrowIfLineBreak(request.Method.Span, "method");
+        ThrowIfLineBreak(request.Path.Span, "target");
+        foreach (KeyValuePair<ReadOnlyMemory<byte>, ReadOnlyMemory<byte>> field in request.Headers.AsSpan())
+        {
+            ThrowIfLineBreak(field.Key.Span, "header name");
+            ThrowIfLineBreak(field.Value.Span, "header value");
+        }
+    }
+
+    // CR or LF ends the line early, adding field lines or a second request; servers disagree on NUL.
+    private static void ThrowIfLineBreak(ReadOnlySpan<byte> part, string what)
+    {
+        if (part.IndexOfAny((byte)'\r', (byte)'\n', (byte)0) >= 0)
+        {
+            throw new ArgumentException($"request {what} contains CR, LF or NUL", "request");
+        }
     }
 
     private unsafe int BuildHead(HttpClientRequest request)

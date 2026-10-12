@@ -119,6 +119,7 @@ public sealed unsafe partial class Reactor
 
         int fd = _udpFds[slot];
         _udpFds[slot] = -1;   // released before the close, so no re-arm can race the fd away
+        SubmitCancel(Tag(KindUdpRecv, 0, slot));   // the armed receive holds the socket open past close()
         close(fd);
         _quicPinsOpen--;
     }

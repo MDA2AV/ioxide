@@ -17,7 +17,7 @@ public static class HttpMethods
 /// is retained after <see cref="HttpClientPool.SendAsync"/> returns).
 ///
 /// <c>host</c>, <c>content-length</c> and <c>connection</c> are written by the client - don't add
-/// them here.
+/// them here. A CR, LF or NUL in the method, path or a field is refused with an ArgumentException.
 /// </summary>
 public sealed class HttpClientRequest
 {

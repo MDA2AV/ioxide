@@ -14,6 +14,13 @@ public sealed record ServerConfig
     public uint RingEntries { get; init; } = 8192;
 
     /// <summary>
+    /// Slots each reactor's table of in-flight ring operations starts with: every timer, and every
+    /// socket or file operation of the pg, redis, HTTP and file clients, holds one until it
+    /// completes. The table doubles when it runs out, so this only sets where that first happens.
+    /// </summary>
+    public int OpSlots { get; init; } = 4096;
+
+    /// <summary>
     /// Bind listeners as dual-stack IPv6 (AF_INET6 on :: with IPV6_V6ONLY=0) so one socket accepts both
     /// IPv6 and IPv4-mapped clients. When false (default) listeners are IPv4-only (AF_INET on 0.0.0.0).
     /// Applies to TCP listeners and UDP sockets alike.

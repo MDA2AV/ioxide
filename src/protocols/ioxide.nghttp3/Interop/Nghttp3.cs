@@ -120,6 +120,8 @@ internal static unsafe class Nghttp3
     /// marshalled form.</summary>
     [DllImport(Lib)] internal static extern nint ih3_version();
 
+    internal const int NGHTTP3_ERR_STREAM_NOT_FOUND = -110;   // nghttp3.h
+
     internal static string StrError(int liberr) => Marshal.PtrToStringUTF8(ih3_strerror(liberr)) ?? liberr.ToString();
     internal static string Version() => Marshal.PtrToStringUTF8(ih3_version()) ?? "unknown";
 }
