@@ -383,7 +383,7 @@ public sealed partial class Http3Connection
                     {
                         rs.Sink.Push(data[..take]);   // credited on hand-out, not here
                     }
-                    else
+                    else if (!_streaming)   // streaming: the body is retired and the engine credits it
                     {
                         rs.Request.BodyBuffer ??= new MemoryStream();
                         rs.Request.BodyBuffer.Write(data[..take]);
@@ -602,23 +602,25 @@ public sealed partial class Http3Connection
             catch (Exception e)
             {
                 Console.Error.WriteLine($"[ioxide.http3] request handler faulted: {e.GetBaseException().Message}");
+                RetireBody(rs);
                 Submit(sid, new Http3Response { Status = 500 });
                 continue;
             }
 
             if (pending.IsCompletedSuccessfully)
             {
+                RetireBody(rs);
                 Submit(sid, pending.Result);
             }
             else
             {
-                _ = CompleteStreamingAsync(pending, sid);
+                _ = CompleteStreamingAsync(pending, rs);
             }
         }
         _ready.Clear();
     }
 
-    private async Task CompleteStreamingAsync(ValueTask<Http3Response> pending, long streamId)
+    private async Task CompleteStreamingAsync(ValueTask<Http3Response> pending, ReqStream rs)
     {
         Http3Response resp;
         try
@@ -631,11 +633,27 @@ public sealed partial class Http3Connection
             resp = new Http3Response { Status = 500 };
         }
 
+        RetireBody(rs);
         if (_fatal)
         {
             return;
         }
-        Submit(streamId, resp);
+        Submit(rs.Request.StreamId, resp);
+    }
+
+    // The handler is done with the body: credit what it left unread and let the engine credit the rest.
+    private void RetireBody(ReqStream rs)
+    {
+        if (rs.Sink is null)
+        {
+            return;
+        }
+        rs.Sink.Drop();
+        rs.Sink = null;
+        if (!rs.Finished)
+        {
+            _quicConnection.SetStreamPaced(rs.Request.StreamId, false);
+        }
     }
 
     // --- egress --------------------------------------------------------------------------------

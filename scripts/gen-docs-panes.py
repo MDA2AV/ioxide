@@ -386,10 +386,10 @@ PANES = {
         "is a property no amount of benchmarking substitutes for: nghttp2 is continuously fuzzed, "
         "patched by people whose job it is when the next HTTP/2 CVE lands, and has a decade of "
         "interop against every other stack. "
-        "It streams responses too now - see "
-        "<label for=\"tab-h2ngs\" class=\"ex-jump\">response streamed (nghttp2)</label> - though not "
-        "request bodies, where <label for=\"tab-h2sreq\" class=\"ex-jump\">the managed stack</label> "
-        "is still the only one. Measured as a client on this rig, the managed "
+        "It streams both directions too now - see "
+        "<label for=\"tab-h2ngs\" class=\"ex-jump\">response streamed (nghttp2)</label> and "
+        "<label for=\"tab-h2ngreq\" class=\"ex-jump\">request streamed (nghttp2)</label>. "
+        "Measured as a client on this rig, the managed "
         "stack runs <b>1.35&times;-1.39&times;</b> it. Take this one when you want the reference "
         "implementation's coverage; take "
         "<label for=\"tab-h2cs\" class=\"ex-jump\">buffered</label> for everything else."),
@@ -408,6 +408,21 @@ PANES = {
         "That difference is the whole reason this needed new native entry points "
         "(<code>ih2_submit_response_stream</code>, <code>ih2_stream_write</code>, "
         "<code>ih2_stream_close</code>) rather than being a C# change."),
+    "h2ngreq": (
+        "Http2/Nghttp2StreamedRequest", "HTTP/2 &middot; nghttp2, request streamed", "ioxide + ioxide.nghttp2",
+        ["head -c 50000000 /dev/zero | curl --http2-prior-knowledge --data-binary @- \\",
+         "  http://127.0.0.1:8080/upload"],
+        "The same streamed request body as "
+        "<label for=\"tab-h2sreq\" class=\"ex-jump\">the managed one</label>, and nearly the same "
+        "sample: <code>StreamRequestBodies</code> dispatches at the HEADERS and hands the handler an "
+        "<code>Nghttp2BodyReader</code>. What makes it hold is underneath. nghttp2 "
+        "credits DATA the moment it arrives unless told otherwise, which would put the bound back on "
+        "the whole body, so a streaming session runs with its automatic WINDOW_UPDATE off and the "
+        "reader hands credit back only as the handler <em>reads</em>. Every byte nghttp2 delivers is "
+        "then credited exactly once - read, left unread by a handler that returned, or on a stream "
+        "that was reset - because one that never is shrinks the connection window for every stream on "
+        "it. That took one native entry point (<code>ih2_consume</code>) and a flag on "
+        "<code>ih2_server_new</code>."),
     "h3": (
         "Http3/Nghttp3Request", "HTTP/3 &middot; request streamed (nghttp3)", "ioxide + ioxide.ngtcp2 + ioxide.nghttp3",
         ["curl --http3-only -k https://127.0.0.1:8443/"],
@@ -439,6 +454,30 @@ PANES = {
         "origin advertises it via <b>Alt-Svc</b>, so the upgrade costs nothing at the call site. The "
         "nine <label for=\"tab-pxmatrix\" class=\"ex-jump\">proxy</label> samples pin a protocol "
         "instead."),
+    "gateway": (
+        "Clients/Gateway", "Gateway &middot; several origins", "ioxide + ioxide.httpclient",
+        ["PLAYGROUND_PORT=8081 dotnet run -c Release --project Playground/Tcp/Raw   # origin \"users\"",
+         "PLAYGROUND_PORT=8082 dotnet run -c Release --project Playground/Tcp/Raw   # origin \"orders\"",
+         "curl -i http://127.0.0.1:8090/users/42"],
+        "One front door, several origins, picked by path. Each origin gets its own "
+        "<code>HttpClientPool</code> on every reactor, with its own options - pool size, TLS, "
+        "timeouts - and an origin that goes down fails only its own routes. <code>Start</code> "
+        "registers each pool as the reactor's <code>HttpClientPool</code> service, and services are "
+        "keyed by type, so <code>GetService</code> would find only the last one started: keep the "
+        "pools <code>Start</code> returns, in a service of your own. For origins not known up front, "
+        "<code>RingHttpClient</code> opens a pool per origin on first use."),
+    "gatewaytls": (
+        "Clients/GatewayTlsPipes", "Gateway &middot; tls + pipes", "ioxide + ioxide.httpclient",
+        ["PLAYGROUND_PORT=8444 dotnet run -c Release --project Playground/Tls/OpenSsl   # origin \"users\", https",
+         "PLAYGROUND_PORT=8082 dotnet run -c Release --project Playground/Tcp/Raw       # origin \"orders\", http",
+         "curl -ki https://127.0.0.1:8443/users/42"],
+        "The <label for=\"tab-gateway\" class=\"ex-jump\">gateway</label> behind an https front "
+        "door, read and written through an <code>IDuplexPipe</code>: plaintext requests in, plaintext "
+        "responses out, whichever backend encrypts them. Behind it the origins differ in kind as well "
+        "as in options - <code>users</code> is https by name, resolved off the reactor and checked "
+        "against its certificate, <code>orders</code> plain http by address - and each https origin "
+        "gets a <code>TlsClientContext</code> of its own on every reactor. TLS hands back records, so "
+        "the loop takes one whole request head at a time and leaves a pipelined one for the next read."),
     "pg": (
         "Clients/Pg", "Postgres", "ioxide + ioxide.pg",
         ["curl http://127.0.0.1:8080/"],

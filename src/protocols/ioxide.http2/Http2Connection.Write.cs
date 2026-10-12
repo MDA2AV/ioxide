@@ -189,7 +189,7 @@ public sealed partial class Http2Connection
     {
         if (_streams.Remove(streamId, out PendingRequest? pending))
         {
-            pending.Dispose();
+            pending.Abort();
         }
 
         Span<byte> frame = stackalloc byte[FrameHeader.Size + 4];

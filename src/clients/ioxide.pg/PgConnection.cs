@@ -212,7 +212,7 @@ public sealed class PgConnection : IDisposable
             _prepared[sql] = name!;
         }
 
-        var pending = new Pending(onRow) { PreparedSql = cached ? sql : null, Sql = sql, EnqueuedAtMs = Environment.TickCount64 };
+        var pending = new Pending(onRow) { PreparedSql = cached ? sql : null, Sql = sql, EnqueuedAtMs = Native.MonotonicMs };
         _inflight.Enqueue(pending);
 
         if (!_sending)
@@ -247,7 +247,7 @@ public sealed class PgConnection : IDisposable
             return ValueTask.FromException<PgResult>(ex);
         }
 
-        var pending = new Pending(onRow) { EnqueuedAtMs = Environment.TickCount64 };
+        var pending = new Pending(onRow) { EnqueuedAtMs = Native.MonotonicMs };
         _inflight.Enqueue(pending);
 
         if (!_sending)
@@ -435,7 +435,7 @@ public sealed class PgConnection : IDisposable
         public string? PreparedSql;   // set when this command included a Parse, so it can be evicted on error
         public string? Sql;           // SQL text (extended protocol) - for stale-statement cache eviction
         public PgColumn[]? Columns;   // captured from RowDescription for row-streaming queries
-        public long EnqueuedAtMs;     // Environment.TickCount64 at enqueue - drives the command-timeout sweep
+        public long EnqueuedAtMs;     // Native.MonotonicMs at enqueue - drives the command-timeout sweep
 
         public Pending(PgRowHandler? onRow) => OnRow = onRow;
         public short Version => _core.Version;

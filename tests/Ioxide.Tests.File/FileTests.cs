@@ -1,3 +1,4 @@
+using System.Runtime.InteropServices;
 using ioxide.file;
 
 namespace Ioxide.Tests;
@@ -54,7 +55,41 @@ internal static class FileTests
             Assert.Equal(BigAsset.Length, body.Length);
             Assert.Equal(BigAsset, body);
         });
+
+        runner.Test("file: a child process does not inherit a RingFile's descriptor", () =>
+        {
+            string dir = SampleAssets();
+            string path = Path.Combine(dir, "hello.txt");
+            string controlPath = Path.Combine(dir, "big.txt");
+            RingFile? file = null;
+            TestServer.Start(static (_, conn) => { conn.DecRef(); return Task.CompletedTask; }, r => file = RingFile.Open(r, path));
+
+            // The control: a file opened without close-on-exec is inherited, so a leak would be seen.
+            int plain = open(controlPath, 0 /* O_RDONLY */, 0);
+            string target = ExecInheritance.Target(file!.Fd);
+            string control = ExecInheritance.Target(plain);
+            HashSet<string> held;
+            try
+            {
+                held = ExecInheritance.HeldByChild();
+            }
+            finally
+            {
+                close(plain);
+                file.Dispose();
+            }
+
+            Assert.Equal(path, target);
+            Assert.True(held.Contains(control), "control: the child did not inherit a plain file descriptor, so a leak would go unseen");
+            Assert.True(!held.Contains(target), "the child inherited the RingFile's descriptor");
+        });
     }
+
+    [DllImport("libc")]
+    private static extern int open([MarshalAs(UnmanagedType.LPUTF8Str)] string path, int flags, int mode);
+
+    [DllImport("libc")]
+    private static extern int close(int fd);
 
     // Bigger than the harness write slab (16 KiB) so serving it exercises GrowWriteSlab, but under
     // the client's 64 KiB read buffer so the whole body comes back in one shot.

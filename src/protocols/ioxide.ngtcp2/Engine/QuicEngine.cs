@@ -384,6 +384,12 @@ public sealed unsafe class QuicEngine : IDisposable
 
         return (Reactor reactor, in UdpDatagram datagram, in QuicCid dcid) =>
         {
+            // Checked before the connection is built, which costs ~75 KB whether or not the packet is refused.
+            if (!Ngtcp2.IsAcceptableInitial(datagram.Payload))
+            {
+                return null;
+            }
+
             QuicEngineConnection conn = create(reactor);
 
             // The transport fills the base Reactor/SocketFd/PeerAddr *after* the factory returns;
