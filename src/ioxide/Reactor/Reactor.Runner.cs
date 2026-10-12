@@ -41,7 +41,7 @@ public sealed unsafe partial class Reactor
         try
         {
 
-        // Transports: TCP always; UDP sockets + the QUIC demux only when configured (no-ops otherwise).
+        // Transports, each a no-op unless configured: TCP listeners, UDP sockets, the QUIC demux.
         OpenTcpListeners();
         OpenUdpSockets();
         InitQuic();
