@@ -454,6 +454,30 @@ PANES = {
         "origin advertises it via <b>Alt-Svc</b>, so the upgrade costs nothing at the call site. The "
         "nine <label for=\"tab-pxmatrix\" class=\"ex-jump\">proxy</label> samples pin a protocol "
         "instead."),
+    "gateway": (
+        "Clients/Gateway", "Gateway &middot; several origins", "ioxide + ioxide.httpclient",
+        ["PLAYGROUND_PORT=8081 dotnet run -c Release --project Playground/Tcp/Raw   # origin \"users\"",
+         "PLAYGROUND_PORT=8082 dotnet run -c Release --project Playground/Tcp/Raw   # origin \"orders\"",
+         "curl -i http://127.0.0.1:8090/users/42"],
+        "One front door, several origins, picked by path. Each origin gets its own "
+        "<code>HttpClientPool</code> on every reactor, with its own options - pool size, TLS, "
+        "timeouts - and an origin that goes down fails only its own routes. <code>Start</code> "
+        "registers each pool as the reactor's <code>HttpClientPool</code> service, and services are "
+        "keyed by type, so <code>GetService</code> would find only the last one started: keep the "
+        "pools <code>Start</code> returns, in a service of your own. For origins not known up front, "
+        "<code>RingHttpClient</code> opens a pool per origin on first use."),
+    "gatewaytls": (
+        "Clients/GatewayTlsPipes", "Gateway &middot; tls + pipes", "ioxide + ioxide.httpclient",
+        ["PLAYGROUND_PORT=8444 dotnet run -c Release --project Playground/Tls/OpenSsl   # origin \"users\", https",
+         "PLAYGROUND_PORT=8082 dotnet run -c Release --project Playground/Tcp/Raw       # origin \"orders\", http",
+         "curl -ki https://127.0.0.1:8443/users/42"],
+        "The <label for=\"tab-gateway\" class=\"ex-jump\">gateway</label> behind an https front "
+        "door, read and written through an <code>IDuplexPipe</code>: plaintext requests in, plaintext "
+        "responses out, whichever backend encrypts them. Behind it the origins differ in kind as well "
+        "as in options - <code>users</code> is https by name, resolved off the reactor and checked "
+        "against its certificate, <code>orders</code> plain http by address - and each https origin "
+        "gets a <code>TlsClientContext</code> of its own on every reactor. TLS hands back records, so "
+        "the loop takes one whole request head at a time and leaves a pipelined one for the next read."),
     "pg": (
         "Clients/Pg", "Postgres", "ioxide + ioxide.pg",
         ["curl http://127.0.0.1:8080/"],

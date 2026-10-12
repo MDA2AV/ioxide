@@ -14,6 +14,10 @@ internal static class Program
         var runner = new Runner();
 
         HttpClientTests.Register(runner);
+        HttpClientIdleCloseTests.Register(runner);
+        HttpClientDnsTests.Register(runner);
+        HttpClientConnectTests.Register(runner);
+        RingHttpClientTests.Register(runner);
         TlsClientTests.Register(runner);
 
         // Areas reserved for the failing-test review pass; empty until one lands.

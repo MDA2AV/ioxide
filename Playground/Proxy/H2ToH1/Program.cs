@@ -121,7 +121,7 @@ for (int i = 0; i < threads.Length; i++)
         // per-connection state, so every connection opened from it gets its own SSL.
         HttpClientPool.Start(r, new HttpClientOptions
         {
-            Host              = upstreamHost,     // origin address (IPv4 literal; DNS would block the reactor)
+            Host              = upstreamHost,     // origin name or address; a name is resolved off the reactor
             Port              = upstreamPort,     // origin port
             PoolSize          = upstreamPool,     // connections kept open; round-robin, one request each
             MaxResponseBytes  = 8 * 1024 * 1024,  // per-request ceiling for headers + body
@@ -158,6 +158,15 @@ for (int i = 0; i < threads.Length; i++)
             // streams interleave here, which is exactly why the h1 pool has to be deep.
             await new Http2Connection(pipe).RunBufferedAsync(async request =>
             {
+                // The method and path are h2 field values, written back out below as an HTTP/1.1
+                // request line, so one holding a CR, LF, NUL or space could add lines to the request
+                // the origin sees. Refuse it here.
+                if (!IsRequestLineSafe(request.Method.Span) || !IsRequestLineSafe(request.Path.Span)
+                    || request.Path.Span[0] != (byte)'/')
+                {
+                    return new Http2Response { Status = 400, Body = "bad method or path\n"u8.ToArray() };
+                }
+
                 try
                 {
                     // Method, path and body forward as the bytes they already are: h2 decoded
@@ -217,3 +226,8 @@ foreach (Thread thread in threads)
 {
     thread.Join();
 }
+
+// Visible ASCII only - what an HTTP/1.1 request line can carry without a CR, LF, NUL or space
+// splitting it.
+static bool IsRequestLineSafe(ReadOnlySpan<byte> value)
+    => !value.IsEmpty && !value.ContainsAnyExceptInRange((byte)0x21, (byte)0x7E);
