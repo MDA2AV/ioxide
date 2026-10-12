@@ -182,7 +182,7 @@ public sealed class PgPool
                 {
                     // Its failed waiters resumed inline, and a Pick of theirs may have removed it or others.
                     _connections.Remove(c);
-                    c.Dispose();   // closes the fd - unsticks the connection's stuck send/recv loops
+                    c.Dispose();   // shuts the socket down - unsticks the connection's stuck send/recv loops
                     i = Math.Min(i, _connections.Count);
                 }
             }
