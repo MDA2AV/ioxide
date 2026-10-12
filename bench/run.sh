@@ -8,7 +8,7 @@
 # Servers run 4 reactors (BENCH_REACTORS to override); the tcp-raw/tcp-pipe pair repeats at 12
 # reactors as the io_uring baseline. Loads: wrk for everything TCP (fixed -c 64 -t 4,
 # time-bounded), h2load built with HTTP/3 for the HTTP/3 server (H2LOAD_H3 to point at it), Bench.Clients for the
-# ring-native clients. Sidecars (redis, postgres, an h2c nginx) start via docker when available;
+# ring-native clients. Sidecars (postgres, an h2c nginx) start via docker when available;
 # anything missing skips with a note instead of failing the run.
 #
 # Numbers are hardware-specific: compare runs on one machine, never across machines.
@@ -126,16 +126,8 @@ else
   note "client-h2" "${R}r" "SKIP (docker unavailable for the h2c upstream)"
 fi
 
-# ── redis / pg / file ───────────────────────────────────────────────────────────────────────
+# ── pg / file ───────────────────────────────────────────────────────────────────────
 if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
-  docker rm -f bench-redis >/dev/null 2>&1
-  docker run -d --name bench-redis --network host redis:7-alpine >/dev/null 2>&1
-  sleep 2
-  play Clients/Redis PLAYGROUND_REACTORS=$R PLAYGROUND_PORT=18085 \
-    && note "redis" "${R}r" "$(wrk_h1 http://127.0.0.1:18085/) req/s"
-  stop_play
-  docker rm -f bench-redis >/dev/null 2>&1
-
   docker rm -f bench-pg >/dev/null 2>&1
   docker run -d --name bench-pg --network host \
     -e POSTGRES_USER=bench -e POSTGRES_PASSWORD=bench -e POSTGRES_DB=bench \
@@ -146,7 +138,6 @@ if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
   stop_play
   docker rm -f bench-pg >/dev/null 2>&1
 else
-  note "redis" "${R}r" "SKIP (docker unavailable)"
   note "pg" "${R}r" "SKIP (docker unavailable)"
 fi
 

@@ -23,7 +23,6 @@
     <div class="group">Guide</div>
     <a href="overview.html" class="here">Introduction</a>
     <a href="postgres.html">Postgres</a>
-    <a href="redis.html">Redis</a>
     <a href="tls.html">TLS</a>
     <a href="files.html">Static files</a>
     <a href="multiport.html">Multi-port</a>
@@ -34,7 +33,6 @@
     <div class="group sub">Packages</div>
     <a href="dev-core.html" class="pkg">ioxide <span class="muted">core</span></a>
     <a href="dev-pg.html" class="pkg">ioxide.pg</a>
-    <a href="dev-redis.html" class="pkg">ioxide.redis</a>
     <a href="dev-tls.html" class="pkg">ioxide <span class="muted">tls</span></a>
     <a href="dev-file.html" class="pkg">ioxide.file</a>
   </aside>
@@ -108,8 +106,7 @@ foreach (var t in threads) t.Join();</code></pre>
     engine never names a client type, so adding one never touches the reactor:</p>
     <ul>
       <li><a href="postgres.html"><code>ioxide.pg</code></a> - pooled ring-native Postgres.</li>
-      <li><a href="redis.html"><code>ioxide.redis</code></a> - full RESP2 Redis client.</li>
-      <li><a href="files.html"><code>ioxide.file</code></a> - static files with baked responses.</li>
+          <li><a href="files.html"><code>ioxide.file</code></a> - static files with baked responses.</li>
       <li><code>ioxide.httpclient</code> - the HTTP/1.1 upstream leg between a proxy and an
       origin.</li>
       <li><a href="clients.html">Your own</a> - the same seam in under 100 lines.</li>
@@ -131,7 +128,7 @@ foreach (var t in threads) t.Join();</code></pre>
 
     <h2>Where to go next</h2>
     <p>The documentation has two halves, for two readers. <b>This Guide</b> is the using-it path -
-    a page per client (<a href="postgres.html">Postgres</a>, <a href="redis.html">Redis</a>,
+    a page per client (<a href="postgres.html">Postgres</a>,
     <a href="tls.html">TLS</a>, <a href="files.html">static files</a>), plus
     <a href="multiport.html">multi-port</a> listeners and writing your own
     <a href="clients.html">custom client</a>. Read what you need and stop.</p>
@@ -139,7 +136,7 @@ foreach (var t in threads) t.Join();</code></pre>
     <a href="architecture.html">Architecture</a> for the system view - the submit/wait loop, provided
     buffer rings, completion routing by generation, connection lifetime - then read any package in
     full: the <a href="dev-core.html">core</a>, <a href="dev-pg.html">ioxide.pg</a>,
-    <a href="dev-redis.html">ioxide.redis</a>, <a href="dev-tls.html">the TLS layer</a>, and
+    <a href="dev-tls.html">the TLS layer</a>, and
     <a href="dev-file.html">ioxide.file</a>, each annotated with code straight from the source.</p>
 
     <div class="next"><a href="postgres.html">Postgres →</a></div>

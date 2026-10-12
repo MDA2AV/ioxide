@@ -63,7 +63,6 @@
   <input type="radio" name="mode-tabs" id="tab-gateway">
   <input type="radio" name="mode-tabs" id="tab-gatewaytls">
   <input type="radio" name="mode-tabs" id="tab-pg">
-  <input type="radio" name="mode-tabs" id="tab-redis">
   <input type="radio" name="mode-tabs" id="tab-redisse">
   <input type="radio" name="mode-tabs" id="tab-files">
   <input type="radio" name="mode-tabs" id="tab-qclient">
@@ -167,7 +166,6 @@
     <details class="ex-sect">
       <summary>clients</summary>
       <label for="tab-pg">postgres</label>
-      <label for="tab-redis">redis</label>
       <label for="tab-redisse">redis &middot; StackExchange.Redis</label>
       <label for="tab-files">files</label>
       <label for="tab-https">https origins</label>
@@ -203,7 +201,7 @@
 
       <div class="ex-card">
         <h3>Both directions</h3>
-        <p>A Postgres query, a Redis command, an outbound HTTP call or a file read rides the
+        <p>A Postgres query, an outbound HTTP call or a file read rides the
         <em>same</em> ring that accepted the request.</p>
       </div>
     </div>
@@ -3173,8 +3171,8 @@ for (int i = 0; i &lt; threads.Length; i++)
         {
             // Dispatch waited for end-of-stream, so the body is ALREADY here: request.Body is
             // complete and request.Body.Length is just a property read. No BodyReader, no pacing.
-            // This overload is synchronous, but the awaiting one exists too - a PgPool query or a
-            // Redis command resumes inline on this reactor, so you can await it right here.
+            // This overload is synchronous, but the awaiting one exists too - a PgPool query
+            // resumes inline on this reactor, so you can await it right here.
             _ = request.Body.Length;
 
             // One response object, reused for every request: zero allocations on this path. To
@@ -7806,229 +7804,6 @@ static bool TryReadTarget(ReadOnlySpan&lt;byte&gt; request, out ReadOnlySpan&lt;
 }</code></pre>
     <p class="ex-foot">One pool per reactor, opened on the reactor thread, so a query rides the same ring that accepted the request and resumes the handler inline. The host must be an IPv4 literal - a DNS lookup would block the reactor.</p>
   </div>
-  <div class="pane pane-redis">
-    <div class="pane-head">
-      <h3>Redis</h3>
-      <span class="pane-pkg">ioxide + ioxide.redis</span>
-    </div>
-<pre><code class="language-csharp">// dotnet add package ioxide
-// dotnet add package ioxide.redis
-//   curl http://127.0.0.1:8080/
-
-using System.Text;
-using ioxide;
-using ioxide.redis;
-using ioxide.utils;
-
-// ── Knobs ────────────────────────────────────────────────────────────────────────────────────
-
-ushort port     = 8080;                        // http://127.0.0.1:8080/
-int    reactors = Environment.ProcessorCount;  // one ring per reactor, one reactor per core
-
-
-// The Redis this talks to. IPv4 literal for the same reason as everywhere else - a DNS lookup
-// would block the reactor - and the pool is per reactor. A null password means no AUTH.
-string  redisHost     = &quot;127.0.0.1&quot;;
-ushort  redisPort     = 6379;
-string? redisPassword = null;
-int     redisPoolSize = 4;
-// ─────────────────────────────────────────────────────────────────────────────────────────────
-
-var config = new ServerConfig
-{
-    ReactorCount   = reactors,  // io_uring rings/threads - one per core
-    RingEntries    = 8192,                                                        // SQ/CQ depth per ring
-    DualStack      = false,                                                       // true = one IPv6 socket also accepts IPv4-mapped
-    RecvBufferSize = 32 * 1024,                                                   // bytes per shared recv buffer
-    RecvSlots      = 4096,                                                        // shared recv buffer-ring depth
-    Incremental    = null,                                                        // per-connection recv rings (6.12+) - see Tcp/Incremental
-    Udp            = null,                                                        // no raw UDP sockets (TCP-only server)
-    Quic           = null,                                                        // no QUIC transport - see Http3/* and Quic/Alpn
-    Tcp = new TcpOptions
-    {
-        Port             = port,
-        ExtraPorts       = [],                                                    // extra listener ports (one handler, several doors)
-        ListenBacklog    = 1024,                                                  // accept-queue depth per SO_REUSEPORT listener
-        WriteSlabSize    = 16 * 1024,                                             // per-connection write buffer before overflow kicks in
-        PoolMax          = 1024,                                                  // pooled connection objects kept per reactor
-        WriteOverflow    = WriteOverflowStrategy.Grow,                            // Grow = realloc one slab; Segmented = chain + vectored SENDMSG
-        ZeroCopySend     = false,                                                 // SEND_ZC: kernel copies less, wins on large writes
-        RecvQueueEntries = 4096,                                                  // per-connection recv completion queue depth
-        ReadTimeoutMs    = 60_000,                                                // close a connection whose read waits this long on a silent peer; 0 = off
-        SendTimeoutMs    = 60_000,                                                // close a connection whose flush takes this long to go out; 0 = off
-    },
-};
-
-var redisOptions = new RedisOptions
-{
-    Host             = redisHost,  // IPv4 literal - resolve names up front, DNS blocks the reactor
-    Port             = redisPort,        // Redis wire port
-    Password         = redisPassword,     // AUTH password; null = no auth
-    User             = null,                                           // ACL username (Redis 6+); null = default user
-    Database         = 0,                                              // logical DB index to SELECT on connect
-    PoolSize         = redisPoolSize,            // per reactor, not global
-    CommandTimeoutMs = 30_000,                                         // oldest in-flight command past this -&gt; torn down; 0 disables
-};
-
-var threads = new Thread[config.ReactorCount];
-
-for (int i = 0; i &lt; threads.Length; i++)
-{
-    var reactor = new Reactor(i, config);
-
-    // The pool lives on the reactor: its connections ride this reactor&#x27;s ring, so a query is
-    // an io_uring send + recv with the continuation resuming right here.
-    reactor.OnStart = r =&gt;
-    {
-        RedisPool pool = RedisPool.Start(r, redisOptions);
-        _ = SeedAsync(pool);   // the &quot;/&quot; route reads this key; seed it so the demo answers
-    };
-
-    reactor.TcpHandle = async (r, conn) =&gt;
-    {
-        RedisPool pool = r.GetService&lt;RedisPool&gt;();
-
-        try
-        {
-            while (true)
-            {
-                RecvSnapshot snapshot = await conn.ReadAsync();
-                string path = ReadPath(conn, snapshot);
-
-                try
-                {
-                    string body = path switch
-                    {
-                        // Cache-aside: try the key; on a miss compute, SET with a TTL, return.
-                        var p when p.StartsWith(&quot;/cache/&quot;, StringComparison.Ordinal)
-                            =&gt; await CacheAside(pool, p[&quot;/cache/&quot;.Length..]),
-
-                        // One RESP reply type per route, through the generic ExecuteAsync.
-                        &quot;/incr&quot;     =&gt; $&quot;counter = {(await pool.ExecuteAsync(&quot;INCR&quot;, &quot;play:counter&quot;)).AsInteger()}&quot;,
-                        &quot;/hash&quot;     =&gt; await Hash(pool),
-                        &quot;/list&quot;     =&gt; await List(pool),
-
-                        // Several commands, one round trip, replies in order.
-                        &quot;/pipeline&quot; =&gt; await Pipeline(pool),
-
-                        // The hot path: a single GET per request. wrk this one.
-                        _           =&gt; $&quot;redis = {await pool.GetAsync(&quot;play:bench&quot;) ?? &quot;(nil)&quot;}&quot;,
-                    };
-
-                    WriteText(conn, &quot;200 OK&quot;, body);
-                }
-                catch (RedisException e)
-                {
-                    // A server error is an exception, not a broken socket: the connection has
-                    // resynced and goes back to the pool usable.
-                    WriteText(conn, &quot;500 Internal Server Error&quot;, e.Message);
-                }
-
-                await conn.FlushAsync();
-
-                if (snapshot.IsClosed) return;
-                conn.ResetRead();
-            }
-        }
-        finally
-        {
-            conn.DecRef();
-        }
-    };
-
-    threads[i] = new Thread(reactor.Run) { Name = $&quot;reactor-{i}&quot; };
-    threads[i].Start();
-}
-
-Console.WriteLine($&quot;[redis] {config.ReactorCount} reactors on :{config.Tcp!.Port} &quot;
-                + $&quot;-&gt; {redisOptions.Host}:{redisOptions.Port}, {redisOptions.PoolSize} connections each&quot;);
-
-foreach (Thread thread in threads)
-{
-    thread.Join();
-}
-
-static async Task SeedAsync(RedisPool pool)
-{
-    try
-    {
-        await pool.ExecuteAsync(&quot;SET&quot;, &quot;play:bench&quot;, &quot;42&quot;);
-    }
-    catch (Exception e) { Console.Error.WriteLine($&quot;[redis] seed failed: {e.Message}&quot;); }
-}
-
-static async Task&lt;string&gt; CacheAside(RedisPool pool, string key)
-{
-    key = &quot;play:cache:&quot; + key;
-    string? cached = await pool.GetAsync(key);
-    if (cached != null)
-    {
-        return $&quot;hit {key} = {cached}&quot;;
-    }
-
-    string value = $&quot;value-{key.Length}&quot;;           // stands in for the expensive computation
-    await pool.SetExAsync(key, value, seconds: 60);
-    return $&quot;miss {key} = {value} (cached 60s)&quot;;
-}
-
-// RESP array of bulk strings: field, value, field, value, ...
-static async Task&lt;string&gt; Hash(RedisPool pool)
-{
-    await pool.ExecuteAsync(&quot;HSET&quot;, &quot;play:hash&quot;, &quot;lang&quot;, &quot;csharp&quot;, &quot;engine&quot;, &quot;io_uring&quot;);
-    RespValue all = await pool.ExecuteAsync(&quot;HGETALL&quot;, &quot;play:hash&quot;);
-    return &quot;hash = [&quot; + string.Join(&quot;, &quot;, all.Items.Select(v =&gt; v.AsString())) + &quot;]&quot;;
-}
-
-static async Task&lt;string&gt; List(RedisPool pool)
-{
-    await pool.ExecuteAsync(&quot;DEL&quot;, &quot;play:list&quot;);
-    await pool.ExecuteAsync(&quot;RPUSH&quot;, &quot;play:list&quot;, &quot;a&quot;, &quot;b&quot;, &quot;c&quot;);
-    RespValue items = await pool.ExecuteAsync(&quot;LRANGE&quot;, &quot;play:list&quot;, &quot;0&quot;, &quot;-1&quot;);
-    return &quot;list = [&quot; + string.Join(&quot;, &quot;, items.Items.Select(v =&gt; v.AsString())) + &quot;]&quot;;
-}
-
-static async Task&lt;string&gt; Pipeline(RedisPool pool)
-{
-    RespValue[] replies = await pool.PipelineAsync(
-        new RedisCommand(&quot;SET&quot;, &quot;play:pipe&quot;, &quot;1&quot;),
-        new RedisCommand(&quot;INCR&quot;, &quot;play:pipe&quot;),
-        new RedisCommand(&quot;GET&quot;, &quot;play:pipe&quot;));
-    return $&quot;set={replies[0].AsString()} incr={replies[1].AsInteger()} get={replies[2].AsString()}&quot;;
-}
-
-// &quot;GET /cache/x HTTP/1.1&quot; -&gt; &quot;/cache/x&quot;, draining the recv on the way past.
-static string ReadPath(TcpConnection conn, RecvSnapshot snapshot)
-{
-    string path = &quot;/&quot;;
-    while (conn.TryGetItem(snapshot, out SpscRecvRing.Item item))
-    {
-        if (item.HasBuffer)
-        {
-            ReadOnlySpan&lt;byte&gt; request = item.AsSpan();
-            int firstSpace = request.IndexOf((byte)&#x27; &#x27;);
-            if (firstSpace &gt;= 0)
-            {
-                ReadOnlySpan&lt;byte&gt; rest = request[(firstSpace + 1)..];
-                int secondSpace = rest.IndexOf((byte)&#x27; &#x27;);
-                if (secondSpace &gt; 0)
-                {
-                    ReadOnlySpan&lt;byte&gt; target = rest[..secondSpace];
-                    int query = target.IndexOf((byte)&#x27;?&#x27;);
-                    path = Encoding.ASCII.GetString(query &gt;= 0 ? target[..query] : target);
-                }
-            }
-            conn.ReturnBuffer(in item);
-        }
-    }
-
-    return path;
-}
-
-static void WriteText(TcpConnection conn, string status, string body)
-    =&gt; conn.Write(Encoding.ASCII.GetBytes(
-        $&quot;HTTP/1.1 {status}\r\nContent-Type: text/plain\r\nContent-Length: {body.Length}\r\n\r\n{body}&quot;));</code></pre>
-    <p class="ex-foot">RESP2 with pipelining, one pool per reactor. Same shape as <label for="tab-pg" class="ex-jump">postgres</label> - the client is ring-native, so the round trip never leaves the core the request landed on.</p>
-  </div>
   <div class="pane pane-redisse">
     <div class="pane-head">
       <h3>Redis &middot; StackExchange.Redis</h3>
@@ -8220,7 +7995,7 @@ static void WriteText(TcpConnection conn, string status, string body)
     conn.Write(Encoding.ASCII.GetBytes(
         $&quot;HTTP/1.1 {status}\r\nContent-Type: text/plain\r\nContent-Length: {Encoding.UTF8.GetByteCount(body)}\r\n\r\n{body}&quot;));
 }</code></pre>
-    <p class="ex-foot">StackExchange.Redis's whole API with its connections on the reactor's ring. <code>IoxideTunnel</code> hands the multiplexer a transport whose connect, sends and receives are io_uring operations on the reactor, and StackExchange.Redis parses the replies and completes each command on that reactor's thread - one multiplexer per reactor, so a handler's await never leaves it. Built on StackExchange.Redis's experimental transport seam, and pinned to the version it was built against. Compare <label for="tab-redis" class="ex-jump">redis</label>, ioxide's own client.</p>
+    <p class="ex-foot">StackExchange.Redis's whole API with its connections on the reactor's ring. <code>IoxideTunnel</code> hands the multiplexer a transport whose connect, sends and receives are io_uring operations on the reactor, and StackExchange.Redis parses the replies and completes each command on that reactor's thread - one multiplexer per reactor, so a handler's await never leaves it. Built on StackExchange.Redis's experimental transport seam, and pinned to the version it was built against.</p>
   </div>
   <div class="pane pane-files">
     <div class="pane-head">

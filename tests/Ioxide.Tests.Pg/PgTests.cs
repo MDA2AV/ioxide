@@ -59,6 +59,36 @@ internal static class PgTests
             (int status, _) = Client.Get(port, "/slow", timeoutMs: 8000);
             Assert.Equal(503, status);
         }, skip: !pgUp);
+
+        // A socket outliving its close() is the visible half of a recv still armed into the freed buffer.
+        runner.Test("pg: a timed-out connection's socket ends at the timeout, not when the late reply comes", () =>
+        {
+            HashSet<TcpSockets.Connection> earlier = TcpSockets.EstablishedTo(pg.Port);
+            int port = TestServer.Start(PgHandlers.Pg, r => PgPool.Start(r, PgOpts(pg, commandTimeoutMs: 1000)));
+
+            (int okStatus, string okBody) = Client.Get(port, "/");
+            Assert.Equal(200, okStatus);
+            Assert.Equal("42", okBody);
+
+            HashSet<TcpSockets.Connection> pool = TcpSockets.WaitForNew(pg.Port, earlier, count: 2);
+            Assert.True(pool.Count == 2, $"expected the pool's 2 connections ESTABLISHED to :{pg.Port}, found {pool.Count}");
+
+            // The sleep outlasts the wait below, so its reply cannot be what ends the socket.
+            (int status, string body) = Client.Get(port, "/sleep/30", timeoutMs: 15_000);
+            Assert.Equal(500, status);
+            Assert.True(body.Contains("timed out"), $"expected the command timeout, got [{body}]");
+
+            List<TcpSockets.Connection> ended = TcpSockets.WaitForAnyToEnd(pool, timeoutMs: 10_000);
+            Assert.True(ended.Count == 1,
+                $"{ended.Count} of the pool's 2 connections ended within 10 s of the timeout; the timed-out one is still ESTABLISHED");
+
+            // Control: the connection that did not time out is untouched, and the pool still answers.
+            Assert.True(pool.Where(c => !ended.Contains(c)).All(TcpSockets.StillEstablished),
+                "the connection that did not time out ended too");
+            (int afterStatus, string afterBody) = Client.Get(port, "/");
+            Assert.Equal(200, afterStatus);
+            Assert.Equal("42", afterBody);
+        }, skip: !pgUp);
     }
 
     private static PgOptions PgOpts((string Host, int Port) pg, int commandTimeoutMs = 30_000) => new()

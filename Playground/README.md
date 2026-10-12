@@ -125,7 +125,6 @@ reference implementation. QUIC itself is always ngtcp2 + picotls, bundled as one
 | [`Clients.Quic`](Clients/Quic/Program.cs) | 166 | The client half of QUIC, and the thing that drives `Quic/Raw`. No listener of any kind. | `ioxide.ngtcp2` |
 | [`Clients.File`](Clients/File/Program.cs) | 422 | A static file server: every file opened ONCE, descriptors shared across reactors, read positionally off the ring. | `ioxide.file` |
 | [`Clients.Pg`](Clients/Pg/Program.cs) | 224 | A Postgres-backed server, whole: a pool per reactor, connect/query/row streaming all ring operations. | `ioxide.pg` |
-| [`Clients.Redis`](Clients/Redis/Program.cs) | 236 | A `RedisPool` per reactor; concurrent requests share connections and pipeline automatically. | `ioxide.redis` |
 | [`Clients.RedisStackExchange`](Clients/RedisStackExchange/Program.cs) | 215 | StackExchange.Redis with its connections on the reactor's ring: a multiplexer per reactor through `IoxideTunnel`, and a knob to run it on StackExchange.Redis's own sockets instead. Experimental. | `ioxide.redis.stackexchange` |
 | [`Clients.Timer`](Clients/Timer/Program.cs) | 184 | A deadline that stays on the ring: `GET /<ms>` answers after that long, one `IORING_OP_TIMEOUT` per wait. A knob swaps in `Task.Delay` to price the difference. | `ioxide.timer` |
 | [`Proxy.H1ToH1`](Proxy/H1ToH1/Program.cs) | 259 | A reverse proxy with TLS on BOTH hops - ioxide TLS in, `TlsClientContext` out. Read this one first. | `ioxide.httpclient` |

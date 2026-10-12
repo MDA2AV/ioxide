@@ -23,7 +23,7 @@ using StackExchange.Redis;
 //  completion only that reactor can run. No TLS through the tunnel yet.
 //
 //  Experimental: built on StackExchange.Redis's transport seam (SER009), which may change in any
-//  StackExchange.Redis release. Compare with Clients/Redis, ioxide's own client.
+//  StackExchange.Redis release.
 //
 //  Needs: ioxide.redis.stackexchange
 // ─────────────────────────────────────────────────────────────────────────────────────────────
