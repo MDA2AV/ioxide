@@ -1,12 +1,15 @@
+using System.Collections.Concurrent;
 using System.Net;
 using System.Net.Sockets;
 using System.Runtime.InteropServices;
+using System.Text;
 using ioxide;
 
 namespace Ioxide.Tests;
 
 /// <summary>
-/// A reactor that runs out of file descriptors while connections wait in the listen backlog (#222).
+/// A reactor that runs out of file descriptors while connections wait in the listen backlog (#222),
+/// and <see cref="TcpOptions.MaxConnections"/>, which sheds accepts before that (#97).
 /// </summary>
 internal static class AcceptExhaustionTests
 {
@@ -103,7 +106,129 @@ internal static class AcceptExhaustionTests
                 $"the reactor used {busy:P0} of a core while out of descriptors: it kept re-arming an accept that could only fail");
             Assert.Equal(Clients, greeted);
         });
+
+        RegisterMaxConnections(runner, "shared", incremental: null);
+        RegisterMaxConnections(runner, "incremental", new IncrementalOptions { MaxConnections = 64, RecvSlots = 4, RecvBufferSize = 1024 });
     }
+
+    private static void RegisterMaxConnections(Runner runner, string mode, IncrementalOptions? incremental)
+    {
+        runner.Test($"tcp ({mode}): an accept whose descriptor reaches MaxConnections is shed, and accepting resumes once a number frees (#97)", () =>
+        {
+            // Sockets earlier tests dropped close when finalized, which would free numbers below the cap mid-test.
+            GC.Collect();
+            GC.WaitForPendingFinalizers();
+            FdCount.Stable();
+
+            // Far above every number open now, so the server's own descriptors and its readiness probe land below it.
+            int cap = HighestOpenFd() + 64;
+            var handled = new ConcurrentQueue<int>();
+
+            int port = TestServer.StartConfigured((r, conn) =>
+            {
+                handled.Enqueue(conn.ClientFd);
+                return Handlers.Raw(r, conn);
+            }, new ServerConfig
+            {
+                RecvBufferSize = 4096,
+                RecvSlots = 64,
+                Incremental = incremental,
+                Tcp = new TcpOptions { WriteSlabSize = 4096, PoolMax = 8, RecvQueueEntries = 64, MaxConnections = cap },
+            }).Port;
+
+            // The probe's number must be free before the table is filled, not free up below the cap afterwards.
+            Assert.True(SpinWait.SpinUntil(() => !handled.IsEmpty, 5_000), "the readiness probe never reached the handler");
+            Assert.True(handled.TryPeek(out int probe) && SpinWait.SpinUntil(() => !IsOpen(probe), 5_000),
+                "the server never closed the readiness probe's connection");
+
+            var placeholders = new List<int>();
+            var clients = new Socket[4];
+            try
+            {
+                // Every number below the cap taken, the clients' own sockets above it, then two numbers
+                // given back: the server's accepts are all that compete for them.
+                while (true)
+                {
+                    int fd = Native.open("/dev/null", 0, 0);
+                    Assert.True(fd >= 0, $"open failed after {placeholders.Count} placeholders: errno {Marshal.GetLastPInvokeError()}");
+                    if (fd >= cap)
+                    {
+                        Native.close(fd);
+                        break;
+                    }
+                    placeholders.Add(fd);
+                }
+
+                for (int i = 0; i < clients.Length; i++)
+                {
+                    clients[i] = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp) { ReceiveTimeout = 5_000 };
+                }
+
+                for (int i = 0; i < 2; i++)
+                {
+                    Native.close(placeholders[^1]);
+                    placeholders.RemoveAt(placeholders.Count - 1);
+                }
+
+                Assert.Equal("served", Ask(clients[0], port));
+                Assert.Equal("served", Ask(clients[1], port));
+                Assert.Equal("shed", Ask(clients[2], port));   // every number below the cap was open
+
+                // One leaves. Once the server has closed its side, that number is the lowest free one again.
+                int leaving = handled.ElementAt(1);
+                clients[0].Dispose();
+                Assert.True(SpinWait.SpinUntil(() => !IsOpen(leaving), 5_000), "the server never closed the connection whose client left");
+                Assert.Equal("served", Ask(clients[3], port));
+
+                int[] numbers = [.. handled];
+                Assert.True(numbers.Length == 4 && numbers.All(n => n < cap),
+                    $"handlers saw descriptors {string.Join(", ", numbers)} under a cap of {cap}: only the probe and three clients should have");
+            }
+            finally
+            {
+                foreach (Socket? client in clients)
+                {
+                    client?.Dispose();
+                }
+                foreach (int fd in placeholders)
+                {
+                    Native.close(fd);
+                }
+            }
+        }, skip: incremental is not null && !TestServer.KernelAtLeast(6, 12));
+    }
+
+    // "served", "shed" when it is closed or reset with no answer, or what else became of it.
+    private static string Ask(Socket client, int port)
+    {
+        client.Connect(IPAddress.Loopback, port);
+        try
+        {
+            client.Send("GET / HTTP/1.1\r\nHost: t\r\n\r\n"u8);
+            byte[] buffer = new byte[256];
+            int n = client.Receive(buffer);
+            string answer = Encoding.ASCII.GetString(buffer, 0, n);
+            return n == 0 ? "shed" : answer.Contains("200") ? "served" : $"answered \"{answer}\"";
+        }
+        catch (SocketException e) when (e.SocketErrorCode is SocketError.ConnectionReset or SocketError.Shutdown)
+        {
+            return "shed";
+        }
+        catch (SocketException e)
+        {
+            return $"failed: {e.SocketErrorCode}";
+        }
+    }
+
+    [DllImport("libc", SetLastError = true)]
+    private static extern int fcntl(int fd, int command);
+
+    private const int FGetFd = 1;
+
+    private static bool IsOpen(int fd) => fcntl(fd, FGetFd) != -1;
+
+    private static int HighestOpenFd()
+        => Directory.EnumerateFileSystemEntries("/proc/self/fd").Max(entry => int.Parse(Path.GetFileName(entry)));
 
     private static async Task Greeter(Reactor reactor, TcpConnection conn)
     {

@@ -235,6 +235,17 @@ public sealed unsafe partial class Reactor
             int clientFd = res;
             _acceptPauseReported = false;
 
+            // At TcpOptions.MaxConnections every lower number is open: shed, as the gid cap below does.
+            if (_tcp.MaxConnections > 0 && clientFd >= _tcp.MaxConnections)
+            {
+                close(clientFd);
+                if (!more)
+                {
+                    SubmitAcceptMultishot(listenFd);
+                }
+                return;
+            }
+
             TcpConnection conn = _pool.TryPop(out var pooled)
                 ? pooled.SetFd(clientFd)
                 : new TcpConnection(this, clientFd, _tcp.WriteSlabSize, _tcp.RecvQueueEntries,
