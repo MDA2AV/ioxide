@@ -97,6 +97,13 @@ deliberately does not.
   single-reactor method measures 22%.
 - **`h2-matrix.sh`** - nghttp2 versus the pure-C# HTTP/2, with and without TLS, on one load
   generator, interleaved so drift hits both arms equally.
+- **`redis-matrix.sh`** - StackExchange.Redis over the ioxide transport against StackExchange.Redis
+  on its own sockets, through `Clients/RedisStackExchange`, whose transport knob is the only
+  difference. Both arms are pinned to the same CPUs, so StackExchange.Redis's own threads cannot
+  borrow cores the ioxide arm does not get. Redis runs in a container of its own on the host
+  network, pinned to another core - a `-p` mapping would put `docker-proxy` in the path of every
+  command - and the driver on the remaining performance cores. `AVOID_CPUS` keeps a core out of
+  every role.
 - **`ab.sh`** - one sample, two git refs: each built in its own worktree under `bench/.work/ab/`,
   runs interleaved a, b, a, b so drift hits both, and requests/s plus the server's CPU per request
   from `/proc`. The driver is `Bench.Clients`, built once from the current tree, so it needs no

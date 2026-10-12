@@ -71,6 +71,7 @@ Quic/Raw                      echo    8443  /           -                   -
 # upstream clients and static files
 Clients/File                  h1      8080  /f.bin      -                   PLAYGROUND_DIR=/tmp/ioxide-bench-assets
 Clients/Pg                    h1      8080  /           -                   -
+Clients/RedisStackExchange    h1      8080  /           -                   -
 Clients/Http                  h1      8090  /           Tcp/Raw             -
 Clients/Https                 h1      8080  /           Tls/OpenSsl         PLAYGROUND_UPSTREAM_CA=/tmp/ioxide-playground-quic/quic.crt
 Clients/Timer                 h1      8080  /           -                   PLAYGROUND_DELAY_MS=0
