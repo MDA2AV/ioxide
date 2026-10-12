@@ -93,21 +93,21 @@ for (int id = 0; id < threads.Length; id++)
 
                 // Drain the recv, pulling the request target out on the way past. The buffers must
                 // go back to the ring, so read what you need before returning them.
-                string target = "/";
+                string? target = null;
                 while (conn.TryGetItem(snapshot, out SpscRecvRing.Item item))
                 {
                     if (item.HasBuffer)
                     {
-                        if (TryReadTarget(item.AsSpan(), out ReadOnlySpan<byte> found))
-                        {
-                            target = Encoding.ASCII.GetString(found);
-                        }
+                        target ??= RequestTarget(item.AsSpan());
                         conn.ReturnBuffer(in item);
                     }
                 }
 
-                Route? route = gateway.Match(target);
-                if (route is null)
+                if (target is null)
+                {
+                    conn.Write("HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\n\r\n"u8);
+                }
+                else if (gateway.Match(target) is not Route route)
                 {
                     conn.Write("HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n"u8);
                 }
@@ -158,21 +158,18 @@ foreach (Thread thread in threads)
     thread.Join();
 }
 
-// "GET /users/42?x=1 HTTP/1.1" -> "/users/42?x=1", forwarded whole. Your framework of choice
-// would do this for you; ioxide deliberately doesn't, so here it is in full.
-static bool TryReadTarget(ReadOnlySpan<byte> request, out ReadOnlySpan<byte> target)
+// "GET /users/42?x=1 HTTP/1.1" -> "/users/42?x=1", forwarded whole; null when the line is not a
+// request. It is cut at the line's first CR or LF, so nothing a client sends can add lines to the
+// request an origin sees. Your framework of choice would do this for you; ioxide deliberately
+// doesn't, so here it is in full.
+static string? RequestTarget(ReadOnlySpan<byte> request)
 {
-    target = default;
-
-    int firstSpace = request.IndexOf((byte)' ');
-    if (firstSpace < 0) return false;
-
-    ReadOnlySpan<byte> afterMethod = request[(firstSpace + 1)..];
-    int secondSpace = afterMethod.IndexOf((byte)' ');
-    if (secondSpace < 0) return false;
-
-    target = afterMethod[..secondSpace];
-    return true;
+    int end = request.IndexOfAny((byte)'\r', (byte)'\n');
+    ReadOnlySpan<byte> line = end < 0 ? request : request[..end];
+    int first = line.IndexOf((byte)' ');
+    int last = line.LastIndexOf((byte)' ');
+    if (first < 0 || last <= first + 1 || line[first + 1] != (byte)'/' || line.Contains((byte)0)) return null;
+    return Encoding.ASCII.GetString(line[(first + 1)..last]);
 }
 
 // An origin and the paths sent to it.
