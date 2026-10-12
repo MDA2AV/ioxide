@@ -10,6 +10,9 @@ namespace ioxide.pg;
 /// </summary>
 internal sealed class PgScram
 {
+    // PBKDF2 runs on the reactor thread, so the server's count is how long the reactor stops: about 0.2 s here.
+    private const int MaxIterations = 1_000_000;
+
     private readonly string _password;
     private readonly string _clientNonce;
     private string _clientFirstBare = "";
@@ -45,6 +48,8 @@ internal sealed class PgScram
 
         if (serverNonce == null || saltB64 == null || iterations <= 0)
             throw new PgException("SCRAM: malformed server-first message");
+        if (iterations > MaxIterations)
+            throw new PgException($"SCRAM: the server asks for {iterations} iterations, more than the {MaxIterations} this client allows");
         if (!serverNonce.StartsWith(_clientNonce))
             throw new PgException("SCRAM: server nonce does not extend the client nonce");
 
