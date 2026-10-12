@@ -138,6 +138,9 @@ public sealed class TlsClientStream : IDisposable
         {
             throw new IOException($"SSL_set1_host('{serverName}'): {OpenSsl.LastError()}");
         }
+
+        // 'ww*.example.com' must not match 'www.example.com': a partial wildcard names a prefix, not a host.
+        OpenSsl.SSL_set_hostflags(ssl, OpenSsl.X509_CHECK_FLAG_NO_PARTIAL_WILDCARDS);
     }
 
     private async ValueTask RunHandshakeAsync(TlsClientOptions options, string serverName)
