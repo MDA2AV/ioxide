@@ -639,6 +639,16 @@ public sealed class TlsService
                     OpenSsl.ERR_clear_error();
                     throw new IOException($"set_ciphersuites{what}: OpenSSL does not know the suite '{name}'.");
                 }
+
+                // OpenSSL resolves IANA names over the whole table, so a TLS 1.2 suite is accepted
+                // too; what it resolved heads the context's ciphers, where the 1.3 list sits.
+                nint resolved = OpenSsl.OPENSSL_sk_value(OpenSsl.SSL_CTX_get_ciphers(ctx), 0);
+                if (Marshal.PtrToStringUTF8(OpenSsl.SSL_CIPHER_get_version(resolved)) != "TLSv1.3")
+                {
+                    throw new IOException(
+                        $"set_ciphersuites{what}: '{name}' is not a TLS 1.3 suite OpenSSL can offer. "
+                        + "TLS 1.2 ciphers belong in CipherList.");
+                }
             }
 
             if (OpenSsl.SSL_CTX_set_ciphersuites(ctx, suites) != 1)

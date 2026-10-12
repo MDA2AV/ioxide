@@ -40,7 +40,7 @@ internal static class ContextBuildTests
 
     public static void Register(Runner runner)
     {
-        runner.Pending("ctx: a CipherSuites name that is not a TLS 1.3 suite is refused, not accepted into a port that serves nobody", () =>
+        runner.Test("ctx: a CipherSuites name that is not a TLS 1.3 suite is refused, not accepted into a port that serves nobody", () =>
         {
             (string cert, string key) = TestCert.Ensure();
 
@@ -84,9 +84,7 @@ internal static class ContextBuildTests
             Assert.True(beside.Refusal is not null && beside.Refusal.Contains(Tls12SuiteName),
                 $"'{Tls12SuiteName}' beside a real 1.3 suite was accepted and then silently dropped "
                 + "from the list, which is what a one-character typo in a suite name is refused for");
-        }, "found by review: SSL_CTX_set_ciphersuites resolves IANA std names over the whole cipher "
-         + "table, so a TLS 1.2 suite name passes every check this module makes and disables the "
-         + "TLS 1.3 list it lands in");
+        });
 
         runner.Test("ctx: control: a list of real TLS 1.3 suite names starts and the port serves it", () =>
         {

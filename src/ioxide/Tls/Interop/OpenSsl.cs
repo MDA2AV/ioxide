@@ -46,6 +46,12 @@ internal static unsafe partial class OpenSsl
     /// <summary>TLS 1.2 and below. A separate list from the 1.3 one, in OpenSSL and here.</summary>
     [LibraryImport(Ssl, StringMarshalling = StringMarshalling.Utf8)]
     public static partial int SSL_CTX_set_cipher_list(nint ctx, string list);
+
+    /// <summary>The context's ciphers, its TLS 1.3 suites first. Borrowed: never freed.</summary>
+    [LibraryImport(Ssl)] public static partial nint SSL_CTX_get_ciphers(nint ctx);
+
+    /// <summary>"TLSv1.3" for a TLS 1.3 suite. A static string, so it is returned as a pointer.</summary>
+    [LibraryImport(Ssl)] public static partial nint SSL_CIPHER_get_version(nint cipher);
     [LibraryImport(Ssl)] public static partial long SSL_CTX_ctrl(nint ctx, int cmd, long arg, nint parg);
     [LibraryImport(Ssl)] public static partial int SSL_CTX_set_num_tickets(nint ctx, nuint num);
     /// <summary>
@@ -149,6 +155,9 @@ internal static unsafe partial class OpenSsl
 
     /// <summary>OPENSSL_free. The macro passes __FILE__/__LINE__, which may be NULL/0.</summary>
     [LibraryImport(Crypto)] public static partial void CRYPTO_free(nint ptr, nint file, int line);
+
+    /// <summary>The element at <paramref name="index"/> of an OpenSSL stack, borrowed, or 0 past its end.</summary>
+    [LibraryImport(Crypto)] public static partial nint OPENSSL_sk_value(nint stack, int index);
 
     // Structural access to one attribute of a DN, so an identity can be compared as a value
     // instead of matched inside a rendered string. See TlsSession.PeerCommonName.
