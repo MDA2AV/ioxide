@@ -157,6 +157,17 @@ public sealed unsafe partial class Reactor
         // this path already did before it tore anything down at all.
         _ring.Dispose(closeFd: !startFailed);
 
+        // Pooled connections are past their last send (#250) and their incremental ring is unregistered,
+        // so their slabs can go. A live one's handler may still write to it, so live ones stay (#223).
+        while (_pool.TryPop(out TcpConnection? pooled))
+        {
+            pooled.Dispose();
+        }
+        while (_writeSlabPool.TryPop(out nint slab))
+        {
+            NativeMemory.AlignedFree((void*)slab);
+        }
+
         // Shared provided-buffer ring (incremental mode allocates per connection instead).
         if (_bufRing != null)
         {
