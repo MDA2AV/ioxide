@@ -37,9 +37,8 @@ public sealed class TlsService
 
     private sealed class PendingHandshake
     {
-        public TcpConnection Conn = null!;
+        public TcpConnection? Conn;   // null once settled: behind a stalled entry it waits out the whole timeout
         public long DeadlineMs;
-        public bool Done;
     }
 
     /// <summary>
@@ -48,13 +47,13 @@ public sealed class TlsService
     /// </summary>
     private void SweepHandshakes()
     {
-        long now = Environment.TickCount64;
+        long now = Native.MonotonicMs;
 
         while (_handshakes.Count > 0)
         {
             PendingHandshake head = _handshakes.Peek();
 
-            if (head.Done)
+            if (head.Conn is null)
             {
                 _handshakes.Dequeue();
                 continue;
@@ -66,7 +65,6 @@ public sealed class TlsService
             }
 
             _handshakes.Dequeue();
-            head.Done = true;
 
             // Both halves are needed, and neither is redundant.
             //
@@ -1139,7 +1137,7 @@ public sealed class TlsService
             pending = new PendingHandshake
             {
                 Conn = conn,
-                DeadlineMs = Environment.TickCount64 + _options.HandshakeTimeoutMs,
+                DeadlineMs = Native.MonotonicMs + _options.HandshakeTimeoutMs,
             };
             _handshakes.Enqueue(pending);
         }
@@ -1150,15 +1148,18 @@ public sealed class TlsService
             {
                 int ret = OpenSsl.Accept(ssl, out int err);
 
+                // Read before the alert's flush, during which other connections' OpenSSL calls clear this thread's queue.
+                string? failure = ret != 1 && err != OpenSsl.SSL_ERROR_WANT_READ ? OpenSsl.LastError() : null;
+
                 await FlushOutbound(conn, wbio);   // server flights stage into the slab
 
                 if (ret == 1)
                 {
                     break;
                 }
-                if (err != OpenSsl.SSL_ERROR_WANT_READ)
+                if (failure is not null)
                 {
-                    throw new IOException($"TLS handshake failed: {OpenSsl.LastError()}");
+                    throw new IOException($"TLS handshake failed: {failure}");
                 }
 
                 RecvSnapshot snapshot = await conn.ReadAsync();
@@ -1234,11 +1235,11 @@ public sealed class TlsService
         finally
         {
             // However this ended - handshake done, peer gone, the sweep itself - the entry stops
-            // being a candidate. Flagged rather than removed: it may be anywhere in the queue, and
-            // the sweep drops flagged entries when they reach the front, which costs nothing.
+            // being a candidate. Emptied rather than removed: it may be anywhere in the queue, and
+            // the sweep drops empty entries when they reach the front, which costs nothing.
             if (pending is not null)
             {
-                pending.Done = true;
+                pending.Conn = null;
             }
         }
     }

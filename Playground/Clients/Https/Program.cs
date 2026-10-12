@@ -29,10 +29,10 @@ int    reactors = Environment.ProcessorCount;  // one ring per reactor, one reac
 
 Env.Override(ref port, ref reactors);
 
-// The https origin this calls OUT to. Point it somewhere real: "93.184.216.34" / "example.com"
-// / 443. The IP must be a literal - resolving a name would block the reactor - and the NAME is
-// what goes out as SNI and what the certificate has to match.
-string originIp   = "127.0.0.1";
+// The https origin this calls OUT to. Point it somewhere real: "example.com" / "example.com" /
+// 443. The host can be a name - resolved off the reactor each time a connection opens - or an
+// address, and the NAME is what goes out as SNI and what the certificate has to match.
+string originHost = "127.0.0.1";
 string originName = "localhost";
 ushort originPort = 443;
 
@@ -42,7 +42,7 @@ string? caFile = null;
 // Skip certificate verification entirely. Read the warning at the call site before setting it.
 bool insecure = false;
 
-Env.Override(ref originIp, "PLAYGROUND_UPSTREAM_HOST");
+Env.Override(ref originHost, "PLAYGROUND_UPSTREAM_HOST");
 Env.Override(ref originName, "PLAYGROUND_UPSTREAM_SNI");
 Env.Override(ref originPort, "PLAYGROUND_UPSTREAM_PORT");
 Env.OverrideOptional(ref caFile, "PLAYGROUND_UPSTREAM_CA");
@@ -88,7 +88,7 @@ for (int i = 0; i < threads.Length; i++)
         // CA belongs in CaFile, not here.
         TlsClientContext tls = TlsClientContext.Create(new TlsClientOptions
         {
-            ServerName         = originName,             // sent as SNI, checked against the cert (required)
+            ServerName         = originName,             // sent as SNI, checked against the cert; null = Host
             AlpnProtocols      = ["http/1.1"],           // offered most-preferred first; [] offers none
             CaFile             = caFile,                 // PEM trust anchors; null = system store
             VerifyCertificate  = !insecure,              // off = encrypted but UNAUTHENTICATED (tests only)
@@ -98,7 +98,7 @@ for (int i = 0; i < threads.Length; i++)
 
         HttpClientPool.Start(r, new HttpClientOptions
         {
-            Host              = originIp,         // IPv4 literal - DNS would block the reactor
+            Host              = originHost,       // a name or an address; a name is resolved off the reactor
             Port              = originPort,       // origin port
             PoolSize          = 2,                // connections to the origin, per reactor
             MaxResponseBytes  = 8 * 1024 * 1024,  // per-request ceiling for headers + body
@@ -171,7 +171,7 @@ for (int i = 0; i < threads.Length; i++)
 }
 
 Console.WriteLine($"[tls-httpsclient] {config.ReactorCount} reactors on :{config.Tcp!.Port}, "
-                + $"origin https://{originName} ({originIp}:{originPort}), "
+                + $"origin https://{originName} ({originHost}:{originPort}), "
                 + $"verify={(insecure ? "OFF" : caFile ?? "system store")}");
 
 foreach (Thread thread in threads)

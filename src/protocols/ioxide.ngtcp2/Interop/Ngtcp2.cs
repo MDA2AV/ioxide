@@ -127,6 +127,17 @@ internal static unsafe class Ngtcp2
         }
     }
 
+    /// <summary>ngtcp2's own test of a first datagram, which iq_accept also runs; the bundle exports it.</summary>
+    [DllImport(Lib)] private static extern int ngtcp2_accept(void* dest, byte* pkt, nuint pktLen);
+
+    internal static bool IsAcceptableInitial(ReadOnlySpan<byte> packet)
+    {
+        fixed (byte* p = packet)
+        {
+            return ngtcp2_accept(null, p, (nuint)packet.Length) == 0;
+        }
+    }
+
     [DllImport(Lib)] internal static extern nint iq_accept(
         nint engine,
         void* localSa, nuint localSaLen,

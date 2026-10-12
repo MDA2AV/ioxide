@@ -23,7 +23,9 @@ public sealed partial class Nghttp3Connection
                 bodyPointer, (nuint)response.Body.Length);
         }
         ArrayPool<byte>.Shared.Return(headers);
-        if (submitResult != 0)
+
+        // A stream that closed while its handler ran was a cancelled request, not a failed connection.
+        if (submitResult != 0 && submitResult != Nghttp3.NGHTTP3_ERR_STREAM_NOT_FOUND)
         {
             Console.Error.WriteLine($"[ioxide.nghttp3] submit_response failed: {Nghttp3.StrError(submitResult)}");
             FailProtocol(submitResult);

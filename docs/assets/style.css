@@ -236,6 +236,8 @@ nav.top .links a.gh svg { display: block; }
 #tab-quicalpn:checked ~ .ex-menu label[for="tab-quicalpn"],
 #tab-qclient:checked ~ .ex-menu label[for="tab-qclient"],
 #tab-https:checked ~ .ex-menu label[for="tab-https"],
+#tab-gateway:checked ~ .ex-menu label[for="tab-gateway"],
+#tab-gatewaytls:checked ~ .ex-menu label[for="tab-gatewaytls"],
 #tab-timer:checked ~ .ex-menu label[for="tab-timer"],
 #tab-h2cs:checked ~ .ex-menu label[for="tab-h2cs"],
 #tab-h2sresp:checked ~ .ex-menu label[for="tab-h2sresp"],
@@ -243,6 +245,7 @@ nav.top .links a.gh svg { display: block; }
 #tab-h2sboth:checked ~ .ex-menu label[for="tab-h2sboth"],
 #tab-h2ng:checked ~ .ex-menu label[for="tab-h2ng"],
 #tab-h2ngs:checked ~ .ex-menu label[for="tab-h2ngs"],
+#tab-h2ngreq:checked ~ .ex-menu label[for="tab-h2ngreq"],
 #tab-pxmatrix:checked ~ .ex-menu label[for="tab-pxmatrix"],
 #tab-pxh1toh1:checked ~ .ex-menu label[for="tab-pxh1toh1"],
 #tab-pxh1toh2:checked ~ .ex-menu label[for="tab-pxh1toh2"],
@@ -380,6 +383,8 @@ nav.top .links a.gh svg { display: block; }
 #tab-quicalpn:checked ~ .pane-quicalpn { display: block; }
 #tab-qclient:checked ~ .pane-qclient { display: block; }
 #tab-https:checked ~ .pane-https { display: block; }
+#tab-gateway:checked ~ .pane-gateway { display: block; }
+#tab-gatewaytls:checked ~ .pane-gatewaytls { display: block; }
 #tab-timer:checked ~ .pane-timer { display: block; }
 #tab-h2cs:checked ~ .pane-h2cs { display: block; }
 #tab-h2sresp:checked ~ .pane-h2sresp { display: block; }
@@ -387,6 +392,7 @@ nav.top .links a.gh svg { display: block; }
 #tab-h2sboth:checked ~ .pane-h2sboth { display: block; }
 #tab-h2ng:checked ~ .pane-h2ng { display: block; }
 #tab-h2ngs:checked ~ .pane-h2ngs { display: block; }
+#tab-h2ngreq:checked ~ .pane-h2ngreq { display: block; }
 #tab-pxmatrix:checked ~ .pane-pxmatrix { display: block; }
 #tab-pxh1toh1:checked ~ .pane-pxh1toh1 { display: block; }
 #tab-pxh1toh2:checked ~ .pane-pxh1toh2 { display: block; }
@@ -529,6 +535,8 @@ nav.top .links a.gh svg { display: block; }
   #tab-quicalpn:checked ~ .ex-menu label[for="tab-quicalpn"],
   #tab-qclient:checked ~ .ex-menu label[for="tab-qclient"],
 #tab-https:checked ~ .ex-menu label[for="tab-https"],
+#tab-gateway:checked ~ .ex-menu label[for="tab-gateway"],
+#tab-gatewaytls:checked ~ .ex-menu label[for="tab-gatewaytls"],
 #tab-timer:checked ~ .ex-menu label[for="tab-timer"],
     #tab-h2cs:checked ~ .ex-menu label[for="tab-h2cs"],
 #tab-h2sresp:checked ~ .ex-menu label[for="tab-h2sresp"],
@@ -536,6 +544,7 @@ nav.top .links a.gh svg { display: block; }
 #tab-h2sboth:checked ~ .ex-menu label[for="tab-h2sboth"],
 #tab-h2ng:checked ~ .ex-menu label[for="tab-h2ng"],
 #tab-h2ngs:checked ~ .ex-menu label[for="tab-h2ngs"],
+#tab-h2ngreq:checked ~ .ex-menu label[for="tab-h2ngreq"],
     #tab-pxmatrix:checked ~ .ex-menu label[for="tab-pxmatrix"],
   #tab-pxh1toh1:checked ~ .ex-menu label[for="tab-pxh1toh1"],
   #tab-pxh1toh2:checked ~ .ex-menu label[for="tab-pxh1toh2"],
