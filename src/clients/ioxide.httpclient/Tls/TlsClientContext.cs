@@ -3,14 +3,14 @@ using System.Runtime.InteropServices;
 namespace ioxide.httpclient;
 
 /// <summary>
-/// A configured client SSL_CTX: trust anchors, protocol floor and the ALPN list to offer. One per
-/// origin is plenty - it holds no per-connection state, and every <see cref="TlsClientStream"/>
-/// opened from it gets its own SSL.
+/// A configured client SSL_CTX: trust anchors, protocol floor and the ALPN list to offer. One is
+/// plenty for any number of origins - it holds no per-connection state, every <see cref="TlsClientStream"/>
+/// opened from it gets its own SSL, and the name to verify comes per connection unless
+/// <see cref="TlsClientOptions.ServerName"/> pins it.
 ///
 /// <code>
 /// using var tls = TlsClientContext.Create(new TlsClientOptions
 /// {
-///     ServerName = "api.example.com",
 ///     AlpnProtocols = ["h2", "http/1.1"],
 /// });
 /// </code>
@@ -39,10 +39,10 @@ public sealed unsafe class TlsClientContext : IDisposable
     /// <summary>Build the context. Throws if OpenSSL rejects any of the configuration.</summary>
     public static TlsClientContext Create(TlsClientOptions options)
     {
-        if (string.IsNullOrWhiteSpace(options.ServerName))
+        if (options.ServerName is { } name && string.IsNullOrWhiteSpace(name))
         {
             throw new ArgumentException(
-                "ServerName is required: it is both the SNI sent and the name the certificate is checked against.",
+                "ServerName is blank: it is both the SNI sent and the name the certificate is checked against.",
                 nameof(options));
         }
 
@@ -199,7 +199,13 @@ public sealed unsafe class TlsClientContext : IDisposable
     /// the socket and closes it on dispose.
     /// </summary>
     public ValueTask<TlsClientStream> ConnectAsync(RingSocket socket)
-        => TlsClientStream.HandshakeAsync(socket, this);
+        => ConnectAsync(socket, Options.ServerName ?? throw new InvalidOperationException(
+            "no ServerName to verify the origin against: set TlsClientOptions.ServerName, or pass the name"));
+
+    /// <summary>As <see cref="ConnectAsync(RingSocket)"/>, verifying the origin as
+    /// <paramref name="serverName"/>.</summary>
+    public ValueTask<TlsClientStream> ConnectAsync(RingSocket socket, string serverName)
+        => TlsClientStream.HandshakeAsync(socket, this, serverName);
 
     public void Dispose()
     {
