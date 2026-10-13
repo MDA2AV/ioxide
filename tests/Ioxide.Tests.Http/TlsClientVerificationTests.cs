@@ -34,12 +34,12 @@ internal static class TlsClientVerificationTests
     }
 
     /// <summary>
-    /// Wildcard matching, which the client never spells out: it calls SSL_set1_host and inherits
-    /// whatever OpenSSL's default hostflags mean this month.
+    /// Wildcard matching, which the client spells out rather than inheriting whatever OpenSSL's
+    /// default hostflags mean this month: SSL_set1_host with X509_CHECK_FLAG_NO_PARTIAL_WILDCARDS.
     /// </summary>
     private static void RegisterWildcards(Runner runner)
     {
-        runner.Pending("tls client: a partial wildcard must not match (ww*.example.com is not www.example.com)", () =>
+        runner.Test("tls client: a partial wildcard must not match (ww*.example.com is not www.example.com)", () =>
         {
             // A certificate issued for 'ww*.example.com' is a certificate for a PREFIX, and the
             // holder of one for 'ww*' can speak for www, wwx and every other name that starts the
@@ -55,15 +55,13 @@ internal static class TlsClientVerificationTests
                 $"a partial wildcard should not have authenticated www.example.com, got: {body}");
             Assert.True(body.Contains("certificate verify failed"),
                 $"should be refused as a verification failure, got: {body}");
-        }, "SSL_set1_host runs with OpenSSL's default hostflags: X509_CHECK_FLAG_NO_PARTIAL_WILDCARDS "
-           + "is never set, so 'ww*' matches 'www'. curl sets it, and SslStream and Python refuse "
-           + "partial wildcards outright");
+        });
 
         runner.Test("tls client: control - a full wildcard matches one label below it", () =>
         {
             // The control for the case above, and the reason it is a control: the ONLY difference
             // is the two characters in front of the star. A '*.example.com' certificate is
-            // ordinary and has to keep working, so the pending test above cannot be satisfied by
+            // ordinary and has to keep working, so the test above cannot be satisfied by
             // refusing wildcards altogether.
             using Authority ca = Authority.Mint();
             using X509Certificate2 leaf = ca.Leaf("CN=wildcard origin", dns: ["*.example.com"]);
@@ -75,7 +73,7 @@ internal static class TlsClientVerificationTests
         runner.Test("tls client: a wildcard does not match across a label", () =>
         {
             // '*.example.com' covers one label, not a subtree - so it must not authenticate
-            // a.b.example.com. Pinned because the obvious wrong fix for the pending case above is
+            // a.b.example.com. Pinned because the obvious wrong fix for the partial case above is
             // to reach for the hostflags argument and pass the wrong constant:
             // X509_CHECK_FLAG_MULTI_LABEL_WILDCARDS is right next to the one that is wanted and
             // widens matching instead of narrowing it.

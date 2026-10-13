@@ -31,6 +31,7 @@ internal static unsafe partial class OpenSsl
     public const int SSL_VERIFY_NONE = 0x00;
     public const int SSL_VERIFY_PEER = 0x01;
     public const long X509_V_OK = 0;
+    public const uint X509_CHECK_FLAG_NO_PARTIAL_WILDCARDS = 0x4;
 
     // --- context ---------------------------------------------------------------------------------
 
@@ -130,6 +131,9 @@ internal static unsafe partial class OpenSsl
     /// </summary>
     [LibraryImport(Ssl, StringMarshalling = StringMarshalling.Utf8)]
     public static partial int SSL_set1_host(nint ssl, string hostname);
+
+    /// <summary>How <see cref="SSL_set1_host"/>'s name is matched: X509_CHECK_FLAG_* bits.</summary>
+    [LibraryImport(Ssl)] public static partial void SSL_set_hostflags(nint ssl, uint flags);
 
     [LibraryImport(Ssl)] public static partial long SSL_get_verify_result(nint ssl);
     [LibraryImport(Ssl)] public static partial void SSL_get0_alpn_selected(nint ssl, byte** data, uint* length);
