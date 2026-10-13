@@ -206,13 +206,15 @@ public sealed class TlsEncryptingPipeWriter : PipeWriter, IValueTaskSource<Flush
             {
                 _tls.WriteEncrypted(_conn, _staging.AsSpan(0, _staged));
             }
-            catch (IOException)
+            catch (Exception e) when (e is IOException or InvalidOperationException)
             {
                 // Best effort, because Complete is a notification and PipeWriter forbids it from
-                // throwing. Encrypting can fail for one reason - the session is already dead, from
+                // throwing. Encrypting can fail - the session is already dead, from
                 // a decrypt fault or a peer that vanished - and on a connection being torn down
                 // there is nobody left to tell. Letting it escape aborted the caller's teardown
                 // mid-way and leaked the SSL, its BIOs and the handle rooting the session.
+                // Or a flush in flight refuses the slab (InvalidOperationException): the records
+                // stay in the write BIO and go out ahead of the close_notify, or neither does.
             }
         }
         _staged = 0;

@@ -78,7 +78,7 @@ internal static class WriterContractTests
         // still in flight, and what should be a notification throws out of a teardown - which is
         // where a leaked SSL and its BIOs come from, the exact outcome the IOException catch was
         // added to prevent.
-        runner.Pending("tls writer: Complete does not throw while the connection's flush is in flight", () =>
+        runner.Test("tls writer: Complete does not throw while the connection's flush is in flight", () =>
         {
             (string certPath, string keyPath) = TestCert.Ensure();
             var options = new TlsOptions { CertificatePath = certPath, KeyPath = keyPath };
@@ -105,8 +105,7 @@ internal static class WriterContractTests
 
             Assert.True(outcome.Error.Length == 0,
                 "Complete threw out of a teardown that may not fail: " + outcome.Error);
-        }, "Complete catches only IOException, but its commit reaches TcpConnection.GetSpan, which "
-           + "throws InvalidOperationException(\"Cannot write while flush is in progress\")");
+        });
 
         // The other half of the same two-line teardown, and the half that reached production: a
         // handler that flushed everything it wrote leaves Complete nothing to commit, so it returns
@@ -251,6 +250,7 @@ internal static class WriterContractTests
                 // how much a loopback pair absorbs before that happens is a property of the box.
                 byte[] chunk = new byte[ParkChunkBytes];
                 Task<FlushResult>? parked = null;
+                var tick = new RingOpSource();
 
                 for (int attempt = 0; attempt < 64 && parked is null; attempt++)
                 {
@@ -258,8 +258,16 @@ internal static class WriterContractTests
                     Task<FlushResult> flush = pipe.Output.FlushAsync().AsTask();
 
                     // A deadline, not a timing assertion: a flush that has not come back is the
-                    // state under test, and one that has simply costs another chunk.
-                    if (await Task.WhenAny(flush, Task.Delay(TimeSpan.FromSeconds(2))) != flush)
+                    // state under test, and one that has simply costs another chunk. Waited on
+                    // the ring, so the handler never leaves the reactor.
+                    for (int waitedMs = 0; waitedMs < 2_000 && !flush.IsCompleted; waitedMs += 10)
+                    {
+                        ValueTask<int> wait = tick.Prepare();
+                        reactor.SubmitTimeout(10_000_000L, tick);
+                        await wait;
+                    }
+
+                    if (!flush.IsCompleted)
                     {
                         parked = flush;
                     }
