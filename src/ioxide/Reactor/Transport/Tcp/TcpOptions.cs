@@ -46,8 +46,10 @@ public sealed record TcpOptions
     // Per-connection SPSC recv queue depth (power of two), about 24 bytes a slot. Each queued delivery
     // holds one of the reactor's recv buffers until the handler reads it, so in shared mode one connection
     // can hold this many of RecvSlots. Overflow drops the delivery that did not fit and closes the
-    // connection, which its readers report as an error (TcpConnection.RecvOverflowed).
-    public int RecvQueueEntries { get; init; } = 4096;
+    // connection, which its readers report as an error (TcpConnection.RecvOverflowed). The queue is
+    // sized up front for every connection, pooled ones included, so the default stays small; raise it
+    // for a handler that lets its peer get further ahead.
+    public int RecvQueueEntries { get; init; } = 64;
 
     /// <summary>
     /// Close a connection whose read has waited this long for the peer. 0 disables.
