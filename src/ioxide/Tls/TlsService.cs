@@ -865,8 +865,9 @@ public sealed class TlsService
 
         if (options.ClientCaPath is not null && ReadAfterBom(options.ClientCaPath) is { } bundle)
         {
-            // BoringSSL's PEM reader does not skip a UTF-8 BOM; the text route does it here.
-            AddTrustAnchorsPem(ctx, System.Text.Encoding.UTF8.GetString(bundle));
+            // BoringSSL's file loader does not skip a UTF-8 BOM, so the bundle goes in without it.
+            AddTrustAnchorsPem(ctx, System.Text.Encoding.UTF8.GetString(bundle),
+                $"client CA '{options.ClientCaPath}'");
         }
         else if (options.ClientCaPath is not null)
         {
@@ -891,7 +892,7 @@ public sealed class TlsService
         }
         else
         {
-            AddTrustAnchorsPem(ctx, options.ClientCaPem!);
+            AddTrustAnchorsPem(ctx, options.ClientCaPem!, "ClientCaPem");
         }
 
         int mode = BoringSsl.SSL_VERIFY_PEER;
@@ -907,7 +908,7 @@ public sealed class TlsService
 
     // Trust anchors from PEM text, added straight to the context's store - the in-memory mirror of
     // load_verify_locations, for hosts that carry a CA bundle as data rather than as a file.
-    private static unsafe void AddTrustAnchorsPem(nint ctx, string pem)
+    private static unsafe void AddTrustAnchorsPem(nint ctx, string pem, string source)
     {
         nint store = BoringSsl.SSL_CTX_get_cert_store(ctx);
         if (store == 0)
@@ -943,7 +944,7 @@ public sealed class TlsService
                         if (!BoringSsl.ErrorIsEndOfPem())
                         {
                             throw new IOException(
-                                $"ClientCaPem is malformed after {added} usable certificate(s); "
+                                $"{source} is malformed after {added} usable certificate(s); "
                                 + "the rest of the bundle would have been ignored.");
                         }
 
@@ -982,7 +983,7 @@ public sealed class TlsService
 
         if (added == 0)
         {
-            throw new IOException("ClientCaPem contained no certificates.");
+            throw new IOException($"{source} contained no certificates.");
         }
     }
 
