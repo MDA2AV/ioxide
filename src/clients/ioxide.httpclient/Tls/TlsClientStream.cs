@@ -145,7 +145,8 @@ public sealed class TlsClientStream : IDisposable
 
     private async ValueTask RunHandshakeAsync(TlsClientOptions options, string serverName)
     {
-        long deadlineMs = Native.MonotonicMs + options.HandshakeTimeoutMs;
+        var deadline = new HandshakeDeadline(this);
+        _socket.Host.SubmitTimeout(options.HandshakeTimeoutMs * 1_000_000L, deadline);
 
         while (true)
         {
@@ -167,17 +168,12 @@ public sealed class TlsClientStream : IDisposable
                 throw new IOException($"TLS handshake to '{serverName}' failed: {failure}");
             }
 
-            // The deadline is checked between flights rather than raced against the recv: a ring
-            // operation cannot be abandoned mid-flight without its completion landing on a source
-            // someone else has since taken. A peer that goes completely silent is bounded by the
-            // caller's own acquire timeout instead.
-            if (Native.MonotonicMs >= deadlineMs)
+            int n = await _socket.RecvAsync(_inbound, CiphertextBufferSize);
+            if (deadline.Expired)
             {
                 throw new IOException(
                     $"TLS handshake to '{serverName}' did not complete within {options.HandshakeTimeoutMs} ms");
             }
-
-            int n = await _socket.RecvAsync(_inbound, CiphertextBufferSize);
             if (n <= 0)
             {
                 throw new IOException(n == 0
@@ -377,5 +373,21 @@ public sealed class TlsClientStream : IDisposable
         FreeCiphertextBuffer(_inbound);
         FreeCiphertextBuffer(_outbound);
         _socket.Dispose();
+    }
+
+    // Shuts down a handshake still running at HandshakeTimeoutMs, which completes the recv it is parked on.
+    private sealed class HandshakeDeadline(TlsClientStream stream) : IRingCompletion
+    {
+        public bool Expired { get; private set; }
+
+        public void Complete(int result)
+        {
+            // -ETIME: the wait ran its course. Disposed is checked first: by then SSL_free has run.
+            if (result is -62 or 0 && !stream._disposed && OpenSsl.SSL_in_init(stream._ssl) != 0)
+            {
+                Expired = true;
+                Native.shutdown(stream._socket.Fd, Native.SHUT_RDWR);
+            }
+        }
     }
 }
