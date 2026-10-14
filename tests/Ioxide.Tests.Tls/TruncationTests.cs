@@ -137,24 +137,22 @@ internal static class TruncationTests
                 $"a request never reached the pipe: ended={ended.Plaintext} B, cut={cut.Plaintext} B");
         });
 
-        runner.Pending(closedName, () =>
+        runner.Test(closedName, () =>
         {
-            // With the kernel decrypting, the close_notify alert never reaches OpenSSL - the record
-            // is either consumed by the kernel or refuses the ring's plain recv outright - so
-            // Closed, documented as "true once the peer sent close_notify", stays false forever.
+            // With the kernel decrypting, the close_notify alert never reaches OpenSSL: the ring's
+            // plain recv stops at it with EIO and the kernel keeps it queued. Closed, documented as
+            // "true once the peer sent close_notify", has to read it from there (#346).
             //
-            // That is the last accessor standing. The pipe already cannot tell the two apart; on
-            // this path the session cannot either, so a connection that ended politely and one that
-            // was cut are identical in every value ioxide exposes.
+            // That is the last accessor standing. The pipe already cannot tell the two apart; if
+            // the session could not either, a connection that ended politely and one that was cut
+            // would be identical in every value ioxide exposes.
             (Ending ended, Ending cut) = BothShapes(KernelRx());
 
             Assert.True(!cut.SessionClosed, "nothing sent close_notify on the cut stream");
             Assert.True(ended.SessionClosed,
                 "the peer sent close_notify under kTLS RX and TlsSession.Closed stayed false, so "
                 + "every connection on this path reports itself truncated");
-        }, "the kernel owns the record layer under kTLS RX, so the peer's close_notify never "
-         + "reaches OpenSSL and TlsSession.Closed - documented as true once the peer sent one, and "
-         + "the last accessor that separates ENDED from CUT - never becomes true at all");
+        });
     }
 
     private static TlsOptions Default()

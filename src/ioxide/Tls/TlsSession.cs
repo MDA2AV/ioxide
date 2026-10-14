@@ -48,7 +48,31 @@ public sealed unsafe class TlsSession : IDisposable
     internal void MarkKernelRx() => KernelRx = true;
 
     /// <summary>True once the peer sent close_notify.</summary>
-    public bool Closed { get; private set; }
+    /// <remarks>
+    /// Under kTLS RX the kernel holds the peer's alerts: a plain recv stops at one with EIO, which
+    /// ends the read side with the alert still queued. Asked after that, this reads it, once.
+    /// </remarks>
+    public bool Closed
+    {
+        // The OpenSSL reader asks per recv, so this stays two field reads there.
+        get => _closed || (KernelRx && PeekKernelCloseNotify());
+        private set => _closed = value;
+    }
+
+    private bool _closed;
+    private bool _alertPeeked;
+    private int _generation;   // the connection's life this session belongs to; _fd is someone else's after it
+
+    private bool PeekKernelCloseNotify()
+    {
+        if (_alertPeeked || _conn is not { IsClosed: true } conn || conn.Generation != _generation)
+        {
+            return false;
+        }
+        _alertPeeked = true;
+        _closed = Ktls.PeekCloseNotify(_fd);
+        return _closed;
+    }
 
     /// <summary>
     /// The protocol ALPN settled on, or null when the client offered none this port serves. This
@@ -298,6 +322,7 @@ public sealed unsafe class TlsSession : IDisposable
     {
         _conn = conn;
         _fd = conn.ClientFd;
+        _generation = conn.Generation;
     }
 
     internal void MarkTxEnabled(int fd)
