@@ -101,11 +101,86 @@ internal static class TruncationTests
                 + "indistinguishable from a truncation: " + Describe(types));
         });
 
+        runner.Test("tls truncation: a client's close_notify is answered with the server's own", () =>
+        {
+            // RFC 8446 6.1: each side sends close_notify before closing its write side, whichever
+            // closed first. TLS 1.2 again, so the alert shows as a record type.
+            (string certPath, string keyPath) = TestCert.Ensure();
+            var options = new TlsOptions { CertificatePath = certPath, KeyPath = keyPath };
+
+            int port = TestServer.Start(ReadUntilPeerClosesHandler, r => TlsService.Start(r, options));
+
+            using var sock = new TcpClient();
+            sock.Connect("127.0.0.1", port);
+            sock.ReceiveTimeout = 10_000;
+            var tap = new RecordingStream(sock.GetStream());
+            var ssl = new SslStream(tap, leaveInnerStreamOpen: true, (_, _, _, _) => true);
+            ssl.AuthenticateAsClient(new SslClientAuthenticationOptions
+            {
+                TargetHost = "localhost",
+                EnabledSslProtocols = SslProtocols.Tls12,
+            });
+            int handshake = tap.Inbound.Length;
+
+            ssl.ShutdownAsync().GetAwaiter().GetResult();
+            var buffer = new byte[512];
+            try
+            {
+                while (tap.Read(buffer, 0, buffer.Length) > 0)
+                {
+                }
+            }
+            catch (IOException)
+            {
+                // The records that arrived are already in the tap.
+            }
+
+            List<byte> types = RecordTypes(tap.Inbound[handshake..]);
+            Assert.True(types.Contains(Alert),
+                "the client sent close_notify and the server closed without its own: " + Describe(types));
+        });
+
         RegisterKernelRx(runner, ktls);
     }
 
+    private static async Task ReadUntilPeerClosesHandler(Reactor reactor, TcpConnection connection)
+    {
+        TlsSession? session = null;
+        TlsConnectionDualPipe? pipe = null;
+        try
+        {
+            session = await reactor.GetService<TlsService>().AcceptAsync(connection);
+            pipe = new TlsConnectionDualPipe(connection, session);
+            while (true)
+            {
+                ReadResult read = await pipe.Input.ReadAsync();
+                pipe.Input.AdvanceTo(read.Buffer.End);
+                if (read.IsCompleted)
+                {
+                    break;   // the client's close_notify
+                }
+            }
+        }
+        catch
+        {
+            // The harness probes the port with a raw TCP connection, which fails the handshake.
+        }
+        finally
+        {
+            if (pipe is not null)
+            {
+                await pipe.DisposeAsync();
+            }
+            else
+            {
+                session?.Dispose();
+            }
+            connection.DecRef();
+        }
+    }
+
     /// <summary>
-    /// Under kTLS RX the kernel decrypts, so OpenSSL never sees the peer's close_notify at all -
+    /// Under kTLS RX the kernel decrypts, so BoringSSL never sees the peer's close_notify at all -
     /// which is worth asking about precisely because <see cref="TlsSession.Closed"/> is the accessor
     /// the userspace pump's own comment points a caller at.
     /// </summary>
@@ -127,7 +202,7 @@ internal static class TruncationTests
         {
             // Without this the test below could pass or fail for the ordinary userspace reason.
             // The handoff is conditional at run time - a connection whose records keep arriving
-            // cut past the handoff's bound keeps the OpenSSL path - so "kTLS RX was configured" is
+            // cut past the handoff's bound keeps the BoringSSL path - so "kTLS RX was configured" is
             // not the same claim as "kTLS RX happened".
             (Ending ended, Ending cut) = BothShapes(KernelRx());
 
@@ -139,7 +214,7 @@ internal static class TruncationTests
 
         runner.Test(closedName, () =>
         {
-            // With the kernel decrypting, the close_notify alert never reaches OpenSSL: the ring's
+            // With the kernel decrypting, the close_notify alert never reaches BoringSSL: the ring's
             // plain recv stops at it with EIO and the kernel keeps it queued. Closed, documented as
             // "true once the peer sent close_notify", has to read it from there (#346).
             //

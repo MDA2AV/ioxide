@@ -41,9 +41,10 @@ Env.Override(ref port, ref reactors, ref bodyBytes);
 // A real PEM pair, or null to generate a self-signed localhost cert on first run.
 string? certOverride = null;
 string? keyOverride  = null;
+Env.OverrideTlsCert(ref certOverride, ref keyOverride);
 
 // Hand OUTBOUND encryption to the kernel: the handler writes plaintext and the kernel makes the
-// records. Off by default - OpenSSL both ways is the portable path, and on loopback the kernel
+// records. Off by default - BoringSSL both ways is the portable path, and on loopback the kernel
 // is not faster. Its real payoff is sendfile and NIC offload, which a benchmark here cannot see.
 bool kernelTx = false;
 
@@ -109,7 +110,7 @@ for (int i = 0; i < threads.Length; i++)
         KeyPath         = keyPath,                         // PEM private key file
         KeyPem          = null,                            // in-memory PEM alternative to KeyPath
         Alpn            = ["h2", "http/1.1"],              // ORDERED, most preferred first - a client offering both gets h2
-        KernelTx        = kernelTx,                        // kTLS encrypt: kernel makes the records (off = OpenSSL both ways)
+        KernelTx        = kernelTx,                        // kTLS encrypt: kernel makes the records (off = BoringSSL both ways)
         KernelRx        = kernelRx,                        // kTLS decrypt: needs KernelTx; experimental (see the knob above)
     });
 

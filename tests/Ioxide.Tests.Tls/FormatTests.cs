@@ -46,9 +46,9 @@ internal static class FormatTests
         runner.Test("format: a UTF-8 BOM ahead of the PEM is accepted", () =>
         {
             // Editors and secret stores add one silently, and it is invisible in every tool that
-            // shows the file. Measured rather than assumed: OpenSSL's PEM reader skips it and the
-            // certificate loads, so this records that as the behaviour. If a future version stops
-            // skipping it, this test turns the change into a decision instead of a support ticket.
+            // shows the file. OpenSSL's PEM reader skipped it and BoringSSL's does not, so TlsService
+            // strips it before the file is parsed - this test is what made that a decision instead of
+            // a support ticket.
             (string certPath, string keyPath) = TestCert.EnsureServerCert(TestCert.PemShape.Utf8Bom);
 
             int port = TestServer.Start(Handlers.Tls, r => TlsService.Start(r, new TlsOptions
@@ -82,12 +82,9 @@ internal static class FormatTests
 
         runner.Test("format: a key of a different ALGORITHM to the certificate is refused at startup", () =>
         {
-            // The narrow case OpenSSL does not catch on its own. Two unrelated RSA halves are
-            // refused by use_PrivateKey, because they collide in the same slot - but an RSA
-            // certificate with an EC key does not collide: the key lands in the empty EC slot and
-            // the certificate keeps the RSA one, so nothing complains, the server starts, and every
-            // handshake afterwards fails with no shared cipher. That is what an operator moving a
-            // server from RSA to EC and updating one of the two files produces.
+            // OpenSSL let an EC key land beside an RSA certificate without complaint: the server
+            // started, and every handshake afterwards failed with no shared cipher. That is what an
+            // operator moving a server from RSA to EC and updating one of the two files produces.
             (string certPath, _) = TestCert.EnsureServerCert(TestCert.PemShape.Plain);
             (_, string ecKey) = TestCert.EnsureServerCert(TestCert.PemShape.EcKey);
 
@@ -102,8 +99,7 @@ internal static class FormatTests
 
         runner.Test("format: two unrelated RSA halves are refused too", () =>
         {
-            // The case OpenSSL does catch, kept so the guard above is not the only thing standing
-            // between a mismatched pair and a running server.
+            // Same algorithm, different key: refused with the same reason as the case above.
             (string certPath, _) = TestCert.EnsureServerCert(TestCert.PemShape.Plain);
             (_, string otherKey) = TestCert.EnsureNamed("mismatch.test");
 
@@ -113,7 +109,7 @@ internal static class FormatTests
                     CertificatePath = certPath,
                     KeyPath = otherKey,
                 })),
-                "key values mismatch");
+                "do not go together");
         });
 
     }

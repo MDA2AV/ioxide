@@ -71,7 +71,7 @@ internal static unsafe class Ktls
     /// decrypts inbound records and an ordinary recv returns plaintext.
     /// </summary>
     /// <param name="recordSequence">
-    /// How many application-data records the client has already sent that OpenSSL consumed during
+    /// How many application-data records the client has already sent that BoringSSL consumed during
     /// the handshake. This is the one thing that cannot be guessed: the sequence number is part of
     /// the AEAD nonce, so starting the kernel at the wrong one makes every record fail to
     /// authenticate. The client's first request routinely rides in with its Finished flight, and

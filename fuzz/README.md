@@ -29,7 +29,7 @@ bash fuzz/shim/build.sh && fuzz/shim/build/fuzz_client_hello  # the one C parser
 ## `Ioxide.Fuzz/` - the managed parsers
 
 This is where ioxide's parsing lives, so this is where most of the effort goes. The QUIC transport
-is vendored ngtcp2 and the TLS is OpenSSL or picotls, so the hand-written attack surface is small
+is vendored ngtcp2 and the TLS is BoringSSL or picotls, so the hand-written attack surface is small
 and almost all of it is C#: HTTP/3 varints, QPACK prefixed integers, and whole QPACK field sections
 decoded straight into the request object a handler is then handed.
 

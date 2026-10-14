@@ -39,16 +39,16 @@
 
   <main class="doc">
     <h1>TLS internals</h1>
-    <p class="lead"><code>ioxide.tls</code> terminates TLS with OpenSSL in both directions by
-    default: the handshake runs over memory BIOs, inbound records decrypt in userspace, and
-    responses are encrypted before they reach the write slab. Kernel TLS is a per-direction
+    <p class="lead"><code>ioxide.tls</code> terminates TLS with BoringSSL, bundled in the package,
+    in both directions by default: the handshake runs over memory BIOs, inbound records decrypt in
+    userspace, and responses are encrypted before they reach the write slab. Kernel TLS is a per-direction
     opt-in (<code>TlsOptions.KernelTx</code> / <code>KernelRx</code>) for the deployments where
     <code>sendfile</code> or NIC offload pays for its constraints.</p>
 
     <h2>TlsService &middot; <span class="dim">TlsService.cs</span></h2>
     <p>Per-reactor TLS termination, holding one <code>SSL_CTX</code> shared across that reactor's
-    connections (created in <code>OnStart</code>). By default the context keeps OpenSSL's own
-    posture - TLS 1.2 and 1.3, any ciphersuite, session tickets on. Only when
+    connections (created in <code>OnStart</code>). By default the context keeps BoringSSL's own
+    posture - TLS 1.2 and 1.3, its default ciphersuites, session tickets on. Only when
     <code>KernelTx</code> opts into kTLS is it pinned to TLS 1.3 with
     <code>TLS_AES_128_GCM_SHA256</code> and tickets disabled: the kernel needs a known key layout,
     and a ticket would advance the record sequence after the handshake and break the handoff.
@@ -64,14 +64,14 @@
 <p class="src"><b>TlsService.cs</b> · the handshake as an ordinary reactor await loop</p>
 <pre><code class="language-csharp">while (true)
 {
-    int ret = OpenSsl.SSL_accept(ssl);
-    int err = ret == 1 ? 0 : OpenSsl.SSL_get_error(ssl, ret);   // read the error immediately
+    int ret = BoringSsl.SSL_accept(ssl);
+    int err = ret == 1 ? 0 : BoringSsl.SSL_get_error(ssl, ret);   // read the error immediately
 
     await FlushOutbound(conn, wbio);    // drain server flights into the slab, then io_uring send
 
     if (ret == 1) break;
-    if (err != OpenSsl.SSL_ERROR_WANT_READ)
-        throw new IOException($"TLS handshake failed: {OpenSsl.LastError()}");
+    if (err != BoringSsl.SSL_ERROR_WANT_READ)
+        throw new IOException($"TLS handshake failed: {BoringSsl.LastError()}");
 
     RecvSnapshot snapshot = await conn.ReadAsync();   // WANT_READ: pull more ciphertext
     bool fed = FeedInbound(conn, rbio, snapshot);
@@ -83,22 +83,22 @@
 
     <h3>Per-session secret via ex_data (no global map)</h3>
     <p>kTLS keys are derived from the TLS 1.3 traffic secrets (server for TX, client for RX), which
-    OpenSSL surfaces through a keylog callback. The callback is a static function pointer with no
+    BoringSSL surfaces through a keylog callback. The callback is a static function pointer with no
     instance, so to find the right session it reads a <code>GCHandle</code> to the
     <code>TlsSession</code> stored on the <code>SSL</code> via <code>SSL_set_ex_data</code> /
     <code>SSL_get_ex_data</code> (the index allocated once with
-    <code>CRYPTO_get_ex_new_index</code>), and stores the secret on that session directly - no
+    <code>SSL_get_ex_new_index</code>), and stores the secret on that session directly - no
     process-global, recycled-pointer-keyed map, so two reactors that get the same recycled
     <code>SSL</code> address can't collide. On every path that does not program the kernel the
     secrets are zeroed at the handoff decision, and again on <code>TlsSession.Dispose</code>,
     which also frees the handle.</p>
 <p class="src"><b>TlsService.cs</b> · one ex_data index, allocated once; each SSL* carries a GCHandle to its session</p>
 <pre><code class="language-csharp">private static readonly int SslSessionIndex =
-    OpenSsl.CRYPTO_get_ex_new_index(OpenSsl.CRYPTO_EX_INDEX_SSL, 0, 0, 0, 0, 0);
+    BoringSsl.SSL_get_ex_new_index(0, 0, 0, 0, 0);
 
 // In AcceptAsync, bind this SSL* to its managed session:
 GCHandle handle = GCHandle.Alloc(session);
-OpenSsl.SSL_set_ex_data(ssl, SslSessionIndex, GCHandle.ToIntPtr(handle));
+BoringSsl.SSL_set_ex_data(ssl, SslSessionIndex, GCHandle.ToIntPtr(handle));
 session.AttachHandle(handle);</code></pre>
 <p class="src"><b>TlsService.cs</b> · the static keylog callback resolves its session through ex_data - no global map</p>
 <pre><code class="language-csharp">[UnmanagedCallersOnly]
@@ -113,7 +113,7 @@ private static void KeylogCallback(nint ssl, nint line)
     if (!server &amp;&amp; !client)
         return;
 
-    nint data = OpenSsl.SSL_get_ex_data(ssl, SslSessionIndex);
+    nint data = BoringSsl.SSL_get_ex_data(ssl, SslSessionIndex);
     if (data == 0 || GCHandle.FromIntPtr(data).Target is not TlsSession session)
         return;
 
@@ -208,8 +208,9 @@ private static void KeylogCallback(nint ssl, nint line)
     }
 }</code></pre>
 
-    <h2>OpenSsl &middot; <span class="dim">OpenSsl.cs</span></h2>
-    <p>The minimal OpenSSL 3 P/Invoke surface (via <code>[LibraryImport]</code> source-gen): context
+    <h2>BoringSsl &middot; <span class="dim">BoringSsl.cs</span></h2>
+    <p>The minimal P/Invoke surface over <code>libioxide_boringssl.so</code>, the BoringSSL build the
+    package ships (via <code>[LibraryImport]</code> source-gen): context
     setup (<code>SSL_CTX_new</code>, protocol/ciphersuite/ticket controls, cert/key file loads, the
     keylog and ALPN callback setters), the per-connection objects (<code>SSL_new</code>/<code>_free</code>,
     <code>SSL_set_bio</code>/<code>_accept_state</code>/<code>_accept</code>/<code>_read</code>/<code>_write</code>/<code>_shutdown</code>/<code>_get_error</code>),

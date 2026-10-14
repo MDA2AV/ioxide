@@ -6,9 +6,9 @@ namespace ioxide.tls;
 
 /// <summary>
 /// Per-reactor TLS termination. <see cref="AcceptAsync"/> drives the TLS 1.3 handshake through
-/// OpenSSL memory BIOs - handshake bytes ride the same ring recv/send as everything else - and
+/// BoringSSL memory BIOs - handshake bytes ride the same ring recv/send as everything else - and
 /// hands back the <see cref="TlsSession"/> that carries the connection from there. By default
-/// OpenSSL owns both directions: the handler writes through <see cref="TlsSession.Write"/> and
+/// BoringSSL owns both directions: the handler writes through <see cref="TlsSession.Write"/> and
 /// passes each ciphertext slice through <see cref="TlsSession.Decrypt"/>. Kernel TLS is opt-in
 /// per direction (<see cref="TlsOptions.KernelTx"/> / <see cref="TlsOptions.KernelRx"/>), and the
 /// handoff happens here, right after the handshake.
@@ -83,7 +83,7 @@ public sealed class TlsService
         }
     }
 
-    // Identifies this server to OpenSSL's session cache. Any stable value works - what matters is
+    // Identifies this server to BoringSSL's session cache. Any stable value works - what matters is
     // that it is set at all, and that it does not change between the contexts of one service.
     private static readonly byte[] SessionIdContext = "ioxide"u8.ToArray();
 
@@ -92,12 +92,11 @@ public sealed class TlsService
 
     /// <summary>
     /// How much the kTLS RX handoff holds while it waits for a cut record's rest. Past it the
-    /// connection stays on OpenSSL, which decrypts what was held.
+    /// connection stays on BoringSSL, which decrypts what was held.
     /// </summary>
     private const nuint MaxHandoffBytes = 1 << 20;
 
-    private static readonly int SslSessionIndex =
-        OpenSsl.CRYPTO_get_ex_new_index(OpenSsl.CRYPTO_EX_INDEX_SSL, 0, 0, 0, 0, 0);
+    private static readonly int SslSessionIndex = BoringSsl.SSL_get_ex_new_index(0, 0, 0, 0, 0);
 
     private TlsService(CertificateSlot slot, GCHandle slotHandle, GCHandle alpnHandle, TlsOptions options)
     {
@@ -360,7 +359,7 @@ public sealed class TlsService
     /// certificate material, which is exactly why this method is not allowed to change anything else.
     ///
     /// The contexts it replaces are kept, not freed. A handshake may be between reading the table
-    /// and using what it found, and OpenSSL gives no way to wait that out - so they are retained
+    /// and using what it found, and BoringSSL gives no way to wait that out - so they are retained
     /// for the life of the service, as its contexts already were. A rotation is an operational
     /// event, not a hot path; rotating a handful of names a few times a year costs kilobytes.
     /// </remarks>
@@ -406,10 +405,10 @@ public sealed class TlsService
                     // server serving the wrong certificate rather than one that failed to start.
                     delegate* unmanaged<nint, nint, nint, int> servername = &ServerNameCallback;
 
-                    if (OpenSsl.SSL_CTX_callback_ctrl(ctx, OpenSsl.SSL_CTRL_SET_TLSEXT_SERVERNAME_CB, (nint)servername) != 1 ||
-                        OpenSsl.SSL_CTX_ctrl(ctx, OpenSsl.SSL_CTRL_SET_TLSEXT_SERVERNAME_ARG, 0, GCHandle.ToIntPtr(slotHandle)) != 1)
+                    if (BoringSsl.SSL_CTX_set_tlsext_servername_callback(ctx, (nint)servername) != 1 ||
+                        BoringSsl.SSL_CTX_set_tlsext_servername_arg(ctx, GCHandle.ToIntPtr(slotHandle)) != 1)
                     {
-                        throw new IOException($"could not install the SNI callback: {OpenSsl.LastError()}");
+                        throw new IOException($"could not install the SNI callback: {BoringSsl.LastError()}");
                     }
                 }
             }
@@ -432,17 +431,17 @@ public sealed class TlsService
     {
         if (ctx != 0)
         {
-            OpenSsl.SSL_CTX_free(ctx);
+            BoringSsl.SSL_CTX_free(ctx);
         }
 
         foreach (nint hostCtx in byHost?.Contexts ?? [])
         {
-            OpenSsl.SSL_CTX_free(hostCtx);
+            BoringSsl.SSL_CTX_free(hostCtx);
         }
     }
 
     /// <summary>
-    /// One OpenSSL context per SNI name, built here so that selecting one at handshake time is a
+    /// One BoringSSL context per SNI name, built here so that selecting one at handshake time is a
     /// lookup and nothing more. Null when no alternatives were configured.
     /// </summary>
     /// <remarks>
@@ -450,19 +449,19 @@ public sealed class TlsService
     /// setting is repeated here - the two halves are worth telling apart, because only one of them
     /// is load-bearing:
     ///
-    /// Settings OpenSSL copies into the SSL when it is created, from the DEFAULT context, and never
+    /// Settings BoringSSL copies into the SSL when it is created, from the DEFAULT context, and never
     /// re-reads: the verify mode, SSL_OP_* options, min/max protocol version, and the ticket count.
     /// A swap cannot touch these, so a host context cannot weaken them - it is why SNI cannot be
     /// used to escape mutual TLS or the kTLS protocol floor. Setting them below is inert.
     ///
-    /// Settings a host context therefore has to carry itself, because OpenSSL takes them from it:
+    /// Settings a host context therefore has to carry itself, because BoringSSL takes them from it:
     /// the client trust anchors and CA list, and the ALPN and keylog callbacks, each read back off
     /// the context after the swap - and EVERYTHING IN ITS CERT, which the swap duplicates wholesale
     /// over the connection's own. That is the certificate and key, and with them the security
     /// level, the signature-algorithm lists, and the certificate callback. Omitting any of these
     /// changes how the connection behaves: dropping the anchors would fail every mutual-TLS client
     /// of a named host, and a security level or sigalg list configured only on the default would be
-    /// silently reset to OpenSSL's own for every named one.
+    /// silently reset to BoringSSL's own for every named one.
     ///
     /// That split is the invariant to preserve: anything added to the default context in future
     /// belongs in the second group unless it is known to be in the first.
@@ -538,7 +537,7 @@ public sealed class TlsService
             // had already built.
             for (int i = 0; i < next; i++)
             {
-                OpenSsl.SSL_CTX_free(contexts[i]);
+                BoringSsl.SSL_CTX_free(contexts[i]);
             }
 
             throw;
@@ -548,12 +547,12 @@ public sealed class TlsService
     }
 
     /// <summary>
-    /// One configured OpenSSL context. The default certificate and every SNI alternative are built
+    /// One configured BoringSSL context. The default certificate and every SNI alternative are built
     /// HERE and nowhere else.
     /// </summary>
     /// <remarks>
     /// That is the point of the method rather than a tidiness argument. A per-host context has to
-    /// carry everything OpenSSL reads back off the context after a handshake swaps to it, and the
+    /// carry everything BoringSSL reads back off the context after a handshake swaps to it, and the
     /// two were previously configured by two pieces of code that had to be kept in step by hand -
     /// so a setting added to one and forgotten on the other would apply to clients that sent no
     /// name and silently not to clients that did. Built from one body, they cannot drift.
@@ -563,10 +562,10 @@ public sealed class TlsService
     /// </remarks>
     private static nint NewContext(TlsOptions options, TlsCertificate certificate, string what, GCHandle alpnHandle)
     {
-        nint ctx = OpenSsl.SSL_CTX_new(OpenSsl.TLS_server_method());
+        nint ctx = BoringSsl.SSL_CTX_new(BoringSsl.TLS_server_method());
         if (ctx == 0)
         {
-            throw new IOException($"SSL_CTX_new{what}: {OpenSsl.LastError()}");
+            throw new IOException($"SSL_CTX_new{what}: {BoringSsl.LastError()}");
         }
 
         try
@@ -578,7 +577,7 @@ public sealed class TlsService
             // The context is this method's to release until it returns one. A caller cannot do it:
             // the assignment it would free through never happened, which is exactly how a renewal
             // retried against a half-written PEM leaked a certificate and key per attempt.
-            OpenSsl.SSL_CTX_free(ctx);
+            BoringSsl.SSL_CTX_free(ctx);
             throw;
         }
 
@@ -589,50 +588,37 @@ public sealed class TlsService
     /// exactly one owner and one release path.</summary>
     private static void Configure(nint ctx, TlsOptions options, TlsCertificate certificate, string what, GCHandle alpnHandle)
     {
-        // Before any key is read. OpenSSL's default passphrase callback is PEM_def_callback, which
-        // reads the TERMINAL - so an encrypted key makes Start, or ReplaceCertificates on a
-        // rotation thread while the server is still answering, block on a prompt rather than fail.
-        // TlsOptions has no passphrase, so the only correct answer is that none is available, which
-        // turns a hang into the ordinary refusal every other unusable key already gets.
+        // Before any key is read. TlsOptions has no passphrase, so the only correct answer is that
+        // none is available: an encrypted key gets the ordinary refusal every other unusable key
+        // gets, whatever the library's default callback would have tried (OpenSSL's read the
+        // terminal, which made Start - or a rotation thread - block on a prompt).
         unsafe
         {
             delegate* unmanaged<nint, int, int, nint, int> refuse = &NoPassphrase;
-            OpenSsl.SSL_CTX_set_default_passwd_cb(ctx, (nint)refuse);
+            BoringSsl.SSL_CTX_set_default_passwd_cb(ctx, (nint)refuse);
         }
 
-
-        // OpenSSL copies a context's options onto each SSL as it is created and never re-reads
-        // them, so this holds for every connection whether or not it asked for a name. TLS 1.3 has
-        // no renegotiation to refuse; over TLS 1.2 refusing it costs nothing anyone uses and takes
-        // away a second ClientHello - which, with SNI, would be a second go at the certificate.
-        OpenSsl.SSL_CTX_set_options(ctx, OpenSsl.SSL_OP_NO_RENEGOTIATION);
+        // No renegotiation to refuse: a BoringSSL server never renegotiates.
 
         // Caller-stated posture first; the kTLS block below then pins what it must, and Start has
         // already refused the combinations where the two would disagree.
         if (options.MinProtocolVersion != TlsProtocolVersion.Default)
         {
-            long floor = options.MinProtocolVersion == TlsProtocolVersion.Tls13
-                ? OpenSsl.TLS1_3_VERSION
-                : OpenSsl.TLS1_2_VERSION;
+            ushort floor = options.MinProtocolVersion == TlsProtocolVersion.Tls13
+                ? BoringSsl.TLS1_3_VERSION
+                : BoringSsl.TLS1_2_VERSION;
 
-            if (OpenSsl.SSL_CTX_ctrl(ctx, OpenSsl.SSL_CTRL_SET_MIN_PROTO_VERSION, floor, 0) != 1)
+            if (BoringSsl.SSL_CTX_set_min_proto_version(ctx, floor) != 1)
             {
-                throw new IOException($"set_min_proto_version{what}: {OpenSsl.LastError()}");
+                throw new IOException($"set_min_proto_version{what}: {BoringSsl.LastError()}");
             }
         }
 
         if (options.CipherSuites is { } suites)
         {
-            // OpenSSL is no help here on its own. It accepts an EMPTY 1.3 list and returns success,
-            // which leaves no TLS 1.3 suite enabled at all - so with a 1.3 floor the server starts
-            // clean and fails every handshake. And it ignores names it does not know as long as one
-            // in the list is valid, so a single typo silently drops the suite the operator meant to
-            // pin. Neither shows up until a client cannot connect, and neither is a mistake the
-            // caller can see. Note CipherList (1.2) behaves the opposite way and refuses both.
-            //
-            // Each name is offered on its own first, because a one-name list that OpenSSL does not
-            // recognise IS an all-unknown list, which it does refuse. The full list is applied
-            // afterwards so ordering is the caller's.
+            // Every name has to be a TLS 1.3 suite this BoringSSL implements, so a typo or a TLS 1.2
+            // name fails here rather than at the first handshake. Empty is refused as well: BoringSSL
+            // reads an empty list as its built-in order, which is what null already means.
             string[] names = suites.Split(':', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
             if (names.Length == 0)
             {
@@ -640,72 +626,77 @@ public sealed class TlsService
                     $"CipherSuites{what} is empty, which disables every TLS 1.3 suite. Leave it null for the default.");
             }
 
-            foreach (string name in names)
+            ushort[] ids = new ushort[names.Length];
+            for (int i = 0; i < names.Length; i++)
             {
-                if (OpenSsl.SSL_CTX_set_ciphersuites(ctx, name) != 1)
-                {
-                    OpenSsl.ERR_clear_error();
-                    throw new IOException($"set_ciphersuites{what}: OpenSSL does not know the suite '{name}'.");
-                }
+                ids[i] = BoringSsl.Tls13SuiteId(names[i]) ?? throw new IOException(
+                    $"CipherSuites{what}: '{names[i]}' is not a TLS 1.3 suite BoringSSL implements; "
+                    + "TLS 1.2 ciphers go in CipherList.");
             }
 
-            if (OpenSsl.SSL_CTX_set_ciphersuites(ctx, suites) != 1)
+            unsafe
             {
-                throw new IOException($"set_ciphersuites{what}: {OpenSsl.LastError()}");
+                fixed (ushort* p = ids)
+                {
+                    if (BoringSsl.SSL_CTX_set1_tls13_ciphers(ctx, p, null, (nuint)ids.Length) != 1)
+                    {
+                        throw new IOException($"set1_tls13_ciphers{what}: {BoringSsl.LastError()}");
+                    }
+                }
             }
         }
 
         // Empty is not "no restriction" - it is a list nothing matches, which would fail every
         // TLS 1.2 handshake at the point of use rather than here.
-        if (options.CipherList is { } ciphers && OpenSsl.SSL_CTX_set_cipher_list(ctx, ciphers) != 1)
+        if (options.CipherList is { } ciphers && BoringSsl.SSL_CTX_set_cipher_list(ctx, ciphers) != 1)
         {
-            throw new IOException($"set_cipher_list{what}: {OpenSsl.LastError()}");
+            throw new IOException($"set_cipher_list{what}: {BoringSsl.LastError()}");
         }
 
-        // A stated list is documented as being in preference order, and OpenSSL's default is to let
-        // the CLIENT's order win - so without this the operator's order was decoration. Set only
-        // when they actually stated one: with no list configured the default order is OpenSSL's to
-        // choose, and forcing server preference there would change which suite existing clients
-        // negotiate for no one's benefit.
+        // A stated list is documented as being in preference order. A TLS 1.3 list set above always
+        // is; for TLS 1.2 the default lets the CLIENT's order win, so without this the operator's
+        // order was decoration. Set only when they actually stated one: with no list configured the
+        // default order is BoringSSL's to choose.
         if (options.CipherSuites is not null || options.CipherList is not null)
         {
-            OpenSsl.SSL_CTX_set_options(ctx, OpenSsl.SSL_OP_CIPHER_SERVER_PREFERENCE);
+            BoringSsl.SSL_CTX_set_options(ctx, BoringSsl.SSL_OP_CIPHER_SERVER_PREFERENCE);
         }
 
         // The kTLS constraints are the kernel path's, not TLS's - so they apply only when the
-        // kernel path was asked for. The default keeps OpenSSL's own defaults: TLS 1.2 and 1.3,
+        // kernel path was asked for. The default keeps BoringSSL's own defaults: TLS 1.2 and 1.3,
         // any ciphersuite, session tickets on. This is the table in TlsOptions.KernelTx made true.
         if (options.KernelTx)
         {
             // TLS 1.3 only, one suite: kTLS needs AES-128-GCM keys and a known layout.
-            OpenSsl.SSL_CTX_ctrl(ctx, OpenSsl.SSL_CTRL_SET_MIN_PROTO_VERSION, OpenSsl.TLS1_3_VERSION, 0);
-            OpenSsl.SSL_CTX_ctrl(ctx, OpenSsl.SSL_CTRL_SET_MAX_PROTO_VERSION, OpenSsl.TLS1_3_VERSION, 0);
-            if (OpenSsl.SSL_CTX_set_ciphersuites(ctx, "TLS_AES_128_GCM_SHA256") != 1)
+            unsafe
             {
-                throw new IOException($"set_ciphersuites{what}: {OpenSsl.LastError()}");
+                ushort aes128Gcm = BoringSsl.TLS_AES_128_GCM_SHA256;
+                if (BoringSsl.SSL_CTX_set_min_proto_version(ctx, BoringSsl.TLS1_3_VERSION) != 1 ||
+                    BoringSsl.SSL_CTX_set_max_proto_version(ctx, BoringSsl.TLS1_3_VERSION) != 1 ||
+                    BoringSsl.SSL_CTX_set1_tls13_ciphers(ctx, &aes128Gcm, null, 1) != 1)
+                {
+                    throw new IOException($"kTLS posture{what}: {BoringSsl.LastError()}");
+                }
             }
 
             // No session tickets: they would consume record sequence numbers after the
             // handshake and break the kTLS handoff (which programs the record sequence).
-            OpenSsl.SSL_CTX_set_num_tickets(ctx, 0);
+            BoringSsl.SSL_CTX_set_num_tickets(ctx, 0);
         }
 
         LoadCertificate(ctx, certificate, what);
         ConfigureClientVerification(ctx, options);
 
-        // Scope sessions to this server. Required rather than tidy: with SSL_VERIFY_PEER set and no
-        // id context, OpenSSL treats a resumption attempt as fatal to the whole HANDSHAKE, not just
-        // to the resumption - so an mTLS port issues tickets and then refuses every client that
-        // comes back with one, which is roughly every second connection from anything that caches.
+        // Scope sessions to this server, so a ticket another server issued is not resumed here.
         // Constant per process: every context of this service must accept the others' tickets, or a
         // rotation would invalidate every outstanding session.
         unsafe
         {
             fixed (byte* id = SessionIdContext)
             {
-                if (OpenSsl.SSL_CTX_set_session_id_context(ctx, id, (uint)SessionIdContext.Length) != 1)
+                if (BoringSsl.SSL_CTX_set_session_id_context(ctx, id, (nuint)SessionIdContext.Length) != 1)
                 {
-                    throw new IOException($"could not set the session id context{what}: {OpenSsl.LastError()}");
+                    throw new IOException($"could not set the session id context{what}: {BoringSsl.LastError()}");
                 }
             }
         }
@@ -720,13 +711,13 @@ public sealed class TlsService
             if (options.KernelTx)
             {
                 delegate* unmanaged<nint, nint, void> keylog = &KeylogCallback;
-                OpenSsl.SSL_CTX_set_keylog_callback(ctx, (nint)keylog);
+                BoringSsl.SSL_CTX_set_keylog_callback(ctx, (nint)keylog);
             }
 
             // ALPN is settled against whichever context the handshake ends on, so every context
             // needs the callback - reading the same wire bytes through the same handle.
             delegate* unmanaged<nint, nint, nint, nint, uint, nint, int> alpn = &AlpnSelectCallback;
-            OpenSsl.SSL_CTX_set_alpn_select_cb(ctx, (nint)alpn, GCHandle.ToIntPtr(alpnHandle));
+            BoringSsl.SSL_CTX_set_alpn_select_cb(ctx, (nint)alpn, GCHandle.ToIntPtr(alpnHandle));
         }
     }
 
@@ -784,7 +775,7 @@ public sealed class TlsService
     /// listed, and would report it as a dead connection rather than a certificate mismatch.
     ///
     /// A name that WAS matched returns OK, and any other outcome returns NOACK. The difference is
-    /// what the server says about it: OK acknowledges the extension, so OpenSSL echoes the name
+    /// what the server says about it: OK acknowledges the extension, so BoringSSL echoes the name
     /// back and records it on the session. Acknowledging a name this server does not hold would be
     /// claiming one it cannot serve (RFC 6066 3), and would file the client's own string against
     /// the session. NOACK declines the extension WITHOUT failing the handshake, which is exactly
@@ -794,9 +785,9 @@ public sealed class TlsService
     /// bytes already in native memory, against a table built when the service started.
     /// </remarks>
     /// <summary>
-    /// "There is no passphrase." Zero written bytes makes OpenSSL fail the key load with an
-    /// ordinary error rather than prompting on the terminal, which is what it does when no
-    /// callback is installed at all.
+    /// "There is no passphrase." Zero written bytes fails the key load with an ordinary error.
+    /// BoringSSL's default callback never prompts either; this states the answer rather than
+    /// relying on that.
     /// </summary>
     [UnmanagedCallersOnly]
     private static int NoPassphrase(nint buf, int size, int rwflag, nint userdata) => 0;
@@ -811,42 +802,42 @@ public sealed class TlsService
             if (arg == 0 || GCHandle.FromIntPtr(arg).Target is not CertificateSlot slot
                 || slot.Current.ByHost is not { } byHost)
             {
-                return OpenSsl.SSL_TLSEXT_ERR_NOACK;
+                return BoringSsl.SSL_TLSEXT_ERR_NOACK;
             }
 
-            nint namePtr = OpenSsl.SSL_get_servername(ssl, OpenSsl.TLSEXT_NAMETYPE_host_name);
+            nint namePtr = BoringSsl.SSL_get_servername(ssl, BoringSsl.TLSEXT_NAMETYPE_host_name);
             if (namePtr == 0)
             {
                 // No SNI extension. The default certificate is the answer, which is what it is for.
-                return OpenSsl.SSL_TLSEXT_ERR_NOACK;
+                return BoringSsl.SSL_TLSEXT_ERR_NOACK;
             }
 
-            // OpenSSL's own copy of the name, NUL-terminated and valid for this handshake - read
-            // where it lies rather than decoded into a string only to be thrown away. OpenSSL has
+            // BoringSSL's own copy of the name, NUL-terminated and valid for this handshake - read
+            // where it lies rather than decoded into a string only to be thrown away. BoringSSL has
             // already refused an over-long name and one carrying a NUL, so the span is bounded.
             nint hostCtx = byHost.Find(MemoryMarshal.CreateReadOnlySpanFromNullTerminated((byte*)namePtr));
 
             if (hostCtx == 0)
             {
-                return OpenSsl.SSL_TLSEXT_ERR_NOACK;
+                return BoringSsl.SSL_TLSEXT_ERR_NOACK;
             }
 
             // Fails only when the certificate cannot be duplicated, and the default context is
             // still a working answer - but then this name was NOT the one being served, so it must
             // not be acknowledged as though it were.
-            if (OpenSsl.SSL_set_SSL_CTX(ssl, hostCtx) == 0)
+            if (BoringSsl.SSL_set_SSL_CTX(ssl, hostCtx) == 0)
             {
-                return OpenSsl.SSL_TLSEXT_ERR_NOACK;
+                return BoringSsl.SSL_TLSEXT_ERR_NOACK;
             }
         }
         catch
         {
             // A throw here would cross native frames. The default certificate is a working answer,
             // so failing to select a better one is not a reason to lose the connection.
-            return OpenSsl.SSL_TLSEXT_ERR_NOACK;
+            return BoringSsl.SSL_TLSEXT_ERR_NOACK;
         }
 
-        return OpenSsl.SSL_TLSEXT_ERR_OK;
+        return BoringSsl.SSL_TLSEXT_ERR_OK;
     }
 
     /// <summary>
@@ -860,7 +851,7 @@ public sealed class TlsService
     /// <see cref="TlsSession.PeerSubject"/> from a handshake that already happened.
     ///
     /// Orthogonal to kTLS. The certificate is exchanged and validated during the handshake, which
-    /// OpenSSL performs either way - the kernel only takes over record crypto afterwards - so this
+    /// BoringSSL performs either way - the kernel only takes over record crypto afterwards - so this
     /// composes with <see cref="TlsOptions.KernelTx"/> and <see cref="TlsOptions.KernelRx"/>
     /// unchanged.
     /// </remarks>
@@ -871,70 +862,76 @@ public sealed class TlsService
             return;
         }
 
-        if (options.ClientCaPath is not null)
+        if (options.ClientCaPath is not null && ReadAfterBom(options.ClientCaPath) is { } bundle)
         {
-            if (OpenSsl.SSL_CTX_load_verify_locations(ctx, options.ClientCaPath, null) != 1)
+            // BoringSSL's file loader does not skip a UTF-8 BOM, so the bundle goes in without it.
+            AddTrustAnchorsPem(ctx, System.Text.Encoding.UTF8.GetString(bundle),
+                $"client CA '{options.ClientCaPath}'");
+        }
+        else if (options.ClientCaPath is not null)
+        {
+            if (BoringSsl.SSL_CTX_load_verify_locations(ctx, options.ClientCaPath, null) != 1)
             {
                 throw new IOException(
-                    $"could not load client CA '{options.ClientCaPath}': {OpenSsl.LastError()}");
+                    $"could not load client CA '{options.ClientCaPath}': {BoringSsl.LastError()}");
             }
 
             // Tell the client which issuers we accept. Failure here is not fatal - it costs the
-            // hint, not the verification - so a CA file OpenSSL can trust but not enumerate still
+            // hint, not the verification - so a CA file BoringSSL can trust but not enumerate still
             // works for a client with a single certificate.
-            nint names = OpenSsl.SSL_load_client_CA_file(options.ClientCaPath);
+            nint names = BoringSsl.SSL_load_client_CA_file(options.ClientCaPath);
             if (names != 0)
             {
-                OpenSsl.SSL_CTX_set_client_CA_list(ctx, names);
+                BoringSsl.SSL_CTX_set_client_CA_list(ctx, names);
             }
             else
             {
-                OpenSsl.ERR_clear_error();
+                BoringSsl.ERR_clear_error();
             }
         }
         else
         {
-            AddTrustAnchorsPem(ctx, options.ClientCaPem!);
+            AddTrustAnchorsPem(ctx, options.ClientCaPem!, "ClientCaPem");
         }
 
-        int mode = OpenSsl.SSL_VERIFY_PEER;
+        int mode = BoringSsl.SSL_VERIFY_PEER;
         if (options.RequireClientCertificate)
         {
-            mode |= OpenSsl.SSL_VERIFY_FAIL_IF_NO_PEER_CERT;
+            mode |= BoringSsl.SSL_VERIFY_FAIL_IF_NO_PEER_CERT;
         }
 
         // No callback: a chain that does not validate fails the handshake. There is no prompt to
         // fall back to and no partial trust worth inventing.
-        OpenSsl.SSL_CTX_set_verify(ctx, mode, 0);
+        BoringSsl.SSL_CTX_set_verify(ctx, mode, 0);
     }
 
     // Trust anchors from PEM text, added straight to the context's store - the in-memory mirror of
     // load_verify_locations, for hosts that carry a CA bundle as data rather than as a file.
-    private static unsafe void AddTrustAnchorsPem(nint ctx, string pem)
+    private static unsafe void AddTrustAnchorsPem(nint ctx, string pem, string source)
     {
-        nint store = OpenSsl.SSL_CTX_get_cert_store(ctx);
+        nint store = BoringSsl.SSL_CTX_get_cert_store(ctx);
         if (store == 0)
         {
-            throw new IOException($"SSL_CTX_get_cert_store: {OpenSsl.LastError()}");
+            throw new IOException($"SSL_CTX_get_cert_store: {BoringSsl.LastError()}");
         }
 
-        // UTF-8, so a byte-order mark arrives as the three bytes OpenSSL strips, as from a file.
-        byte[] bytes = System.Text.Encoding.UTF8.GetBytes(pem);
+        // UTF-8, minus any leading byte-order mark: BoringSSL's reader does not skip one.
+        byte[] bytes = System.Text.Encoding.UTF8.GetBytes(pem.TrimStart('\uFEFF'));
         int added = 0;
 
         fixed (byte* p = bytes)
         {
-            nint bio = OpenSsl.BIO_new_mem_buf(p, bytes.Length);
+            nint bio = BoringSsl.BIO_new_mem_buf(p, bytes.Length);
             if (bio == 0)
             {
-                throw new IOException($"BIO_new_mem_buf: {OpenSsl.LastError()}");
+                throw new IOException($"BIO_new_mem_buf: {BoringSsl.LastError()}");
             }
 
             try
             {
                 while (true)
                 {
-                    nint cert = OpenSsl.PEM_read_bio_X509_AUX(bio, 0, 0, 0);
+                    nint cert = BoringSsl.PEM_read_bio_X509_AUX(bio, 0, 0, 0);
                     if (cert == 0)
                     {
                         // Exhausted, or stopped on a malformed block. Only the first is an end of
@@ -943,49 +940,49 @@ public sealed class TlsService
                         // later anchor are refused with nothing said server-side. The file route
                         // refuses such a bundle outright, and TlsOptions documents the two sources
                         // as equivalent.
-                        if (!OpenSsl.ErrorIsEndOfPem())
+                        if (!BoringSsl.ErrorIsEndOfPem())
                         {
                             throw new IOException(
-                                $"ClientCaPem is malformed after {added} usable certificate(s); "
+                                $"{source} is malformed after {added} usable certificate(s); "
                                 + "the rest of the bundle would have been ignored.");
                         }
 
                         break;
                     }
 
-                    int ok = OpenSsl.X509_STORE_add_cert(store, cert);
+                    int ok = BoringSsl.X509_STORE_add_cert(store, cert);
 
                     // Same issuer hint the file route sends. Without it a client holding several
                     // certificates has nothing to choose by and offers whichever comes first, so
                     // the two anchor sources would accept different populations of client - which
                     // is not something the choice between a path and PEM text should decide.
                     // Not fatal on failure: it costs the hint, not the verification.
-                    if (ok == 1 && !Hinted(ctx, cert) && OpenSsl.SSL_CTX_add_client_CA(ctx, cert) != 1)
+                    if (ok == 1 && !Hinted(ctx, cert) && BoringSsl.SSL_CTX_add_client_CA(ctx, cert) != 1)
                     {
-                        OpenSsl.ERR_clear_error();
+                        BoringSsl.ERR_clear_error();
                     }
 
-                    OpenSsl.X509_free(cert);   // the store and the CA list took their own references
+                    BoringSsl.X509_free(cert);   // the store and the CA list took their own references
 
                     if (ok != 1)
                     {
-                        throw new IOException($"X509_STORE_add_cert: {OpenSsl.LastError()}");
+                        throw new IOException($"X509_STORE_add_cert: {BoringSsl.LastError()}");
                     }
                     added++;
                 }
             }
             finally
             {
-                OpenSsl.BIO_free(bio);
+                BoringSsl.BIO_free(bio);
             }
         }
 
         // Running off the end of the last certificate leaves a "no start line" error behind.
-        OpenSsl.ERR_clear_error();
+        BoringSsl.ERR_clear_error();
 
         if (added == 0)
         {
-            throw new IOException("ClientCaPem contained no certificates.");
+            throw new IOException($"{source} contained no certificates.");
         }
     }
 
@@ -993,13 +990,13 @@ public sealed class TlsService
     // each name once, so a bundle that repeats an anchor must not grow the CertificateRequest here.
     private static bool Hinted(nint ctx, nint cert)
     {
-        nint names = OpenSsl.SSL_CTX_get_client_CA_list(ctx);
-        nint subject = OpenSsl.X509_get_subject_name(cert);
+        nint names = BoringSsl.SSL_CTX_get_client_CA_list(ctx);
+        nint subject = BoringSsl.X509_get_subject_name(cert);
 
         nint name;
-        for (int i = 0; (name = OpenSsl.OPENSSL_sk_value(names, i)) != 0; i++)
+        for (nuint i = 0; (name = BoringSsl.OPENSSL_sk_value(names, i)) != 0; i++)
         {
-            if (OpenSsl.X509_NAME_cmp(name, subject) == 0)
+            if (BoringSsl.X509_NAME_cmp(name, subject) == 0)
             {
                 return true;
             }
@@ -1008,83 +1005,130 @@ public sealed class TlsService
         return false;
     }
 
-    // Certificate and key, from whichever source the caller carries. The file route is OpenSSL's
+    // Certificate and key, from whichever source the caller carries. The file route is BoringSSL's
     // own loaders; the in-memory route reads the same PEM through a memory BIO. Which of the two
     // is set was settled by RequireOneSourceEach before any context existed.
     private static void LoadCertificate(nint ctx, TlsCertificate certificate, string what)
     {
-        if (certificate.CertificatePath is not null)
+        if (certificate.CertificatePath is { } certificatePath)
         {
-            if (OpenSsl.SSL_CTX_use_certificate_chain_file(ctx, certificate.CertificatePath) != 1)
+            // BoringSSL's PEM reader, unlike OpenSSL's, does not skip a UTF-8 BOM: such a file goes
+            // through the in-memory route with the mark removed.
+            if (ReadAfterBom(certificatePath) is { } text)
             {
-                throw new IOException($"certificate{what} '{certificate.CertificatePath}': {OpenSsl.LastError()}");
+                LoadCertificatePem(ctx, text, $"certificate{what} '{certificatePath}'");
+            }
+            else if (BoringSsl.SSL_CTX_use_certificate_chain_file(ctx, certificatePath) != 1)
+            {
+                throw new IOException($"certificate{what} '{certificatePath}': {BoringSsl.LastError()}");
             }
         }
         else
         {
-            LoadCertificatePem(ctx, certificate.CertificatePem!);
+            LoadCertificatePem(ctx, System.Text.Encoding.ASCII.GetBytes(certificate.CertificatePem!), "CertificatePem");
         }
 
-        if (certificate.KeyPath is not null)
+        if (certificate.KeyPath is { } keyPath)
         {
-            if (OpenSsl.SSL_CTX_use_PrivateKey_file(ctx, certificate.KeyPath, OpenSsl.SSL_FILETYPE_PEM) != 1)
+            if (ReadAfterBom(keyPath) is { } text)
             {
-                throw new IOException($"private key{what} '{certificate.KeyPath}': {OpenSsl.LastError()}");
+                try
+                {
+                    LoadKeyPem(ctx, text, $"private key{what} '{keyPath}'", what);
+                }
+                finally
+                {
+                    System.Security.Cryptography.CryptographicOperations.ZeroMemory(text);
+                }
+            }
+            else if (BoringSsl.SSL_CTX_use_PrivateKey_file(ctx, keyPath, BoringSsl.SSL_FILETYPE_PEM) != 1)
+            {
+                throw BoringSsl.ErrorIsKeyMismatch()
+                    ? PairMismatch(what)
+                    : new IOException($"private key{what} '{keyPath}': {BoringSsl.LastError()}");
             }
         }
         else
         {
-            LoadKeyPem(ctx, certificate.KeyPem!);
+            LoadKeyPem(ctx, System.Text.Encoding.ASCII.GetBytes(certificate.KeyPem!), "KeyPem", what);
         }
 
-        // The pair has to be checked explicitly, because OpenSSL only checks it for us when the two
-        // land in the SAME algorithm slot. A certificate and key that are both RSA and unrelated
-        // are refused by use_PrivateKey itself - but an RSA certificate with an EC key is not: the
-        // key goes into the EC slot, which has no certificate, and the RSA slot keeps a certificate
-        // with no key. Nothing complains, the server starts, and every handshake afterwards fails
-        // with no shared cipher. That is the shape of an operator moving a server from RSA to EC
-        // and updating one of the two files.
-        if (OpenSsl.SSL_CTX_check_private_key(ctx) != 1)
+        // The pair is checked explicitly rather than trusting the key load to notice a mismatch:
+        // whether it does depends on the library and the key types (OpenSSL put an EC key next to
+        // an RSA certificate without complaint, and every handshake then failed with no shared
+        // cipher). That is the shape of an operator moving a server from RSA to EC and updating one
+        // of the two files.
+        if (BoringSsl.SSL_CTX_check_private_key(ctx) != 1)
         {
-            OpenSsl.ERR_clear_error();
-            throw new IOException(
-                $"the certificate and private key{what} do not go together - a certificate of one "
-                + "algorithm with a key of another leaves the context with neither a usable pair.");
+            throw PairMismatch(what);
         }
     }
 
-    private static unsafe void LoadCertificatePem(nint ctx, string pem)
+    private static IOException PairMismatch(string what)
     {
-        byte[] bytes = System.Text.Encoding.ASCII.GetBytes(pem);
+        BoringSsl.ERR_clear_error();
+        return new IOException(
+            $"the certificate and private key{what} do not go together - the key is not the one the "
+            + "certificate was issued for.");
+    }
+
+    /// <summary>
+    /// The file's bytes after a leading UTF-8 BOM, or null when it has none - or cannot be read, so
+    /// that BoringSSL's own loader reports the file as it reports every other unusable one.
+    /// </summary>
+    private static byte[]? ReadAfterBom(string path)
+    {
+        try
+        {
+            using FileStream file = File.OpenRead(path);
+            Span<byte> head = stackalloc byte[3];
+            if (file.ReadAtLeast(head, 3, throwOnEndOfStream: false) < 3 || !head.SequenceEqual(Utf8Bom))
+            {
+                return null;
+            }
+            byte[] rest = new byte[file.Length - 3];
+            file.ReadExactly(rest);
+            return rest;
+        }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException)
+        {
+            return null;
+        }
+    }
+
+    private static ReadOnlySpan<byte> Utf8Bom => [0xEF, 0xBB, 0xBF];
+
+    private static unsafe void LoadCertificatePem(nint ctx, byte[] bytes, string source)
+    {
         fixed (byte* p = bytes)
         {
             // The memory BIO reads the pinned buffer in place, so the fixed block spans every read.
-            nint bio = OpenSsl.BIO_new_mem_buf(p, bytes.Length);
+            nint bio = BoringSsl.BIO_new_mem_buf(p, bytes.Length);
             if (bio == 0)
             {
-                throw new IOException($"CertificatePem: {OpenSsl.LastError()}");
+                throw new IOException($"{source}: {BoringSsl.LastError()}");
             }
 
             try
             {
                 // First PEM block is the leaf; use_certificate takes its own reference.
-                nint leaf = OpenSsl.PEM_read_bio_X509(bio, 0, 0, 0);
+                nint leaf = BoringSsl.PEM_read_bio_X509(bio, 0, 0, 0);
                 if (leaf == 0)
                 {
-                    throw new IOException($"CertificatePem carries no certificate: {OpenSsl.LastError()}");
+                    throw new IOException($"{source} carries no certificate: {BoringSsl.LastError()}");
                 }
-                int ok = OpenSsl.SSL_CTX_use_certificate(ctx, leaf);
-                OpenSsl.X509_free(leaf);
+                int ok = BoringSsl.SSL_CTX_use_certificate(ctx, leaf);
+                BoringSsl.X509_free(leaf);
                 if (ok != 1)
                 {
-                    throw new IOException($"CertificatePem: {OpenSsl.LastError()}");
+                    throw new IOException($"{source}: {BoringSsl.LastError()}");
                 }
 
                 // Any further blocks are the chain, closest-to-leaf first, exactly as in a chain
                 // file. add_extra_chain_cert takes ownership on success, so no free there.
                 while (true)
                 {
-                    nint extra = OpenSsl.PEM_read_bio_X509(bio, 0, 0, 0);
+                    nint extra = BoringSsl.PEM_read_bio_X509(bio, 0, 0, 0);
                     if (extra == 0)
                     {
                         // Exhausted, or stopped on a malformed block - the same distinction
@@ -1096,58 +1140,61 @@ public sealed class TlsService
                         // the rotation throw - says it went fine. A renewal read mid-write is the
                         // ordinary way to produce exactly this file. SSL_CTX_use_certificate_chain_file,
                         // which the path route uses and this mirrors, refuses it outright.
-                        if (!OpenSsl.ErrorIsEndOfPem())
+                        if (!BoringSsl.ErrorIsEndOfPem())
                         {
                             throw new IOException(
-                                "CertificatePem is malformed after the leaf; the rest of the chain "
+                                $"{source} is malformed after the leaf; the rest of the chain "
                                 + "would have been ignored and the certificate served without it.");
                         }
 
-                        OpenSsl.ERR_clear_error();   // end-of-data queues PEM_R_NO_START_LINE
+                        BoringSsl.ERR_clear_error();   // end-of-data queues PEM_R_NO_START_LINE
                         break;
                     }
-                    if (OpenSsl.SSL_CTX_ctrl(ctx, OpenSsl.SSL_CTRL_EXTRA_CHAIN_CERT, 0, extra) != 1)
+                    if (BoringSsl.SSL_CTX_add_extra_chain_cert(ctx, extra) != 1)
                     {
-                        OpenSsl.X509_free(extra);
-                        throw new IOException($"CertificatePem chain: {OpenSsl.LastError()}");
+                        BoringSsl.X509_free(extra);
+                        throw new IOException($"{source} chain: {BoringSsl.LastError()}");
                     }
                 }
             }
             finally
             {
-                OpenSsl.BIO_free(bio);
+                BoringSsl.BIO_free(bio);
             }
         }
     }
 
-    private static unsafe void LoadKeyPem(nint ctx, string pem)
+    private static unsafe void LoadKeyPem(nint ctx, byte[] bytes, string source, string what)
     {
-        byte[] bytes = System.Text.Encoding.ASCII.GetBytes(pem);
         fixed (byte* p = bytes)
         {
-            nint bio = OpenSsl.BIO_new_mem_buf(p, bytes.Length);
+            nint bio = BoringSsl.BIO_new_mem_buf(p, bytes.Length);
             if (bio == 0)
             {
-                throw new IOException($"KeyPem: {OpenSsl.LastError()}");
+                throw new IOException($"{source}: {BoringSsl.LastError()}");
             }
 
             try
             {
-                nint key = OpenSsl.PEM_read_bio_PrivateKey(bio, 0, 0, 0);
+                nint key = BoringSsl.PEM_read_bio_PrivateKey(bio, 0, 0, 0);
                 if (key == 0)
                 {
-                    throw new IOException($"KeyPem carries no private key: {OpenSsl.LastError()}");
+                    throw new IOException($"{source} carries no private key: {BoringSsl.LastError()}");
                 }
-                int ok = OpenSsl.SSL_CTX_use_PrivateKey(ctx, key);
-                OpenSsl.EVP_PKEY_free(key);
+                int ok = BoringSsl.SSL_CTX_use_PrivateKey(ctx, key);
+                BoringSsl.EVP_PKEY_free(key);
+                if (ok != 1 && BoringSsl.ErrorIsKeyMismatch())
+                {
+                    throw PairMismatch(what);
+                }
                 if (ok != 1)
                 {
-                    throw new IOException($"KeyPem: {OpenSsl.LastError()}");
+                    throw new IOException($"{source}: {BoringSsl.LastError()}");
                 }
             }
             finally
             {
-                OpenSsl.BIO_free(bio);
+                BoringSsl.BIO_free(bio);
             }
         }
     }
@@ -1163,23 +1210,23 @@ public sealed class TlsService
         // Read once, here: whichever certificates are in force when this connection starts are the
         // ones it uses. SSL_new takes its own reference, so a rotation a moment later cannot pull
         // the context out from under a handshake already running on it.
-        nint ssl = OpenSsl.SSL_new(_slot.Current.Default);
+        nint ssl = BoringSsl.SSL_new(_slot.Current.Default);
         if (ssl == 0)
         {
-            throw new IOException($"SSL_new: {OpenSsl.LastError()}");
+            throw new IOException($"SSL_new: {BoringSsl.LastError()}");
         }
 
-        nint rbio = OpenSsl.BIO_new(OpenSsl.BIO_s_mem());
-        nint wbio = OpenSsl.BIO_new(OpenSsl.BIO_s_mem());
-        OpenSsl.SSL_set_bio(ssl, rbio, wbio);   // ssl owns both BIOs now
-        OpenSsl.SSL_set_accept_state(ssl);
+        nint rbio = BoringSsl.BIO_new(BoringSsl.BIO_s_mem());
+        nint wbio = BoringSsl.BIO_new(BoringSsl.BIO_s_mem());
+        BoringSsl.SSL_set_bio(ssl, rbio, wbio);   // ssl owns both BIOs now
+        BoringSsl.SSL_set_accept_state(ssl);
 
         var session = new TlsSession(ssl, rbio, wbio);
 
         // Associate the session with this SSL so the keylog callback writes the secret onto it
         // directly (no global map). The handle is freed in TlsSession.Dispose.
         GCHandle handle = GCHandle.Alloc(session);
-        OpenSsl.SSL_set_ex_data(ssl, SslSessionIndex, GCHandle.ToIntPtr(handle));
+        BoringSsl.SSL_set_ex_data(ssl, SslSessionIndex, GCHandle.ToIntPtr(handle));
         session.AttachHandle(handle);
         session.AttachConnection(conn);   // the teardown close_notify goes out on it, both modes
 
@@ -1199,10 +1246,10 @@ public sealed class TlsService
         {
             while (true)
             {
-                int ret = OpenSsl.Accept(ssl, out int err);
+                int ret = BoringSsl.Accept(ssl, out int err);
 
-                // Read before the alert's flush, during which other connections' OpenSSL calls clear this thread's queue.
-                string? failure = ret != 1 && err != OpenSsl.SSL_ERROR_WANT_READ ? OpenSsl.LastError() : null;
+                // Read before the alert's flush, during which other connections' BoringSSL calls clear this thread's queue.
+                string? failure = ret != 1 && err != BoringSsl.SSL_ERROR_WANT_READ ? BoringSsl.LastError() : null;
 
                 await FlushOutbound(conn, wbio);   // server flights stage into the slab
 
@@ -1232,8 +1279,8 @@ public sealed class TlsService
             session.CapturePeerCertificate();
 
             // kTLS RX takes over at a record boundary. The records the handshake already pulled off
-            // the socket are invisible to the kernel, so OpenSSL decrypts them and the kernel's
-            // record sequence starts after them. -1 keeps this connection on OpenSSL.
+            // the socket are invisible to the kernel, so BoringSSL decrypts them and the kernel's
+            // record sequence starts after them. -1 keeps this connection on BoringSSL.
             int handedRecords = -1;
             if (_options.KernelTx && _options.KernelRx && session.ClientSecret is not null)
             {
@@ -1280,7 +1327,7 @@ public sealed class TlsService
                     {
                         throw new IOException("connection closed inside a TLS record");
                     }
-                    if (OpenSsl.BIO_ctrl_pending(rbio) > MaxHandoffBytes)
+                    if (BoringSsl.BIO_ctrl_pending(rbio) > MaxHandoffBytes)
                     {
                         break;   // its records keep arriving cut
                     }
@@ -1312,7 +1359,7 @@ public sealed class TlsService
             }
             else
             {
-                // No TLS ULP on this socket at all: OpenSSL encrypts, the reactor sends ordinary
+                // No TLS ULP on this socket at all: BoringSSL encrypts, the reactor sends ordinary
                 // bytes, and MSG_WAITALL stays as accepted: there is no kTLS to reject it. The raw
                 // secrets have no further use - and a TLS 1.2 handshake never produced them.
                 session.ZeroSecrets();
@@ -1327,7 +1374,7 @@ public sealed class TlsService
             }
             else if (session.ClientSecret is not null)
             {
-                // The client secret exists only for that handoff. OpenSSL keeps its own key
+                // The client secret exists only for that handoff. BoringSSL keeps its own key
                 // schedule, so on every path that did not program the kernel the raw secret is
                 // just key material sitting on the heap - scrub it now, not at GC's leisure.
                 CryptographicOperations.ZeroMemory(session.ClientSecret);
@@ -1355,7 +1402,7 @@ public sealed class TlsService
 
     private static async ValueTask FlushOutbound(TcpConnection conn, nint wbio)
     {
-        int pending = (int)OpenSsl.BIO_ctrl_pending(wbio);
+        int pending = (int)BoringSsl.BIO_ctrl_pending(wbio);
         while (pending > 0)
         {
             int n = StageOutbound(conn, wbio, Math.Min(pending, 8 * 1024));
@@ -1374,7 +1421,7 @@ public sealed class TlsService
         int n;
         fixed (byte* p = dst)
         {
-            n = OpenSsl.BIO_read(wbio, p, chunk);
+            n = BoringSsl.BIO_read(wbio, p, chunk);
         }
         if (n > 0)
         {
@@ -1390,7 +1437,7 @@ public sealed class TlsService
         {
             if (item.HasBuffer)
             {
-                OpenSsl.BIO_write(rbio, item.Ptr, item.Len);
+                BoringSsl.BIO_write(rbio, item.Ptr, item.Len);
                 conn.ReturnBuffer(in item);
                 any = true;
             }
@@ -1405,7 +1452,7 @@ public sealed class TlsService
         int n = Sockets.ReceiveWaiting(fd, buffer, Math.Min(count, 16 * 1024));
         if (n > 0)
         {
-            OpenSsl.BIO_write(rbio, buffer, n);
+            BoringSsl.BIO_write(rbio, buffer, n);
         }
         return n;
     }
@@ -1441,7 +1488,7 @@ public sealed class TlsService
     [UnmanagedCallersOnly]
     private static void KeylogCallback(nint ssl, nint line)
     {
-        // Guarded for the same reason ServerNameCallback is: OpenSSL's C frame sits between here
+        // Guarded for the same reason ServerNameCallback is: BoringSSL's C frame sits between here
         // and any managed caller, so an escaping exception aborts the PROCESS rather than faulting
         // one connection - uncatchably, and with no stack to read. The body parses a string and
         // allocates, so it is not throw-free by inspection.
@@ -1471,7 +1518,7 @@ public sealed class TlsService
         }
 
         // Resolve the session from the SSL's ex_data (set in AcceptAsync) - no global pointer map.
-        nint data = OpenSsl.SSL_get_ex_data(ssl, SslSessionIndex);
+        nint data = BoringSsl.SSL_get_ex_data(ssl, SslSessionIndex);
         if (data == 0 || GCHandle.FromIntPtr(data).Target is not TlsSession session)
         {
             return;
@@ -1498,7 +1545,7 @@ public sealed class TlsService
     [UnmanagedCallersOnly]
     private static unsafe int AlpnSelectCallback(nint ssl, nint outPtr, nint outLen, nint inPtr, uint inLen, nint arg)
     {
-        // Same reason as the other two: an exception crossing OpenSSL's frame aborts the process.
+        // Same reason as the other two: an exception crossing BoringSSL's frame aborts the process.
         // NOACK on failure is the safe answer - it declines ALPN and lets the handshake continue,
         // which is what this returns for "nothing in common" anyway.
         try
@@ -1508,7 +1555,7 @@ public sealed class TlsService
         catch (Exception e)
         {
             Console.Error.WriteLine($"[tls] alpn callback faulted: {e}");
-            return OpenSsl.SSL_TLSEXT_ERR_NOACK;
+            return BoringSsl.SSL_TLSEXT_ERR_NOACK;
         }
     }
 
@@ -1516,7 +1563,7 @@ public sealed class TlsService
     {
         if (arg == 0 || GCHandle.FromIntPtr(arg).Target is not byte[] wire)
         {
-            return OpenSsl.SSL_TLSEXT_ERR_NOACK;
+            return BoringSsl.SSL_TLSEXT_ERR_NOACK;
         }
 
         // SERVER preference: walk OUR list in order and take the first the client also offered, so
@@ -1546,7 +1593,7 @@ public sealed class TlsService
                 {
                     *(nint*)outPtr = inPtr + theirs + 1;
                     *(byte*)outLen = (byte)haveLength;
-                    return OpenSsl.SSL_TLSEXT_ERR_OK;
+                    return BoringSsl.SSL_TLSEXT_ERR_OK;
                 }
                 theirs += 1 + haveLength;
             }
@@ -1556,7 +1603,7 @@ public sealed class TlsService
 
         // Nothing in common. NOACK continues without the extension rather than failing the
         // handshake - the client may still speak HTTP/1.1 quite happily.
-        return OpenSsl.SSL_TLSEXT_ERR_NOACK;
+        return BoringSsl.SSL_TLSEXT_ERR_NOACK;
     }
 
     /// <summary>

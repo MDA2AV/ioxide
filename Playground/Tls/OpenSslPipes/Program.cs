@@ -6,7 +6,7 @@ using ioxide.tls;
 using Playground.Shared;
 
 // ─────────────────────────────────────────────────────────────────────────────────────────────
-//  tls-openssl-pipes - TLS served through an IDuplexPipe, with OpenSSL doing the crypto in userspace.
+//  tls-openssl-pipes - TLS served through an IDuplexPipe, with BoringSSL doing the crypto in userspace.
 //
 //      dotnet run -c Release --project Playground/Tls/OpenSslPipes   # NO modprobe needed
 //      curl -ks https://127.0.0.1:8443/ | head -c 40
@@ -17,7 +17,7 @@ using Playground.Shared;
 //
 //  TlsConnectionDualPipe composes rather than implements. Each direction has two possible halves:
 //
-//              kernel                       OpenSSL
+//              kernel                       BoringSSL
 //    read      TcpConnectionPipeReader      TlsDecryptingPipeReader
 //              (plaintext is already in     (decrypts into a Pipe
 //               ring memory - zero copy)     it owns)
@@ -32,7 +32,7 @@ using Playground.Shared;
 //
 //  Compare the raw-ring pair, Playground/Tls/Ktls and Playground/Tls/OpenSsl. Those two DO differ
 //  in the handler, because at that level the backend is visible: kTLS writes plaintext straight to
-//  the connection, OpenSSL goes through TlsSession.Write. Over a pipe it is not. Needs: ioxide
+//  the connection, BoringSSL goes through TlsSession.Write. Over a pipe it is not. Needs: ioxide
 // ─────────────────────────────────────────────────────────────────────────────────────────────
 
 // ── Knobs ────────────────────────────────────────────────────────────────────────────────────
@@ -49,6 +49,7 @@ Env.Override(ref port, ref reactors, ref bodyBytes);
 // A real PEM pair, or null to generate a self-signed localhost cert on first run.
 string? certOverride = null;
 string? keyOverride  = null;
+Env.OverrideTlsCert(ref certOverride, ref keyOverride);
 // Per-connection recv buffer rings (kernel 6.12+) instead of one shared ring per reactor. The
 // handler code is identical either way; this only changes how recv buffers are handed out.
 bool incrementalBuffers = false;
@@ -89,7 +90,7 @@ var tlsOptions = new TlsOptions
     KeyPath         = keyPath,                             // PEM key file (or KeyPem for in-memory)
     Alpn            = ["http/1.1"],                        // protocols this port serves, most-preferred first
 
-    // KernelTx stays false (the default). No TLS ULP on the socket, so OpenSSL encrypts and
+    // KernelTx stays false (the default). No TLS ULP on the socket, so BoringSSL encrypts and
     // decrypts and nothing here needs the 'tls' kernel module - which also keeps TLS 1.2, any
     // ciphersuite and session resumption. Playground/Tls/KtlsPipes adds the one line that
     // changes this.

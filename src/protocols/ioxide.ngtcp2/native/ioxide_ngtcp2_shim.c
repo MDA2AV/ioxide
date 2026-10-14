@@ -34,9 +34,15 @@
 
 #include <openssl/bio.h>
 #include <openssl/pem.h>
-#include <openssl/pemerr.h>
 #include <openssl/evp.h>
 #include <openssl/err.h>
+
+/* The groups the client offers, in the order this bundle offered them before BoringSSL put
+ * X25519MLKEM768 at the head of ptls_openssl_key_exchanges_all: a post-quantum share adds 1.2 KB to
+ * the ClientHello, and offering one is a decision of its own. Servers keep the full list, so a
+ * client that offers X25519MLKEM768 gets it. */
+static ptls_key_exchange_algorithm_t *iq_client_key_exchanges[] = {
+    &ptls_openssl_secp521r1, &ptls_openssl_secp384r1, &ptls_openssl_x25519, &ptls_openssl_secp256r1, NULL};
 
 /* Exported-surface revision. Bump on any change to an exported signature or a struct crossing the
  * boundary; iq_abi() hands it to the managed side, which refuses to start on a mismatch.
@@ -357,7 +363,7 @@ static void iq_free_certificates(ptls_context_t *ctx)
 /* Loads a certificate chain and its key into a context, and installs the signer. Returns 0, or -1
  * with the reason on stderr; on failure the context is left exactly as it was found.
  *
- * The pair is checked against each other. OpenSSL does it for the TCP side when the key is
+ * The pair is checked against each other. BoringSSL does it for the TCP side when the key is
  * installed, and picotls does not - so without this a certificate and a key that do not belong
  * together load happily here and fail every real handshake afterwards. That is exactly the state a
  * half-finished renewal leaves on disk, and catching it at load is what lets a failed renewal leave
@@ -477,7 +483,7 @@ static ptls_context_t *iq_context_for(iq_certs *e, ptls_iovec_t name)
 /* How many host_name entries the ClientHello's server_name extension carries, or -1 when the
  * message cannot be walked. 0 means the extension was absent, or held no host_name.
  *
- * Exists because the two stacks disagree about the same bytes. OpenSSL parses the ServerNameList
+ * Exists because the two stacks disagree about the same bytes. BoringSSL parses the ServerNameList
  * exact-fit and refuses anything that is not one host_name; picotls loops the list and lets the
  * LAST host_name win. So [allowed, evil] is a dead connection over TCP and serves evil's
  * certificate over QUIC - and anything in front that reads the first name, an SNI router or an
@@ -584,7 +590,7 @@ static int iq_on_client_hello(ptls_on_client_hello_t *self, ptls_t *tls,
 
     /* RFC 6066 3.1: a ServerNameList carries at most one name of a given type. picotls does not
      * enforce it and would answer for the last one; refused here so this server cannot be talked
-     * into serving a name that a device in front read as a different one. Same alert OpenSSL
+     * into serving a name that a device in front read as a different one. Same alert BoringSSL
      * sends for the same bytes, so both of this project's stacks now fail it identically. */
     if (iq_count_host_names(params->raw_message.base, params->raw_message.len) > 1) {
         return PTLS_ALERT_DECODE_ERROR;
@@ -1854,7 +1860,7 @@ iq_client_engine *iq_client_engine_new_mtls(const char *alpn, const char *cert_p
     }
     e->ptls_ctx.random_bytes  = ptls_openssl_random_bytes;
     e->ptls_ctx.get_time      = &ptls_get_time;
-    e->ptls_ctx.key_exchanges = ptls_openssl_key_exchanges_all;
+    e->ptls_ctx.key_exchanges = iq_client_key_exchanges;
     e->ptls_ctx.cipher_suites = ptls_openssl_cipher_suites;
     /* Accepts the server's certificate unconditionally (verify_certificate NULL) - this client
      * exists to drive our own servers, not to authenticate them. */

@@ -887,19 +887,30 @@ internal sealed unsafe class QuicTestClient : IDisposable
         long streamId = iq_client_open_bidi(_conn);
         Assert.True(streamId >= 0, "failed to open client stream");
 
-        long consumed;
         fixed (byte* dest = _sendScratch)
         fixed (byte* src = data)
         {
-            nint n = iq_conn_write(_conn, dest, (nuint)_sendScratch.Length, streamId,
-                                   src, (nuint)data.Length, fin ? 1 : 0, &consumed, NowNs());
-            Assert.True(n > 0 && consumed == data.Length, $"client write failed: {n}, consumed {consumed}");
-            if (!lost)
+            for (int attempt = 0; ; attempt++)
             {
-                _udp.Send(_sendScratch, (int)n);
+                long consumed;
+                nint n = iq_conn_write(_conn, dest, (nuint)_sendScratch.Length, streamId,
+                                       src, (nuint)data.Length, fin ? 1 : 0, &consumed, NowNs());
+                Assert.True(n > 0, $"client write failed: {n}, consumed {consumed}");
+
+                // A due path-MTU probe or ACK takes the packet without the data: send it, write again.
+                if (consumed < 0 && attempt < 4)
+                {
+                    _udp.Send(_sendScratch, (int)n);
+                    continue;
+                }
+                Assert.True(consumed == data.Length, $"client write failed: {n}, consumed {consumed}");
+                if (!lost)
+                {
+                    _udp.Send(_sendScratch, (int)n);
+                }
+                return streamId;
             }
         }
-        return streamId;
     }
 
     /// <summary>Read and ack until <paramref name="done"/>.</summary>

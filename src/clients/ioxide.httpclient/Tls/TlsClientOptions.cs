@@ -59,7 +59,7 @@ public sealed record TlsClientOptions
     public int HandshakeTimeoutMs { get; init; } = 10_000;
 }
 
-/// <summary>TLS protocol version numbers, so callers need not know the OpenSSL constants.</summary>
+/// <summary>TLS protocol version numbers, so callers need not know the wire values.</summary>
 public static class OpenSslVersions
 {
     public const int Tls12 = 0x0303;

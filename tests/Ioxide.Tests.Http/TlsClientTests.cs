@@ -225,7 +225,7 @@ internal static class TlsClientTests
             (_, _, _, string clientCert, _, _, string rogueKey) = TestCert.EnsureMutualTls();
 
             // Caught when the context is built rather than surfacing as an opaque handshake failure
-            // against one particular origin, hours later. OpenSSL rejects the pair while LOADING
+            // against one particular origin, hours later. BoringSSL rejects the pair while LOADING
             // the key - it compares against the certificate already in the context - so the
             // explicit check_private_key call after it is a backstop, not the thing that fires.
             string? message = null;

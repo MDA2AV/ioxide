@@ -17,7 +17,7 @@ using Playground.Shared;
 //      dotnet run -c Release --project Playground/Proxy/H1ToH1
 //      curl -k https://127.0.0.1:8443/
 //
-//  Two TLS stacks are in play. INBOUND is ioxide's own termination, OpenSSL in both directions
+//  Two TLS stacks are in play. INBOUND is ioxide's own termination, BoringSSL in both directions
 //  by default. OUTBOUND is the client pool's: each upstream connection wraps its own
 //  TlsClientStream. Neither shows up in the proxying code.
 //
@@ -104,7 +104,7 @@ for (int i = 0; i < threads.Length; i++)
             KeyPath         = keyPath,       // PEM private key file (set exactly one of Path/Pem)
             KeyPem          = null,          // in-memory PEM alternative to KeyPath
             Alpn            = ["http/1.1"],  // protocols offered, most preferred first
-            KernelTx        = false,         // kTLS encrypt (off = OpenSSL both ways)
+            KernelTx        = false,         // kTLS encrypt (off = BoringSSL both ways)
             KernelRx        = false,         // kTLS decrypt; requires KernelTx, experimental
         });
 

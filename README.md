@@ -40,14 +40,14 @@ runnable code side by side.
 
 Every package shares one version and depends only on the runtime. Start with
 **[`ioxide`](https://www.nuget.org/packages/ioxide/)** - reactors, TCP/UDP transports, connections,
-the ring-native client seam, and TLS termination (OpenSSL handshake over the ring, then kTLS, so
+the ring-native client seam, and TLS termination (BoringSSL handshake over the ring, then kTLS, so
 handlers keep writing plaintext) - then add exactly what you use.
 
 **Protocols.** HTTP/2 and HTTP/3 each come twice: a bundled native, or the same surface in pure C#.
 
 | Package | What it does |
 | --- | --- |
-| [`ioxide.ngtcp2`](https://www.nuget.org/packages/ioxide.ngtcp2/) | QUIC. ngtcp2 + picotls as one bundled native; only system dependency is OpenSSL 3. |
+| [`ioxide.ngtcp2`](https://www.nuget.org/packages/ioxide.ngtcp2/) | QUIC. ngtcp2 + picotls on BoringSSL's libcrypto as one bundled native; needs nothing from the system. |
 | [`ioxide.nghttp3`](https://www.nuget.org/packages/ioxide.nghttp3/) | HTTP/3 + QPACK (nghttp3), bundled native. Rides any QUIC connection. |
 | [`ioxide.http3`](https://www.nuget.org/packages/ioxide.http3/) | HTTP/3 in pure C# - frames, QPACK, Huffman. Zero native code, drop-in for `ioxide.nghttp3`. |
 | [`ioxide.nghttp2`](https://www.nuget.org/packages/ioxide.nghttp2/) | HTTP/2 (nghttp2), bundled native. h2c, or h2 over TLS via ALPN. |

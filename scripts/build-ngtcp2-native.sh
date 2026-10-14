@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 #
 # Build the self-contained QUIC native bundle for ioxide.ngtcp2:
-#   ngtcp2 (QUIC engine) + its picotls crypto backend + picotls (TLS 1.3 handshake),
-# statically linked into ONE shared library whose only external dependency is
-# libcrypto.so.3 (picotls uses OpenSSL's libcrypto primitives, so any OpenSSL 3.x
-# works - no OpenSSL 3.5 QUIC API needed). Output lands in the package's
-# runtimes/ dir so the nupkg carries everything.
+#   ngtcp2 (QUIC engine) + its picotls crypto backend + picotls (TLS 1.3 handshake) +
+#   BoringSSL's libcrypto (the primitives picotls's OpenSSL backend calls),
+# statically linked into ONE shared library whose only external dependency is libc. BoringSSL's
+# symbols stay hidden inside it. Output lands in the package's runtimes/ dir so the nupkg carries
+# everything.
 #
 #   scripts/build-ngtcp2-native.sh                 # build with pinned refs below
 #   NGTCP2_REF=v1.14.0 scripts/build-ngtcp2-native.sh
@@ -21,13 +21,15 @@ cd "$(dirname "$0")/.."
 # build. These are the commits the shipped .so was built from.
 NGTCP2_REF=${NGTCP2_REF:-7f7e24b1deb1dc94985c2d6345ca68cc387b4709}
 PICOTLS_REF=${PICOTLS_REF:-f07f1c8c68b237f1468bc1f1fe1b68aba3ff23b4}
+# The commit scripts/build-boringssl-native.sh pins; kept the same so ioxide ships one BoringSSL.
+BORINGSSL_REF=${BORINGSSL_REF:-5b83e5d1abf0ae0033ae52ab579d906b67633b2c}
 WORK=${WORK:-/tmp/ioxide-quic-native}
 OUT=src/protocols/ioxide.ngtcp2/runtimes/linux-x64/native
 
 rm -rf "$WORK" && mkdir -p "$WORK" "$OUT"
 cd "$WORK"
 
-echo "==> fetching picotls ($PICOTLS_REF) + ngtcp2 ($NGTCP2_REF)"
+echo "==> fetching boringssl ($BORINGSSL_REF) + picotls ($PICOTLS_REF) + ngtcp2 ($NGTCP2_REF)"
 
 # Fetch the exact ref rather than cloning a branch: --branch takes tags and branches, and these are
 # commits. Falling back to a plain clone - as this used to - would quietly build something else.
@@ -43,44 +45,72 @@ fetch_at() {   # url, ref, dir
     git -C "$3" submodule update -q --init --depth 1 --recursive
 }
 
+fetch_at https://github.com/google/boringssl "$BORINGSSL_REF" boringssl
 fetch_at https://github.com/h2o/picotls "$PICOTLS_REF" picotls
 fetch_at https://github.com/ngtcp2/ngtcp2 "$NGTCP2_REF" ngtcp2
 
-echo "==> building picotls (static, PIC)"
+echo "==> building boringssl (static, PIC, symbols hidden)"
+cmake -S boringssl -B boringssl/build -DCMAKE_BUILD_TYPE=Release \
+    -DCMAKE_POSITION_INDEPENDENT_CODE=ON >/dev/null
+cmake --build boringssl/build --target crypto ssl decrepit -j"$(nproc)" >/dev/null
+# The layout picotls's FIND_PACKAGE(OpenSSL) expects; it recognises BoringSSL by openssl/base.h.
+mkdir -p boringssl-root/lib
+ln -s "$WORK/boringssl/include" boringssl-root/include
+cp boringssl/build/libcrypto.a boringssl/build/libssl.a boringssl/build/libdecrepit.a boringssl-root/lib/
+
+echo "==> building picotls (static, PIC, on BoringSSL)"
 cmake -S picotls -B picotls/build -DCMAKE_BUILD_TYPE=Release \
-    -DCMAKE_POSITION_INDEPENDENT_CODE=ON -DWITH_FUSION=OFF >/dev/null
-cmake --build picotls/build -j"$(nproc)" >/dev/null
+    -DCMAKE_POSITION_INDEPENDENT_CODE=ON -DWITH_FUSION=OFF \
+    -DOPENSSL_ROOT_DIR="$WORK/boringssl-root" -DOPENSSL_USE_STATIC_LIBS=TRUE >/dev/null
+# Only the two archives: the test programs would link libssl, which is C++.
+cmake --build picotls/build --target picotls-core picotls-openssl -j"$(nproc)" >/dev/null
 
 echo "==> building ngtcp2 + crypto_picotls (static, PIC, default visibility)"
 # ngtcp2 pins hidden visibility on its static targets; the bundle needs the API exported.
 sed -i 's/C_VISIBILITY_PRESET hidden/C_VISIBILITY_PRESET default/' \
     ngtcp2/lib/CMakeLists.txt ngtcp2/crypto/picotls/CMakeLists.txt
+# ngtcp2 finds "OpenSSL" for the picotls backend too; pointed at BoringSSL, whose version lives in
+# base.h where FindOpenSSL does not look, so the 1.1.1 floor would refuse it. -I BoringSSL first:
+# picotls/openssl.h includes <openssl/...>, which would otherwise find the system's headers.
+sed -i 's/find_package(OpenSSL 1.1.1 REQUIRED)/find_package(OpenSSL REQUIRED)/' ngtcp2/CMakeLists.txt
 cmake -S ngtcp2 -B ngtcp2/build -DCMAKE_BUILD_TYPE=Release \
     -DCMAKE_POSITION_INDEPENDENT_CODE=ON -DBUILD_TESTING=OFF \
+    -DCMAKE_C_FLAGS="-I$WORK/boringssl/include" \
+    -DOPENSSL_ROOT_DIR="$WORK/boringssl-root" -DOPENSSL_USE_STATIC_LIBS=TRUE \
     -DENABLE_PICOTLS=ON -DENABLE_OPENSSL=OFF -DENABLE_GNUTLS=OFF \
     -DENABLE_SHARED_LIB=OFF -DENABLE_STATIC_LIB=ON \
     -DPICOTLS_INCLUDE_DIR="$WORK/picotls/include" \
-    "-DPICOTLS_LIBRARIES=$WORK/picotls/build/libpicotls-openssl.a;$WORK/picotls/build/libpicotls-core.a;crypto" >/dev/null
+    "-DPICOTLS_LIBRARIES=$WORK/picotls/build/libpicotls-openssl.a;$WORK/picotls/build/libpicotls-core.a;$WORK/boringssl-root/lib/libdecrepit.a;$WORK/boringssl-root/lib/libcrypto.a;stdc++" >/dev/null
 cmake --build ngtcp2/build -j"$(nproc)" >/dev/null
 
 echo "==> compiling the C# facade shim"
 SHIM="$OLDPWD/src/protocols/ioxide.ngtcp2/native/ioxide_ngtcp2_shim.c"
-gcc -c -O2 -fPIC -o shim.o "$SHIM" \
+gcc -c -O2 -fPIC -o shim.o "$SHIM" -I"$WORK/boringssl/include" \
     -Ingtcp2/lib/includes -Ingtcp2/build/lib/includes \
     -Ingtcp2/crypto/includes -Ipicotls/include
 
 echo "==> linking libioxide_ngtcp2.so"
-gcc -shared -o libioxide_ngtcp2.so shim.o \
+# std:: vtables and typeinfo that BoringSSL's own objects instantiate stay local too.
+echo '{ local: _ZSt*; _ZNSt*; _ZNKSt*; _ZTISt*; _ZTSSt*; _ZTVSt*; };' >std-local.map
+# picotls's Blowfish (CID encryption) is in BoringSSL's libdecrepit. BoringSSL is C++ built without
+# exceptions or RTTI: the little it needs from the C++ runtime is linked in, and hidden.
+g++ -shared -o libioxide_ngtcp2.so shim.o \
     -Wl,--whole-archive \
     ngtcp2/build/lib/libngtcp2.a \
     ngtcp2/build/crypto/picotls/libngtcp2_crypto_picotls.a \
     picotls/build/libpicotls-openssl.a \
     picotls/build/libpicotls-core.a \
-    -Wl,--no-whole-archive -lcrypto -Wl,--no-undefined
+    -Wl,--no-whole-archive boringssl-root/lib/libdecrepit.a boringssl-root/lib/libcrypto.a \
+    -static-libstdc++ -static-libgcc -lpthread -Wl,-Bsymbolic -Wl,--no-undefined \
+    -Wl,--exclude-libs,libstdc++.a:libgcc.a:libgcc_eh.a -Wl,--version-script=std-local.map
+strip --strip-unneeded libioxide_ngtcp2.so   # BoringSSL builds with -ggdb
 
 echo "==> verifying"
-ldd libioxide_ngtcp2.so | grep -vE 'vdso|libcrypto|libc\.|ld-linux' && {
+ldd libioxide_ngtcp2.so | grep -vE 'vdso|libc\.|ld-linux' && {
     echo "unexpected dependency"; exit 1; } || true
+# BoringSSL is linked in, not offered: its symbols must not be exported for anything else to bind.
+nm -D --defined-only libioxide_ngtcp2.so | grep -qE ' ((EVP|X509|SSL|BIO)_|_Z)' && {
+    echo "BoringSSL or C++ symbols exported"; exit 1; } || true
 [ "$(nm -D --defined-only libioxide_ngtcp2.so | grep -c ' ngtcp2_')" -gt 500 ] || {
     echo "ngtcp2 exports missing"; exit 1; }
 [ "$(nm -D --defined-only libioxide_ngtcp2.so | grep -c ' ptls_')" -gt 100 ] || {

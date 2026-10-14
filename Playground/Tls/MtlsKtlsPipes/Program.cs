@@ -52,6 +52,7 @@ Env.Override(ref port, ref reactors, ref bodyBytes);
 // The server's own certificate and key. Null generates a self-signed pair on first run.
 string? certOverride = null;
 string? keyOverride  = null;
+Env.OverrideTlsCert(ref certOverride, ref keyOverride);
 
 Env.OverrideCert(ref certOverride, ref keyOverride);
 
@@ -115,7 +116,7 @@ var tlsOptions = new TlsOptions
     // no session resumption.
     //
     // It does NOT change anything above it. The client certificate is exchanged and verified during
-    // the HANDSHAKE, which OpenSSL performs either way - the kernel only takes over record crypto
+    // the HANDSHAKE, which BoringSSL performs either way - the kernel only takes over record crypto
     // afterwards - so ClientCaPath, RequireClientCertificate and PeerSubject behave identically.
     KernelTx        = true,
     KernelRx        = false,                               // kTLS receive (experimental; requires KernelTx)

@@ -3,44 +3,43 @@ using System.Runtime.InteropServices;
 namespace ioxide.httpclient;
 
 /// <summary>
-/// The OpenSSL 3 surface a TLS CLIENT needs: connect state, SNI, peer verification, the ALPN offer,
-/// and the memory-BIO plumbing the handshake rides on.
+/// The BoringSSL surface a TLS CLIENT needs: connect state, SNI, peer verification, the ALPN offer,
+/// and the memory-BIO plumbing the handshake rides on. The library is the one the ioxide package
+/// ships, libioxide_boringssl.so.
 /// </summary>
 /// <remarks>
 /// Deliberately separate from the one in ioxide.tls rather than shared. That package terminates TLS
 /// for inbound connections and its whole shape serves kernel-TLS offload - TLS 1.3 only, a single
 /// ciphersuite, no session tickets, a keylog callback to extract the traffic secret. None of that
 /// applies to a client, and the two halves have zero logic in common: what they genuinely share is
-/// about sixteen ABI declarations of memory-BIO boilerplate that have not changed since OpenSSL
-/// 3.0. Duplicating those is cheaper than making a client package depend on a server one.
+/// about sixteen ABI declarations of memory-BIO boilerplate. Duplicating those is cheaper than
+/// making a client package depend on a server one.
 /// </remarks>
-internal static unsafe partial class OpenSsl
+internal static unsafe partial class BoringSsl
 {
-    private const string Ssl = "libssl.so.3";
-    private const string Crypto = "libcrypto.so.3";
+    private const string Ssl = "libioxide_boringssl.so";
+    private const string Crypto = "libioxide_boringssl.so";
 
     public const int SSL_ERROR_NONE = 0;
     public const int SSL_ERROR_WANT_READ = 2;
     public const int SSL_ERROR_WANT_WRITE = 3;
     public const int SSL_ERROR_ZERO_RETURN = 6;
 
-    public const int SSL_CTRL_SET_TLSEXT_HOSTNAME = 55;
-    public const int SSL_CTRL_SET_MIN_PROTO_VERSION = 123;
-    public const int TLSEXT_NAMETYPE_host_name = 0;
-
     public const int SSL_VERIFY_NONE = 0x00;
     public const int SSL_VERIFY_PEER = 0x01;
     public const long X509_V_OK = 0;
-    public const uint X509_CHECK_FLAG_NO_PARTIAL_WILDCARDS = 0x4;
+    public const long X509_V_ERR_INVALID_CALL = 65;
 
     // --- context ---------------------------------------------------------------------------------
 
     [LibraryImport(Ssl)] public static partial nint TLS_client_method();
     [LibraryImport(Ssl)] public static partial nint SSL_CTX_new(nint method);
     [LibraryImport(Ssl)] public static partial void SSL_CTX_free(nint ctx);
-    [LibraryImport(Ssl)] public static partial long SSL_CTX_ctrl(nint ctx, int cmd, long arg, nint parg);
+    [LibraryImport(Ssl)] public static partial int SSL_CTX_set_min_proto_version(nint ctx, ushort version);
 
-    /// <summary>Trust anchors from the system store (/etc/ssl/certs and friends).</summary>
+    /// <summary>
+    /// Trust anchors from the system store: /etc/ssl/certs, or SSL_CERT_FILE / SSL_CERT_DIR when set.
+    /// </summary>
     [LibraryImport(Ssl)] public static partial int SSL_CTX_set_default_verify_paths(nint ctx);
 
     [LibraryImport(Ssl, StringMarshalling = StringMarshalling.Utf8)]
@@ -68,7 +67,7 @@ internal static unsafe partial class OpenSsl
     public const int SSL_FILETYPE_PEM = 1;
 
     /// <summary>Protocols we offer, as a length-prefixed wire list. Returns 0 on SUCCESS.</summary>
-    [LibraryImport(Ssl)] public static partial int SSL_CTX_set_alpn_protos(nint ctx, byte* protos, uint length);
+    [LibraryImport(Ssl)] public static partial int SSL_CTX_set_alpn_protos(nint ctx, byte* protos, nuint length);
 
     // --- connection ------------------------------------------------------------------------------
 
@@ -92,7 +91,7 @@ internal static unsafe partial class OpenSsl
     /// The clear, the call and the classify are one operation and are deliberately not offered
     /// apart - the raw entry points above are private so that they cannot be.
     ///
-    /// OpenSSL's error queue belongs to the THREAD, which here is a reactor shared by every pooled
+    /// The error queue belongs to the THREAD, which here is a reactor shared by every pooled
     /// upstream connection on it, and SSL_get_error consults that queue BEFORE asking the SSL
     /// whether it merely wants more data. So a residue left by any other connection - most
     /// reliably by a teardown calling SSL_shutdown on a handshake that never finished - is read as
@@ -123,7 +122,10 @@ internal static unsafe partial class OpenSsl
         error = n > 0 ? SSL_ERROR_NONE : SSL_get_error(ssl, n);
         return n;
     }
-    [LibraryImport(Ssl)] public static partial long SSL_ctrl(nint ssl, int cmd, long larg, nint parg);
+
+    /// <summary>The name sent as SNI. Returns 0 for a name that cannot be one.</summary>
+    [LibraryImport(Ssl, StringMarshalling = StringMarshalling.Utf8)]
+    public static partial int SSL_set_tlsext_host_name(nint ssl, string name);
 
     /// <summary>
     /// The hostname the peer certificate must match. Distinct from SNI: SNI tells the server which
@@ -132,8 +134,12 @@ internal static unsafe partial class OpenSsl
     [LibraryImport(Ssl, StringMarshalling = StringMarshalling.Utf8)]
     public static partial int SSL_set1_host(nint ssl, string hostname);
 
-    /// <summary>How <see cref="SSL_set1_host"/>'s name is matched: X509_CHECK_FLAG_* bits.</summary>
-    [LibraryImport(Ssl)] public static partial void SSL_set_hostflags(nint ssl, uint flags);
+    /// <summary>
+    /// An address the peer certificate must carry as an iPAddress name. <see cref="SSL_set1_host"/>
+    /// checks DNS names only, so an origin reached by its address is verified through this.
+    /// </summary>
+    [LibraryImport(Crypto)] public static partial int X509_VERIFY_PARAM_set1_ip(nint param, byte* ip, nuint length);
+    [LibraryImport(Ssl)] public static partial nint SSL_get0_param(nint ssl);
 
     [LibraryImport(Ssl)] public static partial long SSL_get_verify_result(nint ssl);
     [LibraryImport(Ssl)] public static partial void SSL_get0_alpn_selected(nint ssl, byte** data, uint* length);
@@ -149,15 +155,15 @@ internal static unsafe partial class OpenSsl
 
     // --- errors ----------------------------------------------------------------------------------
 
-    [LibraryImport(Crypto)] public static partial ulong ERR_get_error();
-    [LibraryImport(Crypto)] public static partial void ERR_error_string_n(ulong e, byte* buf, nuint len);
+    [LibraryImport(Crypto)] public static partial uint ERR_get_error();
+    [LibraryImport(Crypto)] public static partial void ERR_error_string_n(uint e, byte* buf, nuint len);
 
     public static string LastError()
     {
-        ulong code = ERR_get_error();
+        uint code = ERR_get_error();
         if (code == 0)
         {
-            return "no OpenSSL error";
+            return "no BoringSSL error";
         }
 
         Span<byte> buffer = stackalloc byte[256];

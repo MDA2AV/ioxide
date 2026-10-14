@@ -170,8 +170,8 @@ internal sealed class HopDuplexPipe : IDuplexPipe, IAsyncDisposable
         writer.Advance(item.Len);
     }
 
-    // Feed the ciphertext slice through OpenSSL and write the plaintext. DecryptInto rather than
-    // Decrypt so OpenSSL writes into the pipe's own memory - Decrypt lands the plaintext in the
+    // Feed the ciphertext slice through BoringSSL and write the plaintext. DecryptInto rather than
+    // Decrypt so BoringSSL writes into the pipe's own memory - Decrypt lands the plaintext in the
     // session's buffer first and we would copy it again on the way here.
     private static unsafe void DecryptSlice(in SpscRecvRing.Item item, PipeWriter writer, TlsSession tls)
         => tls.DecryptInto(item.Ptr, item.Len, writer);
@@ -201,7 +201,7 @@ internal sealed class HopDuplexPipe : IDuplexPipe, IAsyncDisposable
                         else
                         {
                             // Correct in both TLS modes: under kTLS TX the plaintext goes into the
-                            // slab as-is (the kernel makes the records on send); by default OpenSSL
+                            // slab as-is (the kernel makes the records on send); by default BoringSSL
                             // encrypts here. A bare slab copy would put CLEARTEXT on the wire for
                             // every configuration that did not opt into the kernel path.
                             _tls.Write(_conn, segment.Span);

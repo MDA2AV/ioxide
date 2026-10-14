@@ -69,6 +69,16 @@ public static class Env
     }
 
     /// <summary>
+    /// PLAYGROUND_TLS_CERT and PLAYGROUND_TLS_KEY: a real PEM pair in place of the self-signed
+    /// localhost one a sample generates when its own literals are null.
+    /// </summary>
+    public static void OverrideTlsCert(ref string? certOverride, ref string? keyOverride)
+    {
+        certOverride = StrOrNull("PLAYGROUND_TLS_CERT") ?? certOverride;
+        keyOverride = StrOrNull("PLAYGROUND_TLS_KEY") ?? keyOverride;
+    }
+
+    /// <summary>
     /// The kTLS knobs, same escape hatch. These exist so bench/tls-matrix.sh can measure one build
     /// in every backend combination instead of rebuilding per cell - a sample that only ever runs
     /// one way does not need them.

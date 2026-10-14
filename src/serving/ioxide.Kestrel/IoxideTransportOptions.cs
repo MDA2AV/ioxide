@@ -27,7 +27,7 @@ public sealed class IoxideTransportOptions
 
     /// <summary>
     /// TLS termination, done in the transport on the listed ports. When set, the reactor runs the
-    /// handshake on accept - OpenSSL carries the records both ways unless
+    /// handshake on accept - BoringSSL carries the records both ways unless
     /// <see cref="IoxideTlsOptions.KernelTx"/> opts transmit into the kernel - and hands Kestrel a
     /// plaintext connection with the TLS connection features set, so the endpoint must NOT use
     /// <c>UseHttps()</c>. Null = no TLS (every port is plaintext). See
@@ -65,7 +65,7 @@ public sealed class IoxideTlsOptions
     public required string KeyPath { get; set; }
 
     /// <summary>
-    /// Opt into kernel TLS transmit offload. Off by default: OpenSSL encrypts responses in the
+    /// Opt into kernel TLS transmit offload. Off by default: BoringSSL encrypts responses in the
     /// send pump, which needs no 'tls' kernel module. See <c>ioxide.tls.TlsOptions.KernelTx</c>
     /// for what the kernel path buys and what it constrains.
     /// </summary>

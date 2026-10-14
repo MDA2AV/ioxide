@@ -10,12 +10,12 @@ namespace ioxide.tls;
 /// one applies is not a choice the caller makes - it is what the handshake actually achieved:
 ///
 /// <code>
-///                  kTLS (opt-in)                   OpenSSL (default)
+///                  kTLS (opt-in)                   BoringSSL (default)
 ///   read     TcpConnectionPipeReader         TlsDecryptingPipeReader
 ///   write    TcpConnectionPipeWriter         TlsEncryptingPipeWriter
 ///
 /// The kTLS column is the plaintext connection's own reader and writer, reused unchanged: with the
-/// kernel doing the crypto there is nothing for a TLS-specific half to do. The OpenSSL column is
+/// kernel doing the crypto there is nothing for a TLS-specific half to do. The BoringSSL column is
 /// the pair that has to exist - one decrypts into a Pipe it owns, the other encrypts before the
 /// bytes reach the slab.
 /// </code>
@@ -33,7 +33,7 @@ public sealed class TlsConnectionDualPipe : IDuplexPipe, IAsyncDisposable
     private readonly TlsSession _tls;
     private readonly bool _ownsSession;
 
-    private readonly TlsDecryptingPipeReader? _decrypting;   // only when OpenSSL decrypts
+    private readonly TlsDecryptingPipeReader? _decrypting;   // only when BoringSSL decrypts
     private readonly PipeWriter _writer;
 
     /// <summary>
@@ -69,7 +69,7 @@ public sealed class TlsConnectionDualPipe : IDuplexPipe, IAsyncDisposable
             Input = _decrypting;
         }
 
-        // Default is OpenSSL: encrypt before the bytes reach the slab. With kTLS opted in the
+        // Default is BoringSSL: encrypt before the bytes reach the slab. With kTLS opted in the
         // kernel makes the records instead, so the plaintext connection's own writer is enough.
         _writer = session.KernelTx
             ? new TcpConnectionPipeWriter(connection)

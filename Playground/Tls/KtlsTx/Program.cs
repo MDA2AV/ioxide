@@ -5,12 +5,12 @@ using ioxide.utils;
 using Playground.Shared;
 
 // ─────────────────────────────────────────────────────────────────────────────────────────────
-//  tls-ktls-tx - the deployable kernel mode: the OpenSSL handshake runs over the ring, transmit
+//  tls-ktls-tx - the deployable kernel mode: the BoringSSL handshake runs over the ring, transmit
 //  is handed to KERNEL TLS (the handler writes plaintext, the kernel makes the records), and
-//  receive stays in OpenSSL. Tls/Ktls is this plus kernel receive (experimental); Tls/OpenSsl
+//  receive stays in BoringSSL. Tls/Ktls is this plus kernel receive (experimental); Tls/OpenSsl
 //  is the default, with the kernel in neither direction.
 //
-//      sudo modprobe tls                             # needs the Linux 'tls' module + OpenSSL 3
+//      sudo modprobe tls                             # needs the Linux 'tls' module
 //      dotnet run -c Release --project Playground/Tls/KtlsTx
 //      curl -ks https://127.0.0.1:8443/ | head -c 40
 //
@@ -33,6 +33,7 @@ Env.Override(ref port, ref reactors, ref bodyBytes);
 // A real PEM pair, or null to generate a self-signed localhost cert on first run.
 string? certOverride = null;
 string? keyOverride  = null;
+Env.OverrideTlsCert(ref certOverride, ref keyOverride);
 // Per-connection recv buffer rings (kernel 6.12+) instead of one shared ring per reactor. The
 // handler code is identical either way; this only changes how recv buffers are handed out.
 bool incrementalBuffers = false;
@@ -73,7 +74,7 @@ var tlsOptions = new TlsOptions
     KeyPath         = keyPath,                             // PEM key file (or KeyPem for in-memory)
     Alpn            = ["http/1.1"],                        // protocols this port serves, most-preferred first
 
-    // NOT the default - TLS is OpenSSL both ways unless you ask for this. It is what lets the
+    // NOT the default - TLS is BoringSSL both ways unless you ask for this. It is what lets the
     // handler below write PLAINTEXT to the connection: the kernel turns it into records on send.
     // Remove this line and conn.Write would put cleartext on the wire.
     KernelTx        = true,
@@ -99,7 +100,7 @@ for (int i = 0; i < threads.Length; i++)
 {
     var reactor = new Reactor(i, config);
 
-    // One TlsService per reactor: it owns the OpenSSL contexts and drives handshakes on this ring.
+    // One TlsService per reactor: it owns the BoringSSL contexts and drives handshakes on this ring.
     reactor.OnStart = r => TlsService.Start(r, tlsOptions);
 
     reactor.TcpHandle = async (r, conn) =>

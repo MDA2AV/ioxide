@@ -46,21 +46,22 @@ internal static class IdentitySubjectTests
             Assert.Equal(id.CommonName, id.DotNetName);
         });
 
-        runner.Test("identity: a 40 KB distinguished name is rendered whole, common name included", () =>
+        runner.Test("identity: a 20 KB distinguished name is rendered whole, common name included", () =>
         {
             // X509_NAME_oneline's buffer-taking form reports success when handed a buffer too
             // small and writes as many whole attributes as fit - a valid-looking prefix with the
             // CN missing, which is one string for two principals. RenderSubject uses the
             // allocating form to avoid exactly that, and this is what says the avoidance holds at
-            // a size no real DN reaches. Larger is not testable through a handshake: at 200 KB the
-            // server refuses the certificate message outright (excessive message size).
+            // a size no real DN reaches. Larger is not testable through a handshake: both session
+            // tickets carry the client certificate, and past about 30 KB the two of them outgrow
+            // the 64 KB buffer BoringSSL writes its first response record from.
             Identity id = Ask("long-dn", Dn(
-                [Attribute(Organisation, UniversalTagNumber.UTF8String, new string('x', 40_000))],
+                [Attribute(Organisation, UniversalTagNumber.UTF8String, new string('x', 20_000))],
                 [Attribute(CommonName, UniversalTagNumber.UTF8String, "tail.example")]));
 
             // The length is asserted first: without it a subject truncated to nothing would still
             // satisfy the CN assertion, because the CN comes from the DN and not from the render.
-            Assert.True(id.SubjectLength > 40_000,
+            Assert.True(id.SubjectLength > 20_000,
                 $"the whole DN should be rendered, got {id.SubjectLength} characters");
             Assert.True(id.Subject.EndsWith("/CN=tail.example", StringComparison.Ordinal),
                 $"the rendered subject should end with the CN, got the last 40: {Tail(id.Subject)}");
@@ -80,7 +81,7 @@ internal static class IdentitySubjectTests
                 $"a CN carrying CR/LF must not be reported as an identity, got: {id.CommonName}");
 
             // Not merely non-null: the peer authenticated, so a subject exists, and it carries
-            // those bytes in OpenSSL's escaped form rather than as real control characters.
+            // those bytes in BoringSSL's escaped form rather than as real control characters.
             Assert.True(id.Subject.Contains(@"alice\x0D\x0Aauthorized=root", StringComparison.Ordinal),
                 $"the rendered subject should escape the CR/LF, got: {id.Subject}");
         });
@@ -91,7 +92,7 @@ internal static class IdentitySubjectTests
             // peers are authenticated. They differ in ONE thing: the ASN.1 string type the common
             // name is encoded as.
             //
-            // PrintableString is the ordinary one. A BIT STRING is a type OpenSSL accepts inside a
+            // PrintableString is the ordinary one. A BIT STRING is a type BoringSSL accepts inside a
             // Name - it is in the mask X509_NAME's template parses with - but will not decode to
             // text, so ExtractCommonName's ASN1_STRING_to_UTF8 fails and ioxide reports no name at
             // all. The render is not so careful: X509_NAME_oneline copies the attribute's bytes
@@ -400,7 +401,7 @@ internal static class IdentitySubjectTests
             using (tbs.PushSequence())
             {
                 // clientAuth, and not decoration: the server verifies a client chain with
-                // OpenSSL's ssl_client purpose, which refuses a leaf that does not carry it.
+                // BoringSSL's ssl_client purpose, which refuses a leaf that does not carry it.
                 tbs.WriteObjectIdentifier("2.5.29.37");
                 var eku = new AsnWriter(AsnEncodingRules.DER);
                 using (eku.PushSequence())

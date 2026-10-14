@@ -7,7 +7,7 @@
 # constant except the implementation - same h2load invocation, same reactor count, same body, same
 # TLS backend, interleaved so drift hits both arms equally.
 #
-# TLS here is OpenSSL both ways, which is the default. Which backend does not matter for this
+# TLS here is BoringSSL both ways, which is the default. Which backend does not matter for this
 # question: both arms carry the identical TLS cost, so it cancels.
 set -uo pipefail
 cd "$(dirname "$0")/.."

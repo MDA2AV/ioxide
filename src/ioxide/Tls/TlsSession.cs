@@ -5,7 +5,7 @@ using System.Security.Cryptography;
 namespace ioxide.tls;
 
 /// <summary>
-/// The per-connection TLS state once the handshake is done: OpenSSL decrypts inbound records and
+/// The per-connection TLS state once the handshake is done: BoringSSL decrypts inbound records and
 /// encrypts outbound ones, except for whichever direction was handed to the kernel (opt-in, see
 /// <see cref="TlsOptions.KernelTx"/>). One session per connection, reactor-thread only.
 /// </summary>
@@ -54,7 +54,7 @@ public sealed unsafe class TlsSession : IDisposable
     /// </remarks>
     public bool Closed
     {
-        // The OpenSSL reader asks per recv, so this stays two field reads there.
+        // The BoringSSL reader asks per recv, so this stays two field reads there.
         get => _closed || (KernelRx && PeekKernelCloseNotify());
         private set => _closed = value;
     }
@@ -85,7 +85,7 @@ public sealed unsafe class TlsSession : IDisposable
     {
         byte* data;
         uint length;
-        OpenSsl.SSL_get0_alpn_selected(_ssl, &data, &length);
+        BoringSsl.SSL_get0_alpn_selected(_ssl, &data, &length);
         NegotiatedAlpn = data == null || length == 0
             ? null
             : System.Text.Encoding.ASCII.GetString(data, (int)length);
@@ -136,20 +136,20 @@ public sealed unsafe class TlsSession : IDisposable
         PeerCertificateDer = null;
 
         // Borrowed, not owned - get0 takes no reference, so there is nothing to free.
-        nint cert = OpenSsl.SSL_get0_peer_certificate(_ssl);
+        nint cert = BoringSsl.PeerCertificate(_ssl);
         if (cert == 0)
         {
             return;
         }
 
-        // Belt and braces: with SSL_VERIFY_PEER and no callback OpenSSL has already failed the
+        // Belt and braces: with SSL_VERIFY_PEER and no callback BoringSSL has already failed the
         // handshake on a bad chain, so this cannot report a name that was not verified.
-        if (OpenSsl.SSL_get_verify_result(_ssl) != OpenSsl.X509_V_OK)
+        if (BoringSsl.SSL_get_verify_result(_ssl) != BoringSsl.X509_V_OK)
         {
             return;
         }
 
-        nint name = OpenSsl.X509_get_subject_name(cert);
+        nint name = BoringSsl.X509_get_subject_name(cert);
         if (name == 0)
         {
             return;
@@ -175,10 +175,10 @@ public sealed unsafe class TlsSession : IDisposable
     private static unsafe byte[]? ExportDer(nint cert)
     {
         byte* der = null;
-        int length = OpenSsl.i2d_X509(cert, &der);
+        int length = BoringSsl.i2d_X509(cert, &der);
         if (length <= 0 || der is null)
         {
-            OpenSsl.ERR_clear_error();
+            BoringSsl.ERR_clear_error();
             return null;
         }
 
@@ -188,15 +188,15 @@ public sealed unsafe class TlsSession : IDisposable
         }
         finally
         {
-            OpenSsl.CRYPTO_free((nint)der, 0, 0);   // i2d_X509 allocates when handed a null target
+            BoringSsl.OPENSSL_free((nint)der);   // i2d_X509 allocates when handed a null target
         }
     }
 
     /// <summary>
-    /// The protocol version this handshake settled on, as OpenSSL's wire value (0x0303 = TLS 1.2,
+    /// The protocol version this handshake settled on, as BoringSSL's wire value (0x0303 = TLS 1.2,
     /// 0x0304 = TLS 1.3), or 0 before the handshake completes.
     /// </summary>
-    public int NegotiatedProtocolVersion => OpenSsl.SSL_version(_ssl);
+    public int NegotiatedProtocolVersion => BoringSsl.SSL_version(_ssl);
 
     /// <summary>
     /// The negotiated ciphersuite's IANA id, or 0 if there is none yet. The numbering is the same
@@ -206,8 +206,8 @@ public sealed unsafe class TlsSession : IDisposable
     {
         get
         {
-            nint cipher = OpenSsl.SSL_get_current_cipher(_ssl);
-            return cipher == 0 ? (ushort)0 : (ushort)OpenSsl.SSL_CIPHER_get_protocol_id(cipher);
+            nint cipher = BoringSsl.SSL_get_current_cipher(_ssl);
+            return cipher == 0 ? (ushort)0 : (ushort)BoringSsl.SSL_CIPHER_get_protocol_id(cipher);
         }
     }
 
@@ -221,7 +221,7 @@ public sealed unsafe class TlsSession : IDisposable
     /// </summary>
     private static string? RenderSubject(nint name)
     {
-        nint rendered = OpenSsl.X509_NAME_oneline(name, null, 0);
+        nint rendered = BoringSsl.X509_NAME_oneline(name, null, 0);
         if (rendered == 0)
         {
             return null;
@@ -233,7 +233,7 @@ public sealed unsafe class TlsSession : IDisposable
         }
         finally
         {
-            OpenSsl.CRYPTO_free(rendered, 0, 0);
+            BoringSsl.OPENSSL_free(rendered);
         }
     }
 
@@ -242,9 +242,9 @@ public sealed unsafe class TlsSession : IDisposable
         // The LAST CN, matching what every X.509 consumer does with a multi-CN subject: -1 starts
         // the scan, and each result seeds the next until there are no more.
         int index = -1;
-        for (int next = OpenSsl.X509_NAME_get_index_by_NID(name, OpenSsl.NID_commonName, -1);
+        for (int next = BoringSsl.X509_NAME_get_index_by_NID(name, BoringSsl.NID_commonName, -1);
              next >= 0;
-             next = OpenSsl.X509_NAME_get_index_by_NID(name, OpenSsl.NID_commonName, next))
+             next = BoringSsl.X509_NAME_get_index_by_NID(name, BoringSsl.NID_commonName, next))
         {
             index = next;
         }
@@ -254,13 +254,13 @@ public sealed unsafe class TlsSession : IDisposable
             return null;
         }
 
-        nint entry = OpenSsl.X509_NAME_get_entry(name, index);
+        nint entry = BoringSsl.X509_NAME_get_entry(name, index);
         if (entry == 0)
         {
             return null;
         }
 
-        nint asn1 = OpenSsl.X509_NAME_ENTRY_get_data(entry);
+        nint asn1 = BoringSsl.X509_NAME_ENTRY_get_data(entry);
         if (asn1 == 0)
         {
             return null;
@@ -269,7 +269,7 @@ public sealed unsafe class TlsSession : IDisposable
         // Decoded rather than read raw: a CN is PrintableString, UTF8String or BMPString depending
         // on the issuer, and only this normalises all three to UTF-8.
         nint utf8;
-        int length = OpenSsl.ASN1_STRING_to_UTF8(&utf8, asn1);
+        int length = BoringSsl.ASN1_STRING_to_UTF8(&utf8, asn1);
         if (length < 0)
         {
             return null;
@@ -305,7 +305,7 @@ public sealed unsafe class TlsSession : IDisposable
         }
         finally
         {
-            OpenSsl.CRYPTO_free(utf8, 0, 0);
+            BoringSsl.OPENSSL_free(utf8);
         }
     }
 
@@ -338,14 +338,14 @@ public sealed unsafe class TlsSession : IDisposable
     public ReadOnlySpan<byte> Decrypt(byte* ciphertext, int length)
     {
         // With kTLS RX the kernel already decrypted this; recv handed us plaintext. Feeding it to
-        // OpenSSL would be feeding plaintext to a record parser.
+        // BoringSSL would be feeding plaintext to a record parser.
         if (KernelRx)
         {
             return new ReadOnlySpan<byte>(ciphertext, length);
         }
 
         _plainLen = 0;
-        OpenSsl.BIO_write(_rbio, ciphertext, length);
+        BoringSsl.BIO_write(_rbio, ciphertext, length);
         DrainPending();
         return _plain.AsSpan(0, _plainLen);
     }
@@ -361,7 +361,7 @@ public sealed unsafe class TlsSession : IDisposable
     /// <remarks>
     /// The point of this over <see cref="Decrypt"/> is one fewer copy. <see cref="Decrypt"/> has to
     /// land the plaintext in <c>_plain</c> and hand back a span, so a caller feeding a pipe copies
-    /// it a second time; here OpenSSL writes into the pipe's own memory and there is no
+    /// it a second time; here BoringSSL writes into the pipe's own memory and there is no
     /// intermediate. Callers with nowhere better to put the bytes still want <see cref="Decrypt"/>.
     /// </remarks>
     public int DecryptInto(byte* ciphertext, int length, PipeWriter writer)
@@ -373,7 +373,7 @@ public sealed unsafe class TlsSession : IDisposable
             return length;
         }
 
-        OpenSsl.BIO_write(_rbio, ciphertext, length);
+        BoringSsl.BIO_write(_rbio, ciphertext, length);
 
         int total = 0;
         while (true)
@@ -386,7 +386,7 @@ public sealed unsafe class TlsSession : IDisposable
             fixed (byte* p = destination)
             {
                 // Synchronous, so the pin lasts only for the call.
-                n = OpenSsl.Read(_ssl, p, destination.Length, out error);
+                n = BoringSsl.Read(_ssl, p, destination.Length, out error);
             }
 
             if (n > 0)
@@ -420,7 +420,7 @@ public sealed unsafe class TlsSession : IDisposable
         missing = 0;
 
         byte* buffer;
-        long available = OpenSsl.BIO_ctrl(_rbio, OpenSsl.BIO_CTRL_INFO, 0, &buffer);
+        long available = BoringSsl.BIO_ctrl(_rbio, BoringSsl.BIO_CTRL_INFO, 0, &buffer);
         if (available <= 0 || buffer == null)
         {
             return 0;
@@ -450,12 +450,12 @@ public sealed unsafe class TlsSession : IDisposable
     /// <summary>
     /// Stage <paramref name="plaintext"/> into the connection's write slab, correctly for whichever
     /// backend this session ended up with: under kTLS TX it goes in as-is and the kernel makes the
-    /// records on send; otherwise OpenSSL encrypts here and the records go in. The one write call
+    /// records on send; otherwise BoringSSL encrypts here and the records go in. The one write call
     /// that is right in both modes - handlers should not branch on <see cref="KernelTx"/>.
     /// </summary>
     /// <remarks>
-    /// The OpenSSL branch is where the extra copy the kTLS write path avoids actually lives:
-    /// OpenSSL encrypts into its write BIO first, and BIO_read then moves the records into the
+    /// The BoringSSL branch is where the extra copy the kTLS write path avoids actually lives:
+    /// BoringSSL encrypts into its write BIO first, and BIO_read then moves the records into the
     /// slab. Two passes over the bytes instead of one - though BIO_read at least writes directly
     /// into the slab rather than through an intermediate of ours.
     /// </remarks>
@@ -474,11 +474,11 @@ public sealed unsafe class TlsSession : IDisposable
             return;
         }
 
-        // An OpenSSL session is not thread-safe, and the reactor decrypts with this one (#249).
+        // A BoringSSL session is not thread-safe, and the reactor decrypts with this one (#249).
         if (!connection.Reactor.OnReactorThread)
         {
             throw new InvalidOperationException(
-                "TlsSession.Write encrypts with OpenSSL, which the reactor uses for this session: call it on the reactor thread, or write through TlsConnectionDualPipe, whose flush is handed to the reactor.");
+                "TlsSession.Write encrypts with BoringSSL, which the reactor uses for this session: call it on the reactor thread, or write through TlsConnectionDualPipe, whose flush is handed to the reactor.");
         }
 
         WriteEncrypted(connection, plaintext);
@@ -490,15 +490,15 @@ public sealed unsafe class TlsSession : IDisposable
     {
         fixed (byte* p = plaintext)
         {
-            if (OpenSsl.Write(_ssl, p, plaintext.Length, out _) <= 0)
+            if (BoringSsl.Write(_ssl, p, plaintext.Length, out _) <= 0)
             {
-                throw new IOException($"TLS encrypt failed: {OpenSsl.LastError()}");
+                throw new IOException($"TLS encrypt failed: {BoringSsl.LastError()}");
             }
         }
 
         while (true)
         {
-            int pending = (int)OpenSsl.BIO_ctrl_pending(_wbio);
+            int pending = (int)BoringSsl.BIO_ctrl_pending(_wbio);
             if (pending <= 0)
             {
                 return;
@@ -510,7 +510,7 @@ public sealed unsafe class TlsSession : IDisposable
             int n;
             fixed (byte* d = destination)
             {
-                n = OpenSsl.BIO_read(_wbio, d, chunk);
+                n = BoringSsl.BIO_read(_wbio, d, chunk);
             }
 
             if (n <= 0)
@@ -538,16 +538,16 @@ public sealed unsafe class TlsSession : IDisposable
     {
         switch (err)
         {
-            case OpenSsl.SSL_ERROR_WANT_READ:
-            case OpenSsl.SSL_ERROR_WANT_WRITE:
+            case BoringSsl.SSL_ERROR_WANT_READ:
+            case BoringSsl.SSL_ERROR_WANT_WRITE:
                 return false;   // normal: the record is not complete yet
 
-            case OpenSsl.SSL_ERROR_ZERO_RETURN:
+            case BoringSsl.SSL_ERROR_ZERO_RETURN:
                 Closed = true;  // clean close_notify
                 return false;
 
             default:
-                throw new IOException($"TLS decrypt failed (error {err}): {OpenSsl.LastError()}");
+                throw new IOException($"TLS decrypt failed (error {err}): {BoringSsl.LastError()}");
         }
     }
 
@@ -567,7 +567,7 @@ public sealed unsafe class TlsSession : IDisposable
             int n, error;
             fixed (byte* p = _plain)
             {
-                n = OpenSsl.Read(_ssl, p + _plainLen, _plain.Length - _plainLen, out error);
+                n = BoringSsl.Read(_ssl, p + _plainLen, _plain.Length - _plainLen, out error);
             }
 
             if (n > 0)
@@ -592,10 +592,11 @@ public sealed unsafe class TlsSession : IDisposable
         _disposed = true;
 
         // Clean server-side teardown: send close_notify so the peer can tell end-of-stream from a
-        // truncation, whichever backend owns the write side. Skip if the peer already closed, and
-        // where a raw send cannot go out cleanly: into a send the ring still has, or past the FIN -
-        // which a reactor teardown marks too, once the fd may be someone else's.
-        if (!Closed && _fd >= 0 && (_conn is null || (!_conn.FlushOutstanding && !_conn.FinSent)))
+        // truncation, whichever backend owns the write side - also when the peer closed first, which
+        // RFC 8446 6.1 asks of both sides. Skip where a raw send cannot go out cleanly: into a send
+        // the ring still has, or past the FIN - which a reactor teardown marks too, once the fd may
+        // be someone else's.
+        if (_fd >= 0 && (_conn is null || (!_conn.FlushOutstanding && !_conn.FinSent)))
         {
             if (_txEnabled)
             {
@@ -603,7 +604,7 @@ public sealed unsafe class TlsSession : IDisposable
             }
             else
             {
-                SendCloseNotifyOpenSsl();
+                SendCloseNotifyBoringSsl();
             }
         }
 
@@ -611,7 +612,7 @@ public sealed unsafe class TlsSession : IDisposable
         // into the kernel (and zeroed there) or were never needed. Do not leave them on the heap.
         ZeroSecrets();
 
-        OpenSsl.SSL_free(_ssl);   // frees both BIOs
+        BoringSsl.SSL_free(_ssl);   // frees both BIOs
         if (_handle.IsAllocated)
         {
             _handle.Free();
@@ -633,25 +634,25 @@ public sealed unsafe class TlsSession : IDisposable
     }
 
     /// <summary>
-    /// Best-effort close_notify when OpenSSL owns the write side: SSL_shutdown produces the record
+    /// Best-effort close_notify when BoringSSL owns the write side: SSL_shutdown produces the record
     /// into the write BIO, and a plain send puts it on the wire. The mirror of
     /// <see cref="Ktls.SendCloseNotify"/> - teardown-time, non-fatal, the peer may already be gone.
     /// </summary>
-    private void SendCloseNotifyOpenSsl()
+    private void SendCloseNotifyBoringSsl()
     {
         // Nothing to close down politely if the handshake never completed - there is no session
         // to end, and SSL_shutdown says so by failing and leaving "shutdown while in init" on the
         // shared queue, where it becomes the next connection's problem.
-        if (OpenSsl.SSL_in_init(_ssl) != 0)
+        if (BoringSsl.SSL_in_init(_ssl) != 0)
         {
             return;
         }
 
-        if (OpenSsl.SSL_shutdown(_ssl) < 0)
+        if (BoringSsl.SSL_shutdown(_ssl) < 0)
         {
             // Whatever it queued is ours to clean up; leaving it makes the next connection on this
             // reactor report an error it never caused.
-            OpenSsl.ERR_clear_error();
+            BoringSsl.ERR_clear_error();
             return;
         }
 
@@ -667,7 +668,7 @@ public sealed unsafe class TlsSession : IDisposable
         byte* record = stackalloc byte[512];
         while (true)
         {
-            int n = OpenSsl.BIO_read(_wbio, record, 512);
+            int n = BoringSsl.BIO_read(_wbio, record, 512);
             if (n <= 0)
             {
                 break;

@@ -21,7 +21,7 @@ PANES = {
         "One port, several names, a certificate each - chosen inside the handshake, before a byte "
         "of your protocol exists. The certificate at the top stays the DEFAULT: a client that sends "
         "no name (anything connecting by IP) or asks for one that is not registered gets it rather "
-        "than a dead connection. Each entry is one OpenSSL context built at startup, so choosing "
+        "than a dead connection. Each entry is one BoringSSL context built at startup, so choosing "
         "one per handshake is a lookup that allocates nothing - ten names cost what one does. "
         "The same feature on h2 is "
         "<label for=\"tab-h2sni\" class=\"ex-jump\">a cert per host &middot; h2</label>, and on QUIC "
@@ -87,7 +87,7 @@ PANES = {
         "switches back to stock sockets so the same app can be measured both ways."),
     "tls": (
         "Tls/Ktls", "kTLS &middot; raw ring", "ioxide",
-        ["sudo modprobe tls        # kTLS needs the Linux 'tls' module + OpenSSL 3",
+        ["sudo modprobe tls        # kTLS needs the Linux 'tls' module",
          "curl -k https://127.0.0.1:8443/"],
         "<b>Opt-in - and FULL kTLS</b>: both directions in the kernel, set right on the options. "
         "Kernel RX is experimental, so <code>Tls/KtlsTx</code> in the repo is this server minus "
@@ -101,7 +101,7 @@ PANES = {
         "Tls/KtlsTx", "hybrid &middot; raw ring", "ioxide",
         ["sudo modprobe tls        # the kernel half still needs the module",
          "curl -k https://127.0.0.1:8443/"],
-        "The deployable kernel mode: <b>kernel TX, OpenSSL RX</b>. The handler still writes "
+        "The deployable kernel mode: <b>kernel TX, BoringSSL RX</b>. The handler still writes "
         "plaintext - the kernel makes the records on send, which is what keeps <code>sendfile</code> "
         "and NIC offload reachable - while receive takes the well-trodden userspace path instead of "
         "kernel RX's experimental one. "
@@ -109,16 +109,17 @@ PANES = {
         "receive; <label for=\"tab-tlsossl\" class=\"ex-jump\">openssl &middot; raw</label> is the "
         "default, with the kernel in neither direction."),
     "tlsossl": (
-        "Tls/OpenSsl", "OpenSSL &middot; raw ring", "ioxide",
+        "Tls/OpenSsl", "BoringSSL &middot; raw ring", "ioxide",
         ["curl -k https://127.0.0.1:8443/        # no modprobe needed"],
-        "<b>The default.</b> No TLS ULP is attached at all - OpenSSL encrypts and decrypts, and the "
+        "<b>The default.</b> No TLS ULP is attached at all - BoringSSL encrypts and decrypts, and the "
         "response goes through <code>TlsSession.Write</code>, which is correct whichever backend the "
         "session ended up with. That drops every constraint kTLS imposes: no kernel module, TLS 1.2, any "
         "ciphersuite, session resumption back, no handshake-alignment problem. What it gives up is "
         "<code>sendfile</code> and NIC offload. "
-        "<b>It costs nothing measurable here</b> - against the plaintext baseline, 4 reactors, "
-        "<code>wrk -t4 -c64</code>: 0.79&times; for both at a 64-byte response, 0.35&times; kTLS vs "
-        "0.44&times; OpenSSL at 64 KiB. Which backend you pick matters far less than the cost of TLS."),
+        "<b>It is cheaper than kTLS here</b> - against the plaintext baseline, 4 reactors, "
+        "<code>wrk -t4 -c64</code>: 0.75&times; kTLS TX vs 0.78&times; BoringSSL at a 64-byte "
+        "response, 0.39&times; vs 0.45&times; at 64 KiB. Which backend you pick matters far less than "
+        "the cost of TLS."),
     "tlspipe": (
         "Tls/KtlsPipes", "kTLS &middot; pipes", "ioxide",
         ["sudo modprobe tls", "curl -k https://127.0.0.1:8443/"],
@@ -128,7 +129,7 @@ PANES = {
         "because <code>TlsConnectionDualPipe</code> composes its halves from the session rather than "
         "from configuration."),
     "tlsosslpipe": (
-        "Tls/OpenSslPipes", "OpenSSL &middot; pipes", "ioxide",
+        "Tls/OpenSslPipes", "BoringSSL &middot; pipes", "ioxide",
         ["curl -k https://127.0.0.1:8443/        # no modprobe needed"],
         "Diff this against <label for=\"tab-tlspipe\" class=\"ex-jump\">ktls &middot; pipes</label> and "
         "the only functional difference is <code>KernelTx</code>; the rest is the banner and the log "
@@ -145,7 +146,7 @@ PANES = {
         "the TLS door builds a <code>TlsConnectionDualPipe</code>, the plaintext door pairs the "
         "connection's own reader and writer, and the loop reads an <code>IDuplexPipe</code> without "
         "knowing which it got. Ports come from <a href=\"learn/multiport.html\">multi-port</a>; "
-        "TLS is the default backend, OpenSSL both ways."),
+        "TLS is the default backend, BoringSSL both ways."),
 
     # ── transport ────────────────────────────────────────────────────────────────────────────
     "tlsbcl": (
@@ -155,7 +156,7 @@ PANES = {
         "<code>TcpConnectionStream</code>. Fully managed, full-featured, and the slowest of the "
         "three, because the bytes are copied through a <code>Stream</code> both ways. Reach for it "
         "for <b>client certificates</b> - the ring-native path does not do mTLS - or anything else "
-        "OpenSSL-on-the-ring does not expose; for TLS 1.2 and resumption the default already has "
+        "BoringSSL-on-the-ring does not expose; for TLS 1.2 and resumption the default already has "
         "you covered: <label for=\"tab-tlsossl\" class=\"ex-jump\">openssl &middot; raw</label>."),
     "big": (
         "Tcp/Big", "TCP &middot; large responses", "ioxide",
@@ -189,7 +190,7 @@ PANES = {
         "then branches on what was agreed, so ONE port serves both. That is why the h2c samples "
         "are the exception rather than the rule. What <code>Http2Connection</code> is handed is a "
         "<code>TlsConnectionDualPipe</code>: it never learns TLS is involved, so the protocol code "
-        "is byte-for-byte the h2c sample's. TLS is <b>OpenSSL both ways by default</b>; the "
+        "is byte-for-byte the h2c sample's. TLS is <b>BoringSSL both ways by default</b>; the "
         "<code>kernelTx</code>/<code>kernelRx</code> knobs at the top move either direction into "
         "the kernel, and cost the same <b>0.05&micro;s per request</b> either way."),
     "h2bcl": (
@@ -300,12 +301,12 @@ PANES = {
         "the whole question is <em>what is the write slab supposed to hold when it is sent?</em> "
         "Cleartext: the slab IS the wire. <b>kTLS</b>: the slab holds plaintext and the kernel makes "
         "the records - so <code>ReadFileAsync</code> can still read the file straight into it and the "
-        "bytes are never copied. <b>OpenSSL</b>: the slab must hold ciphertext, so the body has to "
+        "bytes are never copied. <b>BoringSSL</b>: the slab must hold ciphertext, so the body has to "
         "pass through <code>TlsSession.Write</code>, which needs a source buffer - and that buffer IS "
         "the copy. The sample refuses that combination rather than serving the file in the clear. "
         "Measured on one saturated reactor at 4 KiB, skipping the copy is worth <b>1.22&times;</b> "
         "cleartext and <b>1.21&times;</b> under kTLS; at 64 KiB the kernel's per-byte crypto "
-        "overtakes it and OpenSSL wins outright."),
+        "overtakes it and BoringSSL wins outright."),
 
     # ── the last hand-written code panes, now generated too ──────────────────────────────────
     "pipe": (

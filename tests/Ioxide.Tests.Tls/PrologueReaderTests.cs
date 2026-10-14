@@ -1,6 +1,7 @@
 using System.Buffers;
 using System.IO.Pipelines;
 using System.Text;
+using System.Threading.Tasks.Sources;
 using ioxide.tls;
 
 namespace Ioxide.Tests;
@@ -31,6 +32,7 @@ internal static class PrologueReaderTests
         RegisterCompletion(runner);
         RegisterTeardown(runner);
         RegisterBound(runner);
+        RegisterPassThrough(runner);
     }
 
     // ---------------------------------------------------------------- serving the carry
@@ -371,7 +373,76 @@ internal static class PrologueReaderTests
         });
     }
 
+    // ------------------------------------------------------------------ the pass-through
+
+    private static void RegisterPassThrough(Runner runner)
+    {
+        // Every keep-alive request on a kTLS-RX pipe connection is a read that waits, through here.
+        runner.Test("prologue: once drained, a read that has to wait allocates nothing", () =>
+        {
+            var inner = new ParkedReader();
+            var reader = new TlsProloguePipeReader(inner, Ascii("GET / HTTP/1.1\r\n\r\n"));
+            ReadResult read = Await(reader.ReadAsync());
+            reader.AdvanceTo(read.Buffer.End);
+            Assert.True(reader.Drained, "the carry was consumed to the end and should have been released");
+
+            const int warmup = 1_000, reads = 10_000;
+            long before = 0;
+            for (int i = 0; i < warmup + reads; i++)
+            {
+                if (i == warmup)
+                {
+                    before = GC.GetAllocatedBytesForCurrentThread();
+                }
+                ValueTask<ReadResult> parked = reader.ReadAsync();
+                Assert.True(!parked.IsCompleted, "nothing was queued, so the read should have waited");
+                inner.Deliver();
+                read = Await(parked);
+                reader.AdvanceTo(read.Buffer.End);
+            }
+            double perRead = (GC.GetAllocatedBytesForCurrentThread() - before) / (double)reads;
+
+            Assert.True(perRead < 1, $"a drained read that had to wait allocated {perRead:F0} B");
+        });
+    }
+
     // ------------------------------------------------------------------------- plumbing
+
+    /// <summary>Every read waits until <see cref="Deliver"/>, which resumes it inline; allocates nothing itself.</summary>
+    private sealed class ParkedReader : PipeReader, IValueTaskSource<ReadResult>
+    {
+        private static readonly ReadOnlySequence<byte> Request = new(Ascii("GET / HTTP/1.1\r\n\r\n"));
+        private ManualResetValueTaskSourceCore<ReadResult> _core;
+
+        public override ValueTask<ReadResult> ReadAsync(CancellationToken cancellationToken = default)
+        {
+            _core.Reset();
+            return new ValueTask<ReadResult>(this, _core.Version);
+        }
+
+        public void Deliver() => _core.SetResult(new ReadResult(Request, isCanceled: false, isCompleted: false));
+
+        public ReadResult GetResult(short token) => _core.GetResult(token);
+
+        public ValueTaskSourceStatus GetStatus(short token) => _core.GetStatus(token);
+
+        public void OnCompleted(Action<object?> continuation, object? state, short token,
+            ValueTaskSourceOnCompletedFlags flags) => _core.OnCompleted(continuation, state, token, flags);
+
+        public override bool TryRead(out ReadResult result)
+        {
+            result = default;
+            return false;
+        }
+
+        public override void AdvanceTo(SequencePosition consumed) { }
+
+        public override void AdvanceTo(SequencePosition consumed, SequencePosition examined) { }
+
+        public override void CancelPendingRead() { }
+
+        public override void Complete(Exception? exception = null) { }
+    }
 
     /// <summary>
     /// An inner reader with backpressure far out of the way: these tests drive the prologue

@@ -3,14 +3,14 @@ using ioxide.tls;
 namespace Ioxide.Tests;
 
 /// <summary>
-/// TLS over the raw ring: the OpenSSL handshake, then the default OpenSSL write path - plus the
+/// TLS over the raw ring: the BoringSSL handshake, then the default BoringSSL write path - plus the
 /// kTLS TX opt-in, so the handoff keeps coverage now that no test hits it by default.
 /// </summary>
 internal static class TlsTests
 {
     public static void Register(Runner runner, bool ktls)
     {
-        runner.Test("tls: handshake + request (default, OpenSSL both ways)", () =>
+        runner.Test("tls: handshake + request (default, BoringSSL both ways)", () =>
         {
             (string certPath, string keyPath) = TestCert.Ensure();
             var options = new TlsOptions { CertificatePath = certPath, KeyPath = keyPath };
@@ -63,7 +63,7 @@ internal static class TlsTests
         runner.Test("tls raw: a fragmented request gets exactly one response", () =>
         {
             // The raw decrypt loop answers on "any plaintext arrived", not on "a request arrived".
-            // TLS reassembly is fine either way - OpenSSL's BIO holds the partial record - but the
+            // TLS reassembly is fine either way - BoringSSL's BIO holds the partial record - but the
             // HTTP framing above it is the handler's job, and answering per decrypt means one
             // request split across recvs draws several responses.
             (string certPath, string keyPath) = TestCert.Ensure();

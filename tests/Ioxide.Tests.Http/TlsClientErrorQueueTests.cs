@@ -30,6 +30,10 @@ namespace Ioxide.Tests;
 /// So the regression pin here drives the real victim: an established connection that must survive
 /// a neighbouring connection's failed-handshake teardown. The recovery tests around it pin the
 /// rest of the behaviour and say what they do NOT pin.
+///
+/// All of the above is OpenSSL. BoringSSL clears the queue on entry to SSL_read, SSL_write,
+/// SSL_shutdown and the handshake, so the victim cannot be produced on it at all; the pins stay
+/// for the teardown and the pool.
 /// </summary>
 internal static class TlsClientErrorQueueTests
 {
@@ -133,7 +137,7 @@ internal static class TlsClientErrorQueueTests
     // A TCP endpoint whose handler fetches from the flaky TLS origin through the pooled client and
     // writes back "<upstream status>|<detail>" - the shape TlsClientTests uses. The TestServer
     // reactor is single (the harness stamps ReactorCount = 1), so every pooled upstream connection
-    // shares one thread, which is what makes its OpenSSL error queue shared state.
+    // shares one thread, which is what makes its error queue shared state.
     private static int StartProxy(int originPort, int poolSize)
     {
         (string certPath, _) = TestCert.Ensure();

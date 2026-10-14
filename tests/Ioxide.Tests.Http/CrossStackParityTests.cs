@@ -8,7 +8,7 @@ namespace Ioxide.Tests;
 /// One option, both stacks. Where TCP and QUIC are documented as equivalent and are not.
 /// </summary>
 /// <remarks>
-/// The two TLS terminations are deliberately separate - OpenSSL under <c>ioxide.tls</c>, picotls
+/// The two TLS terminations are deliberately separate - BoringSSL under <c>ioxide.tls</c>, picotls
 /// under <c>ioxide.ngtcp2</c> - and there is a standing rule against a shared base class, so
 /// nothing here argues for unifying them. What it looks for is narrower and worse: an option
 /// spelled the same on both, described the same on both, that a deployment can set once and get

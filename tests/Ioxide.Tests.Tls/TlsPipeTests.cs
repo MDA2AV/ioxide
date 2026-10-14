@@ -10,7 +10,7 @@ using ioxide.tls;
 namespace Ioxide.Tests;
 
 /// <summary>
-/// Serving TLS over pipes. Under the default both halves are OpenSSL's: the write half encrypts
+/// Serving TLS over pipes. Under the default both halves are BoringSSL's: the write half encrypts
 /// before the bytes reach the slab, the read half decrypts into a Pipe it owns. Under the kTLS TX
 /// opt-in the write half is the plaintext connection's own writer. The default needs no kernel
 /// module, so these run everywhere; the opt-in round-trip is gated on it.
@@ -51,7 +51,7 @@ internal static class TlsPipeTests
         // records and the test would pass against a server that cannot reassemble at all. The
         // first version of this test did exactly that and survived the mutation below.
         //
-        // Nothing in ioxide reassembles records. OpenSSL's memory BIO does: Feed appends whatever
+        // Nothing in ioxide reassembles records. BoringSSL's memory BIO does: Feed appends whatever
         // arrived and SSL_read answers WANT_READ until a record is whole, which ShouldKeepReading
         // reports as "not complete yet" rather than as a fault. These tests exist to keep that
         // true, because the failure mode is silent - a half-record looks exactly like a quiet

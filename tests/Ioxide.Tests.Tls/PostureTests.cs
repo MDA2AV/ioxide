@@ -121,9 +121,9 @@ internal static class PostureTests
             // Control: one at a time, each names its own reason.
             string alone12 = RefusedAlone(port, tls12, reasons);
             string aloneChacha = RefusedAlone(port, chacha, reasons);
-            Assert.True(alone12.Contains("unsupported protocol", StringComparison.Ordinal),
+            Assert.True(alone12.Contains("UNSUPPORTED_PROTOCOL", StringComparison.Ordinal),
                 $"control: a TLS 1.2 ClientHello on its own was refused with: {alone12}");
-            Assert.True(aloneChacha.Contains("no shared cipher", StringComparison.Ordinal),
+            Assert.True(aloneChacha.Contains("NO_SHARED_CIPHER", StringComparison.Ordinal),
                 $"control: a ChaCha20-only ClientHello on its own was refused with: {aloneChacha}");
 
             // The reactor is held while both land, so one turn reads them and the second runs during the first's alert flush.
@@ -152,12 +152,12 @@ internal static class PostureTests
             }
 
             string[] pair = [NextReason(reasons), NextReason(reasons)];
-            Assert.True(pair.Any(p => p.Contains("unsupported protocol", StringComparison.Ordinal))
-                        && pair.Any(p => p.Contains("no shared cipher", StringComparison.Ordinal)),
+            Assert.True(pair.Any(p => p.Contains("UNSUPPORTED_PROTOCOL", StringComparison.Ordinal))
+                        && pair.Any(p => p.Contains("NO_SHARED_CIPHER", StringComparison.Ordinal)),
                 $"each refusal should report its own reason, got: {string.Join(" | ", pair)}");
         });
 
-        runner.Test("posture: a ciphersuite name OpenSSL does not know fails at startup", () =>
+        runner.Test("posture: a ciphersuite name BoringSSL does not know fails at startup", () =>
         {
             // Not at the first handshake, which is where an unvalidated list would surface.
             (string certPath, string keyPath) = TestCert.Ensure();
@@ -167,7 +167,7 @@ internal static class PostureTests
                 CertificatePath = certPath,
                 KeyPath = keyPath,
                 CipherSuites = "TLS_NOT_A_REAL_SUITE",
-            }, "set_ciphersuites"), "an unknown ciphersuite should be refused at startup");
+            }, "CipherSuites"), "an unknown ciphersuite should be refused at startup");
         });
 
         runner.Test("posture: kTLS accepts a CipherSuites list that states the suite it pins", () =>
@@ -206,8 +206,8 @@ internal static class PostureTests
 
         runner.Test("posture: a ciphersuite list that is merely MOSTLY right fails at startup", () =>
         {
-            // The dangerous shape, because OpenSSL reports success for it. set_ciphersuites ignores
-            // names it does not know as long as ONE in the list is valid, so a single typo silently
+            // The dangerous shape, because OpenSSL reported success for it. set_ciphersuites ignored
+            // names it did not know as long as ONE in the list was valid, so a single typo silently
             // drops the suite the operator meant to pin and the server runs with a narrower list
             // than it was configured with. The all-unknown case above already failed; this one did
             // not, which is why "it started" was never evidence the list was applied.
@@ -223,7 +223,7 @@ internal static class PostureTests
 
         runner.Test("posture: an empty ciphersuite list is refused rather than disabling TLS 1.3", () =>
         {
-            // OpenSSL accepts "" and returns success, leaving NO TLS 1.3 suite enabled. Paired with
+            // OpenSSL accepted "" and returned success, leaving NO TLS 1.3 suite enabled. Paired with
             // a 1.3 floor that is a server which starts perfectly and cannot complete a single
             // handshake; on the default floor it quietly becomes TLS 1.2-only. An empty string is
             // what a config binder produces from a blank field, so this is reachable by accident.

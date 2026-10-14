@@ -122,7 +122,7 @@ foreach (var t in threads) t.Join();</code></pre>
       knowledge, or h2 over TLS chosen by <a href="tls.html">ALPN</a>.</li>
       <li><code>ioxide.nghttp3</code> / <code>ioxide.http3</code> - HTTP/3, over
       <a href="../how-ioxide-does-h3.html">QUIC</a> from <code>ioxide.ngtcp2</code>.</li>
-      <li><a href="tls.html">TLS</a> - OpenSSL on the ring, kernel TLS as an opt-in, plus a
+      <li><a href="tls.html">TLS</a> - BoringSSL on the ring, kernel TLS as an opt-in, plus a
       portable SslStream path. In the core package; no reference to add.</li>
     </ul>
 

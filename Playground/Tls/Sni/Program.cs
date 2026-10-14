@@ -32,7 +32,7 @@ using Playground.Shared;
 //  names you want to answer for. Keys are ASCII host names only: SNI carries no port, an IP
 //  address is not a legal value, and an international name belongs here in its xn-- form.
 //
-//  Each entry costs one OpenSSL context, built once at startup. Choosing one per handshake is a
+//  Each entry costs one BoringSSL context, built once at startup. Choosing one per handshake is a
 //  lookup on the reactor thread and allocates nothing, so the cost of serving ten names is the
 //  same as serving one.
 //
@@ -54,6 +54,7 @@ Env.Override(ref port, ref reactors, ref bodyBytes);
 // A real PEM pair for the DEFAULT certificate, or null to generate a self-signed localhost one.
 string? certOverride = null;
 string? keyOverride  = null;
+Env.OverrideTlsCert(ref certOverride, ref keyOverride);
 
 // The names this port answers for, beside the default. Add a line and it is served.
 string[] hosts = ["alpha.test", "beta.test"];

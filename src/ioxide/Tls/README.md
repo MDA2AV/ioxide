@@ -2,8 +2,8 @@
 
 TLS termination for [ioxide](https://github.com/MDA2AV/ioxide). Part of the `ioxide` package -
 there is nothing extra to install, and none of it loads unless you call it. The handshake runs
-through OpenSSL over the reactor's ring; after it, OpenSSL encrypts and decrypts in both
-directions by default. Kernel TLS transmit offload (`TlsOptions.KernelTx`) is opt-in, for the
+through BoringSSL, which ships inside the package, over the reactor's ring; after it, BoringSSL
+encrypts and decrypts in both directions by default. Kernel TLS transmit offload (`TlsOptions.KernelTx`) is opt-in, for the
 deployments where `sendfile` or NIC crypto pays for its constraints.
 
 ```csharp
@@ -33,7 +33,7 @@ the first.
 
 ## How it works
 
-- **By default OpenSSL owns both directions.** Responses go through `TlsSession.Write`, which
+- **By default BoringSSL owns both directions.** Responses go through `TlsSession.Write`, which
   encrypts into the connection's write slab; inbound records decrypt through
   `TlsSession.Decrypt`. No kernel module, TLS 1.2 and 1.3, any ciphersuite, session resumption
   available (each reactor issues its own ticket keys, so a ticket resumes on the reactor that
@@ -45,12 +45,13 @@ the first.
   no resumption. The payoff is `sendfile` and NIC offload, not loopback throughput.
 - **`KernelRx = true`** (requires `KernelTx`, experimental) hands receive to the kernel as well;
   see the `TlsOptions.KernelRx` doc for why it is a research toggle.
-- **The handshake** rides the ring like any other I/O: OpenSSL drives memory BIOs, the service
+- **The handshake** rides the ring like any other I/O: BoringSSL drives memory BIOs, the service
   pumps ciphertext through the connection's recv/send. Resumes inline on the reactor.
 
 ## Requirements
 
-- **OpenSSL 3** - present in the .NET runtime container images.
+- **Nothing for TLS itself** - BoringSSL ships in the package as `libioxide_boringssl.so`
+  (linux-x64), built by `scripts/build-boringssl-native.sh` from a pinned commit.
 - **Linux `tls` kernel module** - only for the kTLS opt-in (`modprobe tls`; standard on
   mainstream distros).
 

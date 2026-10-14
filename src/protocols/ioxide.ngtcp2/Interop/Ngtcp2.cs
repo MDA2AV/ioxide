@@ -4,8 +4,8 @@ namespace ioxide.ngtcp2;
 
 /// <summary>
 /// P/Invoke surface of the bundled native engine: the ioxide.ngtcp2 shim (native/ioxide_ngtcp2_shim.c)
-/// over ngtcp2 + its picotls crypto backend, linked into one shared library
-/// (scripts/build-ngtcp2-native.sh) whose only external dependency is libcrypto.so.3. The shim owns
+/// over ngtcp2 + its picotls crypto backend + BoringSSL's libcrypto, linked into one shared library
+/// (scripts/build-ngtcp2-native.sh) with no external dependency beyond libc. The shim owns
 /// every ngtcp2/picotls struct layout in C, so this surface stays small and stable.
 /// </summary>
 internal static unsafe class Ngtcp2

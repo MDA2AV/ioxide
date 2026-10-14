@@ -8,7 +8,7 @@ namespace Ioxide.Tests;
 /// <summary>
 /// TLS chaos: the assaults that only exist once a handshake sits under the HTTP - a corrupted record
 /// after a good handshake, cleartext sprayed at a TLS port, handshakes that die halfway, and records
-/// fragmented across TCP. The server is the shared <see cref="Handlers.Tls"/> (OpenSSL both ways, the
+/// fragmented across TCP. The server is the shared <see cref="Handlers.Tls"/> (BoringSSL both ways, the
 /// default); every test ends by proving a clean TLS request still returns "tls-ok".
 /// </summary>
 internal static class TlsChaosTests

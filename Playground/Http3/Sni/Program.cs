@@ -55,6 +55,7 @@ if (int.TryParse(Environment.GetEnvironmentVariable("PLAYGROUND_REACTORS"), out 
 // A real PEM pair for the DEFAULT certificate, or null to generate a self-signed localhost one.
 string? certOverride = null;
 string? keyOverride  = null;
+Env.OverrideTlsCert(ref certOverride, ref keyOverride);
 
 // The names this port answers for, beside the default. Add a line and it is served.
 string[] hosts = ["alpha.test", "beta.test"];

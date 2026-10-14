@@ -7,7 +7,7 @@ using Playground.Shared;
 
 // ─────────────────────────────────────────────────────────────────────────────────────────────
 //  tls-multiport - one server, two doors: plaintext on :8080, TLS on :8081, and ONE serve loop
-//  for both. The TLS door terminates with the default backend (OpenSSL both ways, no kernel
+//  for both. The TLS door terminates with the default backend (BoringSSL both ways, no kernel
 //  module) and serves through a TlsConnectionDualPipe; the plaintext door pairs the connection's
 //  own pipe halves. The loop reads an IDuplexPipe and cannot tell which door it got - that is
 //  the point.
@@ -33,6 +33,7 @@ Env.Override(ref port, ref reactors);
 // A real PEM pair, or null to generate a self-signed localhost cert on first run.
 string? certOverride = null;
 string? keyOverride  = null;
+Env.OverrideTlsCert(ref certOverride, ref keyOverride);
 // ─────────────────────────────────────────────────────────────────────────────────────────────
 
 (string certPath, string keyPath) = QuicCert.Ensure(certOverride, keyOverride);
@@ -62,7 +63,7 @@ var config = new ServerConfig
     },
 };
 
-// Default backend: OpenSSL in both directions. Only connections on the TLS door go near this.
+// Default backend: BoringSSL in both directions. Only connections on the TLS door go near this.
 var tlsOptions = new TlsOptions
 {
     CertificatePath = certPath,                            // PEM chain file (or CertificatePem for in-memory)

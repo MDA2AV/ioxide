@@ -76,7 +76,7 @@ internal sealed class IoxideTlsFeature : ITlsConnectionFeature, ITlsHandshakeFea
         _ => SslProtocols.None,
     };
 
-    // OpenSSL reports the suite by its IANA id, which is exactly how TlsCipherSuite is numbered.
+    // BoringSSL reports the suite by its IANA id, which is exactly how TlsCipherSuite is numbered.
     public TlsCipherSuite NegotiatedCipherSuite => (TlsCipherSuite)(_session?.NegotiatedCipherSuiteId ?? 0);
     public string HostName => string.Empty;
 #pragma warning disable SYSLIB0058 // legacy ITlsHandshakeFeature cipher properties are obsolete but required

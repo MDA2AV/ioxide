@@ -47,6 +47,7 @@ int udpRecvSlots = 16;
 
 string? certOverride = null;
 string? keyOverride  = null;
+Env.OverrideTlsCert(ref certOverride, ref keyOverride);
 
 Env.OverrideCert(ref certOverride, ref keyOverride);
 // ─────────────────────────────────────────────────────────────────────────────────────────────
