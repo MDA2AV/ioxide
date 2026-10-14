@@ -265,6 +265,7 @@ public sealed unsafe partial class Reactor
             Track(clientFd, conn);
             conn.InitRefs();
             conn.ListenerPort = PortOf(listenFd);
+            conn.BindSendOpFlags(_sendOpFlags);   // TcpOptions.SendWaitAll; the kTLS handoff clears it
             SubmitRecvMultishot(clientFd, (ushort)conn.Generation, bgid);
 
             _ = RunHandlerAsync(conn);
