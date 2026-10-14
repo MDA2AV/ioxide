@@ -149,6 +149,22 @@ public sealed unsafe partial class TcpConnection : IValueTaskSource<RecvSnapshot
 
     public void ResetRead() => _readSignal.Reset();
 
+    /// <summary>
+    /// Wakes a parked <see cref="ReadAsync"/> with whatever is queued, possibly nothing, the way a
+    /// recv completion does. Reactor thread only.
+    /// </summary>
+    internal void WakeRead()
+    {
+        if (Interlocked.Exchange(ref _armed, 0) == 1)
+        {
+            _readSignal.SetResult(new RecvSnapshot(_recv.SnapshotTail(), Volatile.Read(ref _closed) != 0));
+        }
+        else
+        {
+            Volatile.Write(ref _pending, 1);
+        }
+    }
+
     // Returns false on recv-queue overflow; the reactor then tears the connection down.
     public bool Complete(int res, ushort bid, bool hasBuffer, byte* ptr)
     {

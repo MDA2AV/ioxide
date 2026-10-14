@@ -39,6 +39,7 @@ internal static class Program
         SessionResumptionTests.Register(runner);
         PrologueReaderTests.Register(runner);
         TruncationTests.Register(runner);
+        KernelRxHandoffTests.Register(runner, ktls);
         WriterContractTests.Register(runner);
         SessionLifetimeTests.Register(runner);
         AnchorSourceTests.Register(runner);

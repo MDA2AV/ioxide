@@ -24,6 +24,9 @@ public sealed unsafe partial class Reactor
     public int ShardCount => _config.ReactorCount;
     private Ring _ring = null!;   // created on the reactor thread (DEFER_TASKRUN requires same-thread setup+enter)
 
+    /// <summary>Whether the kernel is holding completions the CQ had no room for. Reactor thread only.</summary>
+    internal bool CqOverflowed => _ring.CqOverflowed;
+
     // TcpConnection table indexed by fd (dense small ints - array beats Dictionary per CQE).
     private TcpConnection?[] _connections = new TcpConnection?[4096];
 

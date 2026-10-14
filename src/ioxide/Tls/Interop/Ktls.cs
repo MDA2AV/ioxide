@@ -16,9 +16,11 @@ internal static unsafe class Ktls
     private const int TLS_TX = 1;
     private const int TLS_RX = 2;
     private const int TLS_SET_RECORD_TYPE = 1;
+    private const int TLS_GET_RECORD_TYPE = 2;
     private const ushort TLS_1_3_VERSION = 0x0304;
     private const ushort TLS_CIPHER_AES_GCM_128 = 51;
     private const byte TLS_RECORD_TYPE_ALERT = 21;
+    private const int MSG_PEEK = 0x2;
     private const int MSG_NOSIGNAL = 0x4000;
     private const int MSG_DONTWAIT = 0x40;
 
@@ -27,6 +29,9 @@ internal static unsafe class Ktls
 
     [DllImport("libc", SetLastError = true)]
     private static extern nint sendmsg(int fd, Msghdr* msg, int flags);
+
+    [DllImport("libc", SetLastError = true)]
+    private static extern nint recvmsg(int fd, Msghdr* msg, int flags);
 
     /// <summary>tls12_crypto_info_aes_gcm_128 - the layout the kernel expects (40 bytes).</summary>
     [StructLayout(LayoutKind.Sequential, Pack = 1)]
@@ -84,6 +89,39 @@ internal static unsafe class Ktls
         // Record sequence 0: session tickets are disabled under kTLS, so no server record went out
         // under the application traffic key before the handoff.
         => Program(fd, TLS_TX, "TLS_TX", serverTrafficSecret, recordSequence: 0, installUlp: true);
+
+    /// <summary>
+    /// Whether the record a kTLS RX socket holds next is the peer's close_notify. A plain recv stops
+    /// at a non-data record with EIO and leaves it queued; this reads it with the control message
+    /// that carries its type, and leaves it there.
+    /// </summary>
+    public static bool PeekCloseNotify(int fd)
+    {
+        byte* alert = stackalloc byte[2];
+
+        const int cmsgSpace = 24;   // CMSG_SPACE(1)
+        byte* control = stackalloc byte[cmsgSpace];
+        new Span<byte>(control, cmsgSpace).Clear();
+
+        var iov = new Iovec { Base = (nint)alert, Len = 2 };
+        var msg = new Msghdr
+        {
+            Iov = (nint)(&iov),
+            IovLen = 1,
+            Control = (nint)control,
+            ControlLen = cmsgSpace,
+        };
+
+        if (recvmsg(fd, &msg, MSG_PEEK | MSG_DONTWAIT) != 2)
+        {
+            return false;
+        }
+
+        return *(int*)(control + 8) == SOL_TLS                 // cmsg_level
+            && *(int*)(control + 12) == TLS_GET_RECORD_TYPE    // cmsg_type
+            && control[16] == TLS_RECORD_TYPE_ALERT            // CMSG_DATA[0]: the record's type
+            && alert[1] == 0;                                  // description: close_notify
+    }
 
     /// <summary>
     /// Derives the AES-128-GCM key material from a TLS 1.3 traffic secret and programs it into one

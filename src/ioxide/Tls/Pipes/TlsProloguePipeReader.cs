@@ -39,6 +39,7 @@ public sealed class TlsProloguePipeReader : PipeReader
     private bool _awaitingInner;    // a carry-mode read is parked on the inner reader right now
     private bool _drained;      // the carry is gone; pure delegation from here
     private bool _completed;
+    private bool _innerCompleted;   // an inner read reported the peer gone; the carry paths report it too
 
     public TlsProloguePipeReader(PipeReader inner, ReadOnlySpan<byte> prologue)
     {
@@ -71,7 +72,7 @@ public sealed class TlsProloguePipeReader : PipeReader
         if (_cancelRequested)
         {
             _cancelRequested = false;
-            return new ReadResult(Sequence(), isCanceled: true, isCompleted: false);
+            return new ReadResult(Sequence(), isCanceled: true, isCompleted: _innerCompleted);
         }
 
         // Unconsumed carry first - unless the caller already examined it all without consuming,
@@ -79,7 +80,7 @@ public sealed class TlsProloguePipeReader : PipeReader
         // identical buffer back would spin that caller hot forever.
         if (_consumed < _length && !_needMore)
         {
-            return new ReadResult(Sequence(), isCanceled: false, isCompleted: false);
+            return new ReadResult(Sequence(), isCanceled: false, isCompleted: _innerCompleted);
         }
 
         ReadResult next;
@@ -94,10 +95,11 @@ public sealed class TlsProloguePipeReader : PipeReader
         }
 
         _needMore = false;
+        _innerCompleted |= next.IsCompleted;
         Append(next.Buffer);
         _inner.AdvanceTo(next.Buffer.End);
 
-        return new ReadResult(Sequence(), next.IsCanceled, next.IsCompleted);
+        return new ReadResult(Sequence(), next.IsCanceled, _innerCompleted);
     }
 
     public override bool TryRead(out ReadResult result)
@@ -110,13 +112,13 @@ public sealed class TlsProloguePipeReader : PipeReader
         if (_cancelRequested)
         {
             _cancelRequested = false;
-            result = new ReadResult(Sequence(), isCanceled: true, isCompleted: false);
+            result = new ReadResult(Sequence(), isCanceled: true, isCompleted: _innerCompleted);
             return true;
         }
 
         if (_consumed < _length && !_needMore)
         {
-            result = new ReadResult(Sequence(), isCanceled: false, isCompleted: false);
+            result = new ReadResult(Sequence(), isCanceled: false, isCompleted: _innerCompleted);
             return true;
         }
 
@@ -124,9 +126,10 @@ public sealed class TlsProloguePipeReader : PipeReader
         if (_inner.TryRead(out ReadResult next))
         {
             _needMore = false;
+            _innerCompleted |= next.IsCompleted;
             Append(next.Buffer);
             _inner.AdvanceTo(next.Buffer.End);
-            result = new ReadResult(Sequence(), next.IsCanceled, next.IsCompleted);
+            result = new ReadResult(Sequence(), next.IsCanceled, _innerCompleted);
             return true;
         }
 

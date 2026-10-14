@@ -22,9 +22,9 @@ namespace ioxide.tls;
 ///
 /// <see cref="TlsOptions.KernelRx"/> and <see cref="TlsOptions.KernelTx"/> express intent;
 /// <see cref="TlsService"/> decides per connection at the handoff, because intent is not always
-/// achievable - a handshake that left a partial record in the BIO cannot hand off to kTLS RX at
-/// all, and that connection silently keeps the userspace reader. <see cref="TlsSession"/> then
-/// reports the OUTCOME, which is what this reads.
+/// achievable - a connection whose records keep arriving cut past the handoff's bound never hands
+/// off to kTLS RX, and keeps the userspace reader. <see cref="TlsSession"/> then reports the
+/// OUTCOME, which is what this reads.
 /// </summary>
 /// <remarks>Reactor thread only, like everything else that touches a connection.</remarks>
 public sealed class TlsConnectionDualPipe : IDuplexPipe, IAsyncDisposable

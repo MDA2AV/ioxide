@@ -17,6 +17,7 @@ public sealed unsafe class Ring : IDisposable
     private uint*       _sqTail;
     private uint*       _sqArray;
     private uint        _sqMask;
+    private uint*       _sqFlags;
     private uint        _sqEntries;
     private IoUringSqe* _sqes;
 
@@ -170,6 +171,7 @@ public sealed unsafe class Ring : IDisposable
         ring._sqTail  = (uint*)(ringPointer + ioUringParams.sq_off.tail);
         ring._sqArray = (uint*)(ringPointer + ioUringParams.sq_off.array);
         ring._sqMask  = *(uint*)(ringPointer + ioUringParams.sq_off.ring_mask);
+        ring._sqFlags = (uint*)(ringPointer + ioUringParams.sq_off.flags);
 
         ring._cqHead = (uint*)(ringPointer + ioUringParams.cq_off.head);
         ring._cqTail = (uint*)(ringPointer + ioUringParams.cq_off.tail);
@@ -260,6 +262,9 @@ public sealed unsafe class Ring : IDisposable
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public uint CqReady() => Volatile.Read(ref *_cqTail) - *_cqHead;
+
+    /// <summary>Completions the CQ had no room for are held in the kernel until the next enter.</summary>
+    internal bool CqOverflowed => (Volatile.Read(ref *_sqFlags) & IORING_SQ_CQ_OVERFLOW) != 0;
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public ref readonly IoUringCqe CqeAt(uint i) => ref _cqes[(*_cqHead + i) & _cqMask];

@@ -176,15 +176,17 @@ public sealed class TlsOptions
     /// Two reasons it is opt-in even where <see cref="KernelTx"/> is.
     ///
     /// The handoff must land on a record boundary. Whatever the handshake already pulled off the
-    /// socket is invisible to the kernel, so the record sequence it starts at has to account for
-    /// it - and if the handshake left a PARTIAL record behind, those bytes are gone and no sequence
-    /// number can recover them. That connection silently stays on the userspace path.
+    /// socket is invisible to the kernel: OpenSSL decrypts it, and the record sequence the kernel
+    /// starts at accounts for it. When what arrived ends inside a record, the handshake waits for
+    /// the rest of that record before handing over; a connection whose records keep arriving cut
+    /// past 1 MiB stays on the userspace path.
     ///
     /// And a recv can then fail with EIO. With kTLS RX a non-application-data record - a TLS 1.3
     /// KeyUpdate, or an alert - is only retrievable through recvmsg with a TLS_GET_RECORD_TYPE
     /// control message. The reactor's TCP hot path uses IORING_OP_RECV, which carries no control
-    /// data, so the kernel refuses the read instead. Clients that never send one are unaffected;
-    /// one that does loses the connection.
+    /// data, so the kernel refuses the read and the read side ends there. A close_notify still
+    /// reaches <see cref="TlsSession.Closed"/>, which reads it once the read side has ended; a
+    /// client that sends a KeyUpdate loses the connection.
     /// </summary>
     public bool KernelRx { get; init; }
 

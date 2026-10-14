@@ -142,7 +142,7 @@ internal static class PrologueReaderTests
         // the stream open again. IsCompleted is monotonic in System.IO.Pipelines - a completed
         // writer cannot un-complete - and a caller that latched on it to decide "this request is
         // truncated, stop waiting" is being told the opposite one read later.
-        runner.Pending("prologue: IsCompleted does not go back to false once the peer is gone", () =>
+        runner.Test("prologue: IsCompleted does not go back to false once the peer is gone", () =>
         {
             Pipe pipe = NewPipe();
             var reader = new TlsProloguePipeReader(pipe.Reader, Ascii("ABCDEFGHIJ"));
@@ -164,9 +164,7 @@ internal static class PrologueReaderTests
             Assert.True(read.IsCompleted,
                 "IsCompleted flapped true then false: the reader un-completed a stream whose peer is already gone");
             reader.AdvanceTo(read.Buffer.End);
-        }, "TlsProloguePipeReader.ReadAsync hard-codes isCompleted:false on the carry fast path and never "
-           + "latches what the inner read reported, so any partial consume after the writer completed "
-           + "reports the stream as open again");
+        });
 
         // The control for the Pending above, and the reason it is a defect rather than a taste:
         // the very reader being wrapped, driven through the identical sequence, keeps the flag.
