@@ -41,6 +41,7 @@ Env.Override(ref port, ref reactors, ref bodyBytes);
 // A real PEM pair, or null to generate a self-signed localhost cert on first run.
 string? certOverride = null;
 string? keyOverride  = null;
+Env.OverrideTlsCert(ref certOverride, ref keyOverride);
 
 // Hand OUTBOUND encryption to the kernel: the handler writes plaintext and the kernel makes the
 // records. Off by default - OpenSSL both ways is the portable path, and on loopback the kernel

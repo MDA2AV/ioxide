@@ -49,6 +49,7 @@ Env.Override(ref port, ref reactors, ref bodyBytes);
 // The server's own certificate and key. Null generates a self-signed pair on first run.
 string? certOverride = null;
 string? keyOverride  = null;
+Env.OverrideTlsCert(ref certOverride, ref keyOverride);
 
 Env.OverrideCert(ref certOverride, ref keyOverride);
 

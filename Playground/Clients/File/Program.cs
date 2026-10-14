@@ -59,6 +59,7 @@ int reactors = Environment.ProcessorCount;   // one ring per reactor, one reacto
 // A real PEM pair, or null to generate a self-signed localhost cert on first run.
 string? certOverride = null;
 string? keyOverride  = null;
+Env.OverrideTlsCert(ref certOverride, ref keyOverride);
 
 Env.OverrideFile(ref dir, ref buffered, ref tlsMode);
 

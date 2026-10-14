@@ -52,6 +52,7 @@ Env.Override(ref port, ref reactors);
 // A real PEM pair for the DEFAULT certificate, or null to generate a self-signed localhost one.
 string? certOverride = null;
 string? keyOverride  = null;
+Env.OverrideTlsCert(ref certOverride, ref keyOverride);
 
 Env.OverrideCert(ref certOverride, ref keyOverride);
 

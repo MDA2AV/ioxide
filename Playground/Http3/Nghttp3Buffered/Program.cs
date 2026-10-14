@@ -71,6 +71,7 @@ long qpackBlockedStreams = qpackCapacity > 0 ? 100 : 0;
 // A real PEM pair, or null to generate a self-signed localhost cert on first run.
 string? certOverride = null;
 string? keyOverride  = null;
+Env.OverrideTlsCert(ref certOverride, ref keyOverride);
 // ─────────────────────────────────────────────────────────────────────────────────────────────
 
 (string certPath, string keyPath) = QuicCert.Ensure(certOverride, keyOverride);

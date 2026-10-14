@@ -49,6 +49,7 @@ Env.Override(ref port, ref reactors, ref bodyBytes);
 // A real PEM pair, or null to generate a self-signed localhost cert on first run.
 string? certOverride = null;
 string? keyOverride  = null;
+Env.OverrideTlsCert(ref certOverride, ref keyOverride);
 // Per-connection recv buffer rings (kernel 6.12+) instead of one shared ring per reactor. The
 // handler code is identical either way; this only changes how recv buffers are handed out.
 bool incrementalBuffers = false;

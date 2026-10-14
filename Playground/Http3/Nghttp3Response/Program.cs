@@ -50,6 +50,7 @@ int udpRecvSlots = 16;
 // A real PEM pair, or null to generate a self-signed localhost cert on first run.
 string? certOverride = null;
 string? keyOverride  = null;
+Env.OverrideTlsCert(ref certOverride, ref keyOverride);
 
 Env.OverrideCert(ref certOverride, ref keyOverride);
 // ─────────────────────────────────────────────────────────────────────────────────────────────
