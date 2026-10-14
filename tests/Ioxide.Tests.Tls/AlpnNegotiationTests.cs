@@ -16,11 +16,11 @@ namespace Ioxide.Tests;
 /// <see cref="TlsSession.NegotiatedAlpn"/> in the body - so each case pins BOTH views of the
 /// negotiation: what the client was told, and what a handler would branch on to pick an h2 loop
 /// over an h1 one. The select loop is additionally pinned by reflection for the malformed offers
-/// OpenSSL never forwards - that test says why end-to-end cannot deliver them.
+/// BoringSSL never forwards - that test says why end-to-end cannot deliver them.
 /// </remarks>
 internal static class AlpnNegotiationTests
 {
-    // OpenSSL's tlsext callback results, restated because the binding class is internal to the
+    // BoringSSL's tlsext callback results, restated because the binding class is internal to the
     // module. The values are ABI, not convention - they cannot drift.
     private const int TlsExtErrOk = 0;      // SSL_TLSEXT_ERR_OK
     private const int TlsExtErrNoAck = 3;   // SSL_TLSEXT_ERR_NOACK
@@ -189,7 +189,7 @@ internal static class AlpnNegotiationTests
 
     /// <summary>
     /// The select loop's own bounds, driven by reflection with offer lists a real handshake can
-    /// never deliver: OpenSSL validates the ClientHello's ALPN list while parsing it (empty or
+    /// never deliver: BoringSSL validates the ClientHello's ALPN list while parsing it (empty or
     /// truncated entries are a decode_error alert) and hands the callback only the validated
     /// copy, so the loop's malformed-input handling is defence in depth that end-to-end tests
     /// structurally cannot reach. Unreachable is not unpinnable: if the bound is "simplified"

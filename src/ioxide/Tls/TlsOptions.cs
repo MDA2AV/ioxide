@@ -196,8 +196,8 @@ public sealed class TlsOptions
     /// It used to default on, which made ioxide's TLS asymmetric: the kernel encrypted, the library
     /// decrypted. That asymmetry is now something you opt into rather than something you inherit,
     /// because it is not free and it was not faster. Measured on loopback, HTTP/1.1, 4 reactors:
-    /// kTLS trails BoringSSL by roughly 20-25% on large single writes and costs about 20% more CPU
-    /// per request, while a small response shows no difference either way. What it constrains is
+    /// kTLS costs 12-29% more CPU per request than BoringSSL at 8-64 KiB responses and about 5%
+    /// more at 64 B and 256 KiB - never less. What it constrains is
     /// the part that matters: the Linux <c>tls</c> module has to be present, TLS 1.3 only, one
     /// ciphersuite, and session resumption is disabled because a ticket would consume a record
     /// sequence number and desynchronise the handoff.

@@ -15,7 +15,7 @@ namespace Ioxide.Tests;
 /// not be: ordering, encodings, auxiliary trust settings, bundle size.
 /// </summary>
 /// <remarks>
-/// The two sources reach OpenSSL by different doors, which is why the claim is worth testing at
+/// The two sources reach BoringSSL by different doors, which is why the claim is worth testing at
 /// all: the path goes through SSL_CTX_load_verify_locations, which parses the bundle with
 /// PEM_X509_INFO_read_bio, while the text goes through a PEM_read_bio_X509_AUX loop. Those two
 /// readers have to accept the same set of blocks, and a difference is silent - a block one of them
@@ -86,14 +86,14 @@ internal static class AnchorSourceTests
     }
 
     /// <summary>
-    /// What the PEM-text route does to bytes on the way in. It converts the string to UTF-8, so a
-    /// byte-order mark reaches OpenSSL as the three bytes it strips from a file; converted as ASCII
-    /// it was a question mark, which OpenSSL has no reason to strip.
+    /// What the PEM-text route does to bytes on the way in. It drops a leading byte-order mark and
+    /// converts the rest to UTF-8, as the file route drops one from a file; converted as ASCII the
+    /// mark became a question mark, which nothing strips.
     /// </summary>
     private static void RegisterEncoding(Runner runner)
     {
         // Control. A byte-order mark in front of a PEM bundle is what Windows tooling writes, which
-        // is why OpenSSL strips one from the first line rather than choking on it.
+        // is why TlsService strips one from the front of a file: BoringSSL's reader would not.
         runner.Test("anchors: a bundle with a byte-order mark read from a path is trusted", () =>
         {
             Anchors anchors = Fixture.Value;

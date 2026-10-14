@@ -64,7 +64,7 @@ internal static class ContextBuildTests
                 // It started. Then it has to be able to serve SOMEONE. The per-name validation
                 // loop passed every name here, the full list applied, and the context came out of
                 // it with no usable suite at either version - which is the end state an EMPTY
-                // CipherSuites is already refused for, reached through a name OpenSSL accepts.
+                // CipherSuites is already refused for, reached through a name the library accepts.
                 Assert.True(Handshakes(alone.Port, SslProtocols.Tls12 | SslProtocols.Tls13),
                     $"CipherSuites = '{Tls12SuiteName}' was accepted at startup and the port then "
                     + "refused every client at both versions (no ciphers available): a TLS 1.2 suite "
@@ -91,7 +91,7 @@ internal static class ContextBuildTests
         {
             // The guard on the refusal above: it must turn away a name that cannot be offered over
             // TLS 1.3, and nothing else. A check that refused every list, or one that read the
-            // shape of the name rather than what OpenSSL does with it, would satisfy the Pending
+            // shape of the name rather than what BoringSSL does with it, would satisfy the test
             // above and break every server that states a suite list at all.
             (string cert, string key) = TestCert.Ensure();
 

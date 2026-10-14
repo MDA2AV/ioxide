@@ -7,7 +7,7 @@ using Playground.Shared;
 
 // ─────────────────────────────────────────────────────────────────────────────────────────────
 //  tls-mtls-openssl-pipes - TLS where the CLIENT proves who it is too, served through an
-//  IDuplexPipe, with OpenSSL doing the crypto in userspace.
+//  IDuplexPipe, with BoringSSL doing the crypto in userspace.
 //
 //      PLAYGROUND_CLIENT_CA=ca.crt dotnet run -c Release --project Playground/Tls/MtlsOpenSslPipes
 //      curl -k --cert client.crt --key client.key https://127.0.0.1:8443/
@@ -108,9 +108,9 @@ var tlsOptions = new TlsOptions
     ClientCaPath    = clientCaPath,                        // trust anchors for CLIENT certificates (or ClientCaPem)
     RequireClientCertificate = requireClientCertificate,   // refuse a client with none, at the handshake
 
-    // KernelTx stays false (the default). OpenSSL encrypts and decrypts, so nothing here needs the
+    // KernelTx stays false (the default). BoringSSL encrypts and decrypts, so nothing here needs the
     // 'tls' kernel module. Client verification is unaffected by that choice either way - the
-    // certificate is exchanged during the handshake, which OpenSSL always performs.
+    // certificate is exchanged during the handshake, which BoringSSL always performs.
     KernelTx        = false,
     KernelRx        = false,                               // kTLS receive (experimental; requires KernelTx)
 };

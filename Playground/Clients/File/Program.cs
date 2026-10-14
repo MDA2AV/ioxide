@@ -71,7 +71,7 @@ ushort port = tlsOn ? (ushort)8443 : (ushort)8080;
 Env.Override(ref port, ref reactors);
 // ─────────────────────────────────────────────────────────────────────────────────────────────
 
-// The constraint this sample exists to show, enforced instead of described: with OpenSSL owning
+// The constraint this sample exists to show, enforced instead of described: with BoringSSL owning
 // transmit the slab must hold CIPHERTEXT, so a file read straight into it would go out in the
 // clear. There is no slab path for that backend - refuse rather than serve cleartext.
 if (tlsMode == "openssl" && !buffered)
@@ -140,8 +140,8 @@ for (int i = 0; i < threads.Length; i++)
 
                 // The whole point: with transmit in the kernel the slab carries PLAINTEXT and the
                 // kernel makes the records, so ReadFileAsync may still read the file straight into
-                // it. With this false, OpenSSL encrypts and the slab must hold ciphertext - which
-                // is why the slab path is refused above. Receive is OpenSSL either way.
+                // it. With this false, BoringSSL encrypts and the slab must hold ciphertext - which
+                // is why the slab path is refused above. Receive is BoringSSL either way.
                 KernelTx = ktls,
             });
         }
@@ -334,9 +334,9 @@ static unsafe void WriteNative(TcpConnection conn, TlsSession? tls, nint data, i
     => Emit(conn, tls, new ReadOnlySpan<byte>((void*)data, length));
 
 // Every response byte goes through here. TlsSession.Write is correct under BOTH backends - it
-// writes plaintext to the slab when the kernel encrypts, and encrypts into the slab when OpenSSL
+// writes plaintext to the slab when the kernel encrypts, and encrypts into the slab when BoringSSL
 // does - so no call site has to know which one is in play. A bare conn.Write would be right only
-// for cleartext and kTLS, and silently wrong for OpenSSL.
+// for cleartext and kTLS, and silently wrong for BoringSSL.
 static void Emit(TcpConnection conn, TlsSession? tls, ReadOnlySpan<byte> bytes)
 {
     if (tls is null) conn.Write(bytes);

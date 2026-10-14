@@ -87,7 +87,7 @@
 
     <h2>TLS here is not the TLS you configured for TCP</h2>
     <p>ioxide terminates TLS twice, through two entirely separate stacks, and this catches people
-    out. Over TCP it is OpenSSL, configured through <code>TlsService</code>. Over QUIC it is
+    out. Over TCP it is BoringSSL, configured through <code>TlsService</code>. Over QUIC it is
     picotls, driven by ngtcp2 and configured on <code>QuicEngine</code>. They share no code and no
     configuration object, deliberately - QUIC does not use TLS records at all, it carries the
     handshake in its own CRYPTO frames, so the two have almost nothing in common below the

@@ -9,7 +9,7 @@ using ioxide.tls;
 
 namespace Ioxide.Tests;
 
-/// <summary>The read timeout through TLS, OpenSSL decrypting on demand and kTLS alike.</summary>
+/// <summary>The read timeout through TLS, BoringSSL decrypting on demand and kTLS alike.</summary>
 internal static class ReadTimeoutTests
 {
     private const int ReadTimeoutMs = 500;
@@ -19,7 +19,7 @@ internal static class ReadTimeoutTests
         foreach (bool kernelRx in new[] { false, true })
         {
             bool rx = kernelRx;
-            string mode = rx ? "kTLS" : "OpenSSL";
+            string mode = rx ? "kTLS" : "BoringSSL";
 
             runner.Test($"tls read timeout ({mode}): a handler busy for longer than the read timeout still answers", () =>
             {
@@ -53,7 +53,7 @@ internal static class ReadTimeoutTests
         foreach (bool parkRead in new[] { false, true })
         {
             bool parked = parkRead;
-            string how = parked ? "OpenSSL, a read parked" : "OpenSSL";
+            string how = parked ? "BoringSSL, a read parked" : "BoringSSL";
             runner.Test($"tls exit ({how}): a response still sending when its handler lets go reaches a slow reader whole", () =>
             {
                 // The teardown close_notify is a raw send: inside a send the ring still has, it would

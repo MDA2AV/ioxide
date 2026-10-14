@@ -117,7 +117,7 @@ for (int i = 0; i < threads.Length; i++)
     var reactor = new Reactor(i, config);
 
     // One TlsService per reactor. It owns the contexts - the default and one per name - and picks
-    // between them during each handshake on this ring. Each entry costs one OpenSSL context, built
+    // between them during each handshake on this ring. Each entry costs one BoringSSL context, built
     // once at startup; choosing one per handshake is a lookup that allocates nothing, so serving
     // ten names costs what serving one does.
     reactor.OnStart = r => TlsService.Start(r, tlsOptions);

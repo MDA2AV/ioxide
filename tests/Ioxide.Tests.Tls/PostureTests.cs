@@ -206,8 +206,8 @@ internal static class PostureTests
 
         runner.Test("posture: a ciphersuite list that is merely MOSTLY right fails at startup", () =>
         {
-            // The dangerous shape, because OpenSSL reports success for it. set_ciphersuites ignores
-            // names it does not know as long as ONE in the list is valid, so a single typo silently
+            // The dangerous shape, because OpenSSL reported success for it. set_ciphersuites ignored
+            // names it did not know as long as ONE in the list was valid, so a single typo silently
             // drops the suite the operator meant to pin and the server runs with a narrower list
             // than it was configured with. The all-unknown case above already failed; this one did
             // not, which is why "it started" was never evidence the list was applied.
@@ -223,7 +223,7 @@ internal static class PostureTests
 
         runner.Test("posture: an empty ciphersuite list is refused rather than disabling TLS 1.3", () =>
         {
-            // OpenSSL accepts "" and returns success, leaving NO TLS 1.3 suite enabled. Paired with
+            // OpenSSL accepted "" and returned success, leaving NO TLS 1.3 suite enabled. Paired with
             // a 1.3 floor that is a server which starts perfectly and cannot complete a single
             // handshake; on the default floor it quietly becomes TLS 1.2-only. An empty string is
             // what a config binder produces from a blank field, so this is reachable by accident.

@@ -116,7 +116,7 @@ var tlsOptions = new TlsOptions
     // no session resumption.
     //
     // It does NOT change anything above it. The client certificate is exchanged and verified during
-    // the HANDSHAKE, which OpenSSL performs either way - the kernel only takes over record crypto
+    // the HANDSHAKE, which BoringSSL performs either way - the kernel only takes over record crypto
     // afterwards - so ClientCaPath, RequireClientCertificate and PeerSubject behave identically.
     KernelTx        = true,
     KernelRx        = false,                               // kTLS receive (experimental; requires KernelTx)

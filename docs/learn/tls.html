@@ -41,8 +41,8 @@
     <h1>TLS</h1>
     <p class="lead">ioxide gives you two ways to serve TLS, with a deliberate trade-off between
     them. <b><code>ioxide.tls</code></b> is the native path: the handshake runs over the ring,
-    OpenSSL does the record crypto in both directions by default, and kernel TLS transmit offload
-    is one flag away for the deployments that can use it. <b>SslStream</b> over
+    BoringSSL (bundled in the package) does the record crypto in both directions by default, and
+    kernel TLS transmit offload is one flag away for the deployments that can use it. <b>SslStream</b> over
     <code>TcpConnectionStream</code> is the portable path: fully managed, full-featured, and a bit
     slower. Both terminate on a <a href="multiport.html">dedicated port</a> and need nothing from
     the core engine beyond what is already public - and both ship <b>inside the <code>ioxide</code>
@@ -54,11 +54,11 @@
 
     <table>
       <tr><th></th><th><code>ioxide.tls</code></th><th>SslStream + <code>TcpConnectionStream</code></th></tr>
-      <tr><td>crypto</td><td>OpenSSL; kernel TX offload opt-in</td><td>fully managed</td></tr>
+      <tr><td>crypto</td><td>BoringSSL, bundled; kernel TX offload opt-in</td><td>fully managed</td></tr>
       <tr><td>copies</td><td>one staged copy; zero-copy send under kTLS TX</td><td>buffered both ways</td></tr>
       <tr><td>TLS versions</td><td>1.2 and 1.3 (1.3 only under kTLS)</td><td>1.2 and 1.3</td></tr>
       <tr><td>features</td><td>ALPN; resumption in the default mode (tickets are per-reactor)</td><td>client certs, resumption, everything</td></tr>
-      <tr><td>dependency</td><td>OpenSSL 3 (<code>tls</code> module only for kTLS)</td><td>none - portable</td></tr>
+      <tr><td>dependency</td><td>none - BoringSSL ships in the package (<code>tls</code> module only for kTLS)</td><td>none - portable</td></tr>
       <tr><td>throughput</td><td>baseline</td><td>~0.65&times; (measured)</td></tr>
       <tr><td>role</td><td><b>fast path</b></td><td><b>compatibility path</b></td></tr>
     </table>
@@ -68,14 +68,14 @@
     The catch is that kTLS only handles the <em>record layer</em> - it does not do the handshake.
     So <code>ioxide.tls</code> splits the work:</p>
     <ul>
-      <li><b>Handshake in userspace, over the ring.</b> OpenSSL runs the TLS 1.3 handshake through
+      <li><b>Handshake in userspace, over the ring.</b> BoringSSL runs the TLS 1.3 handshake through
       memory BIOs; the ciphertext flows over the connection's normal recv/send. Handshake bytes
       ride the same io_uring as everything else, and the handshake resumes inline like any await.</li>
       <li><b>Transmit offloaded to the kernel.</b> Once the handshake completes, the negotiated keys
       are programmed into the socket. From then on your handler writes <em>plaintext</em> and the
       kernel produces the TLS records on the existing io_uring send path - no managed crypto, no
       extra copy.</li>
-      <li><b>Receive stays in userspace.</b> Inbound records are decrypted by OpenSSL. Requests are
+      <li><b>Receive stays in userspace.</b> Inbound records are decrypted by BoringSSL. Requests are
       small, so this is cheap; the heavy direction (responses) is the one the kernel handles.</li>
     </ul>
 
@@ -175,7 +175,7 @@ reactor.OnStart = r =&gt; TlsService.Start(r, options);</code></pre>
     <h2>kTLS: how the hand-off works</h2>
     <p>After <code>SSL_accept</code> completes over the memory BIOs, <code>AcceptAsync</code>:</p>
     <ol>
-      <li>captures the TLS 1.3 <em>server traffic secret</em> from OpenSSL's keylog callback;</li>
+      <li>captures the TLS 1.3 <em>server traffic secret</em> from BoringSSL's keylog callback;</li>
       <li>derives the AES-128-GCM key and IV with HKDF-Expand-Label (RFC 8446);</li>
       <li>programs them into the socket - <code>setsockopt(TCP_ULP, "tls")</code> then
       <code>setsockopt(SOL_TLS, TLS_TX, ...)</code> with record sequence 0;</li>
@@ -224,7 +224,7 @@ if (tls.NegotiatedAlpn == "h2")
 
     <h2>kTLS: receive, and the one limitation</h2>
     <p>The transmit side is kernel-offloaded; the <b>receive side is userspace</b>. Each inbound
-    slice is fed to OpenSSL and decrypted with <code>SSL_read</code> (that is what
+    slice is fed to BoringSSL and decrypted with <code>SSL_read</code> (that is what
     <code>TlsSession.Decrypt</code> does). This is the deliberate boundary of the implementation:</p>
     <ul>
       <li><b>Why not offload RX too?</b> kTLS RX can only take over at a clean TLS record boundary
@@ -245,25 +245,26 @@ if (tls.NegotiatedAlpn == "h2")
       <li><b>No session resumption</b> (tickets disabled, see above).</li>
       <li><b>ALPN</b> is selected from the client's offer, by server preference (see above).</li>
       <li><b>Linux <code>tls</code> kernel module</b> (<code>modprobe tls</code>; standard on
-      mainstream distros) and <b>OpenSSL 3</b> (present in the .NET runtime images).</li>
+      mainstream distros). The TLS library needs nothing installed: BoringSSL ships in the
+      package.</li>
     </ul>
 
-    <h2>Choosing a backend: kTLS, or OpenSSL both ways</h2>
-    <p><b>OpenSSL is the default in both directions.</b> <code>TlsOptions.KernelTx</code> turns
+    <h2>Choosing a backend: kTLS, or BoringSSL both ways</h2>
+    <p><b>BoringSSL is the default in both directions.</b> <code>TlsOptions.KernelTx</code> turns
     kernel encryption on; it is off unless you ask, so the socket gets no TLS ULP and nothing
     requires the <code>tls</code> module. Everything else - the handshake, ALPN, the read loop - is
     identical either way.</p>
     <p>It used to default the other way, which made ioxide's TLS asymmetric: the kernel encrypted
-    while OpenSSL decrypted. That asymmetry is now something you opt into, because it is not free
+    while userspace decrypted. That asymmetry is now something you opt into, because it is not free
     and it was not faster. Handlers should write through
     <code>TlsSession.Write(connection, plaintext)</code>, which is correct in both modes - a bare
     <code>connection.Write</code> is only safe with kTLS on, and puts <b>cleartext on the wire</b>
     without it.</p>
     <table>
-      <tr><th></th><th><code>KernelTx = true</code></th><th>default (OpenSSL)</th></tr>
+      <tr><th></th><th><code>KernelTx = true</code></th><th>default (BoringSSL)</th></tr>
       <tr><td><code>tls</code> kernel module</td><td>required</td><td>not needed</td></tr>
       <tr><td>TLS versions</td><td>1.3 only</td><td>1.2 and 1.3</td></tr>
-      <tr><td>ciphersuites</td><td>one (AES-128-GCM)</td><td>any</td></tr>
+      <tr><td>ciphersuites</td><td>one (AES-128-GCM)</td><td>any BoringSSL implements</td></tr>
       <tr><td>session resumption</td><td>disabled</td><td>available</td></tr>
       <tr><td>handshake alignment</td><td>constrains the handoff</td><td>irrelevant</td></tr>
       <tr><td><code>sendfile</code> / NIC offload</td><td><b>yes</b></td><td>no</td></tr>
@@ -272,30 +273,30 @@ if (tls.NegotiatedAlpn == "h2")
     see - they are loopback, with no NIC and no <code>sendfile</code> anywhere in the path.</p>
 
     <h2>kTLS: performance</h2>
-    <p><b>Measured against plaintext, not against each other.</b> 4 reactors,
-    <code>wrk -t4 -c64</code>, HTTP/1.1, <code>Tcp/Raw</code> as the baseline:</p>
+    <p><b>Measured against plaintext, not against each other.</b> Requests per second, 4 reactors,
+    <code>wrk -t4 -c64</code>, HTTP/1.1, <code>Tcp/Raw</code> as the baseline
+    (<code>bench/tls-matrix.sh</code>, best of two passes):</p>
     <table>
-      <tr><th>response</th><th>plaintext</th><th>kTLS</th><th>OpenSSL</th></tr>
-      <tr><td>64 B</td><td>1,379,980</td><td>1,091,224 &nbsp;0.79&times;</td><td>1,093,361 &nbsp;0.79&times;</td></tr>
-      <tr><td>8 KiB</td><td>1,109,287</td><td>749,833 &nbsp;0.68&times;</td><td>802,325 &nbsp;0.72&times;</td></tr>
-      <tr><td>64 KiB</td><td>448,093</td><td>157,644 &nbsp;0.35&times;</td><td>196,486 &nbsp;0.44&times;</td></tr>
-      <tr><td>256 KiB</td><td>133,097</td><td>41,691 &nbsp;0.31&times;</td><td>49,801 &nbsp;0.37&times;</td></tr>
+      <tr><th>response</th><th>plaintext</th><th>kTLS TX</th><th>BoringSSL</th></tr>
+      <tr><td>64 B</td><td>1,245,989</td><td>937,322 &nbsp;0.75&times;</td><td>976,752 &nbsp;0.78&times;</td></tr>
+      <tr><td>8 KiB</td><td>991,826</td><td>582,376 &nbsp;0.59&times;</td><td>676,158 &nbsp;0.68&times;</td></tr>
+      <tr><td>64 KiB</td><td>344,094</td><td>134,112 &nbsp;0.39&times;</td><td>153,538 &nbsp;0.45&times;</td></tr>
+      <tr><td>256 KiB</td><td>113,412</td><td>38,786 &nbsp;0.34&times;</td><td>40,250 &nbsp;0.35&times;</td></tr>
     </table>
     <p>Two things worth taking from that. <b>TLS costs far more than the choice of backend does</b> -
-    at 64 KiB you are at a third of plaintext either way, so the gap between kTLS and OpenSSL is a
-    rounding error next to the cost of encrypting at all. And <b>the ratio depends on response
-    size</b>: 0.79&times; at 64 bytes is not the same server as 0.35&times; at 64 KiB.</p>
-    <p>kTLS is behind on large <em>single</em> writes - the kernel has to split one 256 KiB write
-    into sixteen records - and level once the protocol above it already chunks. Over HTTP/2, where
-    HTTP/2 frames responses into 16 KiB DATA frames before they reach the socket, the two are
-    within noise of each other at every size.</p>
+    at 64 KiB you are under half of plaintext either way, so the gap between kTLS and BoringSSL is
+    small next to the cost of encrypting at all. And <b>the ratio depends on response size</b>:
+    0.78&times; at 64 bytes is not the same server as 0.35&times; at 256 KiB.</p>
+    <p>kTLS is behind over HTTP/1.1 at every size, most between 8 and 64 KiB, and level once the
+    protocol above it already chunks: over HTTP/2, which frames responses into 16 KiB DATA frames
+    before they reach the socket, the two are within 5% of each other at 64 B and 8 KiB.</p>
 
     <h2>kTLS: where the cost actually is</h2>
     <p>The remainder of this section is about kTLS specifically.
     The cost is dominated by the <em>inherent</em> work of encrypting each response - which the
     kernel does, on the existing send path, with no userspace copy - plus the small fixed cost of
     decrypting each request. Skipping the userspace copy does <em>not</em> make it faster than
-    OpenSSL on the ring: the table above has OpenSSL level or ahead at every size, because the
+    BoringSSL on the ring: the table above has BoringSSL ahead at every size, because the
     crypto dominates and the kernel path gives up batching the userspace one keeps. What the
     kernel path uniquely enables is <code>sendfile</code> and NIC offload - which loopback numbers
     cannot show. The remaining gap to plaintext is the AES-GCM work itself, which no TLS
@@ -348,16 +349,16 @@ if (tls.NegotiatedAlpn == "h2")
     path does not do mTLS, so that still means <code>SslStream</code>.</p>
     <ul>
       <li><b>kTLS</b> (<code>KernelTx = true</code> is the deployable hybrid - kernel TX,
-      OpenSSL RX; add <code>KernelRx = true</code> for both directions, which is experimental)
+      BoringSSL RX; add <code>KernelRx = true</code> for both directions, which is experimental)
       &rarr; you are on Linux 6+ with the <code>tls</code> module, TLS 1.3 and ALPN are enough,
       and you want <code>sendfile</code> or a NIC that offloads TLS.
       Sample: <a href="https://github.com/MDA2AV/ioxide/tree/main/Playground/Tls/Ktls">Tls/Ktls</a>.</li>
-      <li><b>OpenSSL both ways</b> (the default) &rarr; no kernel module, so it runs in a container
+      <li><b>BoringSSL both ways</b> (the default) &rarr; no kernel module, so it runs in a container
       that lacks one; TLS 1.2 available, any ciphersuite, resumption back, and no
-      handshake-alignment constraint. Costs nothing measurable here - see the table above. Sample:
+      handshake-alignment constraint. Cheaper than kTLS at every size here - see the table above. Sample:
       <a href="https://github.com/MDA2AV/ioxide/tree/main/Playground/Tls/OpenSsl">Tls/OpenSsl</a>.</li>
-      <li><b>SslStream</b> over <code>TcpConnectionStream</code> &rarr; now only for what OpenSSL itself
-      cannot give you, or when you want the BCL's stack specifically. It is the slowest of the
+      <li><b>SslStream</b> over <code>TcpConnectionStream</code> &rarr; now only for what BoringSSL
+      itself cannot give you, or when you want the BCL's stack specifically. It is the slowest of the
       three, because every byte is encrypted in userspace <em>and</em> copied through a
       <code>Stream</code>.</li>
     </ul>

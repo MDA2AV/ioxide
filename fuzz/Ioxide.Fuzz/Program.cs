@@ -4,7 +4,7 @@ using ioxide.http3;
 //  Fuzz the managed parsers that read bytes chosen by whoever connected.
 //
 //  This is where ioxide's parsing actually lives. The QUIC transport is vendored ngtcp2 and the
-//  TLS is OpenSSL or picotls, so the hand-written attack surface is small and almost all of it is
+//  TLS is BoringSSL or picotls, so the hand-written attack surface is small and almost all of it is
 //  C#: QPACK field sections, HTTP/3 varints, frame headers. Those decode straight from the wire
 //  into a request a handler then trusts.
 //

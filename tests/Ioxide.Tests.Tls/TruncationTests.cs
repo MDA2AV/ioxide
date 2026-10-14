@@ -180,7 +180,7 @@ internal static class TruncationTests
     }
 
     /// <summary>
-    /// Under kTLS RX the kernel decrypts, so OpenSSL never sees the peer's close_notify at all -
+    /// Under kTLS RX the kernel decrypts, so BoringSSL never sees the peer's close_notify at all -
     /// which is worth asking about precisely because <see cref="TlsSession.Closed"/> is the accessor
     /// the userspace pump's own comment points a caller at.
     /// </summary>
@@ -202,7 +202,7 @@ internal static class TruncationTests
         {
             // Without this the test below could pass or fail for the ordinary userspace reason.
             // The handoff is conditional at run time - a connection whose records keep arriving
-            // cut past the handoff's bound keeps the OpenSSL path - so "kTLS RX was configured" is
+            // cut past the handoff's bound keeps the BoringSSL path - so "kTLS RX was configured" is
             // not the same claim as "kTLS RX happened".
             (Ending ended, Ending cut) = BothShapes(KernelRx());
 
@@ -214,7 +214,7 @@ internal static class TruncationTests
 
         runner.Test(closedName, () =>
         {
-            // With the kernel decrypting, the close_notify alert never reaches OpenSSL: the ring's
+            // With the kernel decrypting, the close_notify alert never reaches BoringSSL: the ring's
             // plain recv stops at it with EIO and the kernel keeps it queued. Closed, documented as
             // "true once the peer sent close_notify", has to read it from there (#346).
             //

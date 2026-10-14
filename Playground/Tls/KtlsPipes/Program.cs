@@ -18,7 +18,7 @@ using Playground.Shared;
 //
 //  TlsConnectionDualPipe composes rather than implements. Each direction has two possible halves:
 //
-//              kernel                       OpenSSL
+//              kernel                       BoringSSL
 //    read      TcpConnectionPipeReader      TlsDecryptingPipeReader
 //              (plaintext is already in     (decrypts into a Pipe
 //               ring memory - zero copy)     it owns)
@@ -33,7 +33,7 @@ using Playground.Shared;
 //
 //  Compare the raw-ring pair, Playground/Tls/Ktls and Playground/Tls/OpenSsl. Those two DO differ
 //  in the handler, because at that level the backend is visible: kTLS writes plaintext straight
-//  to the connection, OpenSSL goes through TlsSession.Write. Over a pipe it is not. Needs: ioxide
+//  to the connection, BoringSSL goes through TlsSession.Write. Over a pipe it is not. Needs: ioxide
 // ─────────────────────────────────────────────────────────────────────────────────────────────
 
 // ── Knobs ────────────────────────────────────────────────────────────────────────────────────
@@ -87,7 +87,7 @@ var tlsOptions = new TlsOptions
     KeyPath         = keyPath,                             // PEM key file (or KeyPem for in-memory)
     Alpn            = ["http/1.1"],                        // protocols this port serves, most-preferred first
 
-    // NOT the default - TLS is OpenSSL both ways unless you ask for this.
+    // NOT the default - TLS is BoringSSL both ways unless you ask for this.
     // Playground/Tls/OpenSslPipes is the same server without these two lines.
     KernelTx        = true,
 

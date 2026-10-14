@@ -116,7 +116,7 @@ internal static class QuicSniTests
         });
 
         // Mutual TLS and SNI together. The pair that matters: a named host is served from its own
-        // picotls context, and unlike the TCP side - where OpenSSL keeps the verify mode on the
+        // picotls context, and unlike the TCP side - where BoringSSL keeps the verify mode on the
         // connection whatever context it swaps to - picotls takes EVERYTHING from the swapped
         // context. So the client-verification settings are carried over by hand in the shim, and
         // if that carry-over were ever dropped, asking for a host name by itself would be a way
@@ -389,7 +389,7 @@ internal static class QuicSniTests
         });
     }
 
-    /// <summary>Four 63-byte labels: 255 bytes, the longest name the TCP side's OpenSSL accepts.</summary>
+    /// <summary>Four 63-byte labels: 255 bytes, the longest name the TCP side's BoringSSL accepts.</summary>
     private static readonly string Longest = string.Join('.', Enumerable.Repeat(new string('a', 63), 4));
 
     /// <summary>Keys no client can ask for, each with the start of the reason it is refused for.</summary>

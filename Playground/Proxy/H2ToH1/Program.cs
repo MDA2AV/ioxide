@@ -113,7 +113,7 @@ for (int i = 0; i < threads.Length; i++)
             KeyPath         = keyPath,   // PEM private key file (set exactly one of Path/Pem)
             KeyPem          = null,      // in-memory PEM alternative to KeyPath
             Alpn            = ["h2"],    // protocols offered, most preferred first
-            KernelTx        = false,     // kTLS encrypt (off = OpenSSL both ways)
+            KernelTx        = false,     // kTLS encrypt (off = BoringSSL both ways)
             KernelRx        = false,     // kTLS decrypt; requires KernelTx, experimental
         });
 

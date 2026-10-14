@@ -28,7 +28,7 @@ delete it when you copy the file out and the literals are the whole configuratio
 ## Certificates
 
 The samples that are about the certificate rather than about the transport. TLS exists twice in
-ioxide and they are not one stack with two doors: on TCP, OpenSSL terminates **above** the
+ioxide and they are not one stack with two doors: on TCP, BoringSSL terminates **above** the
 transport and each reactor owns its own `TlsService`; on QUIC, TLS 1.3 lives **inside** the
 transport (picotls, bundled with ngtcp2) and one `QuicEngine` is shared by every reactor. The same
 feature therefore reads differently on each side, which is why each has its own sample.
@@ -53,13 +53,13 @@ trust.
 
 ## TLS over TCP
 
-The certificate is terminated above the transport, by OpenSSL or by the kernel. All of these serve
+The certificate is terminated above the transport, by BoringSSL or by the kernel. All of these serve
 HTTP/1.1 framed by hand.
 
 | Project | Lines | Shows | Packages |
 | --- | --- | --- | --- |
-| [`Tls.OpenSsl`](Tls/OpenSsl/Program.cs) | 243 | **The default**: OpenSSL both ways - no kernel module, and TLS 1.2 / any suite / resumption. | `ioxide` |
-| [`Tls.KtlsTx`](Tls/KtlsTx/Program.cs) | 225 | The deployable kernel mode: kernel TX (the handler writes plaintext), OpenSSL RX. `Tls/Ktls` minus one line. `modprobe tls`. | `ioxide` |
+| [`Tls.OpenSsl`](Tls/OpenSsl/Program.cs) | 243 | **The default**: BoringSSL both ways - no kernel module, and TLS 1.2 / any suite / resumption. | `ioxide` |
+| [`Tls.KtlsTx`](Tls/KtlsTx/Program.cs) | 225 | The deployable kernel mode: kernel TX (the handler writes plaintext), BoringSSL RX. `Tls/Ktls` minus one line. `modprobe tls`. | `ioxide` |
 | [`Tls.Ktls`](Tls/Ktls/Program.cs) | 225 | **Full kernel TLS** - both directions in the kernel. Experimental: a TLS 1.3 KeyUpdate cannot be read through `IORING_OP_RECV`. | `ioxide` |
 | [`Tls.OpenSslPipes`](Tls/OpenSslPipes/Program.cs) | 186 | The default backend through an `IDuplexPipe`. | `ioxide` |
 | [`Tls.KtlsPipes`](Tls/KtlsPipes/Program.cs) | 184 | Full kTLS through an `IDuplexPipe`. Its serve loop is byte-identical to `Tls/OpenSslPipes` - over a pipe the backend is invisible. | `ioxide` |

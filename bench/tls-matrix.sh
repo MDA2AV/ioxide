@@ -2,8 +2,8 @@
 # The TLS backend matrix: h1 and h2, each in plaintext and in all three TLS configurations.
 #
 #   plaintext        no TLS at all - the baseline everything else is measured against
-#   openssl          OpenSSL encrypts and decrypts.               KernelTx=0 KernelRx=0  (default)
-#   ktls-tx          kernel encrypts, OpenSSL decrypts.           KernelTx=1 KernelRx=0
+#   openssl          BoringSSL encrypts and decrypts.             KernelTx=0 KernelRx=0  (default)
+#   ktls-tx          kernel encrypts, BoringSSL decrypts.         KernelTx=1 KernelRx=0
 #   ktls             kernel does both.                            KernelTx=1 KernelRx=1
 #
 # There is no ktls-rx-only cell: RX is programmed at the same handoff as TX, so TlsService gates

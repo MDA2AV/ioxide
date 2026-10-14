@@ -32,7 +32,7 @@ using Playground.Shared;
 //  names you want to answer for. Keys are ASCII host names only: SNI carries no port, an IP
 //  address is not a legal value, and an international name belongs here in its xn-- form.
 //
-//  Each entry costs one OpenSSL context, built once at startup. Choosing one per handshake is a
+//  Each entry costs one BoringSSL context, built once at startup. Choosing one per handshake is a
 //  lookup on the reactor thread and allocates nothing, so the cost of serving ten names is the
 //  same as serving one.
 //

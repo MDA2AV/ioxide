@@ -6,7 +6,7 @@ namespace ioxide.ngtcp2;
 /// </summary>
 /// <remarks>
 /// Paths and nothing else, for the same reason the constructor takes them: ngtcp2 loads PEM by
-/// path. The TCP side accepts either paths or PEM text because OpenSSL takes the certificate as
+/// path. The TCP side accepts either paths or PEM text because BoringSSL takes the certificate as
 /// data; here there is only the one form.
 /// </remarks>
 /// <param name="CertificatePath">

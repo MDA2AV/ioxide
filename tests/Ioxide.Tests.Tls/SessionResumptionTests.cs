@@ -147,7 +147,7 @@ internal static class SessionResumptionTests
         // Anchors given as ClientCaPath are re-read on every rotation, which is how an issuer is
         // revoked - so a resumption that survived a rotation would have to answer for the client
         // whose issuer that rotation removed. On a resumption no certificate is exchanged at all
-        // and OpenSSL restores the stored peer certificate and its verify result, so a ticket that
+        // and BoringSSL restores the stored peer certificate and its verify result, so a ticket that
         // outlived a rotation would carry the old verdict past the new anchors.
         runner.Test("resume: a ticket does not outlive the removal of its issuer from the anchors", () =>
         {

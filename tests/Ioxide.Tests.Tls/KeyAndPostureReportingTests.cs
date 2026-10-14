@@ -25,11 +25,12 @@ internal static class KeyAndPostureReportingTests
     {
         runner.Test("key: an encrypted private key is refused, and does not go looking for a passphrase", () =>
         {
-            // OpenSSL's PEM readers take a password callback; passing none does not mean "no
-            // password", it means PEM_def_callback - which reads the passphrase FROM THE TERMINAL.
+            // OpenSSL's PEM readers take a password callback; passing none did not mean "no
+            // password", it meant PEM_def_callback - which read the passphrase FROM THE TERMINAL.
             // On a server started from a tty that is not an error path, it is a hang, and on a
-            // rotation thread it would be a hang while still serving. There is no passphrase option
-            // on TlsOptions, so the only correct outcome is a prompt refusal naming the key.
+            // rotation thread it would be a hang while still serving. BoringSSL's default does not
+            // prompt, but there is no passphrase option on TlsOptions either way, so the only
+            // correct outcome is a prompt refusal naming the key.
             //
             // The deadline is the assertion here. A test that merely catches the throw would also
             // pass on a build that blocks, because the runner's watchdog would kill the suite
@@ -87,7 +88,7 @@ internal static class KeyAndPostureReportingTests
                 KeyPath = keyPath,
             }));
 
-            // The accessor reports OpenSSL's WIRE value, and ioxide.Kestrel maps it - 0x0304 to
+            // The accessor reports BoringSSL's WIRE value, and ioxide.Kestrel maps it - 0x0304 to
             // Tls13, 0x0303 to Tls12. Both halves are asserted here: that the session reports the
             // version the client actually negotiated, and that Kestrel's mapping of it is right,
             // since an inverted table there would misreport every connection with nothing to catch it.

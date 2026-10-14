@@ -9,7 +9,7 @@ namespace Ioxide.Tests;
 /// a reissued PEM would be an outage.
 /// </summary>
 /// <remarks>
-/// Harder than the TCP side and tested more carefully for it: OpenSSL refcounts a context, so a
+/// Harder than the TCP side and tested more carefully for it: BoringSSL refcounts a context, so a
 /// connection holding one keeps it alive. picotls does not - it reads the context for as long as
 /// the connection lives - so a generation is published whole and the one it replaced is kept rather
 /// than freed. The load test below is the one that would crash if that were wrong.
@@ -184,7 +184,7 @@ internal static class QuicRotationTests
 
         runner.Test("rotate/quic: a key that does not match its certificate is refused", () =>
         {
-            // OpenSSL cross-checks the pair when the key is installed, so the TCP side has always
+            // BoringSSL cross-checks the pair when the key is installed, so the TCP side has always
             // refused this; picotls does not, so QUIC used to load it happily and then fail every
             // real client's handshake. That is the state a half-finished renewal leaves on disk,
             // and it is invisible to the in-tree client, which never checks a signature.

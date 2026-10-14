@@ -11,8 +11,8 @@ namespace Ioxide.Tests;
 /// implementation rather than only with itself. The handler reports what it sees, which is the
 /// point - enforcing an identity is only half of it if nothing can act on one.
 ///
-/// Every case runs twice where the kernel module allows it: once on the OpenSSL path and once with
-/// KernelTx. mTLS is settled during the handshake, which OpenSSL performs either way, so the two
+/// Every case runs twice where the kernel module allows it: once on the BoringSSL path and once with
+/// KernelTx. mTLS is settled during the handshake, which BoringSSL performs either way, so the two
 /// must agree - and asserting that is cheaper than reasoning about it.
 /// </summary>
 internal static class MutualTlsTests
@@ -182,8 +182,8 @@ internal static class MutualTlsTests
     /// <summary>
     /// Certificates that are legitimately issued by the trusted CA and still must not get in. Every
     /// other fixture in this suite is a clean, in-date, correctly-purposed leaf, so nothing here
-    /// pinned the checks OpenSSL performs beyond the signature - a server that verified the chain
-    /// and ignored everything else passed the whole suite.
+    /// pinned the checks the TLS library performs beyond the signature - a server that verified the
+    /// chain and ignored everything else passed the whole suite.
     /// </summary>
     private static void RegisterBadClientCertificates(Runner runner)
     {

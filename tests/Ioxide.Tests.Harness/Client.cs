@@ -233,7 +233,7 @@ public static class Client
     /// record - and report how many responses came back.
     ///
     /// This is the other fragmentation axis and the one that actually distinguishes handlers.
-    /// A record split across TCP is all-or-nothing: OpenSSL yields nothing until it is whole, so
+    /// A record split across TCP is all-or-nothing: BoringSSL yields nothing until it is whole, so
     /// even a handler that answers per decrypt sees exactly one decrypt. Split the REQUEST across
     /// records and each one decrypts on its own, so answering per decrypt answers several times.
     /// </summary>

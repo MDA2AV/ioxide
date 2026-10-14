@@ -34,8 +34,9 @@ internal static class TlsClientVerificationTests
     }
 
     /// <summary>
-    /// Wildcard matching, which the client spells out rather than inheriting whatever OpenSSL's
-    /// default hostflags mean this month: SSL_set1_host with X509_CHECK_FLAG_NO_PARTIAL_WILDCARDS.
+    /// Wildcard matching, pinned rather than left to a library default: BoringSSL matches a wildcard
+    /// only as a whole leftmost label, which the client used to ask OpenSSL for with
+    /// X509_CHECK_FLAG_NO_PARTIAL_WILDCARDS.
     /// </summary>
     private static void RegisterWildcards(Runner runner)
     {
@@ -88,9 +89,9 @@ internal static class TlsClientVerificationTests
     }
 
     /// <summary>
-    /// An origin reached by its address rather than by a name. The client only ever calls
-    /// SSL_set1_host, never SSL_set1_ip_asc - these pin that this is nonetheless correct, because
-    /// OpenSSL 3's SSL_set1_host routes a literal address to the IP parameter itself.
+    /// An origin reached by its address rather than by a name. BoringSSL's SSL_set1_host compares
+    /// with dNSNames only, so the client hands a literal address to X509_VERIFY_PARAM_set1_ip
+    /// itself - these pin that the address is what gets checked.
     /// </summary>
     private static void RegisterAddresses(Runner runner)
     {

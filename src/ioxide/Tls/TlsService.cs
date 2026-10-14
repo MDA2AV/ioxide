@@ -598,7 +598,6 @@ public sealed class TlsService
             BoringSsl.SSL_CTX_set_default_passwd_cb(ctx, (nint)refuse);
         }
 
-
         // No renegotiation to refuse: a BoringSSL server never renegotiates.
 
         // Caller-stated posture first; the kTLS block below then pins what it must, and Start has
@@ -786,9 +785,9 @@ public sealed class TlsService
     /// bytes already in native memory, against a table built when the service started.
     /// </remarks>
     /// <summary>
-    /// "There is no passphrase." Zero written bytes makes BoringSSL fail the key load with an
-    /// ordinary error rather than prompting on the terminal, which is what it does when no
-    /// callback is installed at all.
+    /// "There is no passphrase." Zero written bytes fails the key load with an ordinary error.
+    /// BoringSSL's default callback never prompts either; this states the answer rather than
+    /// relying on that.
     /// </summary>
     [UnmanagedCallersOnly]
     private static int NoPassphrase(nint buf, int size, int rwflag, nint userdata) => 0;

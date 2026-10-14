@@ -389,7 +389,7 @@ public static class Handlers
                 // Answer per REQUEST, not per decrypt. Those are the same thing only while a
                 // client sends each request in one TLS record - split one across records and
                 // "some plaintext arrived" fires once per record, so one request draws several
-                // responses. TLS reassembly is not the issue: OpenSSL yields nothing until a
+                // responses. TLS reassembly is not the issue: BoringSSL yields nothing until a
                 // record is whole. Framing above it is ours, exactly as in the plaintext path.
                 int responded = 0;
                 int idx;

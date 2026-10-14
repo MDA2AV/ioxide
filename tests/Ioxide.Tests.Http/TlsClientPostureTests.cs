@@ -16,11 +16,10 @@ namespace Ioxide.Tests;
 /// </summary>
 /// <remarks>
 /// Examined without a failing result, stated so they are not re-litigated: MinimumVersion = 0 is
-/// accepted (OpenSSL's "no floor"), but this box's system-wide MinProtocol makes the weakened
-/// floor unobservable, so no test can discriminate it here; a ServerName over 255 bytes makes the
-/// unchecked SNI ctrl silently send no SNI, but SSL_set1_host still checks the certificate against
-/// the full name, so every reachable outcome fails safe; and the client has no in-memory CA
-/// source, so the file/in-memory equivalence question the server answers cannot arise.
+/// accepted and is BoringSSL's default floor, TLS 1.2 - the client's own default, so nothing is
+/// weakened; a ServerName over 255 bytes is refused by SSL_set_tlsext_host_name, so the connect
+/// fails rather than going out without SNI; and the client has no in-memory CA source, so the
+/// file/in-memory equivalence question the server answers cannot arise.
 /// </remarks>
 internal static class TlsClientPostureTests
 {
@@ -78,12 +77,12 @@ internal static class TlsClientPostureTests
             Assert.Equal("200|hello over Tls13", body);
         });
 
-        runner.Test("tls client: a MinimumVersion OpenSSL will not accept fails Create, not silently the default floor", () =>
+        runner.Test("tls client: a MinimumVersion BoringSSL will not accept fails Create, not silently the default floor", () =>
         {
-            // MinimumVersion is a bare int. For a value OpenSSL does not recognise, ssl3_ctx_ctrl
-            // returns 0, applies NOTHING and queues NO error - so before the return was checked, a
-            // typo'd floor meant OpenSSL's default floor with no way to find out. The refusal has
-            // to be loud and has to name the call.
+            // MinimumVersion is a bare int. A value the library does not recognise comes back 0
+            // with NOTHING applied - OpenSSL did not even queue an error - so before the return was
+            // checked, a typo'd floor meant the default floor with no way to find out. The refusal
+            // has to be loud and has to name the call.
             Assert.Throws<IOException>(() =>
             {
                 using TlsClientContext _ = TlsClientContext.Create(new TlsClientOptions

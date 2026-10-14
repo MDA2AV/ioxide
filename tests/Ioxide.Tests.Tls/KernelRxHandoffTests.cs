@@ -41,9 +41,9 @@ internal static class KernelRxHandoffTests
 
     public static void Register(Runner runner, bool ktls)
     {
-        // The same bursts with OpenSSL decrypting, so a failure below is about the handoff and not
+        // The same bursts with BoringSSL decrypting, so a failure below is about the handoff and not
         // about the client.
-        runner.Test("ktls rx: control - the same bursts arrive intact when OpenSSL decrypts", () =>
+        runner.Test("ktls rx: control - the same bursts arrive intact when BoringSSL decrypts", () =>
         {
             foreach (Burst burst in new[] { Burst.Large, Burst.Aligned })
             {

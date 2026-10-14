@@ -5,7 +5,7 @@ using ioxide.utils;
 using Playground.Shared;
 
 // ─────────────────────────────────────────────────────────────────────────────────────────────
-//  tls-openssl - the same TLS termination as Tls/Ktls with kernel TLS turned OFF. OpenSSL does
+//  tls-openssl - the same TLS termination as Tls/Ktls with kernel TLS turned OFF. BoringSSL does
 //  both directions: it decrypts what the ring delivers, and it encrypts responses before they
 //  reach the write slab.
 //
@@ -15,20 +15,21 @@ using Playground.Shared;
 //  Why choose this over kTLS. It drops every constraint kTLS imposes: no 'tls' kernel module (so
 //  it runs in a container that does not have it), no TLS-1.3-only restriction, no single-suite
 //  restriction, session resumption is available again, and there is no handshake-alignment
-//  problem. The cost on this rig is nothing - see the table below - though a deployment using
-//  sendfile or a NIC that offloads TLS would see a real difference kTLS cannot give up.
+//  problem. On this rig it is also cheaper than kTLS at every size - see the table below - though
+//  a deployment using sendfile or a NIC that offloads TLS would see a real difference kTLS cannot
+//  give up.
 //
 //  The one thing the handler must do differently is on the write side: with kTLS the kernel makes
-//  the records so you write plaintext, and without it OpenSSL has to encrypt first.
+//  the records so you write plaintext, and without it BoringSSL has to encrypt first.
 //  Everything else - the handshake, ALPN, the read loop, the framing - is identical.
 //
-//  Measured here, 4 reactors, wrk -t4 -c64, against the plaintext Tcp/Raw baseline:
+//  Measured here, requests/s, 4 reactors, wrk -t4 -c64, against the plaintext Tcp/Raw baseline:
 //
-//      response   plaintext     kTLS            OpenSSL
-//         64 B    1,379,980     1,091,224 0.79x 1,093,361 0.79x
-//        8 KiB    1,109,287       749,833 0.68x   802,325 0.72x
-//       64 KiB      448,093       157,644 0.35x   196,486 0.44x
-//      256 KiB      133,097        41,691 0.31x    49,801 0.37x
+//      response   plaintext     kTLS TX         BoringSSL
+//         64 B    1,245,989       937,322 0.75x   976,752 0.78x
+//        8 KiB      991,826       582,376 0.59x   676,158 0.68x
+//       64 KiB      344,094       134,112 0.39x   153,538 0.45x
+//      256 KiB      113,412        38,786 0.34x    40,250 0.35x
 //
 //  Read that as: which TLS backend you pick is worth far less than the cost of TLS itself.
 //
@@ -92,7 +93,7 @@ var tlsOptions = new TlsOptions
     Alpn            = ["http/1.1"],                        // protocols this port serves, most-preferred first
 
     // KernelTx stays false (the default), so this sample IS the stock configuration: no TLS
-    // ULP on the socket, OpenSSL encrypts and decrypts, MSG_WAITALL stays on, and nothing here
+    // ULP on the socket, BoringSSL encrypts and decrypts, MSG_WAITALL stays on, and nothing here
     // needs the 'tls' kernel module. Tls/Ktls is the sample that opts into the kernel path.
     KernelTx        = false,
     KernelRx        = false,                               // kTLS receive (experimental; requires KernelTx)
@@ -116,7 +117,7 @@ for (int i = 0; i < threads.Length; i++)
 {
     var reactor = new Reactor(i, config);
 
-    // One TlsService per reactor: it owns the OpenSSL contexts and drives handshakes on this ring.
+    // One TlsService per reactor: it owns the BoringSSL contexts and drives handshakes on this ring.
     reactor.OnStart = r => TlsService.Start(r, tlsOptions);
 
     reactor.TcpHandle = async (r, conn) =>
@@ -133,7 +134,7 @@ for (int i = 0; i < threads.Length; i++)
         {
             // The handshake reads and writes through this same connection. Unlike Tls/Ktls, no
             // ULP is attached afterwards - the socket stays an ordinary TCP socket and every
-            // record is made and opened by OpenSSL.
+            // record is made and opened by BoringSSL.
             tls = await r.GetService<TlsService>().AcceptAsync(conn);
 
             // A request can ride in with the handshake's final flight - answer it before parking
@@ -152,7 +153,7 @@ for (int i = 0; i < threads.Length; i++)
                 {
                     if (item.HasBuffer)
                     {
-                        // Records in, plaintext out - OpenSSL decrypts what the ring received.
+                        // Records in, plaintext out - BoringSSL decrypts what the ring received.
                         Decrypt(tls, in item, carry);
                         conn.ReturnBuffer(in item);
                     }
@@ -209,7 +210,7 @@ static bool Answer(TcpConnection conn, TlsSession tls, Carry carry, ReadOnlyMemo
         carry.Consume(end + 4);
 
         // The one line that differs from Tls/Ktls. There, kTLS is producing the records so the
-        // handler writes plaintext; here OpenSSL has to encrypt before anything reaches the slab.
+        // handler writes plaintext; here BoringSSL has to encrypt before anything reaches the slab.
         tls.Write(conn, response.Span);
 
         wrote = true;

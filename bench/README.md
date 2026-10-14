@@ -87,12 +87,12 @@ Anything missing **skips with a note** instead of failing the run.
 These answer one question each, holding everything else constant, and exist because the suite
 deliberately does not.
 
-- **`tls-matrix.sh`** - h1 and h2 across plaintext / OpenSSL / kTLS-TX / kTLS-both, at 64 B and
+- **`tls-matrix.sh`** - h1 and h2 across plaintext / BoringSSL / kTLS-TX / kTLS-both, at 64 B and
   8 KB. There is no kTLS-RX-only cell: RX is programmed at the same handoff as TX, so asking for
-  it alone silently gets you OpenSSL.
+  it alone is refused at startup.
 - **`file-matrix.sh`** - static files, reading straight into the write slab versus through a
-  buffer, crossed with cleartext / kTLS / OpenSSL. Whether the slab path is legal at all follows
-  from what the slab must hold when it is sent, so there is no OpenSSL+slab cell. Runs **one
+  buffer, crossed with cleartext / kTLS / BoringSSL. Whether the slab path is legal at all follows
+  from what the slab must hold when it is sent, so there is no BoringSSL+slab cell. Runs **one
   saturated reactor**: an earlier four-reactor version reported an 11% win where the
   single-reactor method measures 22%.
 - **`h2-matrix.sh`** - nghttp2 versus the pure-C# HTTP/2, with and without TLS, on one load
@@ -114,7 +114,7 @@ deliberately does not.
 
 Measured here at 2 reactors, 64 connections, 32 streams, a 2-byte body, the pure-C# server runs
 2.7x nghttp2 cleartext and 2.5x over TLS, at about a third of the CPU per request. TLS costs
-**both** the same 0.05us per request - identical absolute cost from the same OpenSSL - so it only
+**both** the same 0.05us per request - identical absolute cost from the same TLS library - so it only
 looks like a bigger hit on the faster server.
 
 That ordering narrows as reactors rise and connections-per-reactor falls (2.76x at 2 reactors,

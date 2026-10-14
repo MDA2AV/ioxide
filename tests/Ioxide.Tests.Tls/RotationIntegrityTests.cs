@@ -64,7 +64,7 @@ internal static class RotationIntegrityTests
 
         runner.Test("rotate: a bundle torn mid-block is refused when it comes from a path", () =>
         {
-            // The same bytes as the pending test below, handed over as a file. OpenSSL's own chain
+            // The same bytes as the pending test below, handed over as a file. BoringSSL's own chain
             // loader stops on the unterminated block and says so, which is what the guarantee reads
             // like when it holds: the rotation throws, and the old certificates keep serving.
             Fixture material = Material.Value;

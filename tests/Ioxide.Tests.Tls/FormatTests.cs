@@ -46,9 +46,9 @@ internal static class FormatTests
         runner.Test("format: a UTF-8 BOM ahead of the PEM is accepted", () =>
         {
             // Editors and secret stores add one silently, and it is invisible in every tool that
-            // shows the file. Measured rather than assumed: OpenSSL's PEM reader skips it and the
-            // certificate loads, so this records that as the behaviour. If a future version stops
-            // skipping it, this test turns the change into a decision instead of a support ticket.
+            // shows the file. OpenSSL's PEM reader skipped it and BoringSSL's does not, so TlsService
+            // strips it before the file is parsed - this test is what made that a decision instead of
+            // a support ticket.
             (string certPath, string keyPath) = TestCert.EnsureServerCert(TestCert.PemShape.Utf8Bom);
 
             int port = TestServer.Start(Handlers.Tls, r => TlsService.Start(r, new TlsOptions

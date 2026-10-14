@@ -1,7 +1,7 @@
 namespace Ioxide.Tests;
 
 /// <summary>
-/// TLS termination. The default configuration is OpenSSL in both directions and needs no kernel
+/// TLS termination. The default configuration is BoringSSL in both directions and needs no kernel
 /// module, so most of the suite runs anywhere. The kTLS TX opt-in tests need the Linux 'tls'
 /// module, which does not survive a reboot and does not autoload for an unprivileged process, so
 /// it is loaded once per boot:

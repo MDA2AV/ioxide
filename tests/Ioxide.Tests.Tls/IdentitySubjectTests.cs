@@ -81,7 +81,7 @@ internal static class IdentitySubjectTests
                 $"a CN carrying CR/LF must not be reported as an identity, got: {id.CommonName}");
 
             // Not merely non-null: the peer authenticated, so a subject exists, and it carries
-            // those bytes in OpenSSL's escaped form rather than as real control characters.
+            // those bytes in BoringSSL's escaped form rather than as real control characters.
             Assert.True(id.Subject.Contains(@"alice\x0D\x0Aauthorized=root", StringComparison.Ordinal),
                 $"the rendered subject should escape the CR/LF, got: {id.Subject}");
         });
@@ -92,7 +92,7 @@ internal static class IdentitySubjectTests
             // peers are authenticated. They differ in ONE thing: the ASN.1 string type the common
             // name is encoded as.
             //
-            // PrintableString is the ordinary one. A BIT STRING is a type OpenSSL accepts inside a
+            // PrintableString is the ordinary one. A BIT STRING is a type BoringSSL accepts inside a
             // Name - it is in the mask X509_NAME's template parses with - but will not decode to
             // text, so ExtractCommonName's ASN1_STRING_to_UTF8 fails and ioxide reports no name at
             // all. The render is not so careful: X509_NAME_oneline copies the attribute's bytes
@@ -401,7 +401,7 @@ internal static class IdentitySubjectTests
             using (tbs.PushSequence())
             {
                 // clientAuth, and not decoration: the server verifies a client chain with
-                // OpenSSL's ssl_client purpose, which refuses a leaf that does not carry it.
+                // BoringSSL's ssl_client purpose, which refuses a leaf that does not carry it.
                 tbs.WriteObjectIdentifier("2.5.29.37");
                 var eku = new AsnWriter(AsnEncodingRules.DER);
                 using (eku.PushSequence())
