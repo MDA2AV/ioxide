@@ -32,6 +32,7 @@ public static unsafe partial class Native {
     public const byte IORING_OP_SEND_ZC = 47;
     public const uint IORING_ENTER_GETEVENTS = 1u << 0;
     public const uint IORING_ENTER_EXT_ARG   = 1u << 3;   // the enter's arg is an io_uring_getevents_arg: a wait with a timeout
+    public const uint IORING_SQ_CQ_OVERFLOW  = 1u << 1;   // SQ ring flags: completions are waiting in the kernel's overflow list
     public const long IORING_OFF_SQ_RING = 0;
     public const long IORING_OFF_SQES    = 0x10000000;
 

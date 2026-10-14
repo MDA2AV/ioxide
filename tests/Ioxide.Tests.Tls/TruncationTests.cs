@@ -126,9 +126,9 @@ internal static class TruncationTests
         runner.Test(controlName, () =>
         {
             // Without this the test below could pass or fail for the ordinary userspace reason.
-            // The handoff is conditional at run time - a handshake that left a partial record
-            // behind silently keeps the OpenSSL path - so "kTLS RX was configured" is not the same
-            // claim as "kTLS RX happened".
+            // The handoff is conditional at run time - a connection whose records keep arriving
+            // cut past the handoff's bound keeps the OpenSSL path - so "kTLS RX was configured" is
+            // not the same claim as "kTLS RX happened".
             (Ending ended, Ending cut) = BothShapes(KernelRx());
 
             Assert.True(ended.KernelRx && cut.KernelRx,

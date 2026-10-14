@@ -379,19 +379,20 @@ public sealed unsafe class TlsSession : IDisposable
     }
 
     /// <summary>
-    /// How many COMPLETE TLS records are pending in the read BIO, and whether anything is left over
-    /// beyond them. Inspects the BIO's buffer through BIO_CTRL_INFO rather than consuming it.
+    /// How many COMPLETE TLS records are pending in the read BIO, and how many bytes the record after
+    /// them still lacks (0 when nothing is left over). Inspects the BIO's buffer through
+    /// BIO_CTRL_INFO rather than consuming it.
     /// </summary>
     /// <remarks>
     /// This is what makes the kTLS RX handoff possible. Records the handshake already pulled off
     /// the socket are invisible to the kernel, so the sequence number it starts at has to account
-    /// for them - and a PARTIAL record left behind cannot be accounted for at all, because those
-    /// bytes are gone and the kernel will never see them. Then the only safe move is to stay in
-    /// userspace for that connection.
+    /// for them - and a PARTIAL record left behind cannot be accounted for at all, because its
+    /// first bytes are gone and the kernel would start reading in its middle. The handshake waits
+    /// for the rest of it before handing over.
     /// </remarks>
-    internal int CountPendingRecords(out bool trailingPartial)
+    internal int CountPendingRecords(out int missing)
     {
-        trailingPartial = false;
+        missing = 0;
 
         byte* buffer;
         long available = OpenSsl.BIO_ctrl(_rbio, OpenSsl.BIO_CTRL_INFO, 0, &buffer);
@@ -409,14 +410,15 @@ public sealed unsafe class TlsSession : IDisposable
             int length = (buffer[offset + 3] << 8) | buffer[offset + 4];
             if (offset + 5 + length > available)
             {
-                break;   // the record is not all here
+                missing = (int)(offset + 5 + length - available);   // the record is not all here
+                return records;
             }
 
             records++;
             offset += 5 + length;
         }
 
-        trailingPartial = offset < available;
+        missing = (int)(offset < available ? offset + 5 - available : 0);   // the header is cut
         return records;
     }
 

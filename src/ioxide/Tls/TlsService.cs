@@ -90,6 +90,12 @@ public sealed class TlsService
     /// <summary>The one suite kTLS can derive kernel keys from; see <see cref="TlsOptions.KernelTx"/>.</summary>
     private const string KernelTlsSuite = "TLS_AES_128_GCM_SHA256";
 
+    /// <summary>
+    /// How much the kTLS RX handoff holds while it waits for a cut record's rest. Past it the
+    /// connection stays on OpenSSL, which decrypts what was held.
+    /// </summary>
+    private const nuint MaxHandoffBytes = 1 << 20;
+
     private static readonly int SslSessionIndex =
         OpenSsl.CRYPTO_get_ex_new_index(OpenSsl.CRYPTO_EX_INDEX_SSL, 0, 0, 0, 0, 0);
 
@@ -1178,9 +1184,67 @@ public sealed class TlsService
 
             session.CapturePeerCertificate();
 
-            // Count BEFORE draining: these are the records the handshake pulled off the socket, so
-            // they are invisible to the kernel and the RX sequence number has to skip past them.
-            int consumedRecords = session.CountPendingRecords(out bool partialRecord);
+            // kTLS RX takes over at a record boundary. The records the handshake already pulled off
+            // the socket are invisible to the kernel, so OpenSSL decrypts them and the kernel's
+            // record sequence starts after them. -1 keeps this connection on OpenSSL.
+            int handedRecords = -1;
+            if (_options.KernelTx && _options.KernelRx && session.ClientSecret is not null)
+            {
+                var turn = new HandoffTurn(conn);
+                bool closed = false;
+                while (true)
+                {
+                    // The handshake finished, or more arrived, inside one completion, and the rest of
+                    // that batch may hold further records. They are fed as they come, so the receive
+                    // queue never fills, until the end of the batch wakes this.
+                    turn.Schedule();
+                    do
+                    {
+                        RecvSnapshot snapshot = await conn.ReadAsync();
+                        FeedInbound(conn, rbio, snapshot);
+                        conn.ResetRead();
+                        closed |= snapshot.IsClosed;
+                    }
+                    while (!turn.Ended && !closed);
+
+                    // With DEFER_TASKRUN nothing more leaves the socket before the reactor's next
+                    // io_uring_enter, and nothing below is awaited, so the count holds through
+                    // EnableRx - unless the kernel is holding completions the CQ had no room for.
+                    if (conn.Reactor.CqOverflowed)
+                    {
+                        break;
+                    }
+
+                    // Count BEFORE draining. A cut record's rest is often waiting in the socket
+                    // already, and nothing else reads the socket before that next enter: take exactly
+                    // the rest.
+                    handedRecords = session.CountPendingRecords(out int missing);
+                    while (missing > 0 && !closed && TakeWaiting(conn.ClientFd, rbio, missing) > 0)
+                    {
+                        handedRecords = session.CountPendingRecords(out missing);
+                    }
+
+                    if (missing == 0)
+                    {
+                        break;
+                    }
+                    handedRecords = -1;
+                    if (closed)
+                    {
+                        throw new IOException("connection closed inside a TLS record");
+                    }
+                    if (OpenSsl.BIO_ctrl_pending(rbio) > MaxHandoffBytes)
+                    {
+                        break;   // its records keep arriving cut
+                    }
+
+                    // The rest has not arrived: wait for more, then for the end of its batch.
+                    RecvSnapshot more = await conn.ReadAsync();
+                    FeedInbound(conn, rbio, more);
+                    conn.ResetRead();
+                    closed |= more.IsClosed;
+                }
+            }
 
             // App data that rode in with the client's Finished is sitting in the
             // rbio - decrypt it now so the handler starts with a clean slate.
@@ -1207,12 +1271,10 @@ public sealed class TlsService
                 session.ZeroSecrets();
             }
 
-            // RX is opt-in and per connection. A partial record left in the BIO means bytes the
-            // kernel will never see, and no sequence number recovers those - that connection stays
-            // on the userspace path rather than corrupting itself.
-            if (_options.KernelTx && _options.KernelRx && !partialRecord && session.ClientSecret is not null)
+            // RX is opt-in and per connection, and goes to the kernel only at the boundary found above.
+            if (handedRecords >= 0 && session.ClientSecret is not null)
             {
-                Ktls.EnableRx(conn.ClientFd, session.ClientSecret, (ulong)consumedRecords);
+                Ktls.EnableRx(conn.ClientFd, session.ClientSecret, (ulong)handedRecords);
                 session.ClientSecret = null;   // EnableRx zeroed it
                 session.MarkKernelRx();
             }
@@ -1287,6 +1349,46 @@ public sealed class TlsService
             }
         }
         return any;
+    }
+
+    // Takes up to `count` bytes already waiting in the socket into the read BIO, without blocking.
+    private static unsafe int TakeWaiting(int fd, nint rbio, int count)
+    {
+        byte* buffer = stackalloc byte[16 * 1024];
+        int n = Sockets.ReceiveWaiting(fd, buffer, Math.Min(count, 16 * 1024));
+        if (n > 0)
+        {
+            OpenSsl.BIO_write(rbio, buffer, n);
+        }
+        return n;
+    }
+
+    /// <summary>
+    /// Wakes the kTLS RX handoff's read at the end of the reactor's current turn: after every
+    /// completion of the batch is dispatched, and before the reactor's next io_uring_enter.
+    /// </summary>
+    private sealed class HandoffTurn(TcpConnection conn)
+    {
+        private int _generation;
+
+        public bool Ended { get; private set; }
+
+        public void Schedule()
+        {
+            Ended = false;
+            _generation = conn.Generation;
+            conn.Reactor.ScheduleOnReactor(static state => ((HandoffTurn)state!).End(), this);
+        }
+
+        private void End()
+        {
+            // A handshake that ended mid-turn may have let go of the connection, and it may live again.
+            if (conn.Generation == _generation)
+            {
+                Ended = true;
+                conn.WakeRead();
+            }
+        }
     }
 
     [UnmanagedCallersOnly]

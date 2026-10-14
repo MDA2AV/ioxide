@@ -27,9 +27,9 @@ using Playground.Shared;
 //               kernel makes records)        go into the slab)
 //
 //  It picks them from the SESSION, not from configuration - because the two are not the same
-//  thing. TlsOptions is intent; TlsService decides per connection at the handoff, and a handshake
-//  that left a partial record cannot hand off to kTLS RX at all, so that connection keeps the
-//  userspace reader whatever the config said. TlsSession reports what actually happened.
+//  thing. TlsOptions is intent; TlsService decides per connection at the handoff, and a connection
+//  whose records keep arriving cut past the handoff's bound never hands off to kTLS RX, so it keeps
+//  the userspace reader whatever the config said. TlsSession reports what actually happened.
 //
 //  Compare the raw-ring pair, Playground/Tls/Ktls and Playground/Tls/OpenSsl. Those two DO differ
 //  in the handler, because at that level the backend is visible: kTLS writes plaintext straight
