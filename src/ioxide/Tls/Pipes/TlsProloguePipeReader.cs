@@ -60,13 +60,12 @@ public sealed class TlsProloguePipeReader : PipeReader
     /// <summary>True once this is a pass-through and costs nothing.</summary>
     public bool Drained => _drained;
 
-    public override async ValueTask<ReadResult> ReadAsync(CancellationToken cancellationToken = default)
-    {
-        if (_drained)
-        {
-            return await _inner.ReadAsync(cancellationToken);
-        }
+    // Not async: an async pass-through allocates its state machine on every read that has to wait.
+    public override ValueTask<ReadResult> ReadAsync(CancellationToken cancellationToken = default) =>
+        _drained ? _inner.ReadAsync(cancellationToken) : ReadCarryAsync(cancellationToken);
 
+    private async ValueTask<ReadResult> ReadCarryAsync(CancellationToken cancellationToken)
+    {
         // A cancel that arrived while the carry was live is served here, not latched into the
         // inner reader to pop out as a surprise after the carry drains.
         if (_cancelRequested)
