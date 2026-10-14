@@ -592,10 +592,11 @@ public sealed unsafe class TlsSession : IDisposable
         _disposed = true;
 
         // Clean server-side teardown: send close_notify so the peer can tell end-of-stream from a
-        // truncation, whichever backend owns the write side. Skip if the peer already closed, and
-        // where a raw send cannot go out cleanly: into a send the ring still has, or past the FIN -
-        // which a reactor teardown marks too, once the fd may be someone else's.
-        if (!Closed && _fd >= 0 && (_conn is null || (!_conn.FlushOutstanding && !_conn.FinSent)))
+        // truncation, whichever backend owns the write side - also when the peer closed first, which
+        // RFC 8446 6.1 asks of both sides. Skip where a raw send cannot go out cleanly: into a send
+        // the ring still has, or past the FIN - which a reactor teardown marks too, once the fd may
+        // be someone else's.
+        if (_fd >= 0 && (_conn is null || (!_conn.FlushOutstanding && !_conn.FinSent)))
         {
             if (_txEnabled)
             {

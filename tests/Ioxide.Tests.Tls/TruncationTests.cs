@@ -101,7 +101,82 @@ internal static class TruncationTests
                 + "indistinguishable from a truncation: " + Describe(types));
         });
 
+        runner.Test("tls truncation: a client's close_notify is answered with the server's own", () =>
+        {
+            // RFC 8446 6.1: each side sends close_notify before closing its write side, whichever
+            // closed first. TLS 1.2 again, so the alert shows as a record type.
+            (string certPath, string keyPath) = TestCert.Ensure();
+            var options = new TlsOptions { CertificatePath = certPath, KeyPath = keyPath };
+
+            int port = TestServer.Start(ReadUntilPeerClosesHandler, r => TlsService.Start(r, options));
+
+            using var sock = new TcpClient();
+            sock.Connect("127.0.0.1", port);
+            sock.ReceiveTimeout = 10_000;
+            var tap = new RecordingStream(sock.GetStream());
+            var ssl = new SslStream(tap, leaveInnerStreamOpen: true, (_, _, _, _) => true);
+            ssl.AuthenticateAsClient(new SslClientAuthenticationOptions
+            {
+                TargetHost = "localhost",
+                EnabledSslProtocols = SslProtocols.Tls12,
+            });
+            int handshake = tap.Inbound.Length;
+
+            ssl.ShutdownAsync().GetAwaiter().GetResult();
+            var buffer = new byte[512];
+            try
+            {
+                while (tap.Read(buffer, 0, buffer.Length) > 0)
+                {
+                }
+            }
+            catch (IOException)
+            {
+                // The records that arrived are already in the tap.
+            }
+
+            List<byte> types = RecordTypes(tap.Inbound[handshake..]);
+            Assert.True(types.Contains(Alert),
+                "the client sent close_notify and the server closed without its own: " + Describe(types));
+        });
+
         RegisterKernelRx(runner, ktls);
+    }
+
+    private static async Task ReadUntilPeerClosesHandler(Reactor reactor, TcpConnection connection)
+    {
+        TlsSession? session = null;
+        TlsConnectionDualPipe? pipe = null;
+        try
+        {
+            session = await reactor.GetService<TlsService>().AcceptAsync(connection);
+            pipe = new TlsConnectionDualPipe(connection, session);
+            while (true)
+            {
+                ReadResult read = await pipe.Input.ReadAsync();
+                pipe.Input.AdvanceTo(read.Buffer.End);
+                if (read.IsCompleted)
+                {
+                    break;   // the client's close_notify
+                }
+            }
+        }
+        catch
+        {
+            // The harness probes the port with a raw TCP connection, which fails the handshake.
+        }
+        finally
+        {
+            if (pipe is not null)
+            {
+                await pipe.DisposeAsync();
+            }
+            else
+            {
+                session?.Dispose();
+            }
+            connection.DecRef();
+        }
     }
 
     /// <summary>
