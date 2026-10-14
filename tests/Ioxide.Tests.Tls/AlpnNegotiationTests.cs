@@ -17,9 +17,6 @@ namespace Ioxide.Tests;
 /// negotiation: what the client was told, and what a handler would branch on to pick an h2 loop
 /// over an h1 one. The select loop is additionally pinned by reflection for the malformed offers
 /// OpenSSL never forwards - that test says why end-to-end cannot deliver them.
-///
-/// One live defect rides as Pending: BuildAlpnWire casts each UTF-16 unit to a byte, so a
-/// non-ASCII protocol name goes on the wire as a DIFFERENT protocol made of its chars' low bytes.
 /// </remarks>
 internal static class AlpnNegotiationTests
 {
@@ -140,14 +137,15 @@ internal static class AlpnNegotiationTests
 
         RegisterSelectLoopBounds(runner);
 
-        runner.Pending("alpn: a non-ascii protocol name must not negotiate as a different protocol", () =>
+        runner.Test("alpn: a non-ascii protocol name must not negotiate as a different protocol", () =>
         {
             // BuildAlpnWire writes (byte)protocol[i] - the LOW BYTE of each UTF-16 unit. U+0168
             // has low byte 0x68, which is 'h', so a server configured to speak only "\u0168" + "2"
-            // puts the exact bytes "h2" on the wire and ACKs any client offering h2. Two distinct
-            // protocol identifiers compare equal, the client is told h2, and CaptureAlpn records
+            // put the exact bytes "h2" on the wire and ACKed any client offering h2. Two distinct
+            // protocol identifiers compared equal, the client was told h2, and CaptureAlpn recorded
             // h2 - a protocol the operator never listed. (The same cast is why the SAME non-ASCII
-            // string configured on both sides fails to match: SslApplicationProtocol sends UTF-8.)
+            // string configured on both sides failed to match: SslApplicationProtocol sends UTF-8.)
+            // BuildAlpnWire now refuses a non-ASCII name, so the start below is refused.
             string exotic = "\u0168" + "2";   // two chars whose low bytes are 'h','2'
 
             (string cert, string key) = TestCert.Ensure();
@@ -186,9 +184,7 @@ internal static class AlpnNegotiationTests
             Assert.True(negotiated != "h2",
                 "a server configured to speak only 'U+0168 2' ACKed h2 - the char-to-byte cast in "
                 + "BuildAlpnWire makes two distinct protocol identifiers compare equal");
-        }, "BuildAlpnWire casts UTF-16 units to bytes, so the configured \"\\u01682\" goes on the wire "
-         + "as the bytes 'h2' and the server negotiates - and CaptureAlpn records - a protocol "
-         + "nobody configured");
+        });
     }
 
     /// <summary>

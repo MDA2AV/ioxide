@@ -144,13 +144,13 @@ internal static class TlsClientPostureTests
                 $"should name the verification failure, got: {body}");
         });
 
-        runner.Pending("tls client: a non-ascii alpn protocol must not be offered as a different protocol", () =>
+        runner.Test("tls client: a non-ascii alpn protocol must not be offered as a different protocol", () =>
         {
             // TlsClientContext.BuildAlpnWire writes (byte)protocol[i] - the LOW BYTE of each UTF-16
             // unit. U+0168 has low byte 0x68, 'h', so a client configured to offer ONLY
-            // "Ũ" + "2" puts the exact bytes "h2" on the wire, the origin selects h2, and
-            // NegotiatedAlpn reports a protocol the caller never configured. The server side has
-            // the same cast and the same proven defect; this is the client half.
+            // "Ũ" + "2" put the exact bytes "h2" on the wire, the origin selected h2, and
+            // NegotiatedAlpn reported a protocol the caller never configured. The server side had
+            // the same cast; this is the client half. Create now refuses a non-ASCII name.
             string exotic = "Ũ" + "2";
 
             using TlsTestOrigin origin = TlsTestOrigin.Start("h2");   // speaks ONLY h2
@@ -190,9 +190,7 @@ internal static class TlsClientPostureTests
             Assert.True(!body.EndsWith("hello over h2"),
                 "a client configured to offer only 'U+0168 2' completed a conversation the origin "
                 + $"negotiated as h2; body: {body}, origin saw alpn={origin.LastAlpn ?? "none"}");
-        }, "BuildAlpnWire casts UTF-16 units to bytes, so the configured \"\\u0168 2\" goes on the "
-         + "wire as the bytes 'h2' and the client negotiates - and NegotiatedAlpn reports - a "
-         + "protocol nobody configured");
+        });
 
         runner.Test("tls client: HandshakeTimeoutMs bounds a handshake whose peer accepted and went silent", () =>
         {

@@ -169,18 +169,18 @@ internal static class H3AlpnTests
         }, "the ALPN backstop landed only in the pure-C# stack; Nghttp3Connection never reads "
          + "NegotiatedProtocol, so a permissive engine's 'echo' connection is answered 200");
 
-        runner.Pending("quic/alpn: a non-ascii allow-list token must not admit a protocol nobody configured", () =>
+        runner.Test("quic/alpn: a non-ascii allow-list token must not admit a protocol nobody configured", () =>
         {
-            // QuicEngine.AlpnWire encodes each configured token with Encoding.ASCII, whose
-            // fallback substitutes '?' for anything non-ascii - so ["Ũ2"] goes on the wire as the
-            // allowlist entry "?2". Two consequences: the configured token itself can never
-            // negotiate (a client offering the actual bytes of "Ũ2" finds no match), and every
-            // non-ascii token collapses onto '?', so a client offering the literal "?2" is
-            // admitted, served, and reads back NegotiatedProtocol == "?2" - a protocol nobody
-            // configured. The TCP side's BuildAlpnWire has the same shape with a worse symptom
-            // (UTF-16 units cast to bytes turn "Ũ2" into the real "h2"); the fix on either side
-            // is to refuse a non-ascii token at construction, like the >255-byte one already is,
-            // or to encode it faithfully - both make this body pass.
+            // QuicEngine.AlpnWire encoded each configured token with Encoding.ASCII, whose
+            // fallback substitutes '?' for anything non-ascii - so ["Ũ2"] went on the wire as the
+            // allowlist entry "?2". Two consequences: the configured token itself could never
+            // negotiate (a client offering the actual bytes of "Ũ2" found no match), and every
+            // non-ascii token collapsed onto '?', so a client offering the literal "?2" was
+            // admitted, served, and read back NegotiatedProtocol == "?2" - a protocol nobody
+            // configured. The TCP side's BuildAlpnWire had the same shape with a worse symptom
+            // (UTF-16 units cast to bytes turn "Ũ2" into the real "h2"). A non-ascii token is now
+            // refused at construction, like the >255-byte one; encoding it faithfully would also
+            // make this body pass.
             (string certPath, string keyPath) = TestCert.Ensure();
             QuicEngine engine;
             try
@@ -205,7 +205,6 @@ internal static class H3AlpnTests
                 Assert.True(!client.CompleteHandshake(timeoutMs: 5000),
                     "a client offering '?2' completed the handshake against an allow list of 'Ũ2'");
             }
-        }, "AlpnWire's ASCII '?' substitution puts \"?2\" on the wire for the configured \"Ũ2\", "
-         + "and a client offering the literal \"?2\" is admitted and served");
+        });
     }
 }

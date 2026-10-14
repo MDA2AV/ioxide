@@ -178,6 +178,11 @@ public sealed unsafe class TlsClientContext : IDisposable
             {
                 throw new ArgumentException($"ALPN protocol '{protocol}' must be 1..255 bytes.", nameof(protocols));
             }
+            // Each char goes out as one byte, so any other name would be offered as a different protocol.
+            if (!System.Text.Ascii.IsValid(protocol))
+            {
+                throw new ArgumentException($"ALPN protocol '{protocol}' must be ASCII.", nameof(protocols));
+            }
             total += 1 + protocol.Length;
         }
 
