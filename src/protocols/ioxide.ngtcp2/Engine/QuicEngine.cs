@@ -177,7 +177,8 @@ public sealed unsafe class QuicEngine : IDisposable
     /// TLS the engine was configured for.
     ///
     /// A name already registered is refused rather than shadowed, since the first registration is
-    /// the one that would answer.
+    /// the one that would answer. So is a name no client could ask for - one containing <c>*</c>,
+    /// an IP address, a non-ASCII name, or one over 255 bytes - since the table is matched exactly.
     ///
     /// PEM paths, for the same reason the constructor takes them: ngtcp2 loads certificates by path.
     /// </remarks>
@@ -185,7 +186,7 @@ public sealed unsafe class QuicEngine : IDisposable
     /// The engine is already serving, the name is already registered, or the certificate or key
     /// could not be loaded.
     /// </exception>
-    /// <exception cref="ArgumentException">The name is blank.</exception>
+    /// <exception cref="ArgumentException">The name is blank, or no client could ask for it.</exception>
     public void AddHost(string host, string certificatePath, string keyPath)
     {
         // Before the name is judged: on a serving engine that is the reason the call is refused,
@@ -200,6 +201,7 @@ public sealed unsafe class QuicEngine : IDisposable
         }
 
         ArgumentException.ThrowIfNullOrWhiteSpace(host);
+        RequireServableHost(host);
 
         // Under the same lock as a rotation and disposal. AddHost is legal only before the engine
         // serves, but nothing stops it running beside ReplaceCertificates on another thread during
@@ -271,6 +273,7 @@ public sealed unsafe class QuicEngine : IDisposable
                  certificatesByHost ?? (IReadOnlyDictionary<string, QuicCertificate>)new Dictionary<string, QuicCertificate>())
         {
             ArgumentException.ThrowIfNullOrWhiteSpace(host);
+            RequireServableHost(host);
             ArgumentNullException.ThrowIfNull(certificate);
             ArgumentException.ThrowIfNullOrWhiteSpace(certificate.CertificatePath);
             ArgumentException.ThrowIfNullOrWhiteSpace(certificate.KeyPath);
@@ -293,6 +296,29 @@ public sealed unsafe class QuicEngine : IDisposable
 
             Replace(defaultCertificate, certificatesByHost);
             _hostCount = certificatesByHost?.Count ?? 0;
+        }
+    }
+
+    // The TCP side's TlsService refuses the same keys: the shim matches names exactly, so an entry
+    // no client can ask for would be built and never served.
+    private static void RequireServableHost(string host)
+    {
+        string? why = host switch
+        {
+            _ when host.Contains('*')
+                => "a wildcard is matched as text, not as a pattern - register each name the certificate covers",
+            _ when System.Net.IPAddress.TryParse(host, out _)
+                => "an IP address is not a legal SNI value (RFC 6066 3.1)",
+            _ when !System.Text.Ascii.IsValid(host)
+                => "a non-ASCII name is never sent - register it in its A-label (xn--) form",
+            { Length: > 255 }
+                => "a name over 255 bytes is longer than any DNS name",
+            _ => null,
+        };
+
+        if (why is not null)
+        {
+            throw new ArgumentException($"ioxide.ngtcp2: the host '{host}' cannot be asked for by SNI: {why}.");
         }
     }
 

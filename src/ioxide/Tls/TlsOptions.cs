@@ -34,9 +34,10 @@ public sealed class TlsOptions
     /// no port, and a literal IP address is not a legal SNI value (RFC 6066 3.1).
     ///
     /// Keys must be ASCII, which is what SNI carries: an international name belongs here in its
-    /// A-label form (<c>xn--</c>...), the form a client actually sends. A non-ASCII key is matched
-    /// byte for byte and so would simply never be asked for. Two keys differing only in case are
-    /// refused, since only the first could ever be served.
+    /// A-label form (<c>xn--</c>...), the form a client actually sends. A key no client could ask
+    /// for - one containing <c>*</c>, an IP address, a non-ASCII name, or one over 255 bytes - is
+    /// refused, naming it, rather than built and never served. So are two keys differing only in
+    /// case, since only the first could ever be served.
     ///
     /// Each entry costs one OpenSSL context. Selection at handshake time is a short linear scan
     /// over the names as UTF-8 bytes, on the reactor thread, with no managed allocation - a

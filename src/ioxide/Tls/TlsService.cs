@@ -500,6 +500,8 @@ public sealed class TlsService
                 throw new ArgumentException("A blank host cannot be asked for by SNI.");
             }
 
+            RequireServableHost(host);
+
             RequireOneSourceEach(certificate, $" for '{host}'");
 
             // Folded the SAME way the handshake folds the name it receives - ASCII only. Using
@@ -725,6 +727,31 @@ public sealed class TlsService
             // needs the callback - reading the same wire bytes through the same handle.
             delegate* unmanaged<nint, nint, nint, nint, uint, nint, int> alpn = &AlpnSelectCallback;
             OpenSsl.SSL_CTX_set_alpn_select_cb(ctx, (nint)alpn, GCHandle.ToIntPtr(alpnHandle));
+        }
+    }
+
+    /// <summary>
+    /// Refuses, naming it, a host no client can ask for. The table is matched exactly, so the entry
+    /// would cost a context, be reported in <see cref="ServerNames"/>, and never be served.
+    /// </summary>
+    private static void RequireServableHost(string host)
+    {
+        string? why = host switch
+        {
+            _ when host.Contains('*')
+                => "a wildcard is matched as text, not as a pattern - register each name the certificate covers",
+            _ when System.Net.IPAddress.TryParse(host, out _)
+                => "an IP address is not a legal SNI value (RFC 6066 3.1)",
+            _ when !System.Text.Ascii.IsValid(host)
+                => "a non-ASCII name is never sent - register it in its A-label (xn--) form",
+            { Length: > 255 }
+                => "a name over 255 bytes is longer than any DNS name",
+            _ => null,
+        };
+
+        if (why is not null)
+        {
+            throw new ArgumentException($"The host '{host}' cannot be asked for by SNI: {why}.");
         }
     }
 

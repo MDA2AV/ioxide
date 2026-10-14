@@ -157,7 +157,64 @@ internal static class SniConfigTests
             Assert.True(refusal.Contains("Exactly one certificate source for 'alpha.test'"),
                 $"naming two certificate sources for one host should be refused at startup; got: {refusal}");
         });
+
+        // The table is matched exactly, so each of these was built, reported in ServerNames, and
+        // never served (#207).
+        runner.Test("sni: a host name no client can ask for is refused, naming it", () =>
+        {
+            (string cert, string key) = TestCert.Ensure();
+            (string alphaCert, string alphaKey) = TestCert.EnsureNamed("alpha.test");
+
+            foreach ((string host, string reason) in Unservable)
+            {
+                Assert.True(StartFails(new TlsOptions
+                {
+                    CertificatePath = cert,
+                    KeyPath = key,
+                    CertificatesByHost = new Dictionary<string, TlsCertificate>
+                    {
+                        [host] = new() { CertificatePath = alphaCert, KeyPath = alphaKey },
+                    },
+                }, $"The host '{host}' cannot be asked for by SNI: {reason}"),
+                    $"'{host}' cannot be asked for by SNI ({reason}) and should be refused at startup");
+            }
+        });
+
+        // The control: refused for what they are, not for looking unusual. Starting at all is the
+        // assertion for the 255-byte name, which SslStream will not send (its IDN mapping stops at 253).
+        runner.Test("sni: control: an A-label name and a name of exactly 255 bytes are accepted", () =>
+        {
+            (string cert, string key) = TestCert.Ensure();
+            (string alphaCert, string alphaKey) = TestCert.EnsureNamed("alpha.test");
+
+            int port = TestServer.Start(Handlers.TlsSendFirst, r => TlsService.Start(r, new TlsOptions
+            {
+                CertificatePath = cert,
+                KeyPath = key,
+                CertificatesByHost = new Dictionary<string, TlsCertificate>
+                {
+                    ["xn--bcher-kva.test"] = new() { CertificatePath = alphaCert, KeyPath = alphaKey },
+                    [Longest] = new() { CertificatePath = alphaCert, KeyPath = alphaKey },
+                },
+            }));
+
+            string subject = Client.ServerCertificateSubject(port, "xn--bcher-kva.test");
+            Assert.True(subject.Contains("alpha.test"), $"the A-label name was answered with {subject}");
+        });
     }
+
+    /// <summary>Four 63-byte labels: 255 bytes, the longest server name OpenSSL accepts.</summary>
+    private static readonly string Longest = string.Join('.', Enumerable.Repeat(new string('a', 63), 4));
+
+    /// <summary>Keys no client can ask for, each with the start of the reason it is refused for.</summary>
+    private static readonly (string Host, string Reason)[] Unservable =
+    [
+        ("*.alpha.test", "a wildcard"),
+        ("127.0.0.1", "an IP address"),
+        ("::1", "an IP address"),
+        ("b\u00fccher.test", "a non-ASCII name"),
+        (Longest + "a", "a name over 255 bytes"),
+    ];
 
     /// <summary>
     /// Whether starting with these options was refused for the stated reason. The reactor raises on

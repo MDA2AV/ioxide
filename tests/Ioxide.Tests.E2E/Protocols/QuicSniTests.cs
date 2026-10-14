@@ -351,7 +351,56 @@ internal static class QuicSniTests
 
             Assert.True(refused, "a blank name cannot be asked for by SNI and should be refused");
         });
+
+        // The shim matches names exactly, so each of these was built and never served (#207).
+        runner.Test("sni/quic: a host name no client can ask for is refused, naming it", () =>
+        {
+            (string cert, string key) = TestCert.Ensure();
+            (string alphaCert, string alphaKey) = TestCert.EnsureNamed("alpha.test");
+
+            using var engine = new QuicEngine(cert, key, cidLength: 8, alpn: ["h3"]);
+
+            // Both ways a name reaches the table: added before serving, and in a rotation.
+            foreach ((string host, string reason) in Unservable)
+            {
+                Assert.Throws<ArgumentException>(() => engine.AddHost(host, alphaCert, alphaKey),
+                    $"the host '{host}' cannot be asked for by SNI: {reason}");
+
+                Assert.Throws<ArgumentException>(() => engine.ReplaceCertificates(new QuicCertificate(cert, key),
+                    new Dictionary<string, QuicCertificate> { [host] = new(alphaCert, alphaKey) }),
+                    $"the host '{host}' cannot be asked for by SNI: {reason}");
+            }
+        });
+
+        // The control: refused for what they are, not for looking unusual.
+        runner.Test("sni/quic: control: an A-label name and a name of exactly 255 bytes are accepted", () =>
+        {
+            (string cert, string key) = TestCert.Ensure();
+            (string alphaCert, string alphaKey) = TestCert.EnsureNamed("alpha.test");
+
+            using var engine = new QuicEngine(cert, key, cidLength: 8, alpn: ["h3"]);
+            engine.AddHost("xn--bcher-kva.test", alphaCert, alphaKey);
+            engine.AddHost(Longest, alphaCert, alphaKey);
+            int udpPort = Serve(engine);
+
+            (string subject, int status) = Ask(udpPort, "xn--bcher-kva.test");
+            Assert.True(subject.Contains("alpha.test"), $"the A-label name was answered with {subject}");
+            Assert.Equal(200, status);
+        });
     }
+
+    /// <summary>Four 63-byte labels: 255 bytes, the longest name the TCP side's OpenSSL accepts.</summary>
+    private static readonly string Longest = string.Join('.', Enumerable.Repeat(new string('a', 63), 4));
+
+    /// <summary>Keys no client can ask for, each with the start of the reason it is refused for.</summary>
+    private static readonly (string Host, string Reason)[] Unservable =
+    [
+        ("*.alpha.test", "a wildcard"),
+        ("127.0.0.1", "an IP address"),
+        ("::1", "an IP address"),
+        ("b\u00fccher.test", "a non-ASCII name"),
+        (Longest + "a", "a name over 255 bytes"),
+    ];
 
     /// <summary>Default localhost certificate, plus alpha.test and beta.test by name.</summary>
     private static QuicEngine NewEngine(out string defaultCert)
