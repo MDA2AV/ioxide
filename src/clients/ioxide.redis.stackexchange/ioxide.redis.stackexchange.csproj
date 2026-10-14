@@ -16,7 +16,7 @@
     <NoWarn>$(NoWarn);SER009</NoWarn>
 
     <PackageId>ioxide.redis.stackexchange</PackageId>
-    <Version>0.17.340</Version>
+    <Version>0.18.374</Version>
     <Authors>MDA2AV</Authors>
     <Description>Experimental: StackExchange.Redis over the ioxide io_uring runtime. A Tunnel whose transport is a socket on a reactor's ring, so a multiplexer's connections connect, send and receive on that reactor and complete commands on its thread. Built on StackExchange.Redis's experimental transport seam (SER009) and pinned to one StackExchange.Redis version.</Description>
     <PackageLicenseExpression>MIT</PackageLicenseExpression>
