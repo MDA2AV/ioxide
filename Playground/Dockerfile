@@ -33,8 +33,8 @@ RUN csproj="$(ls Playground/${SAMPLE}/*.csproj)" \
  && dotnet publish "$csproj" -c Release -o /app \
  && ln -s "/app/$(basename "$csproj" .csproj)" /app/playground
 
-# The ngtcp2 bundle's only external dependency is OpenSSL 3 (libcrypto.so.3), which the Debian-based
-# runtime image already carries.
+# The native bundles (BoringSSL, ngtcp2, nghttp2, nghttp3) depend on nothing beyond libc; the runtime
+# image's own OpenSSL is .NET's, for its crypto APIs.
 FROM mcr.microsoft.com/dotnet/runtime:11.0-preview
 WORKDIR /app
 COPY --from=build /app .

@@ -34,9 +34,15 @@
 
 #include <openssl/bio.h>
 #include <openssl/pem.h>
-#include <openssl/pemerr.h>
 #include <openssl/evp.h>
 #include <openssl/err.h>
+
+/* The groups the client offers, in the order this bundle offered them before BoringSSL put
+ * X25519MLKEM768 at the head of ptls_openssl_key_exchanges_all: a post-quantum share adds 1.2 KB to
+ * the ClientHello, and offering one is a decision of its own. Servers keep the full list, so a
+ * client that offers X25519MLKEM768 gets it. */
+static ptls_key_exchange_algorithm_t *iq_client_key_exchanges[] = {
+    &ptls_openssl_secp521r1, &ptls_openssl_secp384r1, &ptls_openssl_x25519, &ptls_openssl_secp256r1, NULL};
 
 /* Exported-surface revision. Bump on any change to an exported signature or a struct crossing the
  * boundary; iq_abi() hands it to the managed side, which refuses to start on a mismatch.
@@ -1854,7 +1860,7 @@ iq_client_engine *iq_client_engine_new_mtls(const char *alpn, const char *cert_p
     }
     e->ptls_ctx.random_bytes  = ptls_openssl_random_bytes;
     e->ptls_ctx.get_time      = &ptls_get_time;
-    e->ptls_ctx.key_exchanges = ptls_openssl_key_exchanges_all;
+    e->ptls_ctx.key_exchanges = iq_client_key_exchanges;
     e->ptls_ctx.cipher_suites = ptls_openssl_cipher_suites;
     /* Accepts the server's certificate unconditionally (verify_certificate NULL) - this client
      * exists to drive our own servers, not to authenticate them. */
