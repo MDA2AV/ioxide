@@ -7,14 +7,14 @@ namespace ioxide.httpclient;
 /// <c>(pointer, length)</c> shape as <see cref="RingSocket"/> itself and mean the same thing, so a
 /// client that already speaks to a raw socket can speak to this instead with no other change.
 ///
-/// OpenSSL sees only memory BIOs; every byte that reaches the network still goes through the
+/// BoringSSL sees only memory BIOs; every byte that reaches the network still goes through the
 /// reactor's ring, and every await resumes inline on the reactor thread like the rest of ioxide.
 /// </summary>
 /// <remarks>
 /// Reactor thread only, and one operation at a time in each direction - the same contract the
 /// underlying <see cref="RingSocket"/> has, since each direction owns a single completion source.
 ///
-/// The OpenSSL calls live in small synchronous helpers rather than inline: an <c>unsafe</c> method
+/// The BoringSSL calls live in small synchronous helpers rather than inline: an <c>unsafe</c> method
 /// cannot contain an await, and the alternative (pointers held across a suspension) is exactly the
 /// shape that goes wrong when a continuation resumes on a different stack.
 /// </remarks>
@@ -26,8 +26,8 @@ public sealed class TlsClientStream : IDisposable
 
     private readonly RingSocket _socket;
     private readonly nint _ssl;
-    private readonly nint _rbio;   // ciphertext IN: socket -> OpenSSL
-    private readonly nint _wbio;   // ciphertext OUT: OpenSSL -> socket
+    private readonly nint _rbio;   // ciphertext IN: socket -> BoringSSL
+    private readonly nint _wbio;   // ciphertext OUT: BoringSSL -> socket
 
     // One staging buffer PER DIRECTION, which is not an optimisation - it is required. RingSocket
     // deliberately allows one send and one recv to be in flight at once (separate completion
@@ -66,34 +66,34 @@ public sealed class TlsClientStream : IDisposable
         // Everything from here to the constructor is unowned: the stream that would free it does
         // not exist yet, and ClientTransport hands the socket over on the understanding that the
         // stream closes it on failure. So each step that can throw unwinds explicitly.
-        nint ssl = OpenSsl.SSL_new(context.Handle);
+        nint ssl = BoringSsl.SSL_new(context.Handle);
         if (ssl == 0)
         {
             socket.Dispose();
-            throw new IOException($"SSL_new: {OpenSsl.LastError()}");
+            throw new IOException($"SSL_new: {BoringSsl.LastError()}");
         }
 
         TlsClientStream stream;
         try
         {
-            nint rbio = OpenSsl.BIO_new(OpenSsl.BIO_s_mem());
-            nint wbio = OpenSsl.BIO_new(OpenSsl.BIO_s_mem());
+            nint rbio = BoringSsl.BIO_new(BoringSsl.BIO_s_mem());
+            nint wbio = BoringSsl.BIO_new(BoringSsl.BIO_s_mem());
             if (rbio == 0 || wbio == 0)
             {
                 // Free whichever one succeeded; SSL_set_bio never ran, so neither is owned yet.
                 if (rbio != 0)
                 {
-                    OpenSsl.BIO_free(rbio);
+                    BoringSsl.BIO_free(rbio);
                 }
                 if (wbio != 0)
                 {
-                    OpenSsl.BIO_free(wbio);
+                    BoringSsl.BIO_free(wbio);
                 }
-                throw new IOException($"BIO_new: {OpenSsl.LastError()}");
+                throw new IOException($"BIO_new: {BoringSsl.LastError()}");
             }
 
-            OpenSsl.SSL_set_bio(ssl, rbio, wbio);   // ssl owns both BIOs from here
-            OpenSsl.SSL_set_connect_state(ssl);
+            BoringSsl.SSL_set_bio(ssl, rbio, wbio);   // ssl owns both BIOs from here
+            BoringSsl.SSL_set_connect_state(ssl);
 
             ConfigureNames(ssl, options, serverName);   // throws when SSL_set1_host rejects the name
 
@@ -101,7 +101,7 @@ public sealed class TlsClientStream : IDisposable
         }
         catch
         {
-            OpenSsl.SSL_free(ssl);   // frees the BIOs too, once set_bio has run
+            BoringSsl.SSL_free(ssl);   // frees the BIOs too, once set_bio has run
             socket.Dispose();
             throw;
         }
@@ -121,26 +121,39 @@ public sealed class TlsClientStream : IDisposable
     // SNI and the verification name are two different things and both are needed: SNI tells the
     // origin which certificate to send, SSL_set1_host checks the one it actually sent. Setting only
     // the first is the classic way to end up with encryption and no authentication.
-    private static void ConfigureNames(nint ssl, TlsClientOptions options, string serverName)
+    private static unsafe void ConfigureNames(nint ssl, TlsClientOptions options, string serverName)
     {
-        nint name = Marshal.StringToHGlobalAnsi(serverName);
-        try
+        // An address is not a host name: it is checked against the certificate's iPAddress names
+        // (SSL_set1_host would compare it with dNSNames) and not sent as SNI, which RFC 6066 3
+        // reserves for host names. Only the full forms count, so a numeric host name stays a name.
+        if ((serverName.Contains(':') || serverName.Count(c => c == '.') == 3)
+            && System.Net.IPAddress.TryParse(serverName, out System.Net.IPAddress? address))
         {
-            OpenSsl.SSL_ctrl(ssl, OpenSsl.SSL_CTRL_SET_TLSEXT_HOSTNAME,
-                OpenSsl.TLSEXT_NAMETYPE_host_name, name);
-        }
-        finally
-        {
-            Marshal.FreeHGlobal(name);
+            if (options.VerifyCertificate)
+            {
+                byte[] bytes = address.GetAddressBytes();
+                fixed (byte* p = bytes)
+                {
+                    if (BoringSsl.X509_VERIFY_PARAM_set1_ip(BoringSsl.SSL_get0_param(ssl), p, (nuint)bytes.Length) != 1)
+                    {
+                        throw new IOException($"X509_VERIFY_PARAM_set1_ip('{serverName}'): {BoringSsl.LastError()}");
+                    }
+                }
+            }
+            return;
         }
 
-        if (options.VerifyCertificate && OpenSsl.SSL_set1_host(ssl, serverName) != 1)
+        if (BoringSsl.SSL_set_tlsext_host_name(ssl, serverName) != 1)
         {
-            throw new IOException($"SSL_set1_host('{serverName}'): {OpenSsl.LastError()}");
+            throw new IOException($"SSL_set_tlsext_host_name('{serverName}'): {BoringSsl.LastError()}");
         }
 
-        // 'ww*.example.com' must not match 'www.example.com': a partial wildcard names a prefix, not a host.
-        OpenSsl.SSL_set_hostflags(ssl, OpenSsl.X509_CHECK_FLAG_NO_PARTIAL_WILDCARDS);
+        // BoringSSL matches a wildcard only as a whole leftmost label, so 'ww*.example.com' never
+        // matches 'www.example.com': a partial wildcard names a prefix, not a host.
+        if (options.VerifyCertificate && BoringSsl.SSL_set1_host(ssl, serverName) != 1)
+        {
+            throw new IOException($"SSL_set1_host('{serverName}'): {BoringSsl.LastError()}");
+        }
     }
 
     private async ValueTask RunHandshakeAsync(TlsClientOptions options, string serverName)
@@ -150,14 +163,22 @@ public sealed class TlsClientStream : IDisposable
 
         while (true)
         {
-            int ret = OpenSsl.Connect(_ssl, out int err);
+            int ret = BoringSsl.Connect(_ssl, out int err);
 
-            // Read before the alert's flush, during which other connections' OpenSSL calls clear this thread's queue.
-            string? failure = ret != 1 && err != OpenSsl.SSL_ERROR_WANT_READ && err != OpenSsl.SSL_ERROR_WANT_WRITE
+            // Read before the alert's flush, during which other connections' BoringSSL calls clear this thread's queue.
+            string? failure = ret != 1 && err != BoringSsl.SSL_ERROR_WANT_READ && err != BoringSsl.SSL_ERROR_WANT_WRITE
                 ? HandshakeFailure(options)
                 : null;
 
-            await FlushCiphertextAsync();
+            try
+            {
+                await FlushCiphertextAsync();
+            }
+            catch (IOException) when (failure is not null)
+            {
+                // The alert after a failed handshake is best-effort: a peer that already closed
+                // refuses it, and that refusal must not stand in for the handshake's own failure.
+            }
 
             if (ret == 1)
             {
@@ -185,8 +206,8 @@ public sealed class TlsClientStream : IDisposable
 
         if (options.VerifyCertificate)
         {
-            long verify = OpenSsl.SSL_get_verify_result(_ssl);
-            if (verify != OpenSsl.X509_V_OK)
+            long verify = BoringSsl.SSL_get_verify_result(_ssl);
+            if (verify != BoringSsl.X509_V_OK)
             {
                 throw new IOException(
                     $"certificate for '{serverName}' was not accepted (X509 verify result {verify})");
@@ -197,12 +218,14 @@ public sealed class TlsClientStream : IDisposable
     }
 
     // The queue says the handshake failed; a refused certificate's verify result says which check refused it.
+    // BoringSSL's error for that is CERTIFICATE_VERIFY_FAILED, so the words callers match on are written out.
+    // INVALID_CALL is not a verdict: the handshake failed before there was a session to verify.
     private string HandshakeFailure(TlsClientOptions options)
     {
-        string error = OpenSsl.LastError();
-        long verify = OpenSsl.SSL_get_verify_result(_ssl);
-        return options.VerifyCertificate && verify != OpenSsl.X509_V_OK
-            ? $"{error}: {OpenSsl.VerifyResultText(verify)}"
+        string error = BoringSsl.LastError();
+        long verify = BoringSsl.SSL_get_verify_result(_ssl);
+        return options.VerifyCertificate && verify is not (BoringSsl.X509_V_OK or BoringSsl.X509_V_ERR_INVALID_CALL)
+            ? $"certificate verify failed: {BoringSsl.VerifyResultText(verify)} ({error})"
             : error;
     }
 
@@ -226,14 +249,14 @@ public sealed class TlsClientStream : IDisposable
             // a recv from the send path would alias that source, which is the same class of bug as
             // sharing a staging buffer. Whoever owns the read side feeds the BIO; the caller
             // retries.
-            if (err == OpenSsl.SSL_ERROR_WANT_READ)
+            if (err == BoringSsl.SSL_ERROR_WANT_READ)
             {
                 throw new IOException(
                     "SSL_write needs inbound data first (post-handshake message); retry once the "
                     + "read side has been pumped");
             }
 
-            throw new IOException($"SSL_write failed (error {err}): {OpenSsl.LastError()}");
+            throw new IOException($"SSL_write failed (error {err}): {BoringSsl.LastError()}");
         }
 
         // The records exist only in the write BIO until this runs, so it is not optional.
@@ -258,21 +281,21 @@ public sealed class TlsClientStream : IDisposable
                 return n;
             }
 
-            if (err == OpenSsl.SSL_ERROR_ZERO_RETURN)
+            if (err == BoringSsl.SSL_ERROR_ZERO_RETURN)
             {
                 _peerClosed = true;
                 return 0;   // clean close_notify
             }
-            if (err == OpenSsl.SSL_ERROR_WANT_WRITE)
+            if (err == BoringSsl.SSL_ERROR_WANT_WRITE)
             {
                 // A key update or renegotiation needs to put bytes on the wire before it can
                 // produce more plaintext.
                 await FlushCiphertextAsync();
                 continue;
             }
-            if (err != OpenSsl.SSL_ERROR_WANT_READ)
+            if (err != BoringSsl.SSL_ERROR_WANT_READ)
             {
-                throw new IOException($"SSL_read failed (error {err}): {OpenSsl.LastError()}");
+                throw new IOException($"SSL_read failed (error {err}): {BoringSsl.LastError()}");
             }
 
             // Incomplete record: pull more ciphertext.
@@ -289,7 +312,7 @@ public sealed class TlsClientStream : IDisposable
         }
     }
 
-    // Drain whatever OpenSSL staged into the write BIO out to the socket. Partial sends loop:
+    // Drain whatever BoringSSL staged into the write BIO out to the socket. Partial sends loop:
     // the ring reports what it took, not what we asked for.
     private async ValueTask FlushCiphertextAsync()
     {
@@ -321,24 +344,24 @@ public sealed class TlsClientStream : IDisposable
     private static unsafe nint AllocateCiphertextBuffer() => (nint)NativeMemory.Alloc(CiphertextBufferSize);
 
     private unsafe void FeedCiphertext(int length)
-        => OpenSsl.BIO_write(_rbio, (byte*)_inbound, length);
+        => BoringSsl.BIO_write(_rbio, (byte*)_inbound, length);
 
     private unsafe int TakeCiphertext()
-        => OpenSsl.BIO_read(_wbio, (byte*)_outbound, CiphertextBufferSize);
+        => BoringSsl.BIO_read(_wbio, (byte*)_outbound, CiphertextBufferSize);
 
-    private unsafe nuint PendingCiphertext() => OpenSsl.BIO_ctrl_pending(_wbio);
+    private unsafe nuint PendingCiphertext() => BoringSsl.BIO_ctrl_pending(_wbio);
 
     private unsafe int SslRead(nint buffer, int length, out int error)
-        => OpenSsl.Read(_ssl, (byte*)buffer, length, out error);
+        => BoringSsl.Read(_ssl, (byte*)buffer, length, out error);
 
     private unsafe int SslWrite(nint buffer, int length, out int error)
-        => OpenSsl.Write(_ssl, (byte*)buffer, length, out error);
+        => BoringSsl.Write(_ssl, (byte*)buffer, length, out error);
 
     private static unsafe string? ReadNegotiatedAlpn(nint ssl)
     {
         byte* data;
         uint length;
-        OpenSsl.SSL_get0_alpn_selected(ssl, &data, &length);
+        BoringSsl.SSL_get0_alpn_selected(ssl, &data, &length);
         return data == null || length == 0
             ? null
             : System.Text.Encoding.ASCII.GetString(data, (int)length);
@@ -361,15 +384,15 @@ public sealed class TlsClientStream : IDisposable
         // SSL_shutdown says so by failing and leaving "shutdown while in init" on the error queue -
         // which belongs to the reactor, not to this connection, so it becomes the next pooled
         // connection's fatal error.
-        if (!_peerClosed && OpenSsl.SSL_in_init(_ssl) == 0)
+        if (!_peerClosed && BoringSsl.SSL_in_init(_ssl) == 0)
         {
-            if (OpenSsl.SSL_shutdown(_ssl) < 0)
+            if (BoringSsl.SSL_shutdown(_ssl) < 0)
             {
-                OpenSsl.ERR_clear_error();   // whatever it queued is ours to clean up
+                BoringSsl.ERR_clear_error();   // whatever it queued is ours to clean up
             }
         }
 
-        OpenSsl.SSL_free(_ssl);   // frees both BIOs
+        BoringSsl.SSL_free(_ssl);   // frees both BIOs
         FreeCiphertextBuffer(_inbound);
         FreeCiphertextBuffer(_outbound);
         _socket.Dispose();
@@ -383,7 +406,7 @@ public sealed class TlsClientStream : IDisposable
         public void Complete(int result)
         {
             // -ETIME: the wait ran its course. Disposed is checked first: by then SSL_free has run.
-            if (result is -62 or 0 && !stream._disposed && OpenSsl.SSL_in_init(stream._ssl) != 0)
+            if (result is -62 or 0 && !stream._disposed && BoringSsl.SSL_in_init(stream._ssl) != 0)
             {
                 Expired = true;
                 Native.shutdown(stream._socket.Fd, Native.SHUT_RDWR);

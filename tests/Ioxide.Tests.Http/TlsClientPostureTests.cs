@@ -60,7 +60,7 @@ internal static class TlsClientPostureTests
             Assert.Equal(200, status);   // the proxy answers; the upstream outcome is in the body
             Assert.True(body.StartsWith("599|"),
                 $"a TLS 1.3 floor should refuse an origin capped at 1.2, got: {body}");
-            Assert.True(body.Contains("protocol"),
+            Assert.True(body.Contains("protocol", StringComparison.OrdinalIgnoreCase),
                 $"the refusal should name the protocol version, got: {body}");
 
             // And the floor is a floor, not a breaker: an origin that can speak 1.3 is served,

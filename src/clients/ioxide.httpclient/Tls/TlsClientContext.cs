@@ -36,7 +36,7 @@ public sealed unsafe class TlsClientContext : IDisposable
         Options = options;
     }
 
-    /// <summary>Build the context. Throws if OpenSSL rejects any of the configuration.</summary>
+    /// <summary>Build the context. Throws if BoringSSL rejects any of the configuration.</summary>
     public static TlsClientContext Create(TlsClientOptions options)
     {
         if (options.ServerName is { } name && string.IsNullOrWhiteSpace(name))
@@ -46,21 +46,22 @@ public sealed unsafe class TlsClientContext : IDisposable
                 nameof(options));
         }
 
-        nint ctx = OpenSsl.SSL_CTX_new(OpenSsl.TLS_client_method());
+        nint ctx = BoringSsl.SSL_CTX_new(BoringSsl.TLS_client_method());
         if (ctx == 0)
         {
-            throw new IOException($"SSL_CTX_new: {OpenSsl.LastError()}");
+            throw new IOException($"SSL_CTX_new: {BoringSsl.LastError()}");
         }
 
         try
         {
-            // Checked, because ssl3_ctx_ctrl returns 0 for a version it will not accept and applies
-            // NOTHING - silently, with no error queued. A caller pinning a floor got OpenSSL's
-            // default instead and no way to find out.
-            if (OpenSsl.SSL_CTX_ctrl(ctx, OpenSsl.SSL_CTRL_SET_MIN_PROTO_VERSION, options.MinimumVersion, 0) != 1)
+            // Checked, because a version the library will not accept leaves its default floor in
+            // place, and a caller pinning one would have no way to find out. The range check comes
+            // first: the int would otherwise wrap into a ushort that happens to be a version.
+            if (options.MinimumVersion is < 0 or > ushort.MaxValue ||
+                BoringSsl.SSL_CTX_set_min_proto_version(ctx, (ushort)options.MinimumVersion) != 1)
             {
                 throw new IOException(
-                    $"set_min_proto_version({options.MinimumVersion:X}): OpenSSL refused the version.");
+                    $"set_min_proto_version({options.MinimumVersion:X}): BoringSSL refused the version.");
             }
 
             ConfigureVerification(ctx, options);
@@ -71,7 +72,7 @@ public sealed unsafe class TlsClientContext : IDisposable
         }
         catch
         {
-            OpenSsl.SSL_CTX_free(ctx);
+            BoringSsl.SSL_CTX_free(ctx);
             throw;
         }
     }
@@ -83,22 +84,22 @@ public sealed unsafe class TlsClientContext : IDisposable
             // Encrypted but unauthenticated: anything in the path can present its own certificate
             // and read or rewrite the whole connection. TlsClientOptions documents the one case
             // this is for.
-            OpenSsl.SSL_CTX_set_verify(ctx, OpenSsl.SSL_VERIFY_NONE, 0);
+            BoringSsl.SSL_CTX_set_verify(ctx, BoringSsl.SSL_VERIFY_NONE, 0);
             return;
         }
 
         // SSL_VERIFY_PEER with no callback makes a failed chain fail the handshake outright, which
         // is what we want - there is no prompt to fall back to.
-        OpenSsl.SSL_CTX_set_verify(ctx, OpenSsl.SSL_VERIFY_PEER, 0);
+        BoringSsl.SSL_CTX_set_verify(ctx, BoringSsl.SSL_VERIFY_PEER, 0);
 
         int loaded = options.CaFile is { } caFile
-            ? OpenSsl.SSL_CTX_load_verify_locations(ctx, caFile, null)
-            : OpenSsl.SSL_CTX_set_default_verify_paths(ctx);
+            ? BoringSsl.SSL_CTX_load_verify_locations(ctx, caFile, null)
+            : BoringSsl.SSL_CTX_set_default_verify_paths(ctx);
 
         if (loaded != 1)
         {
             string source = options.CaFile ?? "the system trust store";
-            throw new IOException($"could not load trust anchors from {source}: {OpenSsl.LastError()}");
+            throw new IOException($"could not load trust anchors from {source}: {BoringSsl.LastError()}");
         }
     }
 
@@ -125,25 +126,25 @@ public sealed unsafe class TlsClientContext : IDisposable
                 nameof(options));
         }
 
-        if (OpenSsl.SSL_CTX_use_certificate_chain_file(ctx, options.CertificateFile) != 1)
+        if (BoringSsl.SSL_CTX_use_certificate_chain_file(ctx, options.CertificateFile) != 1)
         {
             throw new IOException(
-                $"could not load client certificate '{options.CertificateFile}': {OpenSsl.LastError()}");
+                $"could not load client certificate '{options.CertificateFile}': {BoringSsl.LastError()}");
         }
 
-        if (OpenSsl.SSL_CTX_use_PrivateKey_file(ctx, options.PrivateKeyFile, OpenSsl.SSL_FILETYPE_PEM) != 1)
+        if (BoringSsl.SSL_CTX_use_PrivateKey_file(ctx, options.PrivateKeyFile, BoringSsl.SSL_FILETYPE_PEM) != 1)
         {
             throw new IOException(
-                $"could not load client private key '{options.PrivateKeyFile}': {OpenSsl.LastError()}");
+                $"could not load client private key '{options.PrivateKeyFile}': {BoringSsl.LastError()}");
         }
 
         // Catch a mismatched pair here rather than during a handshake, where it surfaces as an
         // opaque failure against a specific origin.
-        if (OpenSsl.SSL_CTX_check_private_key(ctx) != 1)
+        if (BoringSsl.SSL_CTX_check_private_key(ctx) != 1)
         {
             throw new IOException(
                 $"client private key '{options.PrivateKeyFile}' does not match certificate "
-                + $"'{options.CertificateFile}': {OpenSsl.LastError()}");
+                + $"'{options.CertificateFile}': {BoringSsl.LastError()}");
         }
     }
 
@@ -158,13 +159,13 @@ public sealed unsafe class TlsClientContext : IDisposable
         int result;
         fixed (byte* p = wire)
         {
-            result = OpenSsl.SSL_CTX_set_alpn_protos(ctx, p, (uint)wire.Length);
+            result = BoringSsl.SSL_CTX_set_alpn_protos(ctx, p, (nuint)wire.Length);
         }
 
         // Inverted against every other function here: this one returns 0 for success.
         if (result != 0)
         {
-            throw new IOException($"SSL_CTX_set_alpn_protos: {OpenSsl.LastError()}");
+            throw new IOException($"SSL_CTX_set_alpn_protos: {BoringSsl.LastError()}");
         }
     }
 
@@ -219,6 +220,6 @@ public sealed unsafe class TlsClientContext : IDisposable
             return;
         }
         _disposed = true;
-        OpenSsl.SSL_CTX_free(_ctx);
+        BoringSsl.SSL_CTX_free(_ctx);
     }
 }
