@@ -174,4 +174,10 @@ internal static unsafe partial class OpenSsl
         }
         return message;
     }
+
+    [LibraryImport(Crypto)] private static partial nint X509_verify_cert_error_string(long n);
+
+    /// <summary>What an X509 verify result means: "certificate has expired", "hostname mismatch", ...</summary>
+    public static string VerifyResultText(long result)
+        => Marshal.PtrToStringUTF8(X509_verify_cert_error_string(result)) ?? $"X509 verify result {result}";
 }

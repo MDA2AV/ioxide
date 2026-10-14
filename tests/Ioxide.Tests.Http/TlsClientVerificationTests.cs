@@ -211,12 +211,12 @@ internal static class TlsClientVerificationTests
                 $"should say the connection closed, got: {body}");
         });
 
-        runner.Pending("tls client: a verification failure says which check failed", () =>
+        runner.Test("tls client: a verification failure says which check failed", () =>
         {
             // Expired, self-signed and unknown-issuer are three different X509 verify codes (10, 18
             // and 20), and a caller acts on them differently: one is a clock or a renewal, one is
             // an origin misconfigured, one is trust configured wrongly on OUR side. All three
-            // arrive as the same sentence.
+            // used to arrive as the same sentence.
             using Authority trusted = Authority.Mint();
             using Authority stranger = Authority.Mint();
 
@@ -238,9 +238,7 @@ internal static class TlsClientVerificationTests
             string[] reasons = [Reason(expired), Reason(selfSigned), Reason(unknownIssuer)];
             Assert.True(reasons.Distinct().Count() == 3,
                 "three different verification failures reported the same thing: " + reasons[0]);
-        }, "the X509 reason is thrown away: SSL_get_verify_result is consulted only AFTER a handshake "
-           + "that succeeded, where it can only be X509_V_OK, and never on the failure path where it "
-           + "holds the code");
+        });
     }
 
     // --- driving the client ----------------------------------------------------------------------

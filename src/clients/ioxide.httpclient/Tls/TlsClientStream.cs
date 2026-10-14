@@ -151,15 +151,20 @@ public sealed class TlsClientStream : IDisposable
         {
             int ret = OpenSsl.Connect(_ssl, out int err);
 
+            // Read before the alert's flush, during which other connections' OpenSSL calls clear this thread's queue.
+            string? failure = ret != 1 && err != OpenSsl.SSL_ERROR_WANT_READ && err != OpenSsl.SSL_ERROR_WANT_WRITE
+                ? HandshakeFailure(options)
+                : null;
+
             await FlushCiphertextAsync();
 
             if (ret == 1)
             {
                 break;
             }
-            if (err != OpenSsl.SSL_ERROR_WANT_READ && err != OpenSsl.SSL_ERROR_WANT_WRITE)
+            if (failure is not null)
             {
-                throw new IOException($"TLS handshake to '{serverName}' failed: {OpenSsl.LastError()}");
+                throw new IOException($"TLS handshake to '{serverName}' failed: {failure}");
             }
 
             // The deadline is checked between flights rather than raced against the recv: a ring
@@ -193,6 +198,16 @@ public sealed class TlsClientStream : IDisposable
         }
 
         NegotiatedAlpn = ReadNegotiatedAlpn(_ssl);
+    }
+
+    // The queue says the handshake failed; a refused certificate's verify result says which check refused it.
+    private string HandshakeFailure(TlsClientOptions options)
+    {
+        string error = OpenSsl.LastError();
+        long verify = OpenSsl.SSL_get_verify_result(_ssl);
+        return options.VerifyCertificate && verify != OpenSsl.X509_V_OK
+            ? $"{error}: {OpenSsl.VerifyResultText(verify)}"
+            : error;
     }
 
     /// <summary>
