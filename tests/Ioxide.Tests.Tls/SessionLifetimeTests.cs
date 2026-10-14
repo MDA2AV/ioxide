@@ -20,9 +20,9 @@ namespace Ioxide.Tests;
 ///
 /// 2. Use-after-dispose is NOT refused: <see cref="TlsSession.Write"/>,
 ///    <see cref="TlsSession.Decrypt"/> and the version getters dereference the freed handles with
-///    no disposed-guard. Reproduced below as a <see cref="Runner.Pending"/>. A guarded type would
-///    answer with <see cref="ObjectDisposedException"/>; this one runs SSL_write against freed
-///    memory and surfaces whatever OpenSSL makes of it.
+///    no disposed-guard. A guarded type would answer with <see cref="ObjectDisposedException"/>;
+///    this one runs SSL_write against freed memory. Not exercised: OpenSSL happened to return an
+///    error there, BoringSSL segfaults, and neither is something a test can pin.
 ///
 /// A THIRD shape is real but deliberately NOT tested here: Dispose sends a close_notify to a bare
 /// stored fd, and a caller that released the connection (recycling the fd through the pool) before
@@ -37,7 +37,6 @@ internal static class SessionLifetimeTests
     // Written on the reactor thread inside the probe handler, read on the test thread.
     private static volatile bool _served;
     private static volatile bool _probeDone;
-    private static volatile string? _writeAfterDisposeError;   // exception type name, or "none"
     private static volatile string? _secondDisposeError;       // exception type name, or "none"
 
     public static void Register(Runner runner)
@@ -65,7 +64,6 @@ internal static class SessionLifetimeTests
     {
         _served = false;
         _probeDone = false;
-        _writeAfterDisposeError = null;
         _secondDisposeError = null;
 
         (string certPath, string keyPath) = TestCert.Ensure();
@@ -131,7 +129,7 @@ internal static class SessionLifetimeTests
 
             if (_served)
             {
-                Probe(tls, conn);
+                Probe(tls);
                 tls = null;   // Probe disposed it (twice); don't dispose again in finally
             }
         }
@@ -147,23 +145,9 @@ internal static class SessionLifetimeTests
     }
 
     /// <summary>Dispose the live session, then exercise its entry points afterwards and record what they do.</summary>
-    private static void Probe(TlsSession tls, TcpConnection conn)
+    private static void Probe(TlsSession tls)
     {
         tls.Dispose();   // frees the SSL* and both BIOs
-
-        // Use after dispose. A guarded type refuses with ObjectDisposedException; today Write runs
-        // SSL_write against the freed SSL* instead. Bounded catch: SSL_write short-circuits on the
-        // shutdown flag Dispose set, so this returns an IOException rather than walking far into
-        // freed memory - but the record is the exception TYPE, whatever it is.
-        try
-        {
-            tls.Write(conn, "GET / HTTP/1.1\r\n\r\n"u8);
-            _writeAfterDisposeError = "none";
-        }
-        catch (Exception e)
-        {
-            _writeAfterDisposeError = e.GetType().Name;
-        }
 
         // Double dispose: the _disposed guard should make this a no-op.
         try

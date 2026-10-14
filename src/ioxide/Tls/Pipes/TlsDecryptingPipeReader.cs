@@ -7,7 +7,7 @@ using ioxide.utils;
 namespace ioxide.tls;
 
 /// <summary>
-/// The read half when OpenSSL decrypts. Nothing runs in the background: a read decrypts whatever
+/// The read half when BoringSSL decrypts. Nothing runs in the background: a read decrypts whatever
 /// ciphertext the ring has queued for this connection, and when that is not enough it parks on the
 /// connection and decrypts what arrives. The connection therefore has a read armed only while the
 /// caller is waiting, exactly as with <see cref="TcpConnectionPipeReader"/>.

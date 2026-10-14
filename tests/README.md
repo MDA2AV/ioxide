@@ -30,7 +30,7 @@ gets asked most:
 
 | The behaviour is… | Suite | File |
 | --- | --- | --- |
-| TLS over **TCP** (OpenSSL) | `Ioxide.Tests.Tls` | `MutualTlsTests`, `SniTests`, `RotationTests`, `PostureTests`, `FormatTests`, `TlsPipeTests` |
+| TLS over **TCP** (BoringSSL) | `Ioxide.Tests.Tls` | `MutualTlsTests`, `SniTests`, `RotationTests`, `PostureTests`, `FormatTests`, `TlsPipeTests` |
 | TLS over **QUIC** (picotls/ngtcp2) | `Ioxide.Tests.E2E/Protocols` | `QuicMutualTlsTests`, `QuicSniTests`, `QuicRotationTests` |
 | The QUIC transport itself, or the shim | `Ioxide.Tests.E2E` | `Core/QuicTests`, `Protocols/QuicEngineTests` |
 | HTTP/3 above the transport | `Ioxide.Tests.E2E/Protocols` | `H3Tests` (nghttp3), `Http3Tests` (pure C#) |

@@ -74,7 +74,7 @@ internal static class RotationIntegrityTests
             {
                 CertificatePath = material.TornPath,
                 KeyPath = material.KeyPath,
-            }, because: "bad end line");
+            }, because: "BAD_END_LINE");
         });
 
         runner.Test("rotate: a bundle torn mid-block is refused as PEM text too, not published as its leaf alone", () =>
@@ -132,7 +132,7 @@ internal static class RotationIntegrityTests
             {
                 CertificatePath = material.EmptyPath,
                 KeyPath = material.KeyPath,
-            }, because: "no start line");
+            }, because: "NO_START_LINE");
         });
 
         runner.Test("rotate: a certificate file that is valid PEM but holds only a key is refused", () =>
@@ -146,7 +146,7 @@ internal static class RotationIntegrityTests
             {
                 CertificatePath = material.KeyPath,
                 KeyPath = material.KeyPath,
-            }, because: "no start line");
+            }, because: "NO_START_LINE");
         });
 
         runner.Test("rotate: a bundle in the wrong order is refused, because the key does not match the block that leads it", () =>
@@ -161,7 +161,7 @@ internal static class RotationIntegrityTests
             {
                 CertificatePem = material.Intermediate + material.Leaf,
                 KeyPem = material.Key,
-            }, because: "key values mismatch");
+            }, because: "do not go together");
         });
     }
 

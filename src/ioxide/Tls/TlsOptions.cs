@@ -39,7 +39,7 @@ public sealed class TlsOptions
     /// refused, naming it, rather than built and never served. So are two keys differing only in
     /// case, since only the first could ever be served.
     ///
-    /// Each entry costs one OpenSSL context. Selection at handshake time is a short linear scan
+    /// Each entry costs one BoringSSL context. Selection at handshake time is a short linear scan
     /// over the names as UTF-8 bytes, on the reactor thread, with no managed allocation - a
     /// dictionary would mean decoding the name into a string first, which is the allocation the
     /// shape exists to avoid. Contexts are rebuilt whenever the certificates are replaced.
@@ -78,7 +78,7 @@ public sealed class TlsOptions
     /// <summary>
     /// Lowest TLS version this server will negotiate.
     ///
-    /// <see cref="TlsProtocolVersion.Default"/> keeps OpenSSL's own floor, which on a current
+    /// <see cref="TlsProtocolVersion.Default"/> keeps BoringSSL's own floor, which on a current
     /// build is TLS 1.2. <see cref="TlsProtocolVersion.Tls13"/> turns the server into 1.3-only,
     /// which is what a deployment that has to state a posture usually wants: it removes every
     /// TLS 1.2 ciphersuite, renegotiation, and static-RSA key exchange in one setting rather than
@@ -91,10 +91,10 @@ public sealed class TlsOptions
     public TlsProtocolVersion MinProtocolVersion { get; init; } = TlsProtocolVersion.Default;
 
     /// <summary>
-    /// TLS 1.3 ciphersuites to offer, in preference order and in OpenSSL's naming, e.g.
-    /// <c>"TLS_AES_128_GCM_SHA256:TLS_AES_256_GCM_SHA384"</c>. Null keeps OpenSSL's defaults.
+    /// TLS 1.3 ciphersuites to offer, in preference order and in BoringSSL's naming, e.g.
+    /// <c>"TLS_AES_128_GCM_SHA256:TLS_AES_256_GCM_SHA384"</c>. Null keeps BoringSSL's defaults.
     ///
-    /// Separate from <see cref="CipherList"/> because OpenSSL keeps the two lists separate: a 1.3
+    /// Separate from <see cref="CipherList"/> because BoringSSL keeps the two lists separate: a 1.3
     /// suite named here does not restrict a 1.2 handshake and vice versa, so a server that means
     /// to constrain both has to say both - or set <see cref="MinProtocolVersion"/> to
     /// <see cref="TlsProtocolVersion.Tls13"/> and be done.
@@ -105,7 +105,7 @@ public sealed class TlsOptions
     public string? CipherSuites { get; init; }
 
     /// <summary>
-    /// Ciphers for TLS 1.2 and below, in OpenSSL's cipher-list syntax. Null keeps OpenSSL's
+    /// Ciphers for TLS 1.2 and below, in BoringSSL's cipher-list syntax. Null keeps BoringSSL's
     /// defaults. Has no effect on a 1.3 handshake - see <see cref="CipherSuites"/>.
     /// </summary>
     public string? CipherList { get; init; }
@@ -140,10 +140,10 @@ public sealed class TlsOptions
     /// re-read whenever a context is built, so replacing the file changes who is trusted at the next
     /// rotation, whereas PEM text is a value and does not move.
     ///
-    /// This route parses the PEM itself rather than handing the bytes to OpenSSL's file loader, and
-    /// reads a bundle as a path is read: <c>CERTIFICATE</c> and <c>TRUSTED CERTIFICATE</c> blocks
-    /// are both trusted, a byte-order mark is ignored, an issuer the bundle repeats is hinted once,
-    /// and a malformed block is refused outright rather than silently ending the bundle. One
+    /// This route parses the PEM itself rather than handing the bytes to BoringSSL's file loader,
+    /// and reads a bundle as a path is read: <c>CERTIFICATE</c> and <c>TRUSTED CERTIFICATE</c>
+    /// blocks are both trusted, a byte-order mark is ignored, an issuer the bundle repeats is hinted
+    /// once, and a malformed block is refused outright rather than silently ending the bundle. One
     /// difference remains: an anchor from a <c>TRUSTED CERTIFICATE</c> block is also hinted here,
     /// where the file route's hint loader skips that block.
     /// </summary>
@@ -175,7 +175,7 @@ public sealed class TlsOptions
     /// Two reasons it is opt-in even where <see cref="KernelTx"/> is.
     ///
     /// The handoff must land on a record boundary. Whatever the handshake already pulled off the
-    /// socket is invisible to the kernel: OpenSSL decrypts it, and the record sequence the kernel
+    /// socket is invisible to the kernel: BoringSSL decrypts it, and the record sequence the kernel
     /// starts at accounts for it. When what arrived ends inside a record, the handshake waits for
     /// the rest of that record before handing over; a connection whose records keep arriving cut
     /// past 1 MiB stays on the userspace path.
@@ -190,13 +190,13 @@ public sealed class TlsOptions
     public bool KernelRx { get; init; }
 
     /// <summary>
-    /// Let the kernel encrypt outbound records. <b>Off by default</b> - TLS is OpenSSL in both
+    /// Let the kernel encrypt outbound records. <b>Off by default</b> - TLS is BoringSSL in both
     /// directions unless you turn this on.
     ///
-    /// It used to default on, which made ioxide's TLS asymmetric: the kernel encrypted, OpenSSL
+    /// It used to default on, which made ioxide's TLS asymmetric: the kernel encrypted, the library
     /// decrypted. That asymmetry is now something you opt into rather than something you inherit,
     /// because it is not free and it was not faster. Measured on loopback, HTTP/1.1, 4 reactors:
-    /// kTLS trails OpenSSL by roughly 20-25% on large single writes and costs about 20% more CPU
+    /// kTLS trails BoringSSL by roughly 20-25% on large single writes and costs about 20% more CPU
     /// per request, while a small response shows no difference either way. What it constrains is
     /// the part that matters: the Linux <c>tls</c> module has to be present, TLS 1.3 only, one
     /// ciphersuite, and session resumption is disabled because a ticket would consume a record
@@ -206,7 +206,7 @@ public sealed class TlsOptions
     /// of which those measurements exercise.
     ///
     /// <b>It changes what a handler must write.</b> With kTLS the kernel produces the records, so
-    /// a handler writes plaintext straight to the connection; without it OpenSSL has to encrypt
+    /// a handler writes plaintext straight to the connection; without it BoringSSL has to encrypt
     /// first. <see cref="TlsSession.Write"/> is correct either way and is what samples use - a bare
     /// <c>connection.Write</c> on a session with this off puts CLEARTEXT on the wire.
     /// </summary>

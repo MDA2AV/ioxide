@@ -6,7 +6,7 @@ using System.Threading.Tasks.Sources;
 namespace ioxide.tls;
 
 /// <summary>
-/// The write half when the kernel is <b>not</b> encrypting: plaintext is staged here, OpenSSL turns
+/// The write half when the kernel is <b>not</b> encrypting: plaintext is staged here, BoringSSL turns
 /// it into records on flush, and the records go into the connection's slab.
 ///
 /// The counterpart is <see cref="TcpConnectionPipeWriter"/>, which is what a kTLS-TX connection

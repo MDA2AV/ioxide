@@ -2,31 +2,28 @@ using System.Runtime.InteropServices;
 
 namespace ioxide.tls;
 
-/// <summary>Minimal OpenSSL 3 surface: server context, memory-BIO handshake, keylog.</summary>
-internal static unsafe partial class OpenSsl
+/// <summary>
+/// Minimal BoringSSL surface: server context, memory-BIO handshake, keylog. The library ships with
+/// this package as libioxide_boringssl.so (scripts/build-boringssl-native.sh): libssl and libcrypto
+/// in one object, so both names below are the same file.
+/// </summary>
+internal static unsafe partial class BoringSsl
 {
-    private const string Ssl = "libssl.so.3";
-    private const string Crypto = "libcrypto.so.3";
+    private const string Ssl = "libioxide_boringssl.so";
+    private const string Crypto = "libioxide_boringssl.so";
 
     public const int SSL_FILETYPE_PEM = 1;
     public const int SSL_ERROR_WANT_READ = 2;
     public const int SSL_ERROR_WANT_WRITE = 3;
     public const int SSL_ERROR_ZERO_RETURN = 6;
-    public const int SSL_CTRL_SET_MIN_PROTO_VERSION = 123;
-    public const int SSL_CTRL_SET_MAX_PROTO_VERSION = 124;
-    public const int SSL_CTRL_EXTRA_CHAIN_CERT = 14;
-    public const int TLS1_2_VERSION = 0x0303;
-    public const int TLS1_3_VERSION = 0x0304;
+    public const ushort TLS1_2_VERSION = 0x0303;
+    public const ushort TLS1_3_VERSION = 0x0304;
+
+    /// <summary>The RFC 8446 protocol id of the one suite kTLS is programmed for.</summary>
+    public const ushort TLS_AES_128_GCM_SHA256 = 0x1301;
     public const int SSL_TLSEXT_ERR_OK = 0;
     public const int SSL_TLSEXT_ERR_NOACK = 3;
-
-    // Server Name Indication (RFC 6066 3.1). The callback fires mid-handshake, after the
-    // ClientHello is parsed and before a certificate is chosen, which is the only point at which
-    // the name is known and the choice is still open.
-    public const int SSL_CTRL_SET_TLSEXT_SERVERNAME_CB = 53;
-    public const int SSL_CTRL_SET_TLSEXT_SERVERNAME_ARG = 54;
     public const int TLSEXT_NAMETYPE_host_name = 0;
-    public const int CRYPTO_EX_INDEX_SSL = 0;
 
     // Client-certificate verification (mutual TLS).
     public const int SSL_VERIFY_PEER = 0x01;
@@ -39,27 +36,52 @@ internal static unsafe partial class OpenSsl
     public static partial int SSL_CTX_use_certificate_chain_file(nint ctx, string file);
     [LibraryImport(Ssl, StringMarshalling = StringMarshalling.Utf8)]
     public static partial int SSL_CTX_use_PrivateKey_file(nint ctx, string file, int type);
-    /// <summary>TLS 1.3 suites, e.g. "TLS_AES_128_GCM_SHA256:TLS_AES_256_GCM_SHA384".</summary>
-    [LibraryImport(Ssl, StringMarshalling = StringMarshalling.Utf8)]
-    public static partial int SSL_CTX_set_ciphersuites(nint ctx, string list);
 
-    /// <summary>TLS 1.2 and below. A separate list from the 1.3 one, in OpenSSL and here.</summary>
+    [LibraryImport(Ssl)] public static partial int SSL_CTX_set_min_proto_version(nint ctx, ushort version);
+    [LibraryImport(Ssl)] public static partial int SSL_CTX_set_max_proto_version(nint ctx, ushort version);
+
+    /// <summary>
+    /// TLS 1.3 suites by protocol id, in server preference order. Only the listed suites are
+    /// negotiated; an empty list means BoringSSL's built-in order, so callers refuse empty first.
+    /// </summary>
+    [LibraryImport(Ssl)] public static partial int SSL_CTX_set1_tls13_ciphers(nint ctx, ushort* ids, uint* flags, nuint count);
+
+    [LibraryImport(Ssl)] public static partial nint SSL_get_cipher_by_value(ushort value);
+    [LibraryImport(Ssl)] public static partial nint SSL_CIPHER_standard_name(nint cipher);
+
+    /// <summary>
+    /// The protocol id of the TLS 1.3 suite called <paramref name="name"/> (its RFC 8446 name), or
+    /// null when this BoringSSL does not implement it. Asks the library rather than a table here:
+    /// the TLS 1.3 ids are 0x1301-0x1305, and BoringSSL knows the three it offers.
+    /// </summary>
+    public static ushort? Tls13SuiteId(string name)
+    {
+        for (ushort id = 0x1301; id <= 0x1305; id++)
+        {
+            nint cipher = SSL_get_cipher_by_value(id);
+            if (cipher != 0 && Marshal.PtrToStringUTF8(SSL_CIPHER_standard_name(cipher)) == name)
+            {
+                return id;
+            }
+        }
+        return null;
+    }
+
+    /// <summary>TLS 1.2 and below. A separate list from the 1.3 one, in BoringSSL and here.</summary>
     [LibraryImport(Ssl, StringMarshalling = StringMarshalling.Utf8)]
     public static partial int SSL_CTX_set_cipher_list(nint ctx, string list);
-    [LibraryImport(Ssl)] public static partial long SSL_CTX_ctrl(nint ctx, int cmd, long arg, nint parg);
     [LibraryImport(Ssl)] public static partial int SSL_CTX_set_num_tickets(nint ctx, nuint num);
-    /// <summary>
-    /// Renegotiation, which TLS 1.3 does not have at all and which no current client asks a server
-    /// for over TLS 1.2. Refusing it closes a request-flood amplifier, and - since a renegotiation
-    /// carries a second ClientHello - a second chance to pick a different certificate mid-connection.
-    /// </summary>
-    public const ulong SSL_OP_NO_RENEGOTIATION = 1UL << 30;
-    public const ulong SSL_OP_CIPHER_SERVER_PREFERENCE = 0x00400000UL;
+
+    /// <summary>Takes ownership of <paramref name="x509"/> on success.</summary>
+    [LibraryImport(Ssl)] public static partial int SSL_CTX_add_extra_chain_cert(nint ctx, nint x509);
+
+    public const uint SSL_OP_CIPHER_SERVER_PREFERENCE = 0x00400000;
 
     /// <summary>PEM's "the BIO holds no further object", i.e. an ordinary end of bundle.</summary>
-    public const int PEM_R_NO_START_LINE = 108;
+    public const int PEM_R_NO_START_LINE = 110;
+    public const int ERR_LIB_PEM = 9;
 
-    [LibraryImport(Ssl)] public static partial ulong SSL_CTX_set_options(nint ctx, ulong options);
+    [LibraryImport(Ssl)] public static partial uint SSL_CTX_set_options(nint ctx, uint options);
 
     /// <summary>
     /// Drops one reference. Contexts that are SERVING are never freed - a handshake may be between
@@ -71,17 +93,16 @@ internal static unsafe partial class OpenSsl
     [LibraryImport(Ssl)] public static partial void SSL_CTX_set_keylog_callback(nint ctx, nint cb);
     [LibraryImport(Ssl)] public static partial void SSL_CTX_set_alpn_select_cb(nint ctx, nint cb, nint arg);
 
-    /// <summary>
-    /// Takes a function pointer rather than a value, which is why it is not SSL_CTX_ctrl: the
-    /// servername callback is installed through this and its argument through SSL_CTX_ctrl.
-    /// </summary>
-    [LibraryImport(Ssl)] public static partial long SSL_CTX_callback_ctrl(nint ctx, int cmd, nint fp);
+    // Server Name Indication (RFC 6066 3.1). The callback fires mid-handshake, after the
+    // ClientHello is parsed and before a certificate is chosen, which is the only point at which
+    // the name is known and the choice is still open.
+    [LibraryImport(Ssl)] public static partial int SSL_CTX_set_tlsext_servername_callback(nint ctx, nint cb);
+    [LibraryImport(Ssl)] public static partial int SSL_CTX_set_tlsext_servername_arg(nint ctx, nint arg);
 
     /// <summary>
-    /// Install the callback OpenSSL asks for a private key's passphrase. Passing none is NOT "no
-    /// password": the default is PEM_def_callback, which READS THE TERMINAL - so a server started
-    /// from a tty with an encrypted key blocks on a prompt instead of failing, and a rotation
-    /// thread would block while still serving.
+    /// Install the callback asked for a private key's passphrase. ioxide never has one, and says so
+    /// explicitly rather than relying on the library default, so an encrypted key always fails the
+    /// same way: at load, with an error, instead of whatever a default might try.
     /// </summary>
     [LibraryImport(Ssl)] public static partial void SSL_CTX_set_default_passwd_cb(nint ctx, nint cb);
 
@@ -131,14 +152,21 @@ internal static unsafe partial class OpenSsl
     /// <summary>Zero when two names are the same name, compared canonically.</summary>
     [LibraryImport(Crypto)] public static partial int X509_NAME_cmp(nint a, nint b);
 
-    /// <summary>The peer's leaf certificate, borrowed - no reference taken, so it is not freed.</summary>
-    [LibraryImport(Ssl)] public static partial nint SSL_get0_peer_certificate(nint ssl);
+    [LibraryImport(Ssl)] private static partial nint SSL_get_peer_certificate(nint ssl);
+
+    /// <summary>The peer's leaf certificate, borrowed: the session keeps its own reference.</summary>
+    public static nint PeerCertificate(nint ssl)
+    {
+        nint cert = SSL_get_peer_certificate(ssl);
+        X509_free(cert);
+        return cert;
+    }
 
     // What the handshake actually settled on, for callers that have to REPORT it rather than
     // assume it - ASP.NET reads both off ITlsHandshakeFeature.
     [LibraryImport(Ssl)] public static partial int SSL_version(nint ssl);
     [LibraryImport(Ssl)] public static partial nint SSL_get_current_cipher(nint ssl);
-    [LibraryImport(Ssl)] public static partial uint SSL_CIPHER_get_protocol_id(nint cipher);
+    [LibraryImport(Ssl)] public static partial ushort SSL_CIPHER_get_protocol_id(nint cipher);
     [LibraryImport(Crypto)] public static partial int i2d_X509(nint x509, byte** outBuf);
 
     /// <summary>X509_V_OK, or why the chain was rejected.</summary>
@@ -148,16 +176,15 @@ internal static unsafe partial class OpenSsl
 
     /// <summary>
     /// The legacy one-line rendering of a DN. Called with a NULL buffer it allocates the exact
-    /// size and the caller frees it with <see cref="CRYPTO_free"/>; called with a buffer too small
+    /// size and the caller frees it with <see cref="OPENSSL_free"/>; called with a buffer too small
     /// it reports SUCCESS and writes a truncated prefix, which is why nothing here passes one.
     /// </summary>
     [LibraryImport(Crypto)] public static partial nint X509_NAME_oneline(nint name, byte* buf, int size);
 
-    /// <summary>OPENSSL_free. The macro passes __FILE__/__LINE__, which may be NULL/0.</summary>
-    [LibraryImport(Crypto)] public static partial void CRYPTO_free(nint ptr, nint file, int line);
+    [LibraryImport(Crypto)] public static partial void OPENSSL_free(nint ptr);
 
-    /// <summary>The element at <paramref name="index"/> of an OpenSSL stack, borrowed, or 0 past its end.</summary>
-    [LibraryImport(Crypto)] public static partial nint OPENSSL_sk_value(nint stack, int index);
+    /// <summary>The element at <paramref name="index"/> of a stack, borrowed, or 0 past its end.</summary>
+    [LibraryImport(Crypto)] public static partial nint OPENSSL_sk_value(nint stack, nuint index);
 
     // Structural access to one attribute of a DN, so an identity can be compared as a value
     // instead of matched inside a rendered string. See TlsSession.PeerCommonName.
@@ -181,19 +208,19 @@ internal static unsafe partial class OpenSsl
     [LibraryImport(Ssl)] public static partial int SSL_shutdown(nint ssl);
 
     /// <summary>
-    /// The three OpenSSL operations whose result has to be classified, each performed from a clean
-    /// error queue and returning what the classification said.
+    /// The three operations whose result has to be classified, each performed from a clean error
+    /// queue and returning what the classification said.
     /// </summary>
     /// <remarks>
     /// The clear, the call and the classify are one operation and are deliberately not offered
     /// apart - the raw entry points above are private so that they cannot be.
     ///
-    /// The reason is that OpenSSL's error queue belongs to the THREAD, and here a thread is a
-    /// reactor shared by every connection it serves. SSL_get_error consults that queue BEFORE it
-    /// asks the SSL whether it merely wants more data, so a residue any other connection left -
-    /// an aborted handshake, a refused client, a port scan - is read as THIS connection's fatal
-    /// error and kills it. Clearing at each call site works until someone adds the next call site;
-    /// this shape means there is no next call site to forget.
+    /// The reason is that the error queue belongs to the THREAD, and here a thread is a reactor
+    /// shared by every connection it serves. SSL_get_error consults that queue BEFORE it asks the
+    /// SSL whether it merely wants more data, so a residue any other connection left - an aborted
+    /// handshake, a refused client, a port scan - is read as THIS connection's fatal error and
+    /// kills it. Clearing at each call site works until someone adds the next call site; this shape
+    /// means there is no next call site to forget.
     /// </remarks>
     public static unsafe int Accept(nint ssl, out int error)
     {
@@ -228,12 +255,7 @@ internal static unsafe partial class OpenSsl
     /// <summary>
     /// Scopes a session to this server, so a resumption offered to a different one is declined.
     /// </summary>
-    /// <remarks>
-    /// Not optional once client certificates are asked for: OpenSSL treats an unset id context
-    /// under SSL_VERIFY_PEER as fatal to the HANDSHAKE, not merely to the resumption, so a client
-    /// that returns with a ticket is refused outright.
-    /// </remarks>
-    [LibraryImport(Ssl)] public static partial int SSL_CTX_set_session_id_context(nint ctx, byte* sid, uint len);
+    [LibraryImport(Ssl)] public static partial int SSL_CTX_set_session_id_context(nint ctx, byte* sid, nuint len);
     [LibraryImport(Ssl)] private static partial int SSL_get_error(nint ssl, int ret);
 
 
@@ -244,11 +266,11 @@ internal static unsafe partial class OpenSsl
     // callback can find the right session without a global, pointer-keyed map.
     [LibraryImport(Ssl)] public static partial int SSL_set_ex_data(nint ssl, int idx, nint data);
     [LibraryImport(Ssl)] public static partial nint SSL_get_ex_data(nint ssl, int idx);
-    [LibraryImport(Crypto)] public static partial int CRYPTO_get_ex_new_index(int classIndex, long argl, nint argp, nint newFunc, nint dupFunc, nint freeFunc);
+    [LibraryImport(Ssl)] public static partial int SSL_get_ex_new_index(long argl, nint argp, nint unused, nint dupUnused, nint freeFunc);
 
     [LibraryImport(Crypto)] public static partial nint BIO_new(nint type);
     [LibraryImport(Crypto)] public static partial nint BIO_s_mem();
-    [LibraryImport(Crypto)] public static partial nint BIO_new_mem_buf(byte* buf, int len);
+    [LibraryImport(Crypto)] public static partial nint BIO_new_mem_buf(byte* buf, nint len);
     [LibraryImport(Crypto)] public static partial int BIO_free(nint bio);
 
     // PEM-from-memory loading: the same certificate/key material a chain file carries, read
@@ -275,8 +297,21 @@ internal static unsafe partial class OpenSsl
     public const int BIO_CTRL_INFO = 3;
 
     [LibraryImport(Crypto)] public static partial long BIO_ctrl(nint bio, int cmd, long larg, byte** parg);
-    [LibraryImport(Crypto)] public static partial ulong ERR_get_error();
-    [LibraryImport(Crypto)] public static partial void ERR_error_string_n(ulong e, byte* buf, nuint len);
+    [LibraryImport(Crypto)] public static partial uint ERR_get_error();
+    [LibraryImport(Crypto)] private static partial uint ERR_peek_error();
+    [LibraryImport(Crypto)] public static partial void ERR_error_string_n(uint e, byte* buf, nuint len);
+
+    private const int ERR_LIB_X509 = 11;
+    private const int X509_R_KEY_TYPE_MISMATCH = 115;
+    private const int X509_R_KEY_VALUES_MISMATCH = 116;
+
+    /// <summary>Whether the queued error says a key does not belong to the certificate loaded.</summary>
+    public static bool ErrorIsKeyMismatch()
+    {
+        uint code = ERR_peek_error();
+        return (code >> 24) == ERR_LIB_X509
+            && (code & 0xFFF) is X509_R_KEY_TYPE_MISMATCH or X509_R_KEY_VALUES_MISMATCH;
+    }
 
     /// <summary>
     /// Drains the queue and reports whether it held ONLY "no start line" - PEM's way of saying the
@@ -289,10 +324,10 @@ internal static unsafe partial class OpenSsl
         bool sawEnd = false;
         bool sawOther = false;
 
-        ulong code;
+        uint code;
         while ((code = ERR_get_error()) != 0)
         {
-            if ((int)(code & 0xFFF) == PEM_R_NO_START_LINE)
+            if ((code >> 24) == ERR_LIB_PEM && (code & 0xFFF) == PEM_R_NO_START_LINE)
             {
                 sawEnd = true;
             }
@@ -307,8 +342,8 @@ internal static unsafe partial class OpenSsl
 
     public static string LastError()
     {
-        ulong code = ERR_get_error();
-        if (code == 0) return "no OpenSSL error";
+        uint code = ERR_get_error();
+        if (code == 0) return "no BoringSSL error";
 
         Span<byte> buf = stackalloc byte[256];
         string message;
