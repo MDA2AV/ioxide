@@ -891,7 +891,8 @@ public sealed class TlsService
             throw new IOException($"SSL_CTX_get_cert_store: {OpenSsl.LastError()}");
         }
 
-        byte[] bytes = System.Text.Encoding.ASCII.GetBytes(pem);
+        // UTF-8, so a byte-order mark arrives as the three bytes OpenSSL strips, as from a file.
+        byte[] bytes = System.Text.Encoding.UTF8.GetBytes(pem);
         int added = 0;
 
         fixed (byte* p = bytes)
@@ -906,7 +907,7 @@ public sealed class TlsService
             {
                 while (true)
                 {
-                    nint cert = OpenSsl.PEM_read_bio_X509(bio, 0, 0, 0);
+                    nint cert = OpenSsl.PEM_read_bio_X509_AUX(bio, 0, 0, 0);
                     if (cert == 0)
                     {
                         // Exhausted, or stopped on a malformed block. Only the first is an end of
@@ -932,7 +933,7 @@ public sealed class TlsService
                     // the two anchor sources would accept different populations of client - which
                     // is not something the choice between a path and PEM text should decide.
                     // Not fatal on failure: it costs the hint, not the verification.
-                    if (ok == 1 && OpenSsl.SSL_CTX_add_client_CA(ctx, cert) != 1)
+                    if (ok == 1 && !Hinted(ctx, cert) && OpenSsl.SSL_CTX_add_client_CA(ctx, cert) != 1)
                     {
                         OpenSsl.ERR_clear_error();
                     }
@@ -959,6 +960,25 @@ public sealed class TlsService
         {
             throw new IOException("ClientCaPem contained no certificates.");
         }
+    }
+
+    // Whether the hint already names this certificate's subject: the file route's loader sends
+    // each name once, so a bundle that repeats an anchor must not grow the CertificateRequest here.
+    private static bool Hinted(nint ctx, nint cert)
+    {
+        nint names = OpenSsl.SSL_CTX_get_client_CA_list(ctx);
+        nint subject = OpenSsl.X509_get_subject_name(cert);
+
+        nint name;
+        for (int i = 0; (name = OpenSsl.OPENSSL_sk_value(names, i)) != 0; i++)
+        {
+            if (OpenSsl.X509_NAME_cmp(name, subject) == 0)
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     // Certificate and key, from whichever source the caller carries. The file route is OpenSSL's

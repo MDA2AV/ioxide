@@ -139,14 +139,12 @@ public sealed class TlsOptions
     /// re-read whenever a context is built, so replacing the file changes who is trusted at the next
     /// rotation, whereas PEM text is a value and does not move.
     ///
-    /// The two are NOT byte-for-byte interchangeable, and a bundle that loads from a path can be
-    /// refused as text. This route parses the PEM itself rather than handing the bytes to OpenSSL's
-    /// file loader, so today it reads only <c>CERTIFICATE</c> blocks - a <c>TRUSTED CERTIFICATE</c>
-    /// block, which is what an OpenSSL trust store or <c>x509 -trustout</c> emits, is skipped - it
-    /// converts as ASCII, so a byte-order mark makes the first block unreadable, and it sends one
-    /// issuer hint per certificate where the file loader de-duplicates by subject. A malformed
-    /// block is refused outright rather than silently ending the bundle, which the file route also
-    /// does. If a bundle is rejected here and works as a path, that list is where to look.
+    /// This route parses the PEM itself rather than handing the bytes to OpenSSL's file loader, and
+    /// reads a bundle as a path is read: <c>CERTIFICATE</c> and <c>TRUSTED CERTIFICATE</c> blocks
+    /// are both trusted, a byte-order mark is ignored, an issuer the bundle repeats is hinted once,
+    /// and a malformed block is refused outright rather than silently ending the bundle. One
+    /// difference remains: an anchor from a <c>TRUSTED CERTIFICATE</c> block is also hinted here,
+    /// where the file route's hint loader skips that block.
     /// </summary>
     public string? ClientCaPem { get; init; }
 
