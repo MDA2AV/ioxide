@@ -40,27 +40,26 @@ internal static class ConfigValidationTests
                 Assert.Throws<ArgumentException>(() => _ = new Reactor(0, config), $"'{property}'"));
         }
 
-        runner.KnownCoreBug("config: MaxEvents above what epoll_wait accepts is refused at construction, by name", () =>
+        runner.Test("config: MaxEvents above what epoll_wait accepts is refused at construction, by name", () =>
         {
-            // Constructed, it fails in Run: the event buffer is sized as MaxEvents * the event size in
-            // int arithmetic, which wraps exactly past this value, and the allocation throws
-            // OutOfMemoryException. Sized right, epoll_wait would refuse it anyway, with EINVAL.
+            // epoll_wait refuses it with EINVAL, and the event buffer it would need is past what an int
+            // sizes: refused here, by name, rather than as an OutOfMemoryException out of Run.
             Assert.Throws<ArgumentException>(
                 () => _ = new Reactor(0, new ServerConfig { MaxEvents = EpollMaxEvents + 1 }), "'config.MaxEvents'");
-        }, bug: "E3: MaxEvents has no upper bound");
+        });
 
-        runner.KnownCoreBug("control: the smallest sizes still construct", () =>
+        runner.Test("control: the smallest sizes still construct", () =>
         {
             // ioxide constructs with one-byte buffers and a one-entry queue. epoxide's buffer pools keep
-            // a free-list link in each free buffer, four bytes, and refuse anything smaller from inside
-            // the pool - naming its own parameter, 'bufferSize', which no config has.
+            // a four-byte free-list link in each free buffer, so smaller ones are spaced four bytes
+            // apart rather than refused.
             _ = new Reactor(0, new ServerConfig
             {
                 RecvBufferSize = 1,
                 MaxEvents = 1,
                 Tcp = new TcpOptions { RecvQueueEntries = 1, WriteSlabSize = 1 },
             });
-        }, bug: "E2: RecvBufferSize/WriteSlabSize below 4 throw from BufferPool");
+        });
 
         runner.Test("control: the largest sizes still construct, and the smallest the pools can hold", () =>
         {

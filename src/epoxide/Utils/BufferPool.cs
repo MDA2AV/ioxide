@@ -23,6 +23,10 @@ internal sealed unsafe class BufferPool : IDisposable
 
     private readonly int _bufferSize;
 
+    // Bytes from one buffer to the next: the size asked for, but never less than the free-list link a
+    // free buffer keeps in its first four bytes - so a one-byte buffer is legal, as in ioxide.
+    private readonly int _stride;
+
     // Chunk base addresses. Replaced, never mutated in place, when it grows - a reader that took the
     // old array still finds every chunk it can have an id for.
     private nint[] _chunks = new nint[8];
@@ -34,8 +38,9 @@ internal sealed unsafe class BufferPool : IDisposable
 
     public BufferPool(int bufferSize)
     {
-        ArgumentOutOfRangeException.ThrowIfLessThan(bufferSize, sizeof(int));
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(bufferSize);
         _bufferSize = bufferSize;
+        _stride = Math.Max(bufferSize, sizeof(int));
     }
 
     public int BufferSize => _bufferSize;
@@ -83,7 +88,7 @@ internal sealed unsafe class BufferPool : IDisposable
         }
     }
 
-    public byte* Address(int id) => (byte*)Volatile.Read(ref _chunks)[id >> ChunkShift] + (nint)(id & ChunkMask) * _bufferSize;
+    public byte* Address(int id) => (byte*)Volatile.Read(ref _chunks)[id >> ChunkShift] + (nint)(id & ChunkMask) * _stride;
 
     private void Grow()
     {
@@ -95,7 +100,8 @@ internal sealed unsafe class BufferPool : IDisposable
                 return;
             }
 
-            nint chunk = (nint)NativeMemory.AlignedAlloc((nuint)(_bufferSize << ChunkShift), 64);
+            // In nuint: 64 buffers of 32 MiB or more is past int, and wrapped it asks for exabytes.
+            nint chunk = (nint)NativeMemory.AlignedAlloc((nuint)_stride << ChunkShift, 64);
             int index = _chunkCount;
             if (index == _chunks.Length)
             {

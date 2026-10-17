@@ -32,7 +32,7 @@ public static unsafe class Internals
     private static readonly FieldInfo PoolHead = Field(BufferPoolType, "_head");
     private static readonly FieldInfo PoolChunks = Field(BufferPoolType, "_chunks");
     private static readonly FieldInfo PoolChunkCount = Field(BufferPoolType, "_chunkCount");
-    private static readonly FieldInfo PoolBufferSize = Field(BufferPoolType, "_bufferSize");
+    private static readonly FieldInfo PoolStride = Field(BufferPoolType, "_stride");   // buffer to buffer, never under 4 bytes
     private static readonly int ChunkShift = (int)Field(BufferPoolType, "ChunkShift", Static).GetRawConstantValue()!;
 
     /// <summary>The reactor's recv buffers, counted on its thread (see <see cref="OnReactor{T}"/>).</summary>
@@ -50,7 +50,7 @@ public static unsafe class Internals
         long head = (long)PoolHead.GetValue(pool)!;
         var chunks = (nint[])PoolChunks.GetValue(pool)!;
         int total = (int)PoolChunkCount.GetValue(pool)! << ChunkShift;
-        int size = (int)PoolBufferSize.GetValue(pool)!;
+        int size = (int)PoolStride.GetValue(pool)!;
         int mask = (1 << ChunkShift) - 1;
 
         int free = 0;

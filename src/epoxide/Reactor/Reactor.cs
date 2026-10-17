@@ -68,6 +68,10 @@ public sealed unsafe partial class Reactor
         _port = _tcp.Port;
 
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(config.MaxEvents, "config.MaxEvents");
+
+        // epoll_wait refuses more than INT_MAX / sizeof(struct epoll_event); past it, the event
+        // buffer's int-sized allocation in Run wraps and throws OutOfMemoryException first.
+        ArgumentOutOfRangeException.ThrowIfGreaterThan(config.MaxEvents, int.MaxValue / Native.EpollEventSize, "config.MaxEvents");
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(config.RecvBufferSize, "config.RecvBufferSize");
         ThrowUnlessPow2(_tcp.RecvQueueEntries, "config.Tcp.RecvQueueEntries");
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(_tcp.WriteSlabSize, "config.Tcp.WriteSlabSize");

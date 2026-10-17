@@ -32,7 +32,7 @@ public sealed unsafe partial class Reactor
                 throw new InvalidOperationException($"[r{_id}] epoll_create1 failed with errno {Errno}");
             }
 
-            _events = (byte*)NativeMemory.Alloc((nuint)(_config.MaxEvents * EpollEventSize));
+            _events = (byte*)NativeMemory.Alloc((nuint)_config.MaxEvents * (nuint)EpollEventSize);
             _scratch = (byte*)NativeMemory.Alloc((nuint)_config.RecvBufferSize);
 
             OpenWakeFd();
