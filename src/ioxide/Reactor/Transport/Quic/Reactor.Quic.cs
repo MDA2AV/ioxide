@@ -393,8 +393,8 @@ public sealed unsafe partial class Reactor
         _quicSweepScratch.AddRange(_quicConnSet);
         foreach (QuicConnection conn in _quicSweepScratch)
         {
+            conn.OnEvicted(QuicEvictReason.ReactorShutdown);   // first: the removal frees the address a farewell goes to
             QuicRemoveConnection(conn);
-            conn.OnEvicted(QuicEvictReason.ReactorShutdown);
         }
         _quicConns.Clear();
     }

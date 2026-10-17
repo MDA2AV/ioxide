@@ -73,7 +73,10 @@ public abstract class QuicConnection : IValueTaskSource<QuicRecvSnapshot>
     /// <summary>Deadline passed - run loss/handshake/idle processing and flush whatever it produced.</summary>
     public abstract void OnTimer(long nowMs);
 
-    /// <summary>The transport dropped this connection (it is already unregistered when this runs).</summary>
+    /// <summary>
+    /// The transport dropped this connection. It is already unregistered when this runs, except at
+    /// <see cref="QuicEvictReason.ReactorShutdown"/>, where it can still <see cref="Send"/> a farewell.
+    /// </summary>
     public abstract void OnEvicted(QuicEvictReason reason);
 
     /// <summary>
