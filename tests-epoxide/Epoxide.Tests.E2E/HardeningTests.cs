@@ -12,7 +12,7 @@ namespace Epoxide.Tests;
 /// (healthy connections torn down when receive buffers ran short), #94 (faulted handlers leaking
 /// connections), #242 (a handler released twice, so teardown closed a number it had given back),
 /// #92 (a per-reactor limit reached at accept killing the reactor), and an event batch that cannot
-/// hold every ready connection.
+/// hold every ready connection - plus epoxide's own: a peer that keeps a reader's buffer full.
 /// </summary>
 /// <remarks>
 /// Not ported: "incremental recv survives per-conn ring exhaustion (#93)" and "incremental accept
@@ -184,6 +184,98 @@ internal static class HardeningTests
                     client?.Dispose();
                 }
             }
+        });
+
+        runner.Test("core: a peer that keeps a reader's buffer full cannot hold the reactor: another connection on it is still answered", () =>
+        {
+            // epoxide's own: a reader on its reactor receives itself while the socket has data, and a
+            // full buffer says there may be more. A peer sending faster than the handler consumes
+            // keeps every recv full, so without a budget the handler would never give the loop back -
+            // and every other connection on the reactor, and its own parked flush, would wait for good.
+            (int port, _, _) = TestServer.StartConfigured(async (_, conn) =>
+            {
+                try
+                {
+                    while (true)
+                    {
+                        RecvSnapshot snap = await conn.ReadAsync();
+                        bool ping = false;
+                        while (conn.TryGetItem(snap, out SpscRecvRing.Item item))
+                        {
+                            if (item.HasBuffer)
+                            {
+                                ping |= item.Len == 1;
+                                conn.ReturnBuffer(in item);
+                            }
+                        }
+                        if (snap.IsClosed)
+                        {
+                            return;
+                        }
+                        if (ping)
+                        {
+                            conn.Write("."u8);
+                            await conn.FlushAsync();
+                        }
+                        conn.ResetRead();
+                    }
+                }
+                finally
+                {
+                    conn.DecRef();
+                }
+            }, new ServerConfig { RecvBufferSize = 4096, Tcp = new TcpOptions { ReadTimeoutMs = 0 } });
+
+            using var pinger = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp)
+            {
+                NoDelay = true,
+                ReceiveTimeout = 2_000,
+            };
+            pinger.Connect(IPAddress.Loopback, port);
+            var one = new byte[1];
+            pinger.Send("p"u8);
+            Assert.Equal(1, pinger.Receive(one));   // its handler is parked on the reactor now
+
+            int flooding = 1;
+            var flood = new Thread(() =>
+            {
+                try
+                {
+                    using var flooder = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp) { SendTimeout = 2_000 };
+                    flooder.Connect(IPAddress.Loopback, port);
+                    var blob = new byte[256 * 1024];
+                    while (Volatile.Read(ref flooding) == 1)
+                    {
+                        flooder.Send(blob);
+                    }
+                }
+                catch (SocketException)
+                {
+                    // The server stopped reading: the assertions below say why.
+                }
+            }) { IsBackground = true, Name = "flooder" };
+            flood.Start();
+            Thread.Sleep(200);
+
+            const int Pings = 20;
+            int answered = 0, timedOut = 0;
+            for (int i = 0; i < Pings && timedOut < 2; i++)
+            {
+                try
+                {
+                    pinger.Send("p"u8);
+                    answered += pinger.Receive(one);
+                }
+                catch (SocketException e) when (e.SocketErrorCode == SocketError.TimedOut)
+                {
+                    timedOut++;
+                }
+                Thread.Sleep(10);
+            }
+
+            Volatile.Write(ref flooding, 0);
+            flood.Join(5_000);
+            Assert.True(answered == Pings, $"{answered} of {Pings} pings answered while another connection flooded the reactor ({timedOut} waited 2 s for nothing)");
         });
 
         runner.Test("core: faulted handler releases the connection (#94)", () =>

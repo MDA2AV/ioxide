@@ -30,6 +30,12 @@ public sealed unsafe partial class TcpConnection : IValueTaskSource<RecvSnapshot
     // What Receive found.
     private const int RecvEmpty = -1, RecvEnd = 0, RecvSome = 1, RecvFull = 2;
 
+    // Reads in a row a reader made on its reactor's thread without parking. A peer that keeps the
+    // socket full would otherwise keep such a reader in its loop for good, and every other connection
+    // on the reactor - and this one's own parked flush - would wait on it.
+    private int _inlineReads;
+    private const int InlineReadsPerPass = 16;
+
     /// <summary>
     /// Whether this connection has been torn down. A writer needs this: once it is true nothing
     /// will ever drain what it stages, so continuing to buffer is not backpressure, it is a leak.
@@ -74,6 +80,29 @@ public sealed unsafe partial class TcpConnection : IValueTaskSource<RecvSnapshot
             int state = Volatile.Read(ref _rd);
             if (state == RdReady)
             {
+                // Past its budget the reader parks, and the reactor resumes it on its next pass, once
+                // the rest of what is ready has had its turn.
+                if (_reactor.OnReactorThread && ++_inlineReads > InlineReadsPerPass)
+                {
+                    _readSignal.Reset();
+                    ReadParkedMs = _reactor.NowMs;
+
+                    if (Interlocked.CompareExchange(ref _rd, RdParked, RdReady) != RdReady)
+                    {
+                        continue;
+                    }
+                    _inlineReads = 0;
+
+                    if (Volatile.Read(ref _closed) != 0 && Interlocked.CompareExchange(ref _rd, RdIdle, RdParked) == RdParked)
+                    {
+                        return new ValueTask<RecvSnapshot>(Snapshot());
+                    }
+
+                    // Parked with the data still there, so no edge is coming for it: the reactor looks again.
+                    _reactor.AttendLater(this);
+                    return new ValueTask<RecvSnapshot>(this, (short)Volatile.Read(ref _generation));
+                }
+
                 if (Interlocked.CompareExchange(ref _rd, RdIdle, RdReady) != RdReady)
                 {
                     continue;
@@ -105,6 +134,7 @@ public sealed unsafe partial class TcpConnection : IValueTaskSource<RecvSnapshot
                 {
                     continue;
                 }
+                _inlineReads = 0;   // the reactor's loop gets it back from here
 
                 // MarkClosed sets _closed before it looks for a parked reader, so one of the two sees the other.
                 if (Volatile.Read(ref _closed) != 0 && Interlocked.CompareExchange(ref _rd, RdIdle, RdParked) == RdParked)

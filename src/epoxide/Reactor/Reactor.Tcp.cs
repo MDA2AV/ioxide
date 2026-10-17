@@ -248,9 +248,11 @@ public sealed unsafe partial class Reactor
         {
             CloseFromReactor(conn);
         }
-        else if (conn.HandlerReleased)
+        else
         {
-            conn.DrainReleased();
+            // As an edge would: a parked reader is read for - one that gave the loop back after its
+            // budget of reads (ReadAsync) - and a connection its handler let go is drained.
+            conn.OnReadable();
         }
     }
 
