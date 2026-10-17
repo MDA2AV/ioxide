@@ -42,8 +42,9 @@ internal static class ConfigValidationTests
 
         runner.KnownCoreBug("config: MaxEvents above what epoll_wait accepts is refused at construction, by name", () =>
         {
-            // Constructed, it fails at the first epoll_wait - EINVAL, thrown from the loop - and the
-            // event buffer it allocates first is sized in int arithmetic that wraps past this value.
+            // Constructed, it fails in Run: the event buffer is sized as MaxEvents * the event size in
+            // int arithmetic, which wraps exactly past this value, and the allocation throws
+            // OutOfMemoryException. Sized right, epoll_wait would refuse it anyway, with EINVAL.
             Assert.Throws<ArgumentException>(
                 () => _ = new Reactor(0, new ServerConfig { MaxEvents = EpollMaxEvents + 1 }), "'config.MaxEvents'");
         }, bug: "E3: MaxEvents has no upper bound");
