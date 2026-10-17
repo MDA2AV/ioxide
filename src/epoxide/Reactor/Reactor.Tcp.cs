@@ -222,9 +222,13 @@ public sealed unsafe partial class Reactor
         SignalLoop();
     }
 
+    // From the reactor itself: look again on the next pass, once everything else queued has had its turn.
+    internal void AttendLater(TcpConnection conn) => _closeQ.Enqueue((conn, conn.Generation));
+
     private void DrainCloseQ()
     {
-        while (_closeQ.TryDequeue(out (TcpConnection Conn, int Gen) item))
+        // Only what was queued before this pass: a drain re-queued here waits for the next one.
+        for (int queued = _closeQ.Count; queued > 0 && _closeQ.TryDequeue(out (TcpConnection Conn, int Gen) item); queued--)
         {
             if (item.Conn.Generation == item.Gen)
             {

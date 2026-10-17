@@ -28,7 +28,9 @@ Tcp/Hop                       h1      8080  /           -                   -
 Tcp/TaskRun                   h1      8080  /           -                   -
 
 # epoxide: the tcp samples above, on epoll instead of io_uring
+Epoxide/Raw                   h1      8080  /           -                   -
 Epoxide/Pipe                  h1      8080  /           -                   -
+Epoxide/ThreadPool            h1      8080  /           -                   -
 
 # tls over tcp
 Tls/OpenSsl                   h1s     8443  /           -                   -

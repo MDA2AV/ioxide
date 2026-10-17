@@ -8,6 +8,8 @@
   </Folder>
   <Folder Name="/epoxide/playground/">
     <Project Path="Playground/Epoxide/Pipe/Playground.Epoxide.Pipe.csproj" />
+    <Project Path="Playground/Epoxide/Raw/Playground.Epoxide.Raw.csproj" />
+    <Project Path="Playground/Epoxide/ThreadPool/Playground.Epoxide.ThreadPool.csproj" />
   </Folder>
 
   <!-- Protocol layers, native-bundled or pure C#. -->

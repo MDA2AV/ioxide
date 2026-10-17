@@ -218,7 +218,10 @@ public sealed unsafe partial class TcpConnection
     {
         byte* scratch = _reactor.Scratch;
         int size = _reactor.RecvBufferSize;
-        while (true)
+
+        // Bounded, so a peer that keeps sending cannot hold the reactor here; the rest is drained on
+        // a later pass, after every other connection has had its turn.
+        for (int pass = 0; pass < DrainPassesPerEdge; pass++)
         {
             nint n = Native.recv(ClientFd, scratch, (nuint)size, 0);
             if (n > 0)
@@ -243,7 +246,11 @@ public sealed unsafe partial class TcpConnection
             _reactor.CloseFromReactor(this);
             return;
         }
+
+        _reactor.AttendLater(this);
     }
+
+    private const int DrainPassesPerEdge = 16;
 
     internal void Clear()
     {
