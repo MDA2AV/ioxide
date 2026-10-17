@@ -34,7 +34,7 @@ internal static class H3ErrorCodeTests
     // RFC 9114 section 8.1, plus RFC 9204 section 8.3 for the QPACK space.
     private const ulong H3NoError                = 0x0100;
     private const ulong H3GeneralProtocolError   = 0x0101;
-    private const ulong H3ClosedCriticalStream   = 0x0104;
+    internal const ulong H3ClosedCriticalStream  = 0x0104;
     private const ulong H3FrameUnexpected        = 0x0105;
     private const ulong H3FrameError             = 0x0106;
     private const ulong H3ExcessiveLoad          = 0x0107;
@@ -44,7 +44,7 @@ internal static class H3ErrorCodeTests
     // A GET framed by hand: HEADERS(len 6), field-section prefix 00 00 (Required Insert Count 0,
     // base 0), then static-table indexed lines :method GET (17), :scheme https (23), :path / (1),
     // :authority "" (0). Static-only on purpose - the server advertises QPACK capacity 0.
-    private static readonly byte[] WellFormedGet = [0x01, 0x06, 0x00, 0x00, 0xD1, 0xD7, 0xC1, 0xC0];
+    internal static readonly byte[] WellFormedGet = [0x01, 0x06, 0x00, 0x00, 0xD1, 0xD7, 0xC1, 0xC0];
 
     // SETTINGS(len 0) - legal only on a control stream; on a request stream RFC 9114 section 7.2.4
     // demands H3_FRAME_ERROR. Two bytes of malformed h3 that both stacks must refuse.
@@ -53,7 +53,6 @@ internal static class H3ErrorCodeTests
     public static void Register(Runner runner)
     {
         RegisterCodeSeam(runner);
-        RegisterCriticalStream(runner);
         RegisterIncompleteRequest(runner);
         RegisterWire(runner);
         RegisterNghttp3(runner);
@@ -164,40 +163,6 @@ internal static class H3ErrorCodeTests
             Assert.Equal(0, served.Count);
             AssertClosedWith(quic, H3GeneralProtocolError, "H3_GENERAL_PROTOCOL_ERROR");
         });
-    }
-
-    // --- RFC 9114 section 6.2.1: critical streams ------------------------------------------------
-
-    private static void RegisterCriticalStream(Runner runner)
-    {
-        runner.Test("http3/codes: control - a client control stream is parsed and requests still serve", () =>
-        {
-            // The premise for the Pending below: the uni-stream feed path genuinely runs (type
-            // varint, SETTINGS walk) and an OPEN control stream is not an error. The Pending
-            // differs from this rig by exactly one bit - the fin.
-            var quic = new RecordingQuic();
-            Task run = StartPure(quic, out Served served, closeTransport: true,
-                (2, new byte[] { 0x00, 0x04, 0x00 }, false),   // stream type 0x00 (control) + SETTINGS(len 0)
-                (0, WellFormedGet, true));
-
-            Assert.True(run.IsCompleted, "the run loop should complete inline once the transport closes");
-            Assert.Equal(1, served.Count);
-            Assert.True(quic.ClosedWith is null, "an open control stream is not an error");
-        });
-
-        runner.Pending("http3/codes: closing the peer's control stream is a connection error H3_CLOSED_CRITICAL_STREAM", () =>
-        {
-            // RFC 9114 section 6.2.1: "If either control stream is closed at any point, this MUST
-            // be treated as a connection error of type H3_CLOSED_CRITICAL_STREAM."
-            var quic = new RecordingQuic();
-            Task run = StartPure(quic, out _, closeTransport: true,
-                (2, new byte[] { 0x00, 0x04, 0x00 }, false),   // the same control stream as above...
-                (2, Array.Empty<byte>(), true));               // ...now fin'd - a critical stream closed
-
-            Assert.True(run.IsCompleted, "the run loop should have ended");
-            AssertClosedWith(quic, H3ClosedCriticalStream, "H3_CLOSED_CRITICAL_STREAM");
-        }, "RFC 9114 6.2.1 - FeedUni swallows the fin (drops the stream record, keeps serving), and "
-         + "a RESET of the control stream is swallowed the same way by Feed's lifecycle branch");
     }
 
     // --- RFC 9114 section 4.1: a request stream that ends without a request ---------------------
@@ -355,7 +320,7 @@ internal static class H3ErrorCodeTests
 
     // --- helpers ---------------------------------------------------------------------------------
 
-    private sealed class Served { public int Count; }
+    internal sealed class Served { public int Count; }
 
     /// <summary>
     /// Enqueue the items, optionally close the transport (the wake for rigs that never go fatal),
@@ -363,7 +328,7 @@ internal static class H3ErrorCodeTests
     /// so for a fatal or closed transport the returned task is already finished - asserting
     /// IsCompleted is the proof the path under test actually ran.
     /// </summary>
-    private static Task StartPure(RecordingQuic quic, out Served served, bool closeTransport,
+    internal static Task StartPure(RecordingQuic quic, out Served served, bool closeTransport,
         params (long Sid, byte[] Bytes, bool Fin)[] items)
     {
         foreach ((long sid, byte[] bytes, bool fin) in items)
@@ -393,7 +358,7 @@ internal static class H3ErrorCodeTests
             + $"(0x{H3RequestIncomplete:x}) and nothing else, got [{got}]");
     }
 
-    private static void AssertClosedWith(RecordingQuic quic, ulong code, string name)
+    internal static void AssertClosedWith(RecordingQuic quic, ulong code, string name)
         => Assert.True(quic.ClosedWith == code,
             $"expected the connection to close with {name} (0x{code:x}), got "
             + (quic.ClosedWith is ulong got ? $"0x{got:x}" : "no Close at all"));
@@ -404,7 +369,7 @@ internal static class H3ErrorCodeTests
     /// surface (EnqueueStreamData / MarkClosed / ReadAsync) is the real base implementation, so
     /// the run loop under test is the production one; only the engine underneath is absent.
     /// </summary>
-    private sealed class RecordingQuic : QuicConnection
+    internal sealed class RecordingQuic : QuicConnection
     {
         public readonly List<(long StreamId, byte[] Bytes, bool Fin)> Sent = [];
         public readonly List<(long StreamId, ulong Code)> Resets = [];

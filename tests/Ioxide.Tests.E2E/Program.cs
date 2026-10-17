@@ -47,6 +47,7 @@ internal static class Program
         QuicClientCertTimingTests.Register(runner);
         H3BodyTruncationTests.Register(runner);
         H3ErrorCodeTests.Register(runner);
+        H3CriticalStreamTests.Register(runner);
         H3AlpnTests.Register(runner);
         Http2BodyTests.Register(runner);
         Http2StreamedFaultTests.Register(runner);
