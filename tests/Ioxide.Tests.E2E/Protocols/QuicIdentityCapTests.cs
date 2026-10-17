@@ -8,7 +8,8 @@ using ioxide.ngtcp2;
 namespace Ioxide.Tests;
 
 /// <summary>
-/// The fixed-size identity buffers on the QUIC side, and what happens to a name that does not fit.
+/// The fixed-size identity buffers on the QUIC side, what happens to a name that does not fit, and
+/// to a common name that would not be safe to log.
 /// </summary>
 /// <remarks>
 /// The shim keeps a verified peer's identity in <c>char peer_subject[1024]</c> and
@@ -114,8 +115,8 @@ internal static class QuicIdentityCapTests
             Assert.True(status == 200, $"the server never answered, so nothing was verified (status {status})");
 
             // The guard, the other way round: the subject carries the CN, so the certificate was
-            // verified, it HAS a common name, and that name is neither empty nor NUL-bearing -
-            // which is every reason PeerCommonName documents for being null.
+            // verified, it HAS a common name, and that name is neither empty nor carries a control
+            // character - which is every reason PeerCommonName documents for being null.
             Assert.True(subject is not null && subject.Contains(commonNameValue, StringComparison.Ordinal),
                 $"the subject should carry the CN this test signed, got: {subject ?? "<null>"}");
 
@@ -125,6 +126,54 @@ internal static class QuicIdentityCapTests
             // the one failure that actually grants something. Null denies; a prefix might not.
             Assert.True(commonName is null,
                 $"a CN too long to record must be reported as no name, not as a prefix, got: {commonName}");
+        });
+
+        runner.Test("mtls/quic: a common name carrying CRLF is refused, and the subject escapes it", () =>
+        {
+            // The QUIC side of the Tls suite's test of the same name: PeerCommonName is the value to
+            // authorize on, and what gets logged beside the decision, so a CN that could forge a log
+            // line or split a header is not reported as a name. PeerSubject may carry it, escaped.
+            (string cert, string key) = SignedByTestCa("crlf-cn", CommonNamed("alice\r\nauthorized=root"), server: false);
+
+            (int status, string? subject, string? commonName) = NameSeenBy(cert, key);
+
+            Assert.True(status == 200, $"the server never answered, so nothing was verified (status {status})");
+            Assert.True(commonName is null,
+                $"a CN carrying CR/LF must not be reported as an identity, got: {Show(commonName)}");
+            Assert.True(subject is not null && subject.Contains(@"alice\x0D\x0Aauthorized=root", StringComparison.Ordinal),
+                $"the rendered subject should escape the CR/LF, got: {subject ?? "<null>"}");
+        });
+
+        runner.Test("mtls/quic: a common name is refused for exactly the characters TCP refuses", () =>
+        {
+            // TlsSession.ExtractCommonName refuses any char.IsControl character: C0, DEL and C1. The
+            // shim checks UTF-8 bytes, where C1 is C2 80..C2 9F and the next character, U+00A0, is
+            // C2 A0 and no control - so both sides of each edge are asked, and the TCP rule decides.
+            string[] names =
+            [
+                "tab\there", "esc\u001Bhere", "del\u007Fhere", "nel\u0085here", "apc\u009Fhere",
+                "nbsp\u00A0here", "zo\u00EB", "y\u00FF",
+            ];
+
+            var wrong = new List<string>();
+            for (int i = 0; i < names.Length; i++)
+            {
+                string? expected = names[i].Any(char.IsControl) ? null : names[i];
+                (string cert, string key) = SignedByTestCa($"ctl-{i}", CommonNamed(names[i]), server: false);
+
+                (int status, string? subject, string? commonName) = NameSeenBy(cert, key);
+
+                if (status != 200 || subject is null)
+                {
+                    wrong.Add($"{Show(names[i])}: not verified (status {status})");
+                }
+                else if (commonName != expected)
+                {
+                    wrong.Add($"{Show(names[i])}: the TCP rule gives {Show(expected)}, QUIC read {Show(commonName)}");
+                }
+            }
+
+            Assert.True(wrong.Count == 0, string.Join("; ", wrong));
         });
     }
 
@@ -201,7 +250,7 @@ internal static class QuicIdentityCapTests
                     {
                         Body = Encoding.UTF8.GetBytes(
                             $"subject={(conn as QuicEngineConnection)?.PeerSubject}\n"
-                            + $"cn={(conn as QuicEngineConnection)?.PeerCommonName}"),
+                            + $"cn={Uri.EscapeDataString((conn as QuicEngineConnection)?.PeerCommonName ?? "")}"),
                     }));
 
             using var client = new H3TestClient("127.0.0.1", udpPort, clientCert, clientKey);
@@ -274,7 +323,7 @@ internal static class QuicIdentityCapTests
             }
             else if (line.StartsWith("cn=", StringComparison.Ordinal))
             {
-                commonName = line["cn=".Length..];
+                commonName = Uri.UnescapeDataString(line["cn=".Length..]);   // a CN can hold the separator
             }
         }
 
@@ -282,6 +331,18 @@ internal static class QuicIdentityCapTests
     }
 
     // ---- fixtures --------------------------------------------------------------------------------
+
+    /// <summary>A subject of one common name, encoded as a UTF8String whatever it holds.</summary>
+    private static X500DistinguishedName CommonNamed(string commonName)
+    {
+        var name = new X500DistinguishedNameBuilder();
+        name.AddCommonName(commonName);
+        return name.Build();
+    }
+
+    /// <summary>A name for a failure message, its control and non-ASCII characters spelled out.</summary>
+    private static string Show(string? name)
+        => name is null ? "no name" : string.Concat(name.Select(c => c is >= ' ' and <= '~' ? c.ToString() : $"\\u{(int)c:X4}"));
 
     /// <summary>A DN of 24 organisational units, rendering to 1456 bytes - past peer_subject[1024].</summary>
     private static string LongDistinguishedName(string commonName)
@@ -328,6 +389,9 @@ internal static class QuicIdentityCapTests
     /// on a fixture looks exactly like the defect under test.
     /// </remarks>
     private static (string Cert, string Key) SignedByTestCa(string tag, string subject, bool server)
+        => SignedByTestCa(tag, new X500DistinguishedName(subject), server);
+
+    private static (string Cert, string Key) SignedByTestCa(string tag, X500DistinguishedName subject, bool server)
     {
         (string caPath, _, _, _, _, _, _) = TestCert.EnsureMutualTls();
 
