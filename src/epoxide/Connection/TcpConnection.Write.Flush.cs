@@ -241,19 +241,26 @@ public sealed unsafe partial class TcpConnection : IValueTaskSource
             int state = Volatile.Read(ref _wr);
             if (state == WrParked)
             {
-                // The writer is parked, so nothing else moves the state until it is resumed.
+                // Claimed, not just read: a writer that has just parked takes its flush back when it
+                // sees the connection closed (TryParkFlush), and only one of the two may own it.
+                if (Interlocked.CompareExchange(ref _wr, WrIdle, WrParked) != WrParked)
+                {
+                    continue;
+                }
+
                 int sent = SendPending();
                 if (sent == SendBlocked)
                 {
-                    return;   // still full: the next edge brings the reactor back
+                    Volatile.Write(ref _wr, WrParked);   // still full: parked again for the next edge
+                    return;
                 }
                 if (sent == SendFailed)
                 {
-                    OnPeerGone();   // the reactor's end releases the parked flush with it
+                    Volatile.Write(ref _wr, WrParked);   // the reactor's end releases it
+                    OnPeerGone();
                     return;
                 }
 
-                Volatile.Write(ref _wr, WrIdle);
                 EndFlush();
 
                 // The FIN this flush held back, for a handler that let go or called ShutdownWrite meanwhile.
