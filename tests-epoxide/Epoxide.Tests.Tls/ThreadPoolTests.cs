@@ -26,7 +26,7 @@ internal static class ThreadPoolTests
 
             const int Total = 8 << 20;
             var faults = new ConcurrentQueue<string>();
-            var report = new TaskCompletionSource<(long Received, bool Intact, int OnReactor, int Overlaps)>(
+            var report = new TaskCompletionSource<(long Received, bool Intact, int OnReactor, bool Overlapped)>(
                 TaskCreationOptions.RunContinuationsAsynchronously);
 
             int port = TestServer.Start(DuplexHandler(Total, faults, report), r => TlsService.Start(r, options));
@@ -68,15 +68,16 @@ internal static class ThreadPoolTests
             Assert.True(readFault is null && sendFault is null,
                 $"client: received {received} of {Total}: {readFault ?? "ok"}; sending: {sendFault ?? "ok"}");
             Assert.True(report.Task.Wait(10_000), "the handler never reported");
-            (long serverReceived, bool intact, int onReactor, int overlaps) = report.Task.Result;
+            (long serverReceived, bool intact, int onReactor, bool overlapped) = report.Task.Result;
             Assert.True(faults.IsEmpty, "server: " + string.Join(" | ", faults));
             Assert.True(serverReceived == Total && intact,
                 $"the server read {serverReceived} of {Total} bytes, intact={intact}");
 
             // Non-vacuous: the handshake, every read and every flush ran off the reactor, and the two
-            // directions really were on the session together - the case its lock is for.
+            // loops were on the session over the same stretch of time - the case its lock is for.
+            // (With the lock taken out, most runs of this test fail with a TLS decrypt error.)
             Assert.True(onReactor == 0, $"{onReactor} of the handler's TLS operations ran on the reactor");
-            Assert.True(overlaps > 0, "the reader and the writer never had an operation in flight at the same time");
+            Assert.True(overlapped, "the reader and the writer never ran over the same stretch of time");
         });
 
         runner.Test("tls threadpool: a session keeps serving from the thread pool after ConfigureAwait(false)", () =>
@@ -148,28 +149,23 @@ internal static class ThreadPoolTests
 
     // Leaves the reactor before the handshake, then reads and writes on two pool tasks at once.
     private static Func<Reactor, TcpConnection, Task> DuplexHandler(int total, ConcurrentQueue<string> faults,
-        TaskCompletionSource<(long Received, bool Intact, int OnReactor, int Overlaps)> report)
+        TaskCompletionSource<(long Received, bool Intact, int OnReactor, bool Overlapped)> report)
         => async (reactor, connection) =>
         {
             TlsSession? session = null;
             TlsConnectionDualPipe? pipe = null;
             int onReactor = 0;
-            int inFlight = 0;
-            int overlaps = 0;
 
-            void Enter()
+            // When each loop's first operation began and its last one ended.
+            long readFirst = 0, readLast = 0, writeFirst = 0, writeLast = 0;
+
+            void Observe()
             {
                 if (reactor.OnReactorThread)
                 {
                     Interlocked.Increment(ref onReactor);
                 }
-                if (Interlocked.Increment(ref inFlight) > 1)
-                {
-                    Interlocked.Increment(ref overlaps);
-                }
             }
-
-            void Exit() => Interlocked.Decrement(ref inFlight);
 
             try
             {
@@ -177,38 +173,31 @@ internal static class ThreadPoolTests
 
                 try
                 {
-                    Enter();
+                    Observe();
                     session = await reactor.GetService<TlsService>().AcceptAsync(connection);
                 }
                 catch
                 {
                     return;   // the harness's readiness probe never completes a handshake
                 }
-                finally
-                {
-                    Exit();
-                }
 
                 pipe = new TlsConnectionDualPipe(connection, session);
                 PipeReader input = pipe.Input;
                 PipeWriter output = pipe.Output;
 
+                // Released together, so neither loop can be done before the other has begun.
+                using var start = new Barrier(2);
+
                 Task<(long, bool)> reading = Task.Run(async () =>
                 {
+                    start.SignalAndWait();
+                    readFirst = System.Diagnostics.Stopwatch.GetTimestamp();
                     long received = 0;
                     bool intact = true;
                     while (true)
                     {
-                        Enter();
-                        ReadResult read;
-                        try
-                        {
-                            read = await input.ReadAsync();
-                        }
-                        finally
-                        {
-                            Exit();
-                        }
+                        Observe();
+                        ReadResult read = await input.ReadAsync();
 
                         foreach (ReadOnlyMemory<byte> segment in read.Buffer)
                         {
@@ -223,6 +212,7 @@ internal static class ThreadPoolTests
 
                         if (received >= total || read.IsCompleted)
                         {
+                            readLast = System.Diagnostics.Stopwatch.GetTimestamp();
                             return (received, intact);
                         }
                     }
@@ -230,32 +220,29 @@ internal static class ThreadPoolTests
 
                 Task writing = Task.Run(async () =>
                 {
+                    start.SignalAndWait();
+                    writeFirst = System.Diagnostics.Stopwatch.GetTimestamp();
                     const int Chunk = 16 * 1024;
                     for (long sent = 0; sent < total; sent += Chunk)
                     {
                         Fill(output.GetSpan(Chunk)[..Chunk], sent);
                         output.Advance(Chunk);
 
-                        Enter();
-                        try
-                        {
-                            await output.FlushAsync();
-                        }
-                        finally
-                        {
-                            Exit();
-                        }
+                        Observe();
+                        await output.FlushAsync();
                     }
+                    writeLast = System.Diagnostics.Stopwatch.GetTimestamp();
                 });
 
                 await Task.WhenAll(reading, writing);
                 (long got, bool ok) = await reading;
-                report.TrySetResult((got, ok, Volatile.Read(ref onReactor), Volatile.Read(ref overlaps)));
+                bool overlapped = readFirst < writeLast && writeFirst < readLast;
+                report.TrySetResult((got, ok, Volatile.Read(ref onReactor), overlapped));
             }
             catch (Exception e)
             {
                 faults.Enqueue($"{e.GetType().Name}: {e.Message}");
-                report.TrySetResult((-1, false, Volatile.Read(ref onReactor), Volatile.Read(ref overlaps)));
+                report.TrySetResult((-1, false, Volatile.Read(ref onReactor), false));
             }
             finally
             {

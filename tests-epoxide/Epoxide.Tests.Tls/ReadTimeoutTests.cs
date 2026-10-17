@@ -104,7 +104,7 @@ internal static class ReadTimeoutTests
             ReadResult read = await pipe.Input.ReadAsync();
             pipe.Input.AdvanceTo(read.Buffer.End);
 
-            await Task.Delay(4 * ReadTimeoutMs);
+            await new ReactorTimer(reactor).DelayAsync(4 * ReadTimeoutMs);
 
             const string body = "slow-but-here";
             pipe.Output.Write(Encoding.ASCII.GetBytes(
@@ -169,7 +169,7 @@ internal static class ReadTimeoutTests
                     pipe.Output.Write(chunk);
                 }
                 Task flush = pipe.Output.FlushAsync().AsTask();
-                await Task.WhenAny(flush, Task.Delay(300));
+                await Task.WhenAny(flush, new ReactorTimer(reactor).DelayAsync(300).AsTask());
             }
             catch
             {

@@ -367,7 +367,7 @@ internal static class WriterContractTests
                     pipe.Output.Write(chunk);
                     Task<FlushResult> flush = pipe.Output.FlushAsync().AsTask();
 
-                    if (await Task.WhenAny(flush, Task.Delay(TimeSpan.FromSeconds(2))) != flush)
+                    if (await Task.WhenAny(flush, new ReactorTimer(reactor).DelayAsync(2_000).AsTask()) != flush)
                     {
                         parked = flush;
                     }
