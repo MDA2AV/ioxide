@@ -1,3 +1,5 @@
+using System.Globalization;
+
 namespace ioxide.http3;
 
 /// <summary>
@@ -33,6 +35,9 @@ public sealed class Http3Request
     internal readonly List<(int NOff, int NLen, int VOff, int VLen)> HeaderRanges = [];
     internal MemoryStream? BodyBuffer;
 
+    // The DATA payload content-length still owes: -1 without one, -2 for an invalid or repeated one.
+    internal long ContentLengthLeft = -1;
+
     // The QPACK decoder lands every decoded field here; pseudo-headers route by byte compare.
     internal void AddField(ReadOnlySpan<byte> name, ReadOnlySpan<byte> value)
     {
@@ -49,6 +54,15 @@ public sealed class Http3Request
         (int Off, int Len) nr = Append(name);
         (int Off, int Len) vr = Append(value);
         HeaderRanges.Add((nr.Off, nr.Len, vr.Off, vr.Len));
+
+        if (name.SequenceEqual("content-length"u8))
+        {
+            // A repeated one is refused even when the values agree, as nghttp3 does.
+            ContentLengthLeft = ContentLengthLeft == -1
+                && long.TryParse(value, NumberStyles.None, CultureInfo.InvariantCulture, out long length)
+                    ? length
+                    : -2;
+        }
     }
 
     private (int Off, int Len) Append(ReadOnlySpan<byte> data)
