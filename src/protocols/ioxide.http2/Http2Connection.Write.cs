@@ -212,11 +212,17 @@ public sealed partial class Http2Connection
 
     private void WriteResponse(int streamId, Http2Response response)
     {
+        // Gone once the peer has reset the stream, and nothing may follow a reset (RFC 9113 5.1).
+        if (!_responseWindows.Remove(streamId, out int window))
+        {
+            return;
+        }
+
         WriteHeaders(streamId, response, endStream: response.Body.Length == 0);
 
         if (response.Body.Length > 0)
         {
-            WriteData(streamId, response.Body.Span);
+            WriteData(streamId, response.Body.Span, window);
         }
     }
 
@@ -282,7 +288,7 @@ public sealed partial class Http2Connection
         }
     }
 
-    private void WriteData(int streamId, ReadOnlySpan<byte> body)
+    private void WriteData(int streamId, ReadOnlySpan<byte> body, int window)
     {
         int offset = 0;
 
@@ -291,14 +297,13 @@ public sealed partial class Http2Connection
             // Bounded by the frame size AND by both flow-control windows: exceeding either is a
             // connection error, and the peer would be right to hang up.
             int chunk = Math.Min(_peerMaxFrameSize, body.Length - offset);
-            chunk = Math.Min(chunk, _peerConnectionWindow);
+            chunk = Math.Min(chunk, Math.Min(_peerConnectionWindow, window));
 
             if (chunk <= 0)
             {
-                // Out of credit. The rest is dropped rather than queued: this server buffers whole
-                // responses, and a 1 MiB default window makes running out mean the peer has stopped
-                // reading entirely. Streaming responses would need a send queue here instead.
-                ResetStream(streamId, Http2Error.FlowControlError);
+                // Out of credit: the rest waits for a WINDOW_UPDATE the way a streamed response does.
+                _responseWindows[streamId] = window;
+                ParkRest(streamId, body[offset..]);
                 return;
             }
 
@@ -312,7 +317,37 @@ public sealed partial class Http2Connection
             Stage(body.Slice(offset, chunk));
 
             _peerConnectionWindow -= chunk;
+            window -= chunk;
             offset += chunk;
+        }
+    }
+
+    // Copied into a writer, because the body is the handler's again once it has returned.
+    private void ParkRest(int streamId, ReadOnlySpan<byte> rest)
+    {
+        Http2ResponseWriter writer = RentWriter(streamId);
+        writer.ContinueBody();
+        rest.CopyTo(writer.GetSpan(rest.Length));
+        writer.Advance(rest.Length);
+
+        _ = CompleteParkedAsync(writer);
+    }
+
+    private async Task CompleteParkedAsync(Http2ResponseWriter writer)
+    {
+        try
+        {
+            await writer.CompleteAsync();
+        }
+        catch
+        {
+            // FlushAsync has already marked the connection broken; the read loop sees it.
+        }
+        finally
+        {
+            _creditWaiters.Remove(writer.StreamId);
+            _responseWindows.Remove(writer.StreamId);
+            _writerPool.Push(writer);
         }
     }
 

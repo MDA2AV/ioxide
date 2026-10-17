@@ -16,9 +16,10 @@ public sealed partial class Http2Connection
     private readonly Stack<Http2ResponseWriter> _writerPool = new();
 
     /// <summary>
-    /// The peer's per-stream send window for each RESPONSE in flight.
+    /// The peer's per-stream send window for each RESPONSE in flight, buffered or streamed, from the
+    /// moment its request is ready.
     ///
-    /// It cannot live on the PendingRequest, which is where the buffered path keeps it: a request
+    /// It cannot stay on the PendingRequest, where it lives while the request arrives: a request
     /// that arrived complete - every GET, so every static file - is taken out of <c>_streams</c>
     /// the moment it becomes ready, which is BEFORE its handler runs. From then on a streamed
     /// response could find no window at all, and both halves of per-stream flow control went
@@ -55,8 +56,6 @@ public sealed partial class Http2Connection
         {
             return false;
         }
-
-        _responseWindows[request.StreamId] = _peerInitialStreamWindow;
 
         Http2ResponseWriter writer = RentWriter(request.StreamId);
         _ = ServeStreamedAsync(_streamedHandler, request, writer, pending);

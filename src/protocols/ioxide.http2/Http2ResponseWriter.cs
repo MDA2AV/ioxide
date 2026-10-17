@@ -15,9 +15,8 @@ namespace ioxide.http2;
 /// transport-level credit; HTTP/2 multiplexes every stream onto one TCP connection and tracks
 /// TWO windows - one per stream, one for the connection - so a flush can be blocked by either.
 /// <see cref="FlushAsync"/> waits for a WINDOW_UPDATE rather than failing, which is what makes a
-/// response longer than the peer's window possible at all. The buffered path resets the stream
-/// instead, because a whole body was always in hand and running out of credit could only mean the
-/// peer had stopped reading entirely.
+/// response longer than the peer's window possible at all. The buffered path hands whatever its
+/// windows cannot take yet to one of these, so it waits the same way.
 /// </summary>
 /// <remarks>Reactor thread only, like everything else on the connection.</remarks>
 public sealed class Http2ResponseWriter : IBufferWriter<byte>
@@ -265,6 +264,9 @@ public sealed class Http2ResponseWriter : IBufferWriter<byte>
         }
         _staging = grown;
     }
+
+    /// <summary>Carry on a buffered response whose headers are already out, for the body its windows could not take.</summary>
+    internal void ContinueBody() => _headersSent = true;
 
     /// <summary>Take this writer for another stream, keeping its buffer.</summary>
     internal void Reset(int streamId)

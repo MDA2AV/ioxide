@@ -24,6 +24,7 @@ internal static class Program
         Http2TrailerTests.Register(runner);
         Http2StreamedBodyTests.Register(runner);
         Http2FlowControlTests.Register(runner);
+        Http2BufferedCreditTests.Register(runner);
         HpackEncodeTests.Register(runner);
         QpackStaticEncodeTests.Register(runner);
         SendWaitAllTests.Register(runner);
