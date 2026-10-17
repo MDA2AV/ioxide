@@ -422,10 +422,13 @@ public static class TestServer
         }
         catch (Exception e)
         {
-            // Not recorded if a test already accounted for this death - see ObservedDeaths.
-            if (!ObservedDeaths.ContainsKey(port))
+            // Recorded, then withdrawn if a test already accounted for this death (ObservedDeaths). In
+            // this order: that test claims the death before it removes the failure, so one of the two
+            // sees the other - checked first, a claim landing in between left it reported as unseen.
+            StartupFailures[port] = e;
+            if (ObservedDeaths.ContainsKey(port))
             {
-                StartupFailures[port] = e;
+                StartupFailures.TryRemove(port, out _);
             }
 
             // ALWAYS print, even though WaitForListen may also report it. Only failures that happen

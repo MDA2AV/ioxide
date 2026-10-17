@@ -6,7 +6,7 @@ never by breaking the source; assert why, not that; guard against passing vacuou
 claim).
 
 ```bash
-for s in Unit E2E Chaos; do
+for s in Unit E2E Tls Chaos; do
   dotnet build -c Release tests-epoxide/Epoxide.Tests.$s
   dotnet run -c Release --no-build --project tests-epoxide/Epoxide.Tests.$s
 done
@@ -19,7 +19,8 @@ One argument runs only the tests whose name contains it:
 | --- | --- | --- |
 | `Unit` | The version, the clock, the errno the syscall wrappers report, the config sizes refused at construction | nothing |
 | `E2E` | Reactor lifecycle, the TCP read and write paths, hardening, the clocks - and what is epoxide's own: connections used from the thread pool, and outbound connects | nothing |
-| `Chaos` | Malformed and hostile TCP input; TLS chaos joins it with the TLS suite | nothing |
+| `Tls` | TLS on the bundled BoringSSL and on kTLS: handshakes, ALPN, SNI, mutual TLS, rotation, resumption, posture, the kTLS RX handoff, truncation - and sessions read and written from the thread pool | nothing; the kTLS tests skip without the kernel's `tls` module |
+| `Chaos` | Malformed and hostile TCP and TLS input | nothing |
 
 ## Where does my test go?
 
@@ -31,6 +32,7 @@ One argument runs only the tests whose name contains it:
 | Read and send timeouts, the FIN a release sends, half-close | `E2E/TcpTimeoutTests` |
 | `ReactorTimer`, tickers | `E2E/TimerTests` |
 | Setup failures, `Stop()`, what a teardown frees | `E2E/ReactorSetupTeardownTests` |
+| TLS, on BoringSSL or kTLS | `Tls` |
 | A hostile or malformed input | `Chaos` |
 
 ## Ported from ioxide
@@ -45,8 +47,9 @@ rings, ring setup, UDP and QUIC.
 `runner.KnownCoreBug(name, body, bug)` registers a test that reproduces a reported, unfixed epoxide
 core bug. It is listed as `KNOWN` and not run, so the suite stays green; `EPOXIDE_KNOWN_CORE_BUGS=run`
 runs every one as an ordinary test. Once the core is fixed and they pass, make each a `Test()`.
-Not `Pending`, which wants a tracked issue and runs its body - some of these hang a caller or hold a
-descriptor for the rest of the process.
+Not `Pending`, which wants a tracked issue and runs its body - such a test can hang a caller or hold
+a descriptor for the rest of the process. None is registered: every bug the port turned up is fixed,
+and its test runs with the rest.
 
 ## The harness
 

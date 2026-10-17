@@ -83,6 +83,16 @@ jobs:
             echo "::endgroup::"
           done
 
+      # epoxide, the same runtime on epoll: its own suites, in their own folder (tests-epoxide/README.md).
+      - name: Run epoxide tests
+        run: |
+          for suite in Unit E2E Tls Chaos; do
+            echo "::group::epoxide $suite"
+            dotnet run --project tests-epoxide/Epoxide.Tests.$suite/Epoxide.Tests.$suite.csproj \
+              --configuration Release --no-build
+            echo "::endgroup::"
+          done
+
       # Paths mirror the src/ grouping in ioxide.slnx (core, protocols/, clients/, serving/).
       # Every project carrying a PackageId is packed. ioxide.httpclient is the whole client -
       # h1, h2 and h3 - and project-references http2/ngtcp2/nghttp3, so those ship as its NuGet
