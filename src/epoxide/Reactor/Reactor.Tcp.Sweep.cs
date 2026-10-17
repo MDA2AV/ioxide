@@ -21,6 +21,20 @@ public sealed unsafe partial class Reactor
     // Whenever TCP is on: the deferred FIN (TcpConnection.DecRef) is sent from here, clocks or not.
     private bool TcpSweepEnabled => _tcpEnabled;
 
+    // Whether the sweep is on this reactor's tickers. A reactor with no listener registers it with
+    // its first outbound connection, whose clocks and deferred FIN need it just the same.
+    private bool _tcpSweepRegistered;
+
+    // Reactor thread only.
+    private void EnsureTcpSweep()
+    {
+        if (!_tcpSweepRegistered)
+        {
+            _tcpSweepRegistered = true;
+            AddTicker(TcpSweep);
+        }
+    }
+
     /// <summary>One pass over the connection table, on the reactor thread, which owns it outright.</summary>
     private void TcpSweep()
     {

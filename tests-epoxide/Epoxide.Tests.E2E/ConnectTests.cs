@@ -275,12 +275,12 @@ internal static class ConnectTests
                 $"a connect on a stopped reactor ended as {connecting.Status}: {connecting.Exception?.InnerException?.GetType().Name}");
         });
 
-        runner.KnownCoreBug("connect: on a reactor with no listener, a flush its peer stopped draining is released at the send timeout", () =>
+        runner.Test("connect: on a reactor with no listener, a flush its peer stopped draining is released at the send timeout", () =>
         {
             // ServerConfig.Tcp == null is the outbound-only shape, and its connections are the same
-            // TcpConnection with the same clocks (TcpOptions' defaults: 60 s each). But the clocks run
-            // on the TCP sweep, and the sweep is registered only when Tcp is set - so a peer that stops
-            // reading parks the flush forever. Takes the default 60 s when it passes.
+            // TcpConnection with the same clocks (TcpOptions' defaults: 60 s each). The clocks run on
+            // the TCP sweep, which such a reactor registers with its first outbound connection; without
+            // it a peer that stops reading would park the flush forever. Takes the default 60 s.
             using var sink = new FakeServer((_, socket) => Thread.Sleep(Timeout.Infinite));   // accepts, never reads
             (Reactor client, _) = TestServer.StartClientOnly();
 
@@ -301,7 +301,7 @@ internal static class ConnectTests
 
             Assert.True(stalled.Wait(90_000), "the flush was still parked 90 s into a 60 s send timeout");
             Assert.Equal("released, closed", stalled.Result);
-        }, bug: "E5: a reactor with Tcp == null runs no TCP sweep", timeoutMs: 110_000);
+        }, timeoutMs: 110_000);
 
         runner.Test("connect: a connect from another thread that races Stop() settles instead of hanging", () =>
         {

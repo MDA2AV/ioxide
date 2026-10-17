@@ -123,6 +123,8 @@ public sealed unsafe partial class Reactor
             conn.BeginConnect(result);   // before the registration: its first writable edge settles the connect
         }
 
+        EnsureTcpSweep();   // its clocks run on the sweep, listener or not
+
         if (!Register(conn))
         {
             AbandonOutbound(conn);

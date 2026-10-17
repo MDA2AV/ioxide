@@ -42,10 +42,10 @@ public sealed unsafe partial class Reactor
 
             AnnounceListening();
 
-            // After OnStart, so a reactor that serves no TCP registers nothing.
+            // After OnStart. A reactor with no listener registers it with its first outbound connection.
             if (TcpSweepEnabled)
             {
-                AddTicker(TcpSweep);
+                EnsureTcpSweep();
             }
 
             StartTicker();
