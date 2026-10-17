@@ -148,14 +148,14 @@ internal static class QuicSniHostileTests
 
     private static void RegisterSecondHello(Runner runner)
     {
-        runner.Pending("sni/quic: a second ClientHello naming a different host is refused", () =>
+        runner.Test("sni/quic: a second ClientHello naming a different host is refused", () =>
         {
             // on_client_hello runs for the FIRST ClientHello only (picotls guards the call with
             // !is_second_flight), so the host selected there is the one whose certificate is
-            // served. picotls does have a guard for exactly this - it compares CH2's server_name
-            // with CH1's and fails the handshake on a mismatch - but the comparison is gated on
-            // tls->server_name, which is only ever set by ptls_set_server_name, which the shim
-            // never calls. So the guard is dead and the second name is never looked at.
+            // served. picotls has a guard for exactly this - it compares CH2's server_name with
+            // CH1's and fails the handshake on a mismatch - but the comparison is gated on
+            // tls->server_name, which only ptls_set_server_name sets, so it runs only because the
+            // shim's callback saves the name.
             //
             // The client controls whether a second hello happens at all: offering an empty
             // key_share list forces a HelloRetryRequest, and the retry is the invitation to send
@@ -180,13 +180,11 @@ internal static class QuicSniHostileTests
                 "the second ClientHello asked for beta.test where the first asked for alpha.test, and " +
                 "the certificate was already chosen from the first - the server should have refused " +
                 $"the change instead of continuing; it {Describe(second)}");
-        }, "iq_on_client_hello never calls ptls_set_server_name, so picotls's own CH1/CH2 server-name " +
-           "equality check (picotls.c, 'we compare SNI only when the value is saved by the " +
-           "on_client_hello callback') never runs");
+        });
 
         runner.Test("control: a second ClientHello keeping the name continues the handshake", () =>
         {
-            // The control for the Pending above, and the thing that stops it from being a PEND for
+            // The control for the test above, and the thing that stops it from passing for
             // the wrong reason. Same retry, same two flights, same everything - only CH2 keeps
             // alpha.test. A ServerHello here proves the retry rig is correct and that a mismatched
             // name is the ONLY difference between the two cases.
