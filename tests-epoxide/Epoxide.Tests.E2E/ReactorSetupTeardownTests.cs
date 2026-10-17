@@ -20,6 +20,7 @@ namespace Epoxide.Tests;
 /// Translated: ioxide's "a ring the kernel refuses reaches OnFault" - epoxide has no ring, so the
 /// setup failure that reaches OnFault is the listener's refused bind. Not ported: the incremental
 /// variant of "a stop frees its pooled connections" - epoxide has no per-connection buffer ring.
+/// epoxide's own: a stop under a handler parked on something only its reactor completes.
 /// </remarks>
 internal static class ReactorSetupTeardownTests
 {
@@ -161,6 +162,77 @@ internal static class ReactorSetupTeardownTests
         });
 
         RegisterStopFrees(runner);
+        RegisterStopStrands(runner);
+    }
+
+    // The teardown shuts every connection down and leaves each descriptor to its handler's release,
+    // since a handler may be mid-syscall on another thread. That holds only for a handler that runs
+    // again: one parked on something only its reactor would ever have completed - a continuation
+    // posted back to it, a ReactorTimer - never resumes once the loop has exited, so it never lets
+    // go, and its descriptor and the reactor's pools stay held for the life of the process.
+    private static void RegisterStopStrands(Runner runner)
+    {
+        runner.KnownCoreBug("reactor: a handler awaiting a continuation posted back to its reactor at Stop() still lets go, and its descriptor closes", () =>
+        {
+            var gate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            StopUnder(waitOn: _ => gate.Task, afterStop: () => gate.SetResult());
+        }, bug: "E4: Stop() strands what was posted to the reactor and its timers");
+
+        runner.KnownCoreBug("reactor: a handler awaiting a ReactorTimer at Stop() still lets go, and its descriptor closes", () =>
+        {
+            StopUnder(waitOn: r => new ReactorTimer(r).DelayAsync(1_000).AsTask(), afterStop: () => { });
+        }, bug: "E4: Stop() strands what was posted to the reactor and its timers");
+    }
+
+    /// <summary>
+    /// A handler on its reactor parks on <paramref name="waitOn"/> - not on its connection - and the
+    /// reactor stops under it; <paramref name="afterStop"/> then completes what it waits for, if the
+    /// test has a hand in that. The handler must resume, let go, and so close its descriptor.
+    /// </summary>
+    private static void StopUnder(Func<Reactor, Task> waitOn, Action afterStop)
+    {
+        var waiting = new TaskCompletionSource<(string Target, int Fd)>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var resumed = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        (int port, Reactor reactor, Thread thread) = TestServer.StartConfigured(async (r, conn) =>
+        {
+            try
+            {
+                RecvSnapshot snapshot = await conn.ReadAsync();
+                Wire.ReadPath(conn, snapshot);
+                if (snapshot.IsClosed)
+                {
+                    return;   // the harness's readiness probe
+                }
+
+                waiting.TrySetResult((ExecInheritance.Target(conn.ClientFd), conn.ClientFd));
+                await waitOn(r);   // on the reactor: it resumes through its context, or its timer queue
+                resumed.TrySetResult();
+            }
+            finally
+            {
+                conn.DecRef();
+            }
+        }, new ServerConfig
+        {
+            RecvBufferSize = 4096,
+            Tcp = new TcpOptions { WriteSlabSize = 4096, PoolMax = 8, RecvQueueEntries = 64 },
+        });
+
+        using var client = new TcpClient();
+        client.Connect("127.0.0.1", port);
+        client.GetStream().Write("GET / HTTP/1.1\r\n\r\n"u8);
+        Assert.True(waiting.Task.Wait(5_000), "the handler never reached its wait");
+        (string target, int fd) = waiting.Task.Result;
+
+        reactor.Stop();
+        Assert.True(thread.Join(5_000), "the reactor did not stop");
+        afterStop();
+
+        Assert.True(resumed.Task.Wait(5_000),
+            "the handler never resumed after the stop: what it waited on was left with a reactor whose loop had exited");
+        Assert.True(SpinWait.SpinUntil(() => ExecInheritance.Target(fd) != target, 5_000),
+            $"fd {fd} still holds the connection: its handler never let go after the stop");
     }
 
     private const int SlabSize = 4096;

@@ -168,6 +168,23 @@ internal static class CoreTests
             Assert.Equal(body.Length, got.Length);
         });
 
+        runner.KnownCoreBug("core: a 32 MiB recv buffer serves a request instead of failing its first recv", () =>
+        {
+            // The recv pool sizes a chunk of 64 buffers as bufferSize << 6, in int arithmetic: at 32 MiB
+            // that is 2^31, which wraps negative, and the allocation it asks for is about 16 EiB. Every
+            // recv rents first, so the first one throws OutOfMemoryException out of the handler's read
+            // (and a read that parked after one would throw it on the reactor, out of its loop).
+            (int port, _, _) = TestServer.StartConfigured(Handlers.Raw, new ServerConfig
+            {
+                RecvBufferSize = 32 * 1024 * 1024,
+                Tcp = new TcpOptions { WriteSlabSize = 4096, PoolMax = 8, RecvQueueEntries = 64 },
+            });
+
+            (int status, string body) = Client.Get(port, "/");
+            Assert.Equal(200, status);
+            Assert.Equal("ok", body);
+        }, bug: "E2: BufferPool sizes its chunks in int");
+
         runner.Test("core: ExtraPorts listeners route with ListenerPort", () =>
         {
             int extra = TestServer.NextPort();

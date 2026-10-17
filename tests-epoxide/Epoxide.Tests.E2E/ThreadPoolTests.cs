@@ -251,9 +251,10 @@ internal static class ThreadPoolTests
         runner.Test("threadpool: a read on one pool thread and a flush on another share a connection, full duplex, byte-exact", () =>
         {
             // One reader and one writer at a time, as with any stream - and the two at once, on two
-            // threads, neither of them the reactor's. 8 MiB each way through small socket buffers, so
-            // both directions park repeatedly while the other is mid-syscall.
-            const int Bytes = 8 * 1024 * 1024;
+            // threads, neither of them the reactor's. 8 MiB each way through small socket buffers, with
+            // the client pausing now and then on each side, so both directions park repeatedly while the
+            // other is mid-syscall.
+            const int Bytes = 8 * 1024 * 1024, Mebibyte = 1024 * 1024;
             var serverRead = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
             int parkedReads = 0, parkedFlushes = 0;
 
@@ -261,7 +262,9 @@ internal static class ThreadPoolTests
             {
                 try
                 {
-                    if (Drain(conn, await conn.ReadAsync()) == 0)
+                    // The stream's first bytes, which tell this connection from the harness's probe.
+                    byte[] head = Take(conn, await conn.ReadAsync());
+                    if (head.Length == 0)
                     {
                         return;   // the harness's probe
                     }
@@ -269,7 +272,15 @@ internal static class ThreadPoolTests
 
                     Task<string> reading = Task.Run(async () =>
                     {
-                        long got = 0;
+                        for (int i = 0; i < head.Length; i++)
+                        {
+                            if (head[i] != Pattern(i, 17))
+                            {
+                                return $"byte {i} arrived as 0x{head[i]:X2}, expected 0x{Pattern(i, 17):X2}";
+                            }
+                        }
+
+                        long got = head.Length;
                         while (got < Bytes)
                         {
                             ValueTask<RecvSnapshot> pending = conn.ReadAsync();
@@ -340,7 +351,6 @@ internal static class ThreadPoolTests
             using var client = new TcpClient { ReceiveBufferSize = 64 * 1024, SendBufferSize = 64 * 1024 };
             client.Connect("127.0.0.1", port);
             client.ReceiveTimeout = 30_000;
-            client.GetStream().Write("g"u8);
 
             string clientRead = "";
             var reader = new Thread(() =>
@@ -365,6 +375,10 @@ internal static class ThreadPoolTests
                                 return;
                             }
                         }
+                        if ((got + n) / Mebibyte != got / Mebibyte)
+                        {
+                            Thread.Sleep(20);   // a slow reader now and then, so the server's flushes park
+                        }
                         got += n;
                     }
                     clientRead = "ok";
@@ -384,6 +398,10 @@ internal static class ThreadPoolTests
                     outgoing[i] = Pattern(sent + i, 17);
                 }
                 client.Client.Send(outgoing);
+                if ((sent + outgoing.Length) % Mebibyte == 0)
+                {
+                    Thread.Sleep(20);   // a slow sender now and then, so the server's reads park
+                }
             }
 
             Assert.True(serverRead.Task.Wait(30_000), "the server's reader never finished");
@@ -941,6 +959,21 @@ internal static class ThreadPoolTests
         {
             return 0;
         }
+    }
+
+    // Copies every buffer of a snapshot out and hands it back to the pool.
+    private static byte[] Take(TcpConnection conn, in RecvSnapshot snapshot)
+    {
+        var bytes = new List<byte>();
+        while (conn.TryGetItem(snapshot, out SpscRecvRing.Item item))
+        {
+            if (item.HasBuffer)
+            {
+                bytes.AddRange(item.AsSpan().ToArray());
+                conn.ReturnBuffer(in item);
+            }
+        }
+        return [.. bytes];
     }
 
     // Takes every buffer of a snapshot back to the pool and says how many bytes they held.
