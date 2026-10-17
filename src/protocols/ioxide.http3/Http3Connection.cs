@@ -22,6 +22,7 @@ public sealed partial class Http3Connection
 
     // RFC 9114 section 8.1. The code a protocol error closes the connection with.
     private const ulong H3GeneralProtocolError = 0x0101;
+    private const ulong H3ClosedCriticalStream = 0x0104;
     // RFC 9114 8.1 draws the line by WHY the frame is wrong, and the two are not interchangeable:
     // UNEXPECTED is a frame that is not permitted in this state or on this stream, ERROR is one
     // whose layout or size is invalid. A peer debugging its own framing is told different things.
@@ -84,6 +85,7 @@ public sealed partial class Http3Connection
     {
         public bool TypeKnown;
         public bool IsControl;
+        public bool IsCritical;   // control or QPACK encoder/decoder: the peer may never close one
         public readonly byte[] Carry = new byte[16];
         public int CarryLen;
         // Control-stream frame walk (SETTINGS and friends are parsed-and-ignored, but must be
@@ -232,7 +234,10 @@ public sealed partial class Http3Connection
                 dead.Sink?.End();
                 ReleaseParseBuffers(dead);
             }
-            _unis.Remove(item.StreamId);
+            if (_unis.Remove(item.StreamId, out UniStream? uni) && uni.IsCritical)
+            {
+                Fatal("critical stream closed", H3ClosedCriticalStream);
+            }
 
             // A response in flight whose peer will read no more of it: its handler learns at the next
             // flush, and one parked on send capacity wakes to find that out.
@@ -498,9 +503,17 @@ public sealed partial class Http3Connection
             }
             us.TypeKnown = true;
             us.IsControl = type == 0x00;
+            us.IsCritical = type is 0x00 or 0x02 or 0x03;
             int fromData = consumed - us.CarryLen;
             us.CarryLen = 0;
             data = data[fromData..];
+        }
+
+        // RFC 9114 6.2.1 and RFC 9204 4.2.
+        if (fin && us.IsCritical)
+        {
+            Fatal("critical stream closed", H3ClosedCriticalStream);
+            return;
         }
 
         if (!us.IsControl)
@@ -542,11 +555,6 @@ public sealed partial class Http3Connection
                     us.State = ParseState.FrameHeader;
                 }
             }
-        }
-
-        if (fin)
-        {
-            _unis.Remove(sid);
         }
     }
 
