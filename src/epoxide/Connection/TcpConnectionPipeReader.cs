@@ -13,6 +13,7 @@ namespace epoxide;
 /// chain's front. Honors <c>examined</c>: when everything held has been examined, ReadAsync waits
 /// for new bytes instead of returning the same data again. Usable from any thread, one reader at a
 /// time: a caller on the connection's reactor resumes inline, any other where it came from.
+/// <see cref="Complete"/> may come from another thread while a read is parked or completing.
 /// </summary>
 public sealed unsafe class TcpConnectionPipeReader : PipeReader, IValueTaskSource<ReadResult>, IRecvBufferHolder
 {
@@ -67,6 +68,14 @@ public sealed unsafe class TcpConnectionPipeReader : PipeReader, IValueTaskSourc
     private bool _cancelRequested;
     private bool _connectionClosed;
 
+    // Set by the reactor's reclaim at recycle: from then on a read still in flight takes nothing, since
+    // what is left in the queue is the reactor's to return.
+    private bool _reclaimed;
+
+    // Guards the chain. The reader's own calls are one at a time, but Complete from another task and
+    // the reactor's reclaim at recycle can come from other threads at the same moment as a read.
+    private readonly Lock _sync = new();
+
     public TcpConnectionPipeReader(TcpConnection connection)
     {
         _conn = connection ?? throw new ArgumentNullException(nameof(connection));
@@ -80,16 +89,25 @@ public sealed unsafe class TcpConnectionPipeReader : PipeReader, IValueTaskSourc
     {
         ThrowIfCompleted();
 
-        if (_cancelRequested)
+        // Unexamined bytes, a cancel or a closed connection complete synchronously; checked again
+        // under the lock, which only these need.
+        if (_heldBytes > _examined || _cancelRequested || _connectionClosed)
         {
-            _cancelRequested = false;
-            return new ValueTask<ReadResult>(BuildResult(isCanceled: true));
-        }
+            lock (_sync)
+            {
+                ThrowIfCompleted();
 
-        // Unexamined bytes (or a closed connection) complete synchronously.
-        if (_heldBytes > _examined || _connectionClosed)
-        {
-            return new ValueTask<ReadResult>(BuildResult(isCanceled: false));
+                if (_cancelRequested)
+                {
+                    _cancelRequested = false;
+                    return new ValueTask<ReadResult>(BuildResult(isCanceled: true));
+                }
+
+                if (_heldBytes > _examined || _connectionClosed)
+                {
+                    return new ValueTask<ReadResult>(BuildResult(isCanceled: false));
+                }
+            }
         }
 
         // Everything held was examined - wait for new bytes.
@@ -105,11 +123,14 @@ public sealed unsafe class TcpConnectionPipeReader : PipeReader, IValueTaskSourc
                 return new ValueTask<ReadResult>(this, _core.Version);
             }
 
-            if (Ingest(pending.Result) || _connectionClosed || _cancelRequested)
+            lock (_sync)
             {
-                bool canceled = _cancelRequested;
-                _cancelRequested = false;
-                return new ValueTask<ReadResult>(BuildResult(canceled));
+                if (Ingest(pending.Result) || _connectionClosed || _cancelRequested)
+                {
+                    bool canceled = _cancelRequested;
+                    _cancelRequested = false;
+                    return new ValueTask<ReadResult>(BuildResult(canceled));
+                }
             }
             // Spurious wake with nothing new: arm again.
         }
@@ -120,36 +141,47 @@ public sealed unsafe class TcpConnectionPipeReader : PipeReader, IValueTaskSourc
     private void OnRecvReady()
     {
         RecvSnapshot snapshot = _pendingRead.GetResult();
+        ReadResult result;
 
-        if (!Ingest(snapshot) && !_connectionClosed && !_cancelRequested)
+        lock (_sync)
         {
-            // Nothing new: re-arm without completing the caller.
-            while (true)
+            if (!Ingest(snapshot) && !_connectionClosed && !_cancelRequested)
             {
-                ValueTask<RecvSnapshot> pending = _conn.ReadAsync();
-
-                if (!pending.IsCompletedSuccessfully)
+                // Nothing new: re-arm without completing the caller.
+                while (true)
                 {
-                    _pendingRead = pending.GetAwaiter();
-                    _pendingRead.UnsafeOnCompleted(_onRecvReady);
-                    return;
-                }
+                    ValueTask<RecvSnapshot> pending = _conn.ReadAsync();
 
-                if (Ingest(pending.Result) || _connectionClosed || _cancelRequested)
-                {
-                    break;
+                    if (!pending.IsCompletedSuccessfully)
+                    {
+                        _pendingRead = pending.GetAwaiter();
+                        _pendingRead.UnsafeOnCompleted(_onRecvReady);
+                        return;
+                    }
+
+                    if (Ingest(pending.Result) || _connectionClosed || _cancelRequested)
+                    {
+                        break;
+                    }
                 }
             }
+
+            bool canceled = _cancelRequested;
+            _cancelRequested = false;
+            result = BuildResult(canceled);
         }
 
-        bool canceled = _cancelRequested;
-        _cancelRequested = false;
-        _core.SetResult(BuildResult(canceled));
+        _core.SetResult(result);   // outside the lock: the caller resumes inline from here
     }
 
-    // Drain a snapshot into the chain. Returns true if any bytes were added.
+    // Drain a snapshot into the chain, under the lock. Returns true if any bytes were added.
     private bool Ingest(in RecvSnapshot snapshot)
     {
+        if (_reclaimed)
+        {
+            return false;
+        }
+
         bool any = false;
 
         while (_conn.TryGetItem(snapshot, out SpscRecvRing.Item item))
@@ -198,19 +230,22 @@ public sealed unsafe class TcpConnectionPipeReader : PipeReader, IValueTaskSourc
 
     public override bool TryRead(out ReadResult result)
     {
-        ThrowIfCompleted();
-
-        if (_cancelRequested)
+        lock (_sync)
         {
-            _cancelRequested = false;
-            result = BuildResult(isCanceled: true);
-            return true;
-        }
+            ThrowIfCompleted();
 
-        if (_heldBytes > _examined || _connectionClosed)
-        {
-            result = BuildResult(isCanceled: false);
-            return true;
+            if (_cancelRequested)
+            {
+                _cancelRequested = false;
+                result = BuildResult(isCanceled: true);
+                return true;
+            }
+
+            if (_heldBytes > _examined || _connectionClosed)
+            {
+                result = BuildResult(isCanceled: false);
+                return true;
+            }
         }
 
         result = default;
@@ -220,6 +255,14 @@ public sealed unsafe class TcpConnectionPipeReader : PipeReader, IValueTaskSourc
     public override void AdvanceTo(SequencePosition consumed) => AdvanceTo(consumed, consumed);
 
     public override void AdvanceTo(SequencePosition consumed, SequencePosition examined)
+    {
+        lock (_sync)
+        {
+            Advance(consumed, examined);
+        }
+    }
+
+    private void Advance(SequencePosition consumed, SequencePosition examined)
     {
         if (_head == null)
         {
@@ -277,26 +320,29 @@ public sealed unsafe class TcpConnectionPipeReader : PipeReader, IValueTaskSourc
 
     public override void Complete(Exception? exception = null)
     {
-        if (_completed)
+        lock (_sync)
         {
-            return;
+            ReleaseHeld();
         }
-
-        _completed = true;
-
-        ReleaseHeld();
     }
 
-    void IRecvBufferHolder.ReleaseHeldBuffers() => ReleaseHeld();
+    void IRecvBufferHolder.ReleaseHeldBuffers()
+    {
+        lock (_sync)
+        {
+            _reclaimed = true;
+            ReleaseHeld();
+        }
+    }
 
     /// <summary>
     /// Hand every held slice's buffer back to the pool and forget the chain.
     /// </summary>
     /// <remarks>
-    /// Called by <see cref="Complete"/>, and by the reactor at recycle for a reader whose caller
-    /// never completed it (<see cref="TcpConnection.ReleaseHeldRecvBuffers"/>). Idempotent: once the
-    /// chain is empty it does nothing, so the ordinary path of Complete-then-recycle returns each
-    /// buffer exactly once.
+    /// Called under the lock by <see cref="Complete"/>, and by the reactor at recycle for a reader
+    /// whose caller never completed it (<see cref="TcpConnection.ReleaseHeldRecvBuffers"/>), in
+    /// either order or at once. Idempotent: once the chain is empty it does nothing, so each buffer
+    /// goes back exactly once.
     /// </remarks>
     private void ReleaseHeld()
     {
@@ -325,7 +371,7 @@ public sealed unsafe class TcpConnectionPipeReader : PipeReader, IValueTaskSourc
 
     private void ThrowIfCompleted()
     {
-        if (_completed)
+        if (Volatile.Read(ref _completed))
         {
             throw new InvalidOperationException("Reading is not allowed after the reader was completed.");
         }

@@ -11,7 +11,8 @@ namespace epoxide;
 /// flush. Allocation-free at steady state: read and write chain onto the connection's value-task
 /// sources instead of an async state machine, preserving inline resume. The one cost the
 /// <see cref="Stream"/> contract forces is a copy into the caller's buffer (the raw API and the pipe
-/// adapter expose recv memory directly). Single reader, single writer, any thread.
+/// adapter expose recv memory directly). Single reader, single writer, any thread; Dispose may come
+/// from another thread while a read is parked or completing.
 /// </summary>
 public sealed class TcpConnectionStream : Stream, IValueTaskSource<int>, IValueTaskSource, IRecvBufferHolder
 {
@@ -24,6 +25,14 @@ public sealed class TcpConnectionStream : Stream, IValueTaskSource<int>, IValueT
     private int _curOffset;
     private bool _haveCur;
     private bool _eof;
+
+    // Set by the reactor's reclaim at recycle: from then on a read still in flight takes nothing, since
+    // what is left in the queue is the reactor's to return.
+    private bool _reclaimed;
+
+    // Guards the read state: the reader's calls are one at a time, but Dispose from another task and
+    // the reactor's reclaim at recycle can come from other threads at the same moment as a read.
+    private readonly Lock _sync = new();
 
     private ManualResetValueTaskSourceCore<int> _readCore = new() { RunContinuationsAsynchronously = false };
     private ValueTaskAwaiter<RecvSnapshot> _pendingRead;
@@ -73,16 +82,28 @@ public sealed class TcpConnectionStream : Stream, IValueTaskSource<int>, IValueT
     /// </remarks>
     protected override void Dispose(bool disposing)
     {
-        ((IRecvBufferHolder)this).ReleaseHeldBuffers();
+        lock (_sync)
+        {
+            ReleaseHeld();
+        }
         base.Dispose(disposing);
     }
 
     void IRecvBufferHolder.ReleaseHeldBuffers()
     {
+        lock (_sync)
+        {
+            _reclaimed = true;
+            ReleaseHeld();
+        }
+    }
+
+    // Under the lock, from Dispose or the reclaim at recycle, in either order or at once.
+    private void ReleaseHeld()
+    {
         // Terminal, like the reader's. _haveSnap otherwise survives with the PREVIOUS life's tail,
-        // and SpscRecvRing.Reset only moves head/tail without clearing the items - so a read after
-        // recycle would dequeue a stale entry, copy out another tenant's bytes, and on draining it
-        // return a buffer id the group already holds.
+        // and a read after recycle would dequeue a stale entry, copy out another tenant's bytes, and
+        // on draining it return a buffer the pool has already handed on.
         _haveSnap = false;
         _eof = true;
 
@@ -95,6 +116,15 @@ public sealed class TcpConnectionStream : Stream, IValueTaskSource<int>, IValueT
 
     // -1 = nothing buffered, caller must await a fresh snapshot; >= 0 = bytes produced (0 = EOF).
     private int TryServe(Span<byte> destination)
+    {
+        lock (_sync)
+        {
+            return Serve(destination);
+        }
+    }
+
+    // Under the lock.
+    private int Serve(Span<byte> destination)
     {
         while (true)
         {
@@ -160,16 +190,27 @@ public sealed class TcpConnectionStream : Stream, IValueTaskSource<int>, IValueT
                 return new ValueTask<int>(this, _readCore.Version);
             }
 
-            _snap = pending.Result;
-            _haveSnap = true;
+            TakeSnapshot(pending.Result);
+        }
+    }
+
+    // A reclaimed stream takes no new snapshot: it would dequeue what recycle is returning.
+    private void TakeSnapshot(in RecvSnapshot snapshot)
+    {
+        lock (_sync)
+        {
+            if (!_reclaimed)
+            {
+                _snap = snapshot;
+                _haveSnap = true;
+            }
         }
     }
 
     // Completion of a parked conn.ReadAsync - where the caller belongs (the connection's source decides).
     private void OnReadReady()
     {
-        _snap = _pendingRead.GetResult();
-        _haveSnap = true;
+        TakeSnapshot(_pendingRead.GetResult());
 
         while (true)
         {
@@ -188,8 +229,7 @@ public sealed class TcpConnectionStream : Stream, IValueTaskSource<int>, IValueT
                 return;
             }
 
-            _snap = pending.Result;
-            _haveSnap = true;
+            TakeSnapshot(pending.Result);
         }
     }
 

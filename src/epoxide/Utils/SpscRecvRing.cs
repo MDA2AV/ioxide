@@ -105,11 +105,9 @@ public sealed unsafe class SpscRecvRing
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public bool IsFull() => Volatile.Read(ref _tail) - Volatile.Read(ref _head) >= _items.Length;
 
-    // Recycle only, with no reader left: discards what is queued so the next life starts empty.
+    // Recycle only: discards what is queued so the next life starts empty. The indices carry on
+    // instead of restarting at 0, so a snapshot kept from a previous life, its tail now at or behind
+    // the head, finds nothing to take.
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public void Reset()
-    {
-        _head = 0;
-        _tail = 0;
-    }
+    public void Reset() => Volatile.Write(ref _head, Volatile.Read(ref _tail));
 }

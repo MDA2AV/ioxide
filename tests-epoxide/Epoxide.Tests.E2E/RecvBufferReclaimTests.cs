@@ -1,4 +1,6 @@
+using System.Collections.Concurrent;
 using System.IO.Pipelines;
+using System.Net;
 using System.Net.Sockets;
 using epoxide;
 
@@ -268,6 +270,171 @@ internal static class RecvBufferReclaimTests
             Assert.True(pool.Total > 0, "the reactor never rented a recv buffer, so nothing was tested");
             Assert.True(pool.Rented == 0,
                 $"{pool.Rented} recv buffers were still out on a connection whose every stream was disposed");
+        });
+
+        runner.Test("recv buffers: a reader completed, or a stream disposed, on the thread pool after its handler let go hands each back once", () =>
+        {
+            // The idiomatic spellings release after DecRef - `using var stream`, or Complete() below a
+            // try/finally that lets go - and from the thread pool that release runs while the reactor
+            // recycles the connection and reclaims the same buffers. Returned twice, a buffer links the
+            // pool's free list into a cycle, and every rent after it hands that buffer to everyone.
+            const int Connections = 5_000;
+            foreach (bool stream in new[] { false, true })
+            {
+                int handled = 0;
+                (int port, Reactor reactor, _) = TestServer.StartConfigured(async (_, conn) =>
+                {
+                    TcpConnectionPipeReader? reader = stream ? null : new TcpConnectionPipeReader(conn);
+                    TcpConnectionStream? adapter = stream ? new TcpConnectionStream(conn) : null;
+                    bool client;   // the harness's probe sends nothing, and is not counted
+                    await Hop.ToThreadPool();
+                    try
+                    {
+                        if (reader is not null)
+                        {
+                            ReadResult result = await reader.ReadAsync();
+                            client = !result.Buffer.IsEmpty;
+                            reader.AdvanceTo(result.Buffer.Start, result.Buffer.End);   // examined, not consumed: still held
+                        }
+                        else
+                        {
+                            client = await adapter!.ReadAsync(new byte[1]) > 0;   // one byte out, the rest of its buffer held
+                        }
+                    }
+                    finally
+                    {
+                        conn.DecRef();
+                    }
+
+                    Thread.SpinWait(Random.Shared.Next(4_000));   // across the moment the reactor reclaims
+                    reader?.Complete();
+                    adapter?.Dispose();
+                    if (client)
+                    {
+                        Interlocked.Increment(ref handled);
+                    }
+                }, new ServerConfig { RecvBufferSize = 1024, Tcp = new TcpOptions { ReadTimeoutMs = 0 } });
+
+                var request = new byte[100];
+                Parallel.For(0, Connections, new ParallelOptions { MaxDegreeOfParallelism = 16 }, _ =>
+                {
+                    using var client = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp) { NoDelay = true };
+                    client.Connect(IPAddress.Loopback, port);
+                    client.Send(request);
+                    client.Shutdown(SocketShutdown.Both);
+                });
+
+                Assert.True(SpinWait.SpinUntil(() => Volatile.Read(ref handled) == Connections, 20_000),
+                    $"{Volatile.Read(ref handled)} of {Connections} {(stream ? "stream" : "reader")} handlers finished");
+                AssertEveryBufferBack(reactor);
+            }
+        });
+
+        runner.Test("recv buffers: an adapter released by another task while its read is parked or completing hands each back once", () =>
+        {
+            // A duplex handler's other half - a write loop that ended, a dispose in a finally - releases
+            // the reader while its read loop, on another pool thread, is parked or in the middle of
+            // taking a recv. The read must end, and nothing it was handed may be lost or returned twice.
+            const int Connections = 400;
+            foreach (bool stream in new[] { false, true })
+            {
+                int handled = 0;
+                var faults = new ConcurrentQueue<string>();
+                (int port, Reactor reactor, _) = TestServer.StartConfigured(async (_, conn) =>
+                {
+                    TcpConnectionPipeReader? reader = stream ? null : new TcpConnectionPipeReader(conn);
+                    TcpConnectionStream? adapter = stream ? new TcpConnectionStream(conn) : null;
+                    bool client = false;
+                    try
+                    {
+                        await Hop.ToThreadPool();
+
+                        // The first bytes, before the race: the harness's probe sends none, and is not counted.
+                        if (reader is not null)
+                        {
+                            ReadResult first = await reader.ReadAsync();
+                            client = !first.Buffer.IsEmpty;
+                            reader.AdvanceTo(first.Buffer.End);
+                        }
+                        else
+                        {
+                            client = await adapter!.ReadAsync(new byte[4096]) > 0;
+                        }
+                        if (!client)
+                        {
+                            return;
+                        }
+
+                        Task loop = Task.Run(async () =>
+                        {
+                            try
+                            {
+                                var buffer = new byte[4096];
+                                while (true)
+                                {
+                                    if (reader is not null)
+                                    {
+                                        ReadResult result = await reader.ReadAsync();
+                                        reader.AdvanceTo(result.Buffer.End);
+                                        if (result.IsCompleted)
+                                        {
+                                            return;
+                                        }
+                                    }
+                                    else if (await adapter!.ReadAsync(buffer) == 0)
+                                    {
+                                        return;
+                                    }
+                                }
+                            }
+                            catch (InvalidOperationException)
+                            {
+                                // A read after the Complete, refused - as it should be.
+                            }
+                            catch (Exception e)
+                            {
+                                faults.Enqueue($"{e.GetType().Name}: {e.Message}");
+                            }
+                        });
+
+                        Thread.SpinWait(Random.Shared.Next(200_000));
+                        reader?.Complete();
+                        adapter?.Dispose();
+                        await loop;
+                    }
+                    finally
+                    {
+                        conn.DecRef();
+                        if (client)
+                        {
+                            Interlocked.Increment(ref handled);
+                        }
+                    }
+                }, new ServerConfig { RecvBufferSize = 4096, Tcp = new TcpOptions { ReadTimeoutMs = 0 } });
+
+                var blob = new byte[64 * 1024];
+                Parallel.For(0, Connections, new ParallelOptions { MaxDegreeOfParallelism = 4 }, _ =>
+                {
+                    using var client = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp) { SendTimeout = 200 };
+                    client.Connect(IPAddress.Loopback, port);
+                    try
+                    {
+                        for (long until = Environment.TickCount64 + 5; Environment.TickCount64 < until;)
+                        {
+                            client.Send(blob);
+                        }
+                    }
+                    catch (SocketException)
+                    {
+                        // The server stopped reading.
+                    }
+                });
+
+                Assert.True(SpinWait.SpinUntil(() => Volatile.Read(ref handled) == Connections, 20_000),
+                    $"{Volatile.Read(ref handled)} of {Connections} {(stream ? "stream" : "reader")} handlers finished");
+                Assert.True(faults.IsEmpty, $"{faults.Count} read loops faulted, first: {faults.FirstOrDefault()}");
+                AssertEveryBufferBack(reactor);
+            }
         });
 
         runner.Test("recv buffers: completing the reader returns them, with or without reclaim", () =>
