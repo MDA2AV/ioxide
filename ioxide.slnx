@@ -7,7 +7,9 @@
     <Project Path="src/epoxide/epoxide.csproj" />
   </Folder>
   <Folder Name="/epoxide/playground/">
+    <Project Path="Playground/Epoxide/KtlsPipes/Playground.Epoxide.KtlsPipes.csproj" />
     <Project Path="Playground/Epoxide/Pipe/Playground.Epoxide.Pipe.csproj" />
+    <Project Path="Playground/Epoxide/TlsPipes/Playground.Epoxide.TlsPipes.csproj" />
   </Folder>
 
   <!-- Protocol layers, native-bundled or pure C#. -->
