@@ -59,6 +59,13 @@ public sealed unsafe partial class Reactor
     internal void ScheduleTimer(long nanoseconds, ITimerCompletion completion)
     {
         long due = Stopwatch.GetTimestamp() + (long)(nanoseconds * (Stopwatch.Frequency / 1e9));
+        if (_stopped)
+        {
+            // No loop will run it: cancelled, on the pool, as the teardown cancels the rest.
+            ThreadPool.UnsafeQueueUserWorkItem(static timer => timer.Cancel(), completion, preferLocal: false);
+            return;
+        }
+
         if (OnReactorThread)
         {
             _timers.Enqueue(completion, due);
@@ -68,8 +75,33 @@ public sealed unsafe partial class Reactor
         ScheduleOnReactor(static s =>
         {
             var (reactor, timer, at) = ((Reactor, ITimerCompletion, long))s!;
+
+            // Run on the pool by a stopped reactor (EnqueuePost): no loop will expire it.
+            if (reactor._stopped)
+            {
+                timer.Cancel();
+                return;
+            }
             reactor._timers.Enqueue(timer, at);
         }, (this, completion, due));
+    }
+
+    // Teardown, after _stopped: every timer still queued is cancelled. Counted first, so a
+    // continuation that arms again - which ScheduleTimer now cancels on the pool - cannot keep this
+    // loop going.
+    private void CancelTimers()
+    {
+        for (int n = _timers.Count; n > 0 && _timers.TryDequeue(out ITimerCompletion? timer, out _); n--)
+        {
+            try
+            {
+                timer.Cancel();
+            }
+            catch (Exception e)
+            {
+                Console.Error.WriteLine($"[r{_id}] timer continuation threw: {e}");
+            }
+        }
     }
 
     private void RunDueTimers()
@@ -119,4 +151,7 @@ public sealed unsafe partial class Reactor
 internal interface ITimerCompletion
 {
     void Expire();
+
+    /// <summary>The reactor stopped before the deadline: complete without having expired.</summary>
+    void Cancel();
 }

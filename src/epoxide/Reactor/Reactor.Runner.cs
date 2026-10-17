@@ -120,9 +120,23 @@ public sealed unsafe partial class Reactor
 
         _stopped = true;
 
-        // Anything let go before the flag was visible, and queued for a loop that will not run again.
+        // A full fence, not the volatile store's release: ConnectAsync and EnqueueRecycle enqueue and
+        // then read _stopped, so either a drain below finds the item or its producer sees the flag.
+        Interlocked.MemoryBarrier();
+
+        // Anything registered or let go before the flag was visible, queued for a loop that will not
+        // run again. A registration is refused here, which completes its ConnectAsync.
+        DrainRegisterQ();
         DrainCloseQ();
         DrainRecycleQ();
+
+        // What only this loop would ever have run: continuations posted back to it, and its timers.
+        // A handler parked on either resumes now, finds its connection ended, and lets go - left
+        // alone it never would, and its descriptor would stay open with it. A timer is cancelled, not
+        // expired, so a loop on Expired() ends; anything posted or armed from here on is handled on
+        // the pool (EnqueuePost, ScheduleTimer).
+        DrainPostQ();
+        CancelTimers();
 
         // Taken away before it is closed, and its writers waited out: closing under one would free
         // the number and let that writer's 8 bytes land in whatever took it next.

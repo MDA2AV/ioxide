@@ -303,12 +303,12 @@ internal static class ConnectTests
             Assert.Equal("released, closed", stalled.Result);
         }, bug: "E5: a reactor with Tcp == null runs no TCP sweep", timeoutMs: 110_000);
 
-        runner.KnownCoreBug("connect: a connect from another thread that races Stop() settles instead of hanging", () =>
+        runner.Test("connect: a connect from another thread that races Stop() settles instead of hanging", () =>
         {
             // ConnectAsync off the reactor enqueues the registration and wakes the loop; a Stop() right
-            // behind it ends the loop before it drains that queue - and the teardown never drains it.
-            // Nothing settles the connect then: the caller waits forever, and the socket and the live
-            // count leak, so the pools are never freed either.
+            // behind it ends the loop before it drains that queue, so the teardown has to. Left there,
+            // nothing settles the connect: the caller waits forever, and the socket and the live count
+            // leak, so the pools are never freed either.
             int port = TestServer.Start(Handlers.Raw);
             var remote = new IPEndPoint(IPAddress.Loopback, port);
 
@@ -341,7 +341,7 @@ internal static class ConnectTests
             }
 
             Assert.True(hung == 0, $"{hung} of {Rounds} connects that raced Stop() never settled, each holding a socket");
-        }, bug: "E1: Teardown never drains _registerQ");
+        });
     }
 
     /// <summary>One request over a raw connection, read to the end of its body, from whatever thread this is on.</summary>

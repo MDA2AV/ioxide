@@ -19,6 +19,9 @@ public sealed class ReactorTimer : ITimerCompletion, IValueTaskSource<int>
     /// </summary>
     public const int ETime = -62;
 
+    /// <summary>What a wait completes with when its reactor stopped first: -ECANCELED, which <see cref="Expired"/> refuses.</summary>
+    public const int ECanceled = -125;
+
     private const long NanosecondsPerMillisecond = 1_000_000L;
 
     private readonly Reactor _reactor;
@@ -59,6 +62,12 @@ public sealed class ReactorTimer : ITimerCompletion, IValueTaskSource<int>
         // Cleared before SetResult: the inline continuation may arm the next wait.
         _inFlight = false;
         _core.SetResult(0);
+    }
+
+    void ITimerCompletion.Cancel()
+    {
+        _inFlight = false;
+        _core.SetResult(ECanceled);
     }
 
     int IValueTaskSource<int>.GetResult(short token) => _core.GetResult(token);

@@ -167,21 +167,21 @@ internal static class ReactorSetupTeardownTests
 
     // The teardown shuts every connection down and leaves each descriptor to its handler's release,
     // since a handler may be mid-syscall on another thread. That holds only for a handler that runs
-    // again: one parked on something only its reactor would ever have completed - a continuation
-    // posted back to it, a ReactorTimer - never resumes once the loop has exited, so it never lets
-    // go, and its descriptor and the reactor's pools stay held for the life of the process.
+    // again: one parked on something only its reactor would complete - a continuation posted back to
+    // it, a ReactorTimer - has to be resumed by the teardown itself, or it never lets go, and its
+    // descriptor and the reactor's pools stay held for the life of the process.
     private static void RegisterStopStrands(Runner runner)
     {
-        runner.KnownCoreBug("reactor: a handler awaiting a continuation posted back to its reactor at Stop() still lets go, and its descriptor closes", () =>
+        runner.Test("reactor: a handler awaiting a continuation posted back to its reactor at Stop() still lets go, and its descriptor closes", () =>
         {
             var gate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
             StopUnder(waitOn: _ => gate.Task, afterStop: () => gate.SetResult());
-        }, bug: "E4: Stop() strands what was posted to the reactor and its timers");
+        });
 
-        runner.KnownCoreBug("reactor: a handler awaiting a ReactorTimer at Stop() still lets go, and its descriptor closes", () =>
+        runner.Test("reactor: a handler awaiting a ReactorTimer at Stop() still lets go, and its descriptor closes", () =>
         {
             StopUnder(waitOn: r => new ReactorTimer(r).DelayAsync(1_000).AsTask(), afterStop: () => { });
-        }, bug: "E4: Stop() strands what was posted to the reactor and its timers");
+        });
     }
 
     /// <summary>

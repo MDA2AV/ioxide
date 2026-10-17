@@ -52,6 +52,14 @@ public sealed unsafe partial class Reactor
     {
         _postQ.Enqueue(new PostItem(callback, state));
         SignalLoop();
+
+        // Raced the teardown's last drain, or came after it: no loop will take it out of the queue,
+        // and whoever waits on what was posted would wait forever. The pool runs it instead - the
+        // reactor's thread is gone, so there is no running it there.
+        if (_stopped)
+        {
+            ThreadPool.UnsafeQueueUserWorkItem(static reactor => reactor.DrainPostQ(), this, preferLocal: false);
+        }
     }
 
     // On the reactor the loop drains before it next waits, so no syscall; off it, one wake per drain.
