@@ -1,12 +1,14 @@
 using System.Net;
 using System.Net.Sockets;
+using System.Runtime.CompilerServices;
 using ioxide;
 
 namespace Ioxide.Tests;
 
 /// <summary>
 /// Teardown after a setup that FAILED. Run tears the ring down on every exit path, including a
-/// throw from the setup sequence itself, so the fd tables it closes may only be half filled.
+/// throw from the setup sequence itself, so the fd tables it closes may only be half filled. And
+/// what the teardown after a stop frees.
 /// </summary>
 /// <remarks>
 /// The tables are <c>new int[n]</c>, so an unset slot reads as 0 - stdin, not something this
@@ -150,7 +152,129 @@ internal static class ReactorSetupTeardownTests
             // Control: the same probe sees the listener gone once the teardown has run.
             Assert.True(!Accepts(port), "the listener still accepted after Run returned, so the probe cannot tell");
         });
+
+        RegisterStopFrees(runner);
     }
+
+    private const int SlabSize = 4096;
+    private const int ResponseBytes = 3 * SlabSize;
+
+    // A pooled connection owns native memory - its write slab, and in incremental mode its buffer ring -
+    // and so does the reactor's pool of spare write slabs. A stop freed neither, and a connection has no
+    // finalizer, so a host that starts and stops servers leaked them every time (#223).
+    private static void RegisterStopFrees(Runner runner)
+    {
+        foreach (bool incremental in new[] { false, true })
+        {
+            string mode = incremental ? "incremental" : "shared ring, segmented writes";
+
+            runner.Test($"reactor: a stop frees its pooled connections and its spare write slabs ({mode})", () =>
+            {
+                var config = new ServerConfig
+                {
+                    RecvBufferSize = 4096,
+                    RecvSlots = 256,
+                    Incremental = incremental ? new IncrementalOptions { MaxConnections = 16, RecvSlots = 4 } : null,
+                    Tcp = new TcpOptions
+                    {
+                        WriteSlabSize = SlabSize,
+                        PoolMax = 8,
+                        RecvQueueEntries = 64,
+                        WriteOverflow = WriteOverflowStrategy.Segmented,   // incremental mode always grows instead
+                    },
+                };
+
+                TcpConnection? kept = null;
+                int keptGeneration = 0;
+                int spareSlabs = 0;
+                bool hadRing = false;
+                using var released = new ManualResetEventSlim();
+
+                (int port, Reactor reactor, Thread thread) = TestServer.StartConfigured(async (r, conn) =>
+                {
+                    try
+                    {
+                        RecvSnapshot snapshot = await conn.ReadAsync();
+                        Wire.ReadPath(conn, snapshot);
+                        if (snapshot.IsClosed)
+                        {
+                            return;   // the harness's readiness probe, which sends no request
+                        }
+                        conn.ResetRead();
+
+                        conn.Write(new byte[ResponseBytes]);   // past the slab, so a segmented write rents spare slabs
+                        await conn.FlushAsync();
+                        spareSlabs = WriteSlabPool(r).Count;   // handed back as the flush completed
+                        hadRing = HasRing(conn);
+                        keptGeneration = GenerationOf(conn);
+                        kept = conn;
+
+                        // Held until the client closes: the reactor then recycles it in the same dispatch
+                        // that wakes this read, before its loop can see the stop.
+                        while (!(snapshot = await conn.ReadAsync()).IsClosed)
+                        {
+                            Wire.ReadPath(conn, snapshot);
+                            conn.ResetRead();
+                        }
+                    }
+                    finally
+                    {
+                        conn.DecRef();
+                        if (ReferenceEquals(kept, conn))
+                        {
+                            released.Set();
+                        }
+                    }
+                }, config);
+
+                using (var client = new TcpClient())
+                {
+                    client.Connect(IPAddress.Loopback, port);
+                    NetworkStream stream = client.GetStream();
+                    stream.Write("GET / HTTP/1.1\r\n\r\n"u8);
+                    stream.ReadExactly(new byte[ResponseBytes]);
+                }
+
+                Assert.True(released.Wait(TimeSpan.FromSeconds(10)), "the handler never saw the client close");
+                reactor.Stop();
+                Assert.True(thread.Join(TimeSpan.FromSeconds(10)), "the reactor did not stop");
+
+                Assert.True(GenerationOf(kept!) != keptGeneration, "the connection was never recycled, so it never reached the pool");
+                Assert.True(!HasWriteBuffer(kept!), "the pooled connection's write slab outlived its reactor");
+
+                if (incremental)
+                {
+                    Assert.True(hadRing, "the connection had no buffer ring of its own, so there was nothing to free");
+                    Assert.True(!HasRing(kept!), "the pooled connection's buffer ring outlived its reactor");
+                }
+                else
+                {
+                    Assert.True(spareSlabs > 0, "the response never spilled past the slab, so no spare slab was pooled");
+                    Assert.True(WriteSlabPool(reactor).Count == 0,
+                        $"{WriteSlabPool(reactor).Count} spare write slabs outlived their reactor");
+                }
+            }, skip: incremental && !TestServer.KernelAtLeast(6, 12));
+        }
+    }
+
+    private static unsafe bool HasWriteBuffer(TcpConnection connection) => WriteBufferOf(connection) != null;
+
+    private static unsafe bool HasRing(TcpConnection connection) => BufRingOf(connection) != null && BufSlabOf(connection) != null;
+
+    [UnsafeAccessor(UnsafeAccessorKind.Field, Name = "_writeSlabPool")]
+    private static extern ref Stack<nint> WriteSlabPool(Reactor reactor);
+
+    [UnsafeAccessor(UnsafeAccessorKind.Field, Name = "_generation")]
+    private static extern ref int GenerationOf(TcpConnection connection);
+
+    [UnsafeAccessor(UnsafeAccessorKind.Field, Name = "WriteBuffer")]
+    private static extern unsafe ref byte* WriteBufferOf(TcpConnection connection);
+
+    [UnsafeAccessor(UnsafeAccessorKind.Field, Name = "BufRing")]
+    private static extern unsafe ref byte* BufRingOf(TcpConnection connection);
+
+    [UnsafeAccessor(UnsafeAccessorKind.Field, Name = "BufSlab")]
+    private static extern unsafe ref byte* BufSlabOf(TcpConnection connection);
 
     // A connect completes into a listener's backlog without anyone accepting, so it succeeds exactly
     // while the listening socket is open.
