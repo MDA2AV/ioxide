@@ -270,7 +270,7 @@ public sealed unsafe partial class TcpConnection
         Volatile.Write(ref _finSentMs, 0);
         Volatile.Write(ref _finSent, 0);
         Volatile.Write(ref _connecting, 0);
-        _readUntilEmpty = false;
+        Volatile.Write(ref _readUntilEmpty, 0);
         SweepClosed = false;
 
         WriteHead = 0;

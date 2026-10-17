@@ -73,8 +73,16 @@ public sealed unsafe partial class Reactor
             return;   // queued for the fd's previous tenant
         }
 
-        if ((events & (EPOLLIN | EPOLLRDHUP | EPOLLHUP | EPOLLERR)) != 0)
+        if ((events & (EPOLLIN | EPOLLPRI | EPOLLRDHUP | EPOLLHUP | EPOLLERR)) != 0)
         {
+            // A recv takes the peer's FIN along with the bytes in front of it, and stops short at an
+            // urgent mark, so a short one no longer means drained once this edge, now spent, has said
+            // either. Set before OnReadable, whose state change the reader's next recv follows.
+            if ((events & (EPOLLPRI | EPOLLRDHUP | EPOLLHUP | EPOLLERR)) != 0)
+            {
+                conn.ReadUntilEmpty();
+            }
+
             conn.OnReadable();
 
             // The read may have resumed the handler inline, and it may have let the connection go.

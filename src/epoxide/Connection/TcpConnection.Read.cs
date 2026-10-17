@@ -33,6 +33,7 @@ public sealed unsafe partial class TcpConnection : IValueTaskSource<RecvSnapshot
     /// <summary>
     /// Whether this connection has been torn down. A writer needs this: once it is true nothing
     /// will ever drain what it stages, so continuing to buffer is not backpressure, it is a leak.
+    /// A peer's close is seen by the next read or a failed send, not before.
     /// </summary>
     public bool IsClosed => Volatile.Read(ref _closed) == 1;
 
@@ -46,14 +47,15 @@ public sealed unsafe partial class TcpConnection : IValueTaskSource<RecvSnapshot
     /// <summary>Whether the peer is gone: a recv saw its close or an error, or a send failed.</summary>
     internal bool PeerGone => Volatile.Read(ref _peerGone) != 0;
 
-    private bool _readUntilEmpty;
+    private int _readUntilEmpty;
 
     /// <summary>
     /// Read until the socket says EAGAIN instead of stopping at the first short recv - for a socket
-    /// whose recv can return short with more already waiting (kTLS RX stops at a record boundary).
-    /// Costs one recv per read; set for the life of the connection, cleared on recycle.
+    /// whose recv can return short with more already waiting: kTLS RX stops at a record boundary, and
+    /// a recv stops at the peer's FIN or an urgent mark, which the reactor sets this for. Costs one
+    /// recv per read; set for the life of the connection, cleared on recycle.
     /// </summary>
-    internal void ReadUntilEmpty() => _readUntilEmpty = true;
+    internal void ReadUntilEmpty() => Interlocked.Exchange(ref _readUntilEmpty, 1);
 
     // A new life, at accept or connect. The reactor has not seen an edge yet, so "may hold data" is a guess.
     internal void BeginLife(bool readable) => Volatile.Write(ref _rd, readable ? RdReady : RdIdle);
@@ -140,9 +142,9 @@ public sealed unsafe partial class TcpConnection : IValueTaskSource<RecvSnapshot
                     HasBuffer = true,
                     Gen = (ushort)Volatile.Read(ref _generation),
                 });
-                // Short means the socket ran dry, and the next arrival raises a new edge - except under
-                // kTLS RX, which can stop short in front of a control record that is already here.
-                return n == size || _readUntilEmpty ? RecvFull : RecvSome;
+                // Short means the socket ran dry, and the next arrival raises a new edge - unless
+                // ReadUntilEmpty says a short recv can have stopped in front of more.
+                return n == size || Volatile.Read(ref _readUntilEmpty) != 0 ? RecvFull : RecvSome;
             }
 
             int errno = n < 0 ? Native.Errno : 0;

@@ -53,13 +53,3 @@ internal static class Program
         return runner.Summary();
     }
 }
-
-/// <summary>
-/// The epoxide core bugs this suite's <see cref="Runner.KnownCoreBug"/> tests reproduce, as reported
-/// with them: kept out of the green run until the core is fixed.
-/// </summary>
-internal static class CoreBugs
-{
-    public const string FinBehindShortRecv =
-        "EPX-FIN: a parked read never sees a peer FIN that came in the same epoll edge as the peer's last bytes";
-}

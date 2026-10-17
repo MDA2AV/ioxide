@@ -106,6 +106,74 @@ internal static class CoreTests
             Assert.Equal("ok", body);
         });
 
+        runner.Test("core: a request and the peer's FIN back to back end the next read at once, inline or on the thread pool", () =>
+        {
+            // A recv takes the peer's FIN along with the bytes in front of it and comes back short, and
+            // the edge that reported both is spent. Were short still taken for drained, the read after
+            // it would park until the read timeout - 30 s here - for an end that has already arrived.
+            const int Connections = 100;
+            foreach (bool onPool in new[] { false, true })
+            {
+                (int port, _, _) = TestServer.StartConfigured(async (_, conn) =>
+                {
+                    try
+                    {
+                        if (onPool)
+                        {
+                            await Hop.ToThreadPool();
+                        }
+
+                        while (true)
+                        {
+                            RecvSnapshot snap = await conn.ReadAsync();
+                            Drain(conn, snap);
+                            if (snap.IsClosed)
+                            {
+                                return;
+                            }
+
+                            conn.Write("."u8);
+                            await conn.FlushAsync();
+                            conn.ResetRead();
+                        }
+                    }
+                    finally
+                    {
+                        conn.DecRef();
+                    }
+                }, new ServerConfig { Tcp = new TcpOptions { ReadTimeoutMs = 30_000 } });
+
+                int late = 0;
+                for (int i = 0; i < Connections && late < 3; i++)
+                {
+                    using var client = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp)
+                    {
+                        NoDelay = true,
+                        ReceiveTimeout = 3_000,
+                    };
+                    client.Connect(IPAddress.Loopback, port);
+                    var one = new byte[1];
+
+                    client.Send("a"u8);   // one round first, so the request below lands on a parked read
+                    Assert.Equal(1, client.Receive(one));
+
+                    client.Send("b"u8);
+                    client.Shutdown(SocketShutdown.Send);
+                    try
+                    {
+                        Assert.Equal(1, client.Receive(one));
+                        Assert.Equal(0, client.Receive(one));   // the server's FIN, once its read saw ours
+                    }
+                    catch (SocketException e) when (e.SocketErrorCode == SocketError.TimedOut)
+                    {
+                        late++;
+                    }
+                }
+
+                Assert.True(late == 0, $"{late} {(onPool ? "thread-pool" : "inline")} handlers were still reading 3 s after their peer's FIN");
+            }
+        });
+
         runner.Test("core: response larger than the write slab (Grow)",
             () => BigBodyRoundTrip(WriteOverflowStrategy.Grow));
 

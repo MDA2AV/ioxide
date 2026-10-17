@@ -150,7 +150,7 @@ internal static class KernelRxHandoffTests
 
         if (ktls)
         {
-            runner.KnownCoreBug(cutRecordName, cutRecord, CoreBugs.FinBehindShortRecv);
+            runner.Test(cutRecordName, cutRecord);
         }
         else
         {

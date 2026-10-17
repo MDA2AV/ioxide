@@ -17,6 +17,7 @@ public static unsafe partial class Native
     public const int EPOLL_CTL_MOD = 3;
 
     public const uint EPOLLIN    = 0x001;
+    public const uint EPOLLPRI   = 0x002;
     public const uint EPOLLOUT   = 0x004;
     public const uint EPOLLERR   = 0x008;
     public const uint EPOLLHUP   = 0x010;

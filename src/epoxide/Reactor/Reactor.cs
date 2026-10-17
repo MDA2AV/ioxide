@@ -35,7 +35,7 @@ public sealed unsafe partial class Reactor
 
     // Edge-triggered and registered once per connection: readiness is tracked by the connection's
     // own read and write states, so nothing is re-armed per operation.
-    internal const uint ConnEvents = Native.EPOLLIN | Native.EPOLLOUT | Native.EPOLLRDHUP | Native.EPOLLET;
+    internal const uint ConnEvents = Native.EPOLLIN | Native.EPOLLPRI | Native.EPOLLOUT | Native.EPOLLRDHUP | Native.EPOLLET;
 
     // TcpConnection table indexed by fd (dense small ints). Reactor thread only: an outbound
     // connection opened elsewhere is entered by a posted registration.

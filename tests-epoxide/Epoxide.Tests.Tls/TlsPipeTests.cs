@@ -239,7 +239,7 @@ internal static class TlsPipeTests
 
         // epoxide's own: its reads are edge-triggered, and a FIN that comes in the same edge as the
         // peer's last bytes is the one shape that leaves nothing to raise another edge.
-        runner.KnownCoreBug("tls pipe: a peer that closes right behind its last request ends the next read at once", () =>
+        runner.Test("tls pipe: a peer that closes right behind its last request ends the next read at once", () =>
         {
             (string certPath, string keyPath) = TestCert.Ensure();
             var options = new TlsOptions { CertificatePath = certPath, KeyPath = keyPath };
@@ -280,7 +280,7 @@ internal static class TlsPipeTests
             }
             Assert.True(clock.ElapsedMilliseconds < 1_000,
                 $"the server let go {clock.ElapsedMilliseconds} ms after the peer's FIN - its read waited for the read timeout");
-        }, CoreBugs.FinBehindShortRecv);
+        });
 
         runner.Test("tls pipe: a recv queue the reader stops draining pushes back instead of overflowing, so nothing is lost", () =>
         {
