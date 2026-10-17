@@ -11,6 +11,10 @@
     <Project Path="Playground/Epoxide/Pipe/Playground.Epoxide.Pipe.csproj" />
     <Project Path="Playground/Epoxide/TlsPipes/Playground.Epoxide.TlsPipes.csproj" />
   </Folder>
+  <Folder Name="/epoxide/tests/">
+    <Project Path="tests-epoxide/Epoxide.Tests.Harness/Epoxide.Tests.Harness.csproj" />
+    <Project Path="tests-epoxide/Epoxide.Tests.Chaos/Epoxide.Tests.Chaos.csproj" />
+  </Folder>
 
   <!-- Protocol layers, native-bundled or pure C#. -->
   <Folder Name="/protocols/">
