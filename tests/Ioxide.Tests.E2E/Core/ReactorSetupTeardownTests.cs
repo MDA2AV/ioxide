@@ -22,6 +22,8 @@ internal static class ReactorSetupTeardownTests
 {
     public static void Register(Runner runner)
     {
+        RegisterTcpOptIn(runner);
+
         runner.Test("reactor: a bind that fails tears down without closing stdin", () =>
         {
             Assert.True(File.Exists("/proc/self/fd/0"), "fd 0 must be open before the test says anything");
@@ -290,5 +292,106 @@ internal static class ReactorSetupTeardownTests
         {
             return false;
         }
+    }
+
+    // ServerConfig.Tcp defaulted to new(), a listener on 8080, so a config that never asked for TCP bound
+    // 8080 anyway - a QUIC-only one too, whose TcpHandle is never set (#191). The listeners are read off
+    // /proc rather than probed, so nothing here binds or connects to 8080, which other processes may hold.
+    private static void RegisterTcpOptIn(Runner runner)
+    {
+        runner.Test("reactor: a config that never sets Tcp opens no TCP listener, empty or QUIC-only", () =>
+        {
+            ServerConfig[] configs =
+            [
+                new ServerConfig { ReactorCount = 1 },
+                new ServerConfig { ReactorCount = 1, Quic = new QuicOptions { Port = (ushort)TestServer.NextPort() } },
+            ];
+
+            foreach (ServerConfig config in configs)
+            {
+                // Before any reactor runs: one that asks for a listener would bind the shared 8080.
+                Assert.True(config.Tcp is null, $"a config that never set Tcp asks for a TCP listener on {config.Tcp?.Port}");
+
+                HashSet<string> opened = ListenersOpenedBy(config);
+                Assert.True(opened.Count == 0, $"the reactor opened TCP listeners: {string.Join(", ", opened)}");
+            }
+        });
+
+        runner.Test("control: a config that sets Tcp opens its listener, and the same probe sees it", () =>
+        {
+            var config = new ServerConfig { ReactorCount = 1, Tcp = new TcpOptions { Port = (ushort)TestServer.NextPort() } };
+
+            Assert.True(ListenersOpenedBy(config).Count == 1, "the probe did not see the one listener the config asked for");
+        });
+    }
+
+    // The TCP listeners this process gained while a reactor ran config; Run binds them before OnStart.
+    private static HashSet<string> ListenersOpenedBy(ServerConfig config)
+    {
+        HashSet<string> before = ListeningSockets();
+        Exception? fault = null;
+        using var started = new ManualResetEventSlim();
+
+        var reactor = new Reactor(0, config)
+        {
+            TcpHandle = (_, connection) =>
+            {
+                connection.DecRef();
+                return Task.CompletedTask;
+            },
+            OnStart = _ => started.Set(),
+            OnFault = (_, e) => fault = e,
+        };
+        var thread = new Thread(reactor.Run) { IsBackground = true };
+        thread.Start();
+
+        try
+        {
+            Assert.True(started.Wait(TimeSpan.FromSeconds(10)), $"the reactor never reached OnStart: {fault?.Message}");
+
+            HashSet<string> opened = ListeningSockets();
+            opened.ExceptWith(before);
+            return opened;
+        }
+        finally
+        {
+            reactor.Stop();
+            thread.Join(TimeSpan.FromSeconds(10));
+        }
+    }
+
+    // This process's listening TCP sockets, v4 and v6: rows in state 0A whose inode a descriptor here holds.
+    private static HashSet<string> ListeningSockets()
+    {
+        var listening = new HashSet<string>();
+        foreach (string table in (string[])["/proc/self/net/tcp", "/proc/self/net/tcp6"])
+        {
+            foreach (string row in File.ReadLines(table).Skip(1))
+            {
+                string[] f = row.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+                if (f[3] == "0A")
+                {
+                    listening.Add($"socket:[{f[9]}]");
+                }
+            }
+        }
+
+        var mine = new HashSet<string>();
+        foreach (string fd in Directory.EnumerateFileSystemEntries("/proc/self/fd"))
+        {
+            try
+            {
+                if (new FileInfo(fd).LinkTarget is { } target && listening.Contains(target))
+                {
+                    mine.Add(target);
+                }
+            }
+            catch (IOException)
+            {
+                // Closed between the listing and the read.
+            }
+        }
+
+        return mine;
     }
 }

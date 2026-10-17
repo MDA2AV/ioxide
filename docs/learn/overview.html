@@ -67,7 +67,7 @@
     <p>You set a config, spawn one reactor per core on its own thread, and give each a
     <code>TcpHandle</code> - the per-connection loop. That loop reads, does whatever work, writes,
     and flushes; it can <code>await</code> a database, a cache, or a file, and resume inline.</p>
-<pre><code class="language-csharp">var config = new ServerConfig { ReactorCount = Environment.ProcessorCount };   // Tcp.Port defaults to 8080
+<pre><code class="language-csharp">var config = new ServerConfig { ReactorCount = Environment.ProcessorCount, Tcp = new() };   // Tcp.Port defaults to 8080
 
 var threads = new Thread[config.ReactorCount];
 for (int i = 0; i &lt; config.ReactorCount; i++)

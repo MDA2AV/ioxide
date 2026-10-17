@@ -362,9 +362,9 @@ public sealed unsafe partial class Reactor
     private int[] _listenFds = [];
     private ushort[] _listenPorts = [];
 
-    // One SO_REUSEPORT listener per port; accepts route by listener fd. ServerConfig.Tcp == null
-    // opens none at all, which leaves _listenFds empty and makes ArmTcpAccepts a no-op - a
-    // QUIC-only server then binds no TCP port rather than accepting onto an unset TcpHandle.
+    // One SO_REUSEPORT listener per port; accepts route by listener fd. ServerConfig.Tcp == null, the
+    // default, opens none at all, which leaves _listenFds empty and makes ArmTcpAccepts a no-op - a
+    // QUIC-only server binds no TCP port rather than accepting onto an unset TcpHandle (#191).
     private void OpenTcpListeners()
     {
         if (!_tcpEnabled)
