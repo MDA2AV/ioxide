@@ -17,8 +17,7 @@ internal static class Program
 
         ReactorChaosTests.Register(runner);
         TcpChaosTests.Register(runner);
-
-        // TLS chaos registers here, from its own file (TlsChaosTests.cs), with the TLS suite.
+        TlsChaosTests.Register(runner);
 
         return runner.Summary();
     }

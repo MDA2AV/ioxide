@@ -14,6 +14,7 @@
   <Folder Name="/epoxide/tests/">
     <Project Path="tests-epoxide/Epoxide.Tests.Harness/Epoxide.Tests.Harness.csproj" />
     <Project Path="tests-epoxide/Epoxide.Tests.Chaos/Epoxide.Tests.Chaos.csproj" />
+    <Project Path="tests-epoxide/Epoxide.Tests.Tls/Epoxide.Tests.Tls.csproj" />
   </Folder>
 
   <!-- Protocol layers, native-bundled or pure C#. -->

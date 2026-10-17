@@ -15,4 +15,10 @@
     <ProjectReference Include="../Epoxide.Tests.Harness/Epoxide.Tests.Harness.csproj" />
   </ItemGroup>
 
+  <ItemGroup>
+    <!-- The TLS suite's handlers, compiled in here too: TlsChaosTests serves through TlsHandlers.Tls,
+         and the harness stays free of TLS. -->
+    <Compile Include="../Epoxide.Tests.Tls/TlsHandlers.cs" Link="TlsHandlers.cs" />
+  </ItemGroup>
+
 </Project>
