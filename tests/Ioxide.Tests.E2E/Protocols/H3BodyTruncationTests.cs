@@ -12,7 +12,9 @@ namespace Ioxide.Tests;
 /// A request body that stops early, on the pure-C# HTTP/3 stack: a stream that ends inside a DATA
 /// frame it already sized, and a body shorter than the content-length that announced it. Both ask
 /// the same question - can the handler that receives the bytes tell a body that ENDED from one
-/// that was CUT - and the answer is currently no, on either overload.
+/// that was CUT. For the first the answer is no, as pinned below. For the second it is yes, on
+/// either overload: the request is refused with H3_MESSAGE_ERROR, and a handler already reading
+/// the body is told by its next read.
 /// </summary>
 internal static class H3BodyTruncationTests
 {
@@ -47,14 +49,16 @@ internal static class H3BodyTruncationTests
             // 7.1), which Http3Connection raises, and the response is never sent - so no client is
             // served partial data, which is what the rule is for. H3_REQUEST_INCOMPLETE covers a
             // different case. And "an empty chunk means end of body" is not an ioxide.http3
-            // shortcoming: all three body readers document it identically, the nghttp3 one included,
-            // so a truncation flag would have to land in all three or the two stacks would disagree
-            // about what a read returning nothing means. What is pinned is the contract as written.
+            // shortcoming: all three body readers document it identically for a stream that stops,
+            // the nghttp3 one included, so a truncation flag would have to land in all three or the
+            // two stacks would disagree about what a read returning nothing means. What is pinned
+            // is the contract as written. A body that contradicts its content-length is the one case
+            // this reader does flag, below: the request itself said how long the body was.
             Assert.True(outcome.StartsWith("ended", StringComparison.Ordinal),
                 $"the reader should signal an ordinary end, as all three body readers document, got: {outcome}");
         });
 
-        runner.Pending("http3: a body shorter than its content-length is refused, not served whole", () =>
+        runner.Test("http3: a body shorter than its content-length is refused, not served whole", () =>
         {
             // The other way a body stops early, and the one a real client can produce: well-formed
             // DATA frames whose payloads add up to less than the content-length the request
@@ -63,10 +67,10 @@ internal static class H3BodyTruncationTests
             // payload lengths" - and malformed messages must be a stream error of H3_MESSAGE_ERROR.
             //
             // This is the BUFFERED overload, the one believed protected because it reassembles
-            // before dispatching. It is protected against a stream that ends mid-frame (that is
-            // Fatal, before _ready ever gets the id) and against nothing else: content-length is
-            // decoded into req.Headers and never compared with anything, so the handler is handed
-            // a ten-byte Body for a request that said one hundred and cannot tell the difference.
+            // before dispatching. Reassembly protects it against a stream that ends mid-frame (that
+            // is Fatal, before _ready ever gets the id) and against nothing else: without the
+            // content-length check the handler is handed a ten-byte Body for a request that said
+            // one hundred, and cannot tell the difference.
             (string certPath, string keyPath) = TestCert.Ensure();
             using var engine = new QuicEngine(certPath, keyPath, cidLength: 8, alpn: ["h3"]);
 
@@ -92,10 +96,7 @@ internal static class H3BodyTruncationTests
                 $"the request announced content-length: 100 and delivered 10 body bytes; the server "
                 + $"answered {status} '{text}' and handed the handler a {Volatile.Read(ref served)}-byte "
                 + "body as if that were the whole request");
-        },
-        because: "nothing in ioxide.http3 reads the request's content-length: it is decoded into "
-               + "req.Headers and no path compares it with the bytes received, so RFC 9114 4.1.2's "
-               + "malformed-message rule is unenforced on both the buffered and the streaming overload");
+        });
 
         runner.Test("control: a body that matches its content-length is served whole", () =>
         {
@@ -127,6 +128,38 @@ internal static class H3BodyTruncationTests
             Assert.Equal("got 10", text);
             Assert.Equal(10, Volatile.Read(ref served));
         });
+
+        runner.Test("http3: a streamed body shorter than its content-length raises on read instead of ending", () =>
+        {
+            // The streaming overload dispatched at end-of-headers, so refusing the request cannot
+            // keep the handler from the ten bytes. What it can do is make the read after them say
+            // the body was cut. Same frames as the clean-end control at the top; only the header differs.
+            Assert.Equal("raised IOException after 10", StreamedBodyOutcome(promised: 10, contentLength: "100"));
+        });
+
+        runner.Test("control: a streamed body that matches its content-length reads as a clean end", () =>
+        {
+            Assert.Equal("ended after 10", StreamedBodyOutcome(promised: 10, contentLength: "10"));
+        });
+
+        runner.Test("http3: a body that runs past its content-length is refused with H3_MESSAGE_ERROR", () =>
+        {
+            // RFC 9114 4.1.2 again, from the other side: ten bytes of DATA under a content-length of
+            // five. Refused at the DATA frame's header, before any of its payload is taken.
+            Assert.Equal("reset 0x10e", BufferedOutcome("0123456789"u8.ToArray(), "5"));
+        });
+
+        runner.Test("http3: an invalid or repeated content-length is refused with H3_MESSAGE_ERROR", () =>
+        {
+            // Each with a ten-byte body, so only the header is wrong. A repeated content-length is
+            // refused even when the values agree, as nghttp3 refuses it.
+            foreach (string[] fields in new string[][] { ["ten"], ["-10"], ["+10"], ["10 "], ["10", "10"] })
+            {
+                string outcome = BufferedOutcome("0123456789"u8.ToArray(), fields);
+                Assert.True(outcome == "reset 0x10e",
+                    $"content-length {string.Join(" + ", fields.Select(f => $"'{f}'"))}: expected reset 0x10e, got {outcome}");
+            }
+        });
     }
 
     /// <summary>
@@ -142,7 +175,7 @@ internal static class H3BodyTruncationTests
     /// before dispatch and no handler ever sees the body - the safe case, which would make the
     /// truncation test prove nothing.
     /// </remarks>
-    private static string StreamedBodyOutcome(long promised)
+    private static string StreamedBodyOutcome(long promised, string? contentLength = null)
     {
         (string certPath, string keyPath) = TestCert.Ensure();
         using var engine = new QuicEngine(certPath, keyPath, cidLength: 8, alpn: ["h3"]);
@@ -191,7 +224,7 @@ internal static class H3BodyTruncationTests
         Assert.True(client.CompleteHandshake(timeoutMs: 5000), "handshake did not complete");
         client.OpenRequestStream();
 
-        client.Write(RawH3Client.RequestHeaders("POST"), fin: false);
+        client.Write(RawH3Client.RequestHeaders("POST", contentLength is null ? [] : [contentLength]), fin: false);
         Assert.True(client.WaitFor(started.Task, timeoutMs: 5000),
             "the streaming handler never ran, so nothing was reading a body at all");
 
@@ -206,6 +239,49 @@ internal static class H3BodyTruncationTests
 
         return ended.Task.Result;
     }
+
+    /// <summary>
+    /// POST <paramref name="body"/> as one DATA frame under the given content-length fields to a
+    /// buffered handler, and report what became of the request: "reset 0x..." with the code the
+    /// server reset its stream with, "served" if the handler ran, "nothing" if neither happened.
+    /// </summary>
+    private static string BufferedOutcome(byte[] body, params string[] contentLengths)
+    {
+        (string certPath, string keyPath) = TestCert.Ensure();
+        var engine = new QuicEngine(certPath, keyPath, cidLength: 8, alpn: ["h3"]);
+
+        try
+        {
+            int served = 0;
+            (_, int udpPort) = TestServer.StartDatagram(
+                onDatagram: null,
+                quicFactory: engine.CreateFactory(),
+                quicHandle: (_, conn) => new Http3Connection(conn).RunAsync(
+                    req =>
+                    {
+                        Interlocked.Increment(ref served);
+                        return Http3Response.Text($"got {req.Body.Length}");
+                    }));
+
+            using var client = new RawH3Client("127.0.0.1", udpPort);
+            client.Connect();
+            Assert.True(client.CompleteHandshake(timeoutMs: 5000), "handshake did not complete");
+            client.OpenRequestStream();
+
+            client.Write([.. RawH3Client.RequestHeaders("POST", contentLengths), .. RawH3Client.DataFrameHeader(body.Length), .. body],
+                fin: true);
+            ulong? code = client.WaitForReset(timeoutMs: 5000);
+
+            return Volatile.Read(ref served) > 0 ? "served" : code is ulong c ? $"reset 0x{c:x}" : "nothing";
+        }
+        finally
+        {
+            // Called more than once per test, so the reactor comes down here, before the engine it
+            // was handed: a reactor left running can still be inside native code the dispose freed.
+            TestServer.StopAll();
+            engine.Dispose();
+        }
+    }
 }
 
 /// <summary>
@@ -217,7 +293,8 @@ internal static class H3BodyTruncationTests
 /// </summary>
 /// <remarks>
 /// It never opens a control stream: the server parses one if it arrives but requires none, and a
-/// SETTINGS exchange this test does not read would only be one more thing to go wrong.
+/// SETTINGS exchange this test does not read would only be one more thing to go wrong. It also
+/// reports the code a request stream was reset with, which <see cref="H3TestClient"/> does not.
 /// </remarks>
 internal sealed unsafe class RawH3Client : IDisposable
 {
@@ -228,6 +305,7 @@ internal sealed unsafe class RawH3Client : IDisposable
     private GCHandle _self;
     private long _streamId = -1;
     private bool _peerClosed;
+    private ulong? _resetCode;
 
     /// <summary>Whether the peer ended the connection - the engine reports every terminal state.</summary>
     public bool PeerClosed => _peerClosed;
@@ -246,7 +324,12 @@ internal sealed unsafe class RawH3Client : IDisposable
     public void Connect()
     {
         _self = GCHandle.Alloc(this);
-        var callbacks = new IqCallbacks { StructSize = (nuint)sizeof(IqCallbacks), OnStreamData = &OnStreamData };
+        var callbacks = new IqCallbacks
+        {
+            StructSize = (nuint)sizeof(IqCallbacks),
+            OnStreamData = &OnStreamData,
+            OnStreamReset = &OnStreamReset,
+        };
         _engine = iq_client_engine_new_mtls("h3", null, null, callbacks);
         Assert.True(_engine != 0, "client engine init failed");
 
@@ -287,10 +370,10 @@ internal sealed unsafe class RawH3Client : IDisposable
 
     /// <summary>
     /// A HEADERS frame for POST / (or GET /) on localhost: a QPACK field section of static-table
-    /// references plus one literal with a static name reference, which is the whole encoder surface
-    /// a capacity-0 advertisement leaves a client.
+    /// references plus literals with a static name reference, which is the whole encoder surface
+    /// a capacity-0 advertisement leaves a client. One content-length field per value given.
     /// </summary>
-    public static byte[] RequestHeaders(string method)
+    public static byte[] RequestHeaders(string method, params string[] contentLengths)
     {
         byte methodIndex = method == "POST" ? (byte)20 : (byte)17;   // static table 20/17
         byte[] authority = "localhost"u8.ToArray();
@@ -305,6 +388,13 @@ internal sealed unsafe class RawH3Client : IDisposable
             (byte)authority.Length,            // value length, not Huffman-coded
         };
         fields.AddRange(authority);
+
+        foreach (string contentLength in contentLengths)
+        {
+            fields.Add(0x50 | 4);                    // literal, name = static 4 (content-length)
+            fields.Add((byte)contentLength.Length);
+            fields.AddRange(Encoding.ASCII.GetBytes(contentLength));
+        }
 
         var frame = new List<byte>();
         AppendVarint(frame, 0x1);              // HEADERS
@@ -412,6 +502,21 @@ internal sealed unsafe class RawH3Client : IDisposable
         return signal.IsCompleted;
     }
 
+    /// <summary>
+    /// Pump the wire until the server resets the request stream, and return the code it used;
+    /// null if the deadline passed or the connection ended first.
+    /// </summary>
+    public ulong? WaitForReset(int timeoutMs)
+    {
+        long deadline = Environment.TickCount64 + timeoutMs;
+        while (Environment.TickCount64 < deadline && _resetCode is null && !_peerClosed)
+        {
+            FlushOut();
+            PumpIn();
+        }
+        return _resetCode;
+    }
+
     private readonly byte[] _sendScratch = new byte[1452];
 
     private void FlushOut()
@@ -463,6 +568,16 @@ internal sealed unsafe class RawH3Client : IDisposable
     // The response is never read: this client asks a question the server answers by closing.
     [UnmanagedCallersOnly]
     private static void OnStreamData(void* user, long streamId, byte* data, nuint len, int fin) { }
+
+    [UnmanagedCallersOnly]
+    private static void OnStreamReset(void* user, long streamId, ulong appError)
+    {
+        var self = (RawH3Client)GCHandle.FromIntPtr((nint)user).Target!;
+        if (streamId == self._streamId)
+        {
+            self._resetCode = appError;
+        }
+    }
 
     public void Dispose()
     {
