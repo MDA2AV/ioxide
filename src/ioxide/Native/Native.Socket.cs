@@ -42,6 +42,10 @@ public static unsafe partial class Native {
     [DllImport("libc")] public static extern int setsockopt(int fd, int level, int optname, void* optval, uint optlen);
     [DllImport("libc")] public static extern int getsockopt(int fd, int level, int optname, void* optval, uint* optlen);
 
+    // Off the ring: what a stopping reactor sends once its loop will not submit again.
+    internal const int MSG_DONTWAIT = 0x40;
+    [DllImport("libc", SetLastError = true)] internal static extern long sendmsg(int fd, msghdr* msg, int flags);
+
     public static ushort Htons(ushort x) => (ushort)((x << 8) | (x >> 8));
 
     [StructLayout(LayoutKind.Sequential)]

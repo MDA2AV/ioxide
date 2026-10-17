@@ -166,15 +166,14 @@ internal static class QuicTeardownWireTests
                 "an idle-swept connection answered a CONNECTION_CLOSE; RFC 9000 10.2.1 discards it silently");
         });
 
-        runner.Pending("quic: a reactor shutdown tells its peers instead of leaving them to time out", () =>
+        runner.Test("quic: a reactor shutdown tells its peers instead of leaving them to time out", () =>
         {
             // A reactor coming down knows the connection is over, and it is the only one that
             // knows: every peer is left holding a connection that looks alive until its own idle
-            // timer reaps it. Two things stand between OnEvicted and a farewell, and whoever fixes
-            // this needs both - the transport has already run QuicRemoveConnection by the time it
-            // is called, which frees and zeroes the peer address Send needs, and TeardownQuic runs
-            // after the loop has exited, so an SQE queued there is never submitted and the UDP fd
-            // is closed a few lines later. Reordering alone leaves this test exactly as red.
+            // timer reaps it. The farewell needs two things: it must be written before
+            // QuicRemoveConnection frees and zeroes the peer address Send needs, and it must leave
+            // without the loop, which has exited by the time TeardownQuic runs - an SQE queued
+            // there is never submitted, and the UDP fd is closed a few lines later.
             (string certPath, string keyPath) = TestCert.Ensure();
             using var engine = new QuicEngine(certPath, keyPath, cidLength: 8);
 
@@ -204,8 +203,7 @@ internal static class QuicTeardownWireTests
             Assert.True(client.WaitForConnectionClose(FarewellMs),
                 $"the peer was left to time out: {client.DatagramsReceived - beforeShutdown} datagrams arrived "
                 + "after the shutdown and none was a CONNECTION_CLOSE");
-        }, "issue #195 - OnEvicted only frees the connection, and the transport has already run "
-           + "QuicRemoveConnection by then, which zeroes the peer address Send needs");
+        });
     }
 
     /// <summary>

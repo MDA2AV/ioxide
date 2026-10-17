@@ -120,6 +120,8 @@ public sealed unsafe partial class Reactor
     private void Teardown()
     {
         bool startFailed = !_ranLoop;
+        // A faulted loop never set it: UdpSendTo sends directly from here, as nothing submits the ring again.
+        _stopRequested = true;
 
         CloseTcpListeners();
         TeardownQuic();
