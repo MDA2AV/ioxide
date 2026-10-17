@@ -351,6 +351,60 @@ internal static class H3ErrorCodeTests
                     ? "Close was never called - the connection sits registered until the idle sweep"
                     : $"it closed with 0x{quic.ClosedWith:x}"));
         });
+
+        runner.Test("h3/codes: nghttp3 - a non-h3 ALPN closes with H3_GENERAL_PROTOCOL_ERROR on every run loop, unless already closed", () =>
+        {
+            // The pure-C# twin above closes with the same code. The GET names an :authority (a
+            // literal on static name 0) because nghttp3 refuses WellFormedGet's empty one, so a
+            // loop that skipped the check would serve it.
+            byte[] get = [0x01, 0x10, 0x00, 0x00, 0xD1, 0xD7, 0xC1, 0x50, 0x09, .. "localhost"u8];
+
+            var loops = new (string Name, Func<RecordingQuic, Served, Task> Start)[]
+            {
+                ("buffered", (q, s) => new Nghttp3Connection(q).RunBufferedAsync(_ =>
+                {
+                    s.Count++;
+                    return Nghttp3Response.Text("ok");
+                })),
+                ("buffered async", (q, s) => new Nghttp3Connection(q).RunBufferedAsync(_ =>
+                {
+                    s.Count++;
+                    return ValueTask.FromResult(Nghttp3Response.Text("ok"));
+                })),
+                ("streaming", (q, s) => new Nghttp3Connection(q).RunStreamingAsync(_ =>
+                {
+                    s.Count++;
+                    return ValueTask.FromResult(Nghttp3Response.Text("ok"));
+                })),
+                ("streamed", (q, s) => new Nghttp3Connection(q).RunStreamedResponseAsync((_, writer) =>
+                {
+                    s.Count++;
+                    writer.WriteHeaders(new Nghttp3Response { Status = 200 });
+                    return writer.CompleteAsync();
+                })),
+            };
+
+            foreach ((string name, Func<RecordingQuic, Served, Task> start) in loops)
+            {
+                var quic = new RecordingQuic(alpn: "echo");
+                Assert.True(quic.EnqueueStreamData(0, get, true), "the recv ring rejected the item");
+
+                var served = new Served();
+                Task run = start(quic, served);
+
+                Assert.True(served.Count == 0, $"{name}: served {served.Count} request(s) on a connection that negotiated 'echo'");
+                Assert.True(run.IsCompleted, $"{name}: the ALPN refusal must end the run loop");
+                AssertClosedWith(quic, H3GeneralProtocolError, $"H3_GENERAL_PROTOCOL_ERROR ({name})");
+            }
+
+            // A connection evicted before its handshake finished wakes closed with no protocol: its
+            // transport already ended it, and the idle sweep means that to stay silent.
+            var evicted = new RecordingQuic(alpn: null);
+            evicted.MarkClosed();
+            Task drained = new Nghttp3Connection(evicted).RunBufferedAsync(static _ => Nghttp3Response.Text("ok"));
+            Assert.True(drained.IsCompleted, "the closed wake must end the run loop");
+            Assert.True(evicted.CloseCalls == 0, $"an evicted connection was closed with 0x{evicted.ClosedWith:x}");
+        });
     }
 
     // --- helpers ---------------------------------------------------------------------------------
