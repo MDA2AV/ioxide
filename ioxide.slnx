@@ -2,6 +2,14 @@
   <!-- The runtime core, first and unnested: everything below builds on it. -->
   <Project Path="src/ioxide/ioxide.csproj" />
 
+  <!-- epoxide: the same runtime on epoll, with its own samples and tests. -->
+  <Folder Name="/epoxide/">
+    <Project Path="src/epoxide/epoxide.csproj" />
+  </Folder>
+  <Folder Name="/epoxide/playground/">
+    <Project Path="Playground/Epoxide/Pipe/Playground.Epoxide.Pipe.csproj" />
+  </Folder>
+
   <!-- Protocol layers, native-bundled or pure C#. -->
   <Folder Name="/protocols/">
     <Project Path="src/protocols/ioxide.nghttp3/ioxide.nghttp3.csproj" />

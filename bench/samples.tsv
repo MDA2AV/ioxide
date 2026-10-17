@@ -27,6 +27,9 @@ Tcp/Big                       h1      8080  /           -                   PLAY
 Tcp/Hop                       h1      8080  /           -                   -
 Tcp/TaskRun                   h1      8080  /           -                   -
 
+# epoxide: the tcp samples above, on epoll instead of io_uring
+Epoxide/Pipe                  h1      8080  /           -                   -
+
 # tls over tcp
 Tls/OpenSsl                   h1s     8443  /           -                   -
 Tls/KtlsTx                    h1s     8443  /           -                   -

@@ -1,0 +1,55 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFrameworks>net10.0;net11.0</TargetFrameworks>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <RootNamespace>epoxide</RootNamespace>
+
+    <PackageId>epoxide</PackageId>
+    <Version>0.1.0</Version>
+    <Authors>MDA2AV</Authors>
+    <Description>ioxide's shared-nothing, thread-per-core runtime on epoll instead of io_uring: one epoll set per reactor thread, inline completions, and connections that any thread can read and write directly - a thread-pool handler needs no hop back to its reactor. TCP, with TLS termination on the same bundled BoringSSL (libioxide_boringssl.so) and optional kernel TLS (kTLS) offload.</Description>
+    <PackageLicenseExpression>MIT</PackageLicenseExpression>
+    <PackageProjectUrl>https://mda2av.github.io/ioxide/</PackageProjectUrl>
+    <RepositoryUrl>https://github.com/MDA2AV/ioxide</RepositoryUrl>
+    <RepositoryType>git</RepositoryType>
+    <PackageTags>epoll;networking;tcp;tls;server;linux;thread-per-core;reactor</PackageTags>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <None Include="README.md" Pack="true" PackagePath="/" />
+    <!-- The BoringSSL ioxide bundles (scripts/build-boringssl-native.sh), linked rather than copied, so
+         the two runtimes load one binary and a rebuild reaches both. -->
+    <None Include="../ioxide/runtimes/linux-x64/native/libioxide_boringssl.so"
+          Pack="true" PackagePath="runtimes/linux-x64/native/"
+          CopyToOutputDirectory="PreserveNewest" Link="libioxide_boringssl.so" />
+  </ItemGroup>
+
+  <!-- EpoxideRuntime.Version, generated from the Version above the way ioxide.csproj generates its own. -->
+  <Target Name="GenerateVersionSource" BeforeTargets="BeforeCompile;CoreCompile">
+    <PropertyGroup>
+      <_EpoxideVersionFile>$(IntermediateOutputPath)EpoxideVersion.g.cs</_EpoxideVersionFile>
+    </PropertyGroup>
+
+    <ItemGroup>
+      <_EpoxideVersionLines Include="// &lt;auto-generated /&gt;" />
+      <_EpoxideVersionLines Include="// Written by the GenerateVersionSource target in epoxide.csproj, from its Version property." />
+      <_EpoxideVersionLines Include="namespace epoxide%3B" />
+      <_EpoxideVersionLines Include="internal static class EpoxideVersion" />
+      <_EpoxideVersionLines Include="{" />
+      <_EpoxideVersionLines Include="    public const string Value = &quot;$(Version)&quot;%3B" />
+      <_EpoxideVersionLines Include="}" />
+    </ItemGroup>
+
+    <WriteLinesToFile File="$(_EpoxideVersionFile)" Lines="@(_EpoxideVersionLines)"
+                      Overwrite="true" WriteOnlyWhenDifferent="true" />
+
+    <ItemGroup>
+      <Compile Include="$(_EpoxideVersionFile)" />
+    </ItemGroup>
+  </Target>
+
+</Project>
