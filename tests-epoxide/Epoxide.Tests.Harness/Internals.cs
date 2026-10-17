@@ -79,6 +79,10 @@ public static unsafe class Internals
     [UnsafeAccessor(UnsafeAccessorKind.Field, Name = "_refs")]
     public static extern ref int Refs(TcpConnection connection);
 
+    /// <summary>Stamped with the reactor's clock when a flush gets past FlushAsync's closed check: 0 until one has.</summary>
+    [UnsafeAccessor(UnsafeAccessorKind.Field, Name = "FlushArmedMs")]
+    public static extern ref long FlushArmedMs(TcpConnection connection);
+
     /// <summary>The reactor's end of a connection: wakes a parked read with the end and releases a parked flush.</summary>
     [UnsafeAccessor(UnsafeAccessorKind.Method, Name = "MarkClosed")]
     public static extern void MarkClosed(TcpConnection connection);
