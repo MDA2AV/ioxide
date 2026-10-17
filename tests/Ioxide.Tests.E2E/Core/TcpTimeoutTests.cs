@@ -1,5 +1,6 @@
 using System.Net;
 using System.Net.Sockets;
+using System.Runtime.InteropServices;
 using System.Text;
 using ioxide;
 using ioxide.utils;
@@ -520,7 +521,92 @@ internal static class TcpTimeoutTests
             Assert.True(!report.Task.Wait(3_000),
                 "a flush was released with no send timeout configured - something else is reaping it");
         });
+
+        runner.Test("tcp/send: a zero-copy flush the peer stopped draining is released, and its descriptor closed (#245)",
+            () => StalledResponse(zeroCopy: true));
+
+        runner.Test("tcp/send: control: the same stall with plain sends is released, with no TCP_USER_TIMEOUT",
+            () => StalledResponse(zeroCopy: false));
     }
+
+    /// <summary>
+    /// One flush far past what the peer will take, to a peer that never reads, under a 1 s send
+    /// timeout. The sweep's shutdown ends a plain send; a zero-copy one also needs the kernel to let
+    /// go of its pages, which it did not while the peer kept answering the window probes (#245).
+    /// </summary>
+    private static void StalledResponse(bool zeroCopy)
+    {
+        const int SendMs = 1_000;
+        var accepted = new TaskCompletionSource<(int Fd, int UserTimeout)>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var flushed = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        int port = TestServer.StartConfigured(async (_, conn) =>
+        {
+            try
+            {
+                if (!await IsThisTestsConnection(conn))
+                {
+                    return;
+                }
+
+                int length = sizeof(int);
+                int got = getsockopt(conn.ClientFd, Native.IPPROTO_TCP, Native.TCP_USER_TIMEOUT, out int userTimeout, ref length);
+                accepted.TrySetResult((conn.ClientFd, got == 0 ? userTimeout : -1));
+
+                conn.Write(new byte[16 * 1024 * 1024]);
+                await conn.FlushAsync();
+                flushed.TrySetResult("");
+            }
+            catch (Exception e)
+            {
+                flushed.TrySetResult($"{e.GetType().Name}: {e.Message}");
+            }
+            finally
+            {
+                conn.DecRef();
+            }
+        }, new ServerConfig
+        {
+            RecvBufferSize = 4096,
+            RecvSlots = 256,
+            Tcp = new TcpOptions
+            {
+                WriteSlabSize = 256 * 1024,
+                PoolMax = 64,
+                RecvQueueEntries = 64,
+                ReadTimeoutMs = 0,
+                SendTimeoutMs = SendMs,
+                ZeroCopySend = zeroCopy,
+            },
+        }).Port;
+
+        using var client = new TcpClient();
+        client.ReceiveBufferSize = 4096;   // before the connect, so the window the server sees is small
+        client.Connect("127.0.0.1", port);
+        client.GetStream().Write("hi"u8);   // and never reads
+
+        Assert.True(accepted.Task.Wait(5_000), "the handler never saw the test's connection");
+        (int fd, int userTimeout) = accepted.Task.Result;
+
+        // A deadline many sweeps past the send timeout, not a timing assertion.
+        Assert.True(flushed.Task.Wait(10_000),
+            $"the flush is still parked 10 s into a {SendMs} ms send timeout: the kernel still holds the send's pages, and with them the descriptor, the slab and the handler");
+        Assert.Equal("", flushed.Task.Result);
+        Assert.True(SpinWait.SpinUntil(() => !IsOpen(fd), 5_000), $"the connection's descriptor {fd} was never closed");
+
+        // The bound comes from the listener, so it is on the accepted socket without a setsockopt per accept.
+        Assert.Equal(zeroCopy ? SendMs : 0, userTimeout);
+    }
+
+    [DllImport("libc", SetLastError = true)]
+    private static extern int getsockopt(int fd, int level, int optname, out int optval, ref int optlen);
+
+    [DllImport("libc", SetLastError = true)]
+    private static extern int fcntl(int fd, int command);
+
+    private const int FGetFd = 1;
+
+    private static bool IsOpen(int fd) => fcntl(fd, FGetFd) != -1;
 
     // Teardown closes every fd without releasing the reactor's ref, so a later release still sees a
     // live connection. Its FIN must not reach whichever socket took the number since.

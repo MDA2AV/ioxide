@@ -386,7 +386,8 @@ public sealed unsafe partial class Reactor
         }
         for (int i = 0; i < _listenFds.Length; i++)
         {
-            _listenFds[i] = OpenReusePortListener(_listenPorts[i], _tcp.ListenBacklog, _config.DualStack);
+            _listenFds[i] = OpenReusePortListener(_listenPorts[i], _tcp.ListenBacklog, _config.DualStack,
+                _zeroCopySend ? _sendTimeoutMs : 0);
         }
     }
 
@@ -417,7 +418,7 @@ public sealed unsafe partial class Reactor
         }
     }
 
-    private static int OpenReusePortListener(ushort port, int backlog, bool dualStack)
+    private static int OpenReusePortListener(ushort port, int backlog, bool dualStack, int userTimeoutMs)
     {
         int fd = socket(dualStack ? AF_INET6 : AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0);
         if (fd < 0)
@@ -429,6 +430,12 @@ public sealed unsafe partial class Reactor
         setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(int));
         setsockopt(fd, SOL_SOCKET, SO_REUSEPORT, &one, sizeof(int));
         setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(int));   // accepted sockets inherit it
+        if (userTimeoutMs > 0)
+        {
+            // Inherited too: a zero-copy send ends only when its pages are freed, which a peer acking
+            // zero-window probes would put off forever; the kernel aborts that connection instead (#245).
+            setsockopt(fd, IPPROTO_TCP, TCP_USER_TIMEOUT, &userTimeoutMs, sizeof(int));
+        }
 
         if (dualStack)
         {
