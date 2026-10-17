@@ -141,15 +141,33 @@ internal static class H3AlpnTests
             Assert.Equal(big, recorded.Task.Result);
         });
 
-        runner.Pending("h3/nghttp3: a connection that did not negotiate h3 is not served", () =>
+        runner.Test("h3/nghttp3: control - a permissive engine serves a connection that negotiated h3", () =>
         {
-            // The mirror of Http3Tests' "a connection that did not negotiate h3 is not served",
-            // on the OTHER stack. The backstop landed only in the pure-C# layer
-            // (Http3Connection.RunCoreAsync checks NegotiatedProtocol once the control stream is
-            // up); Nghttp3Connection never reads it, so on an engine built without an allowlist -
-            // the constructor's documented default and its own doc example - it answers HTTP/3 on
-            // a connection that negotiated "echo", a protocol the client actually asked for and
-            // is entitled to believe it got.
+            // The same engine and handler as the refusal below, with the one offer that may be served.
+            (string certPath, string keyPath) = TestCert.Ensure();
+            using var engine = new QuicEngine(certPath, keyPath, cidLength: 8);   // permissive, as below
+
+            (_, int udpPort) = TestServer.StartDatagram(
+                onDatagram: null,
+                quicFactory: engine.CreateFactory(),
+                quicHandle: static (_, conn) => new Nghttp3Connection(conn).RunBufferedAsync(
+                    static _ => Nghttp3Response.Text("served-by-nghttp3")));
+
+            using var client = new H3TestClient("127.0.0.1", udpPort);   // offers "h3"
+            client.Connect();
+            Assert.True(client.CompleteHandshake(timeoutMs: 5000), "handshake did not complete");
+
+            (int status, string body) = client.Get("/", timeoutMs: 5000);
+            Assert.Equal(200, status);
+            Assert.Equal("served-by-nghttp3", body);
+        });
+
+        runner.Test("h3/nghttp3: a connection that did not negotiate h3 is not served", () =>
+        {
+            // The mirror of Http3Tests' "a connection that did not negotiate h3 is not served", on
+            // the OTHER stack: an engine built without an allowlist - the constructor's documented
+            // default - confirms "echo", and the h3 layer must refuse it. Its close code is pinned in
+            // H3ErrorCodeTests.
             (string certPath, string keyPath) = TestCert.Ensure();
             using var engine = new QuicEngine(certPath, keyPath, cidLength: 8);   // permissive, on purpose
 
@@ -166,8 +184,7 @@ internal static class H3AlpnTests
 
             (int status, string body) = client.Get("/nope", timeoutMs: 3000);
             Assert.True(status != 200, $"an h3 handler must not serve a non-h3 connection, got {status} '{body}'");
-        }, "the ALPN backstop landed only in the pure-C# stack; Nghttp3Connection never reads "
-         + "NegotiatedProtocol, so a permissive engine's 'echo' connection is answered 200");
+        });
 
         runner.Test("quic/alpn: a non-ascii allow-list token must not admit a protocol nobody configured", () =>
         {
