@@ -12,9 +12,9 @@ internal static class Http2FlowControlTests
     // RFC 9113 6.9.2 default; ioxide never sends a stream-0 WINDOW_UPDATE to raise it.
     private const int ConnectionWindow = 65535;
 
-    private const ushort InitialWindowSize = 0x4;
-    private const uint Cancel = 0x8;
-    private const byte RstStreamFrame = 0x3;
+    internal const ushort InitialWindowSize = 0x4;
+    internal const uint Cancel = 0x8;
+    internal const byte RstStreamFrame = 0x3;
 
     private static readonly Http2Options Streamed = new() { StreamRequestBodies = true };
 
@@ -272,7 +272,7 @@ internal static class Http2FlowControlTests
             Assert.True(finished, "the peer closed the connection under a writer parked on credit, and its handler never finished");
         });
 
-        runner.Pending("h2 flow: a buffered response waits on the peer's stream window instead of overrunning it", () =>
+        runner.Test("h2 flow: a buffered response waits on the peer's stream window instead of overrunning it", () =>
         {
             using var client = new StrictClient();
             Task run = client.Connection.RunBufferedAsync(_ => new Http2Response { Status = 200, Body = new byte[64 * 1024] });
@@ -290,8 +290,7 @@ internal static class Http2FlowControlTests
             Assert.Equal(64 * 1024, Frame.Body(frames, 1).Length);   // the rest follows the credit, not a reset
 
             client.Close(run);
-        }, "Http2Connection.WriteData bounds DATA by the connection window only; the peer's stream "
-           + "window is never consulted on the buffered path");
+        });
 
         runner.Test("h2 flow: control: the streamed path stops at the same stream window", () =>
         {
@@ -505,7 +504,7 @@ internal static class Http2FlowControlTests
             .. Data(streamId, 16384, endStream: false), .. Data(streamId, 16383, endStream: false),
         ];
 
-    private static byte[] Open(params (ushort Id, uint Value)[] settings) => [.. Preface, .. Settings(settings)];
+    internal static byte[] Open(params (ushort Id, uint Value)[] settings) => [.. Preface, .. Settings(settings)];
 
     private static byte[] Settings(params (ushort Id, uint Value)[] settings)
     {
@@ -521,7 +520,7 @@ internal static class Http2FlowControlTests
     // Static-table HPACK only: 0x83 POST / 0x82 GET, 0x86 :scheme http, 0x84 :path /.
     private static byte[] Post(int streamId) => FrameBytes(0x1, 0x4, streamId, [0x83, 0x86, 0x84]);
 
-    private static byte[] Get(int streamId) => FrameBytes(0x1, 0x5, streamId, [0x82, 0x86, 0x84]);
+    internal static byte[] Get(int streamId) => FrameBytes(0x1, 0x5, streamId, [0x82, 0x86, 0x84]);
 
     private static byte[] Data(int streamId, int length, bool endStream, int padding = -1)
     {
@@ -539,14 +538,14 @@ internal static class Http2FlowControlTests
         return FrameBytes(0x0, (byte)(flags | 0x8), streamId, payload);
     }
 
-    private static byte[] RstStream(int streamId, uint error)
+    internal static byte[] RstStream(int streamId, uint error)
     {
         byte[] payload = new byte[4];
         BinaryPrimitives.WriteUInt32BigEndian(payload, error);
         return FrameBytes(0x3, 0, streamId, payload);
     }
 
-    private static byte[] WindowUpdate(int streamId, int increment)
+    internal static byte[] WindowUpdate(int streamId, int increment)
     {
         byte[] payload = new byte[4];
         BinaryPrimitives.WriteInt32BigEndian(payload, increment);
@@ -555,7 +554,7 @@ internal static class Http2FlowControlTests
 
     private static byte[] Ping() => FrameBytes(0x6, 0, 0, new byte[8]);
 
-    private static byte[] FrameBytes(byte type, byte flags, int streamId, ReadOnlySpan<byte> payload)
+    internal static byte[] FrameBytes(byte type, byte flags, int streamId, ReadOnlySpan<byte> payload)
     {
         byte[] frame = new byte[9 + payload.Length];
         frame[0] = (byte)(payload.Length >> 16);

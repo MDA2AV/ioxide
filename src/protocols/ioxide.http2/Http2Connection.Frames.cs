@@ -263,6 +263,7 @@ public sealed partial class Http2Connection
         }
 
         pending.BodyReader = new Http2BodyReader(this, pending.StreamId, ended);
+        _responseWindows[pending.StreamId] = pending.SendWindow;
         _ready.Add(pending);
     }
 
@@ -412,7 +413,9 @@ public sealed partial class Http2Connection
             return;
         }
 
+        // Its window moves with it: a WINDOW_UPDATE finds a stream by _streams only until here.
         _streams.Remove(pending.StreamId);
+        _responseWindows[pending.StreamId] = pending.SendWindow;
         _ready.Add(pending);
     }
 
