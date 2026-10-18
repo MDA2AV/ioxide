@@ -70,8 +70,9 @@ public unsafe partial class QuicEngineConnection : QuicConnection
     /// with <see cref="StringComparison.Ordinal"/>.
     ///
     /// Null when there was no validated certificate, when the subject carries no CN (legitimate:
-    /// modern certificates identify by subjectAltName), when the CN is empty or contains an
-    /// embedded NUL - a name built to be read differently by different consumers - or when it
+    /// modern certificates identify by subjectAltName), when the CN is empty or contains a control
+    /// character - an embedded NUL is a name built to be read differently by different consumers,
+    /// a CR or LF forges the log line it is written to, and TCP refuses the same set - or when it
     /// exceeds the 256 bytes recorded for it, which is four times RFC 5280's ub-common-name of 64.
     /// Every one of those is a refusal rather than an omission: the accessor never reports a name
     /// it had to shorten, because a prefix can belong to someone else.

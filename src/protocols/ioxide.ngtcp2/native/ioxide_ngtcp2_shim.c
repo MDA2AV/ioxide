@@ -226,6 +226,18 @@ static void iq_rand(uint8_t *dest, size_t destlen, const ngtcp2_rand_ctx *rand_c
     ptls_openssl_random_bytes(dest, destlen);
 }
 
+/* Whether UTF-8 holds a character .NET's char.IsControl names: C0, DEL, or C1 (U+0080-U+009F, which
+ * is C2 80..C2 9F). ASN1_STRING_to_UTF8 only ever returns valid UTF-8, so a C2 is always a lead. */
+static int iq_has_control(const unsigned char *s, size_t n)
+{
+    for (size_t i = 0; i < n; i++) {
+        if (s[i] < 0x20 || s[i] == 0x7f || (s[i] == 0xc2 && i + 1 < n && s[i + 1] >= 0x80 && s[i + 1] <= 0x9f)) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
 /* Records the identity of a leaf certificate onto the connection.
  *
  * The buffer-taking form of X509_NAME_oneline is not used, because handed a buffer too small it
@@ -236,9 +248,10 @@ static void iq_rand(uint8_t *dest, size_t destlen, const ngtcp2_rand_ctx *rand_c
  * long for the field is recorded as no name at all rather than as a different one.
  *
  * The CN is read from the DN structurally for the escaping reason on peer_subject, and refused if
- * it is empty or contains a NUL - the latter being the old trick of a name that reads as
- * admin.example to whoever stops at the NUL and as admin.example\0.attacker.test to whoever does
- * not. */
+ * it is empty or contains a control character, the rule TlsSession.ExtractCommonName applies over
+ * TCP. A NUL is the old trick of a name that reads as admin.example to whoever stops at the NUL and
+ * as admin.example\0.attacker.test to whoever does not; a CR or LF forges a log line or splits a
+ * header. */
 static void iq_record_subject(iq_conn *c, X509 *leaf)
 {
     X509_NAME *name = X509_get_subject_name(leaf);
@@ -279,7 +292,7 @@ static void iq_record_subject(iq_conn *c, X509 *leaf)
         return;
     }
 
-    if (cn_len > 0 && (size_t)cn_len < sizeof(c->peer_cn) && memchr(cn, 0, (size_t)cn_len) == NULL) {
+    if (cn_len > 0 && (size_t)cn_len < sizeof(c->peer_cn) && !iq_has_control(cn, (size_t)cn_len)) {
         memcpy(c->peer_cn, cn, (size_t)cn_len);
         c->peer_cn[cn_len] = '\0';
     }
