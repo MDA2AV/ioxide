@@ -332,9 +332,9 @@ public sealed partial class Http2Connection
 
     private void HandleData(in FrameHeader header, ReadOnlySpan<byte> payload)
     {
-        if (header.StreamId == 0)
+        if (header.StreamId == 0 || header.StreamId > _highestStream)
         {
-            GoAway(Http2Error.ProtocolError);   // RFC 9113 6.1: DATA always belongs to a stream
+            GoAway(Http2Error.ProtocolError);   // RFC 9113 6.1: DATA always belongs to a stream, and 5.1: never an idle one
             return;
         }
 

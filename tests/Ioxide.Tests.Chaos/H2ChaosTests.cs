@@ -108,15 +108,41 @@ internal static class H2ChaosTests
             AssertServes(port);
         });
 
-        runner.Pending("h2c: DATA on an idle stream is a PROTOCOL_ERROR", () =>
+        runner.Test("h2c: DATA on an idle stream is a PROTOCOL_ERROR", () =>
         {
+            // RFC 9113 5.1. It was credited to the connection and dropped, like DATA on a closed stream.
             int port = StartH2c();
             Assert.Equal("GOAWAY PROTOCOL_ERROR", H2cClient.Verdict(port, c =>
             {
                 c.WriteFrame(0x0, flags: 0, streamId: 5, "x"u8);
                 c.Request(streamId: 1);
             }));
-        }, "RFC 9113 5.1 - an idle stream differs from a closed one only by the highest stream id opened, which Http2Connection does not keep");
+            Assert.Equal("GOAWAY PROTOCOL_ERROR", H2cClient.Verdict(port, c =>
+            {
+                c.RequestHeadersOnly(streamId: 3, endHeaders: true, endStream: false);
+                c.WriteFrame(0x0, flags: 0x1, streamId: 5, "x"u8);
+            }));
+
+            // Control: at or below the highest id opened a stream is closed, not idle - stream 1 by
+            // opening 3 (RFC 9113 5.1.1), stream 3 once answered - and its DATA is still dropped.
+            Assert.Equal("HEADERS 3", H2cClient.Verdict(port, c =>
+            {
+                c.RequestHeadersOnly(streamId: 3, endHeaders: true, endStream: false);
+                c.WriteFrame(0x0, flags: 0, streamId: 1, "x"u8);
+                c.WriteFrame(0x0, flags: 0x1, streamId: 3, []);
+            }));
+            using (var client = new H2cClient(port))
+            {
+                client.Open();
+                client.Request(streamId: 3);
+                Assert.True(client.AwaitResponse(streamId: 3), "server did not answer stream 3");
+                client.WriteFrame(0x0, flags: 0x1, streamId: 3, "x"u8);
+                client.Request(streamId: 5);
+                Assert.True(client.AwaitResponse(streamId: 5), "DATA on a stream already answered ended the connection");
+            }
+
+            AssertServes(port);
+        });
 
         runner.Test("h2c: a frame truncated mid-payload is handled, server survives", () =>
         {
