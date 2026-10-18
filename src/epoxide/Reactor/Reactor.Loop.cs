@@ -16,7 +16,7 @@ public sealed unsafe partial class Reactor
             DrainCloseQ();
             DrainRecycleQ();
 
-            int n = epoll_wait(_epfd, _events, maxEvents, WaitTimeoutMs());
+            int n = Wait(maxEvents);
             if (n < 0)
             {
                 // A signal is the one transient failure; anything else is a lifecycle or programming
@@ -41,6 +41,36 @@ public sealed unsafe partial class Reactor
             RunDueTimers();
             RunDueTickers();
         }
+    }
+
+    // Set once epoll_pwait2 is missing from the kernel or libc: from then on, the millisecond wait.
+    private static bool s_millisecondWait;
+
+    // epoll_pwait2 takes the timeout in ns, so the loop wakes at a timer's deadline, not the
+    // millisecond after it - which every timer due in one sleep would otherwise share.
+    private int Wait(int maxEvents)
+    {
+        long ns = WaitTimeoutNs();
+        if (!s_millisecondWait)
+        {
+            try
+            {
+                timespec timeout = new() { tv_sec = ns / 1_000_000_000, tv_nsec = ns % 1_000_000_000 };
+                int n = epoll_pwait2(_epfd, _events, maxEvents, &timeout, null);
+                if (n >= 0 || Errno != ENOSYS)
+                {
+                    return n;
+                }
+            }
+            catch (EntryPointNotFoundException)
+            {
+            }
+
+            s_millisecondWait = true;
+        }
+
+        // Rounded up, so a timer never fires early.
+        return epoll_wait(_epfd, _events, maxEvents, (int)Math.Min((ns + 999_999) / 1_000_000, int.MaxValue));
     }
 
     private void Dispatch(ulong data, uint events)

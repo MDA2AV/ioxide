@@ -30,6 +30,9 @@ public static unsafe partial class Native
     [DllImport("libc", SetLastError = true)] public static extern int epoll_create1(int flags);
     [DllImport("libc", SetLastError = true)] public static extern int epoll_ctl(int epfd, int op, int fd, void* ev);
     [DllImport("libc", SetLastError = true)] public static extern int epoll_wait(int epfd, void* events, int maxevents, int timeout);
+
+    /// <summary>epoll_wait with the timeout in nanoseconds (Linux 5.11, glibc 2.35).</summary>
+    [DllImport("libc", SetLastError = true)] public static extern int epoll_pwait2(int epfd, void* events, int maxevents, timespec* timeout, void* sigmask);
     [DllImport("libc", SetLastError = true)] public static extern int eventfd(uint initval, int flags);
 
     /// <summary>Bytes per struct epoll_event on this architecture.</summary>

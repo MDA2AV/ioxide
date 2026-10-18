@@ -41,6 +41,7 @@ public static unsafe partial class Native
     public const int ENOMEM      = 12;
     public const int ENFILE      = 23;
     public const int EMFILE      = 24;
+    public const int ENOSYS      = 38;
     public const int ENOBUFS     = 105;
     public const int EINPROGRESS = 115;
 

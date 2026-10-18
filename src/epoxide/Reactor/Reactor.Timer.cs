@@ -126,8 +126,10 @@ public sealed unsafe partial class Reactor
         }
     }
 
-    // The loop's wait in ms: until the next ticker run or timer, whichever is first; 0 with work queued.
-    private int WaitTimeoutMs()
+    private static readonly double NanosecondsPerTick = 1e9 / Stopwatch.Frequency;
+
+    // The loop's wait in ns: until the next ticker run or timer, whichever is first; 0 with work queued.
+    private long WaitTimeoutNs()
     {
         if (!_postQ.IsEmpty || !_registerQ.IsEmpty || !_closeQ.IsEmpty || !_recycleQ.IsEmpty)
         {
@@ -135,15 +137,15 @@ public sealed unsafe partial class Reactor
         }
 
         // Not NowMs: that was read before this pass's work, and the wait would oversleep by all of it.
-        long untilTick = Math.Max(0, _nextTickMs - Native.MonotonicMs);
+        // +1 ms for the ticker's coarse clock, so the reading after the wait is past its deadline.
+        long ns = (Math.Max(0, _nextTickMs - Native.MonotonicMs) + 1) * 1_000_000;
         if (_timers.TryPeek(out _, out long due))
         {
-            // Rounded up, so a timer never fires early; +1 for the coarse clock reading just short.
-            long untilTimer = (due - Stopwatch.GetTimestamp()) * 1000 / Stopwatch.Frequency + 1;
-            untilTick = Math.Min(untilTick, Math.Max(0, untilTimer));
+            // To the deadline itself: the wait never ends before it, and anything later is a late timer.
+            ns = Math.Min(ns, Math.Max(0, (long)((due - Stopwatch.GetTimestamp()) * NanosecondsPerTick)));
         }
 
-        return (int)Math.Min(untilTick + 1, int.MaxValue);
+        return ns;
     }
 }
 

@@ -106,6 +106,38 @@ internal static class TimerTests
         }
     }
 
+    // Twenty 5 ms waits in a row on one timer, answered with the median of how far past its deadline
+    // each one ended, in microseconds.
+    private static async Task Lateness(Reactor r, TcpConnection conn)
+    {
+        try
+        {
+            RecvSnapshot snapshot = await conn.ReadAsync();
+            Wire.ReadPath(conn, snapshot);
+            if (snapshot.IsClosed)
+            {
+                return;   // the harness's readiness probe, which sends no request
+            }
+
+            var timer = new ReactorTimer(r);
+            var late = new double[20];
+            for (int i = 0; i < late.Length; i++)
+            {
+                long armed = Stopwatch.GetTimestamp();
+                await timer.DelayAsync(5);
+                late[i] = Stopwatch.GetElapsedTime(armed).TotalMicroseconds - 5_000;
+            }
+
+            Array.Sort(late);
+            Wire.Write(conn, 200, ((int)late[late.Length / 2]).ToString());
+            await conn.FlushAsync();
+        }
+        finally
+        {
+            conn.DecRef();
+        }
+    }
+
     public static void Register(Runner runner)
     {
         runner.Test("timer: the wait actually elapses", () =>
@@ -262,6 +294,16 @@ internal static class TimerTests
             Assert.True(outcomes.IsEmpty, $"{outcomes.Count} waits broke their deadline: {string.Join("; ", outcomes.Take(3))}");
         });
 
+        runner.Test("timer: a wait ends at its deadline, not at the millisecond after it", () =>
+        {
+            // A wait that rounds a deadline up to whole milliseconds ends every timer up to one late,
+            // and every timer that came due in one sleep together - the async profile's whole gap.
+            int port = TestServer.Start(Lateness);
+            (int status, string body) = Client.Get(port, "/", timeoutMs: 10_000);
+            Assert.Equal(200, status);
+            Assert.True(int.Parse(body) < 500, $"the median 5 ms wait ended {body} us past its deadline");
+        }, skip: !PreciseWaitAvailable());
+
         runner.Test("ticker: the wait after a pass that ran into the interval asks only for what is left of it", () =>
         {
             // The wait's timeout is the next deadline minus the clock. Read once per pass, right after
@@ -326,19 +368,27 @@ internal static class TimerTests
     [DllImport("libc")]
     private static extern int gettid();
 
-    // The syscalls a parked epoll reactor can be in, by number, whose fourth argument is the timeout
-    // in milliseconds: epoll_wait and epoll_pwait on x86-64, epoll_pwait on arm64 (which has no epoll_wait).
+    // The syscalls a parked epoll reactor can be in, by number: epoll_pwait2 (441 on both), whose fourth
+    // argument points at the timeout, and the fallback's epoll_wait and epoll_pwait on x86-64 and
+    // epoll_pwait on arm64 (which has no epoll_wait), whose fourth argument is the timeout in ms.
+    private const string EpollPwait2 = "441";
+
     private static string[] EpollWaitSyscalls() => RuntimeInformation.ProcessArchitecture switch
     {
-        Architecture.X64 => ["232", "281"],
-        Architecture.Arm64 => ["22"],
+        Architecture.X64 => [EpollPwait2, "232", "281"],
+        Architecture.Arm64 => [EpollPwait2, "22"],
         _ => [],
     };
+
+    // The reactor waits in nanoseconds where the kernel (5.11) and libc (2.35) both have epoll_pwait2.
+    private static bool PreciseWaitAvailable()
+        => Environment.OSVersion.Version >= new Version(5, 11)
+        && NativeLibrary.TryGetExport(NativeLibrary.GetMainProgramHandle(), "epoll_pwait2", out _);
 
     // The timeout a thread is parked with in epoll_wait, from /proc/self/task/<tid>/syscall
     // ("nr arg1 arg2 arg3 arg4 ..."). Null when the thread is not in that wait, or left it while
     // being read.
-    private static long? ParkedWaitMs(int tid)
+    private static unsafe long? ParkedWaitMs(int tid)
     {
         string path = $"/proc/self/task/{tid}/syscall";
         string first = File.ReadAllText(path);
@@ -348,7 +398,16 @@ internal static class TimerTests
             return null;
         }
 
-        long ms = (int)Convert.ToUInt64(f[4], 16);
+        ulong arg = Convert.ToUInt64(f[4], 16);
+        if (f[0] == EpollPwait2 && arg == 0)
+        {
+            return null;
+        }
+
+        // epoll_pwait2's timespec is in this process, on the reactor's stack while it is parked.
+        long ms = f[0] == EpollPwait2
+            ? ((Native.timespec*)arg)->tv_sec * 1000 + ((Native.timespec*)arg)->tv_nsec / 1_000_000
+            : (int)arg;
         return File.ReadAllText(path) == first ? ms : null;
     }
 }
