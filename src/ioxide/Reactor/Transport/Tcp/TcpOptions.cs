@@ -40,7 +40,8 @@ public sealed record TcpOptions
     // Trades the in-kernel payload copy for page-pinning plus a second (F_NOTIF) completion per send,
     // so it only pays off for large responses - leave off for small-payload workloads. The sender is
     // chosen once per connection at accept; kTLS connections always fall back to plain SEND (the
-    // kernel re-buffers to encrypt, so zero-copy buys nothing there).
+    // kernel re-buffers to encrypt, so zero-copy buys nothing there). With SendTimeoutMs above 0 it
+    // also puts TCP_USER_TIMEOUT on the listeners - see SendTimeoutMs.
     public bool ZeroCopySend { get; init; } = false;
 
     /// <summary>
@@ -105,6 +106,13 @@ public sealed record TcpOptions
     ///
     /// It also bounds a flush still draining when the peer closes: that connection is held, fd and
     /// slab, until its send completes, exactly like a live one - so with 0 nothing bounds that either.
+    ///
+    /// With <see cref="ZeroCopySend"/> a send completes only once the kernel lets go of the slab, and
+    /// the sweep's shutdown does not make it: data queued behind a shut window stays queued for as
+    /// long as the peer answers the window probes, which TCP allows forever. So with ZeroCopySend on,
+    /// the listeners also carry this value as TCP_USER_TIMEOUT, which accepted connections inherit:
+    /// the kernel aborts a connection whose peer has kept its window shut, or left sent data
+    /// unacknowledged, for that long, and that frees the slab.
     /// </remarks>
     public int SendTimeoutMs { get; init; } = 60_000;
 }

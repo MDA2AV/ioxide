@@ -624,6 +624,14 @@ static int iq_on_client_hello(ptls_on_client_hello_t *self, ptls_t *tls,
 
             if (host != NULL) {
                 ptls_set_context(tls, host);
+
+                /* Saved so picotls holds a retried ClientHello to this name (it compares only a saved
+                 * one); saving also acknowledges it, which TCP too does only for a name it served. */
+                int rv = ptls_set_server_name(tls, (const char *)params->server_name.base,
+                                              params->server_name.len);
+                if (rv != 0) {
+                    return rv;
+                }
             }
         }
     }
