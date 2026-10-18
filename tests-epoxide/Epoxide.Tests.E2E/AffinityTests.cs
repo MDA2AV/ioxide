@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Net.Sockets;
 using System.Runtime.InteropServices;
 using epoxide;
 
@@ -7,8 +8,8 @@ namespace Epoxide.Tests;
 /// <summary>
 /// Where a handler runs after it awaits. A reactor thread has no SynchronizationContext, so an await
 /// that is not one of epoxide's own - Task.Delay, Task.Run, a BCL HttpClient call - continues on the
-/// thread pool, and the handler keeps serving its connection from there: unlike in ioxide, nothing
-/// needs it back on the reactor. ThreadPoolTests has the rest of that contract.
+/// thread pool, and the handler serves its connection from there until a read or flush of its has to
+/// wait: the reactor resumes that inline, so the handler is back on it. ThreadPoolTests has the rest.
 /// </summary>
 internal static class AffinityTests
 {
@@ -37,17 +38,17 @@ internal static class AffinityTests
             Assert.Equal("none", seen);
         });
 
-        runner.Test("affinity: Task.Delay continues on the thread pool, and the handler serves from there", () =>
+        runner.Test("affinity: Task.Delay continues on the thread pool, and a read that waits brings the handler back to the reactor", () =>
         {
             AssertServesFromPoolAfter(static async () => await Task.Delay(1));
         });
 
-        runner.Test("affinity: Task.Run continues on the thread pool, and the handler serves from there", () =>
+        runner.Test("affinity: Task.Run continues on the thread pool, and a read that waits brings the handler back to the reactor", () =>
         {
             AssertServesFromPoolAfter(static async () => await Task.Run(static () => Thread.Sleep(1)));
         });
 
-        runner.Test("affinity: a BCL HttpClient call continues on the thread pool, and the handler serves from there", () =>
+        runner.Test("affinity: a BCL HttpClient call continues on the thread pool, and a read that waits brings the handler back to the reactor", () =>
         {
             int origin = TestServer.Start(Handlers.Raw);
 
@@ -196,7 +197,8 @@ internal static class AffinityTests
     }
 
     // Runs `work` inside a handler between two requests on one connection, and reports where the
-    // handler is after it and after the next read: nothing may bring it back to the reactor.
+    // handler answers each: on the pool after the work, and on the reactor after a read that waited -
+    // the client sends the second request only once that read has parked.
     private static void AssertServesFromPoolAfter(Func<Task> work)
     {
         int port = TestServer.Start(async (r, conn) =>
@@ -224,9 +226,11 @@ internal static class AffinityTests
                 Wire.Write(conn, 200, verdict);
                 await conn.FlushAsync();
 
-                snapshot = await conn.ReadAsync();
+                ValueTask<RecvSnapshot> next = conn.ReadAsync();
+                bool waited = !next.IsCompleted;
+                snapshot = await next;
                 Wire.ReadPath(conn, snapshot);
-                Wire.Write(conn, 200, Where(r));
+                Wire.Write(conn, 200, waited ? Where(r) : "the read did not wait, so nothing was tested");
                 await conn.FlushAsync();
             }
             finally
@@ -235,9 +239,15 @@ internal static class AffinityTests
             }
         });
 
-        List<(int Status, string Body)> answers = Client.GetKeepAlive(port, "/", 2, timeoutMs: 20_000);
-        Assert.Equal("pool", answers[0].Body);
-        Assert.Equal("pool", answers[1].Body);
+        using var client = new TcpClient();
+        client.Connect("127.0.0.1", port);
+        client.ReceiveTimeout = 20_000;
+        NetworkStream stream = client.GetStream();
+        Client.Send(stream, "/");
+        Assert.Equal("pool", Client.ReadResponse(stream).Body);
+        Thread.Sleep(200);   // the handler's next read has parked by now
+        Client.Send(stream, "/");
+        Assert.Equal("reactor", Client.ReadResponse(stream).Body);
     }
 
     private static string Where(Reactor r)

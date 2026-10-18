@@ -27,11 +27,11 @@ internal static class ConnectTests
             string outcome = Task.Run(async () =>
             {
                 TcpConnection conn = await client.ConnectAsync(new IPEndPoint(IPAddress.Loopback, port));
-                string connected = Where(client);
                 try
                 {
+                    await Hop.ToThreadPool();   // the connect resumes on the reactor once it has waited
                     (int status, string body) = await GetAsync(conn);
-                    return $"{status} {body}, connected on {connected}, answered on {Where(client)}";
+                    return $"{status} {body}";
                 }
                 finally
                 {
@@ -39,7 +39,7 @@ internal static class ConnectTests
                 }
             }).Wait(10_000, out string? result) ? result! : "the exchange never finished";
 
-            Assert.Equal("200 ok, connected on pool, answered on pool", outcome);
+            Assert.Equal("200 ok", outcome);
         });
 
         runner.Test("connect: on the reactor to an epoxide listener, the connect and the reads resume inline", () =>
@@ -98,7 +98,8 @@ internal static class ConnectTests
             client.ScheduleOnReactor(_ => _ = Run(), null);
             async Task Run() => onReactor.TrySetResult(await EchoAsync(client, remote, 100_000, seed: 5));
 
-            Assert.Equal("100000 bytes back intact, on pool", fromPool);
+            // From the pool the exchange ends wherever its last wait resumed it; only the reactor's is fixed.
+            Assert.True(fromPool.StartsWith("100000 bytes back intact, on ", StringComparison.Ordinal), fromPool);
             Assert.True(onReactor.Task.Wait(10_000), "the exchange on the reactor never finished");
             Assert.Equal("100000 bytes back intact, on reactor", onReactor.Task.Result);
         });
@@ -138,7 +139,7 @@ internal static class ConnectTests
                 }
             }
 
-            Assert.Equal("ConnectionRefused, on pool", fromPool);
+            Assert.True(fromPool.StartsWith("ConnectionRefused, on ", StringComparison.Ordinal), fromPool);
             Assert.True(onReactor.Task.Wait(10_000), "the connect on the reactor never settled");
             Assert.Equal("ConnectionRefused, on reactor", onReactor.Task.Result);
         });
@@ -223,12 +224,30 @@ internal static class ConnectTests
             Assert.True(SpinWait.SpinUntil(() => Internals.LiveConnections(client) == 0, 5_000), "the outbound connection was never recycled");
         });
 
-        runner.Test("connect: a read awaited on another reactor resumes on the pool, never on the connection's reactor", () =>
+        runner.Test("connect: a read awaited on another reactor resumes inline on the connection's reactor", () =>
         {
-            // The connection belongs to reactor B, the handler awaiting its read runs on reactor A. B
-            // finishes the recv at the edge, on B's thread, and must not run A's continuation there:
-            // a reactor has no context to hand it back to A, so it goes to the pool.
-            int port = TestServer.Start(Handlers.Raw);
+            // The connection belongs to reactor B, the code awaiting its read runs on reactor A. B
+            // finishes the recv at the edge, on B's thread, and runs the continuation right there. The
+            // server answers a moment late, so the read has parked by then.
+            int port = TestServer.Start(async (r, conn) =>
+            {
+                try
+                {
+                    RecvSnapshot snapshot = await conn.ReadAsync();
+                    Wire.ReadPath(conn, snapshot);
+                    if (snapshot.IsClosed)
+                    {
+                        return;   // the harness's probe
+                    }
+                    await new ReactorTimer(r).DelayAsync(100);
+                    Wire.Write(conn, 200, "ok");
+                    await conn.FlushAsync();
+                }
+                finally
+                {
+                    conn.DecRef();
+                }
+            });
             (Reactor owner, _) = TestServer.StartClientOnly();
             (Reactor awaiter, _) = TestServer.StartClientOnly();
 
@@ -240,11 +259,12 @@ internal static class ConnectTests
                 try
                 {
                     TcpConnection conn = await owner.ConnectAsync(new IPEndPoint(IPAddress.Loopback, port));
-                    string connected = WhereOf(awaiter, owner);
                     try
                     {
+                        await Hop.ToReactor(awaiter);   // the connect may have resumed anywhere
+                        string from = WhereOf(awaiter, owner);
                         (int status, string body) = await GetAsync(conn);
-                        report.TrySetResult($"{status} {body}, connected on {connected}, answered on {WhereOf(awaiter, owner)}");
+                        report.TrySetResult($"{status} {body}, read from {from}, answered on {WhereOf(awaiter, owner)}");
                     }
                     finally
                     {
@@ -258,7 +278,7 @@ internal static class ConnectTests
             }
 
             Assert.True(report.Task.Wait(10_000), "the exchange never finished");
-            Assert.Equal("200 ok, connected on the pool, answered on the pool", report.Task.Result);
+            Assert.Equal("200 ok, read from the awaiter's reactor, answered on the connection's reactor", report.Task.Result);
         });
 
         runner.Test("connect: after Stop() a connect fails at once with ObjectDisposedException", () =>

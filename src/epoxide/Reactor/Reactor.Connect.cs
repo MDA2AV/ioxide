@@ -16,9 +16,10 @@ public sealed unsafe partial class Reactor
 
     /// <summary>
     /// Connect to <paramref name="remote"/> (IPv4 or IPv6) and return the connection, watched by this
-    /// reactor. Callable from any thread, and the result is usable from any thread: an awaiter on this
-    /// reactor resumes inline, any other on its own context or the thread pool. The caller holds the
-    /// handler's ref - <see cref="TcpConnection.DecRef"/> when done, exactly as a handler does.
+    /// reactor. Callable from any thread, and the result is usable from any thread: a connect that has to
+    /// wait resumes its awaiter inline on this reactor, unless it has a SynchronizationContext of its
+    /// own. The caller holds the handler's ref - <see cref="TcpConnection.DecRef"/> when done, exactly
+    /// as a handler does.
     /// </summary>
     /// <remarks>
     /// No DNS here: resolve first (Dns.GetHostAddressesAsync on the thread pool, say). There is no
@@ -71,9 +72,8 @@ public sealed unsafe partial class Reactor
             return Task.FromException<TcpConnection>(new SocketException((int)ToSocketError(errno)));
         }
 
-        // An awaiter on this reactor resumes inline; any other must never run on it.
-        var result = new TaskCompletionSource<TcpConnection>(
-            OnReactorThread ? TaskCreationOptions.None : TaskCreationOptions.RunContinuationsAsynchronously);
+        // Completed on the reactor, where its awaiter resumes inline, as a read's does.
+        var result = new TaskCompletionSource<TcpConnection>();
 
         TcpConnection conn = new(this, fd, _tcp.WriteSlabSize, _tcp.RecvQueueEntries, _tcp.WriteOverflow);
         conn.InitRefs();

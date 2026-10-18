@@ -1207,9 +1207,9 @@ public sealed class TlsService
     /// already in <see cref="TlsSession.DrainPlaintext"/>.
     /// </summary>
     /// <remarks>
-    /// Awaitable from any thread. The handshake's reads and flushes are the connection's own, so it
-    /// resumes where its caller belongs - inline on the connection's reactor, and on the caller's
-    /// own context or the thread pool anywhere else - and nothing in it is handed to the reactor.
+    /// Awaitable from any thread. The handshake's reads and flushes are the connection's own, so one
+    /// that waits resumes it inline on the connection's reactor, as any read does - unless the caller
+    /// has a SynchronizationContext of its own - and nothing in it is handed to the reactor.
     /// </remarks>
     public async ValueTask<TlsSession> AcceptAsync(TcpConnection conn)
     {

@@ -60,7 +60,7 @@ silently), `Client`, `TestCert`, `Handlers`, `FdCount` and the rest. Its own add
 | Type | For |
 | --- | --- |
 | `Internals` | What epoxide does not expose, read by UnsafeAccessor and reflection: the recv pool's counts, a connection's generation and refs, the timer queue |
-| `Hop` | `await Hop.ToThreadPool()` - a handler leaving its reactor. Only in tests about that; everywhere else a handler waits with `ReactorTimer` |
+| `Hop` | `await Hop.ToThreadPool()` - a handler leaving its reactor, and `Hop.ToReactor(r)` onto a given one. Only in tests about that; everywhere else a handler waits with `ReactorTimer` |
 | `TestServer.StartClientOnly` | A reactor with no listener, for `ConnectAsync` |
 
 `Handlers` and `Wire` are partial: a suite whose handlers need a module of its own (TLS) adds them

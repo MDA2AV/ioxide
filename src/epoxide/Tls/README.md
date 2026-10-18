@@ -60,7 +60,7 @@ first.
   `TlsOptions.KernelRx` doc.
 - **The handshake** rides the connection like any other I/O: BoringSSL drives memory BIOs, the
   service pumps ciphertext through the connection's reads and flushes. `AcceptAsync` can be awaited
-  from any thread and resumes where its caller belongs.
+  from any thread, and resumes as those do: inline on the connection's reactor once one has waited.
 
 ## Requirements
 

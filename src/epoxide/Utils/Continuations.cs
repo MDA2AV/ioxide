@@ -3,10 +3,10 @@ using System.Threading.Tasks.Sources;
 namespace epoxide.utils;
 
 /// <summary>
-/// Where the awaiter of an operation a reactor completes resumes. The completion runs on the
-/// reactor thread: an awaiter that was on that same reactor resumes inline there, as in ioxide,
-/// and any other awaiter must never run on it - it resumes on its own SynchronizationContext, if it
-/// has one, or on the thread pool.
+/// Where the awaiter of an operation a reactor completes resumes: inline on that reactor, inside the
+/// completion, wherever the awaiter was - the reactor is the thread that saw the event, so anywhere
+/// else would cost a hop. An awaiter with a SynchronizationContext or TaskScheduler of its own
+/// resumes on that instead.
 /// </summary>
 /// <remarks>
 /// Decided at OnCompleted, on the awaiting thread, and stored before the continuation is published,
@@ -17,18 +17,12 @@ internal static class Continuations
     public static void OnCompleted<T>(ref ManualResetValueTaskSourceCore<T> core, Reactor reactor,
         Action<object?> continuation, object? state, short token, ValueTaskSourceOnCompletedFlags flags)
     {
-        if (reactor.OnReactorThread)
-        {
-            // Stripped so a SynchronizationContext someone installs on the reactor thread cannot turn
-            // the inline resume into a post.
-            core.RunContinuationsAsynchronously = false;
-            core.OnCompleted(continuation, state, token, flags & ~ValueTaskSourceOnCompletedFlags.UseSchedulingContext);
-        }
-        else
-        {
-            core.RunContinuationsAsynchronously = true;
-            core.OnCompleted(continuation, state, token, flags);
-        }
+        core.RunContinuationsAsynchronously = false;
+
+        // Stripped on the reactor's thread, so a SynchronizationContext someone installs there cannot
+        // turn the inline resume into a post.
+        core.OnCompleted(continuation, state, token,
+            reactor.OnReactorThread ? flags & ~ValueTaskSourceOnCompletedFlags.UseSchedulingContext : flags);
     }
 
     /// <summary>

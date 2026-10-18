@@ -3,14 +3,13 @@ using epoxide;
 using Playground.Shared;
 
 // ─────────────────────────────────────────────────────────────────────────────────────────────
-//  thread pool - Playground/Epoxide/Pipe with the handler on the thread pool for the whole of its
-//  connection. Every read and every flush is made from a pool thread, and nothing hops back to the
-//  reactor: a recv or send is an ordinary syscall, and the reactor only resumes a read or a flush
-//  that had to wait - on the pool, where its caller was.
+//  thread pool - Playground/Epoxide/Pipe with the handler started on the thread pool. Its reads and
+//  flushes are made from whatever thread it is on: a recv or send is an ordinary syscall. A read or
+//  flush that has to wait resumes it inline on the reactor, the thread that saw the event, so after
+//  its first wait it runs there, as in Epoxide/Pipe.
 //
 //  ioxide has no equivalent: its ring has a single issuer, so a pool thread's every operation is a
-//  handoff to the reactor, and the first read that waits resumes the handler ON the reactor. Run it
-//  against Epoxide/Pipe to price the pool's dispatch.
+//  handoff to the reactor.
 //
 //      dotnet run -c Release --project Playground/Epoxide/ThreadPool
 //      curl http://127.0.0.1:8080/
@@ -59,7 +58,7 @@ for (int i = 0; i < threads.Length; i++)
 {
     var reactor = new Reactor(i, config);
 
-    // Task.Run: the connection's whole life runs on the pool.
+    // Task.Run: the handler starts on the pool.
     reactor.TcpHandle = (r, conn) => Task.Run(() => ServeAsync(conn));
 
     threads[i] = new Thread(reactor.Run) { Name = $"reactor-{i}" };
@@ -82,8 +81,8 @@ async Task ServeAsync(TcpConnection conn)
     {
         while (true)
         {
-            // A recv on this pool thread; when the socket is empty the reactor finishes it later
-            // and this resumes on the pool again.
+            // A recv on this thread; when the socket is empty the reactor finishes it later and
+            // this resumes on the reactor.
             ReadResult result = await reader.ReadAsync();
             reader.AdvanceTo(result.Buffer.End);
 

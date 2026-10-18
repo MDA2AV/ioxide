@@ -5,8 +5,8 @@ namespace epoxide;
 
 /// <summary>
 /// A wait that completes on a reactor's thread - ioxide's RingTimer, with the deadline held by the
-/// reactor's timer queue instead of the ring. The awaiter resumes inline when it is on that reactor,
-/// and on its own context or the thread pool when it is not.
+/// reactor's timer queue instead of the ring. The awaiter resumes inline on that reactor, unless it
+/// has a SynchronizationContext of its own.
 ///
 /// One wait in flight per timer: hold one per connection, or one per thing that waits. Zero
 /// allocation per wait once constructed (one is posted when armed from another thread).

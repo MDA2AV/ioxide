@@ -16,6 +16,28 @@ public static class Hop
 {
     public static ThreadPoolAwaitable ToThreadPool() => default;
 
+    /// <summary>
+    /// The way onto a given reactor: <c>await Hop.ToReactor(r);</c> continues on <paramref name="reactor"/>'s
+    /// thread, posted there only once the await has registered, so it never finishes on the thread it left.
+    /// </summary>
+    public static ReactorAwaitable ToReactor(epoxide.Reactor reactor) => new(reactor);
+
+    public readonly struct ReactorAwaitable(epoxide.Reactor reactor) : ICriticalNotifyCompletion
+    {
+        public ReactorAwaitable GetAwaiter() => this;
+
+        public bool IsCompleted => false;
+
+        public void GetResult()
+        {
+        }
+
+        public void OnCompleted(Action continuation)
+            => reactor.ScheduleOnReactor(static c => ((Action)c!)(), continuation);
+
+        public void UnsafeOnCompleted(Action continuation) => OnCompleted(continuation);
+    }
+
     public readonly struct ThreadPoolAwaitable : ICriticalNotifyCompletion
     {
         public ThreadPoolAwaitable GetAwaiter() => this;

@@ -13,7 +13,8 @@ namespace Epoxide.Tests;
 /// What epoxide adds to ioxide's TLS: a session used from the thread pool - its handshake, its
 /// reader and its writer, two of them at once - with nothing handed back to the reactor. An SSL
 /// object is not thread-safe, so every BoringSSL call on a session takes the session's lock; these
-/// are the shapes that lock exists for.
+/// are the shapes that lock exists for. A wait resumes its awaiter on the reactor, so code that means
+/// to stay on the pool goes back to it after each.
 /// </summary>
 internal static class ThreadPoolTests
 {
@@ -73,20 +74,20 @@ internal static class ThreadPoolTests
             Assert.True(serverReceived == Total && intact,
                 $"the server read {serverReceived} of {Total} bytes, intact={intact}");
 
-            // Non-vacuous: the handshake, every read and every flush ran off the reactor, and the two
-            // loops were on the session over the same stretch of time - the case its lock is for.
+            // Non-vacuous: the handshake, every read and every flush was made off the reactor, and the
+            // two loops were on the session over the same stretch of time - the case its lock is for.
             // (With the lock taken out, most runs of this test fail with a TLS decrypt error.)
             Assert.True(onReactor == 0, $"{onReactor} of the handler's TLS operations ran on the reactor");
             Assert.True(overlapped, "the reader and the writer never ran over the same stretch of time");
         });
 
-        runner.Test("tls threadpool: a session keeps serving from the thread pool after ConfigureAwait(false)", () =>
+        runner.Test("tls threadpool: a session that left its reactor with ConfigureAwait(false) is back on it after a read that waits", () =>
         {
             (string certPath, string keyPath) = TestCert.Ensure();
             var options = new TlsOptions { CertificatePath = certPath, KeyPath = keyPath };
 
-            var drift = new ConcurrentQueue<string>();
-            int port = TestServer.Start(ConfigureAwaitFalseHandler(drift), r => TlsService.Start(r, options));
+            var places = new ConcurrentQueue<string>();
+            int port = TestServer.Start(ConfigureAwaitFalseHandler(places), r => TlsService.Start(r, options));
 
             using var tcp = new TcpClient();
             tcp.Connect("127.0.0.1", port);
@@ -94,17 +95,19 @@ internal static class ThreadPoolTests
             using var ssl = new SslStream(tcp.GetStream(), leaveInnerStreamOpen: false, (_, _, _, _) => true);
             ssl.AuthenticateAsClient(new SslClientAuthenticationOptions { TargetHost = "localhost" });
 
-            // Keep-alive: every request after the first is read and answered from the pool.
+            // Keep-alive, each request sent once the handler's read has parked: it resumes on the reactor.
             for (int i = 0; i < 5; i++)
             {
+                Thread.Sleep(100);
                 Client.Send(ssl, $"/{i}");
                 (int status, string body) = Client.ReadResponse(ssl);
                 Assert.Equal(200, status);
-                Assert.Equal($"pool-{i}", body);
+                Assert.Equal($"answer-{i}", body);
             }
 
             ssl.ShutdownAsync().Wait(5_000);
-            Assert.True(drift.IsEmpty, "the handler was back on its reactor: " + string.Join("; ", drift));
+            Assert.Equal("after the delay: pool; request 0: reactor; request 1: reactor; request 2: reactor; request 3: reactor; request 4: reactor",
+                string.Join("; ", places));
         });
     }
 
@@ -198,6 +201,10 @@ internal static class ThreadPoolTests
                     {
                         Observe();
                         ReadResult read = await input.ReadAsync();
+                        if (reactor.OnReactorThread)
+                        {
+                            await Hop.ToThreadPool();   // a read that waited resumed on the reactor
+                        }
 
                         foreach (ReadOnlyMemory<byte> segment in read.Buffer)
                         {
@@ -230,6 +237,10 @@ internal static class ThreadPoolTests
 
                         Observe();
                         await output.FlushAsync();
+                        if (reactor.OnReactorThread)
+                        {
+                            await Hop.ToThreadPool();   // a flush that waited resumed on the reactor
+                        }
                     }
                     writeLast = System.Diagnostics.Stopwatch.GetTimestamp();
                 });
@@ -259,8 +270,8 @@ internal static class ThreadPoolTests
         };
 
     // Handshakes on the reactor, then moves off it with ConfigureAwait(false) and serves keep-alive
-    // requests through the raw session API from wherever it resumes.
-    private static Func<Reactor, TcpConnection, Task> ConfigureAwaitFalseHandler(ConcurrentQueue<string> drift)
+    // requests through the raw session API from wherever it resumes, recording where that is.
+    private static Func<Reactor, TcpConnection, Task> ConfigureAwaitFalseHandler(ConcurrentQueue<string> places)
         => async (reactor, connection) =>
         {
             TlsSession? session = null;
@@ -275,8 +286,9 @@ internal static class ThreadPoolTests
                     return;   // the harness's readiness probe never completes a handshake
                 }
 
-                // A wait that really suspends, so the rest runs on the pool with no context to post it back.
+                // A wait that really suspends, so what follows runs on the pool.
                 await Task.Delay(1).ConfigureAwait(false);
+                places.Enqueue("after the delay: " + (reactor.OnReactorThread ? "reactor" : "pool"));
 
                 var carry = new List<byte>();
                 carry.AddRange(session.DrainPlaintext().ToArray());
@@ -285,10 +297,11 @@ internal static class ThreadPoolTests
                 while (true)
                 {
                     // Answer every request already decrypted before reading again.
+                    int before = answered;
                     answered = Answer(session, connection, carry, answered);
-                    if (reactor.OnReactorThread)
+                    for (int i = before; i < answered; i++)
                     {
-                        drift.Enqueue($"request {answered}: on the reactor");
+                        places.Enqueue($"request {i}: " + (reactor.OnReactorThread ? "reactor" : "pool"));
                     }
                     await connection.FlushAsync().ConfigureAwait(false);
 
@@ -314,7 +327,7 @@ internal static class ThreadPoolTests
         while ((end = System.Runtime.InteropServices.CollectionsMarshal.AsSpan(carry).IndexOf("\r\n\r\n"u8)) >= 0)
         {
             carry.RemoveRange(0, end + 4);
-            string body = $"pool-{answered++}";
+            string body = $"answer-{answered++}";
             session.Write(connection, Encoding.ASCII.GetBytes(
                 $"HTTP/1.1 200 OK\r\nContent-Length: {body.Length}\r\n\r\n{body}"));
         }

@@ -10,15 +10,14 @@ using epoxide.utils;
 namespace Epoxide.Tests;
 
 /// <summary>
-/// What is epoxide's own: a connection any thread may read and write. A handler that moves to the
-/// thread pool keeps reading, writing and flushing there, each an ordinary syscall on its own thread.
-/// Only a read with nothing to read, or a flush the socket cannot take, parks; the reactor finishes
-/// it at the next edge, on its own thread, and resumes the awaiter where it belongs - inline when it
-/// was on that reactor, on the thread pool when it was not, never the reactor for a caller that left.
+/// What is epoxide's own: a connection any thread may read and write. A handler on the thread pool
+/// reads, writes and flushes there, each an ordinary syscall on its own thread. Only a read with
+/// nothing to read, or a flush the socket cannot take, parks; the reactor finishes it at the next
+/// edge, on its own thread, and resumes the awaiter inline there, wherever it awaited from.
 /// </summary>
 /// <remarks>
 /// Every handler here leaves its reactor with <see cref="Hop.ToThreadPool"/>, except the one that
-/// pins the other half: an awaiter on the reactor still resumes inline, inside the edge.
+/// pins an awaiter on the reactor; those about the pool's side go back to it after each wait.
 /// </remarks>
 internal static class ThreadPoolTests
 {
@@ -27,27 +26,29 @@ internal static class ThreadPoolTests
 
     public static void Register(Runner runner)
     {
-        runner.Test("threadpool: a handler that moves to the thread pool reads, writes and flushes there", () =>
+        runner.Test("threadpool: a handler on the thread pool reads, writes and flushes from there", () =>
         {
             // Twenty requests on one connection, every one read, answered and flushed from a pool
-            // thread. No step may find itself back on the reactor: nothing posts a pool caller to it.
+            // thread. A read that waits resumes it on the reactor, so it goes back after each; a
+            // flush this small never waits, so it finishes where it was made.
             var places = new ConcurrentQueue<string>();
 
             int port = TestServer.Start(async (r, conn) =>
             {
                 try
                 {
-                    await Hop.ToThreadPool();
                     while (true)
                     {
+                        await Hop.ToThreadPool();
+                        places.Enqueue("read from " + Where(r));
                         RecvSnapshot snapshot = await conn.ReadAsync();
-                        places.Enqueue("read on " + Where(r));
                         Wire.ReadPath(conn, snapshot);
                         if (snapshot.IsClosed)
                         {
                             return;
                         }
 
+                        await Hop.ToThreadPool();
                         Wire.Write(conn, 200, "tp");
                         places.Enqueue("write on " + Where(r));
                         await conn.FlushAsync();
@@ -72,15 +73,15 @@ internal static class ThreadPoolTests
             string[] seen = places.ToArray();
             Assert.True(seen.Count(p => p.StartsWith("flush", StringComparison.Ordinal)) >= 20,
                 $"only {seen.Length} steps were recorded, so the handler did not do what it is credited with");
-            string[] off = seen.Where(p => !p.EndsWith(" on pool", StringComparison.Ordinal)).ToArray();
+            string[] off = seen.Where(p => !p.EndsWith(" pool", StringComparison.Ordinal)).ToArray();
             Assert.True(off.Length == 0, $"{off.Length} steps ran off the thread pool: {string.Join(", ", off.Take(4))}");
         });
 
-        runner.Test("threadpool: a parked read awaited from the thread pool resumes on the thread pool, never on the reactor", () =>
+        runner.Test("threadpool: a parked read awaited from the thread pool resumes inline on the reactor", () =>
         {
-            // Five reads that each find the socket empty and park; the client sends only after a pause.
-            // The reactor finishes each recv at the readable edge, on its own thread, and must hand the
-            // awaiter to the pool rather than run it there.
+            // Five reads, each made from the pool, that find the socket empty and park; the client sends
+            // only after a pause. The reactor finishes each recv at the readable edge, on its own thread,
+            // and runs the awaiter right there instead of handing it back to the pool.
             const int Rounds = 5;
             var resumed = new ConcurrentQueue<string>();
             var report = new TaskCompletionSource<int>(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -90,9 +91,9 @@ internal static class ThreadPoolTests
                 int parked = 0;
                 try
                 {
-                    await Hop.ToThreadPool();
                     for (int i = 0; i < Rounds; i++)
                     {
+                        await Hop.ToThreadPool();
                         ValueTask<RecvSnapshot> read = conn.ReadAsync();
                         bool waited = !read.IsCompleted;
                         RecvSnapshot snapshot = await read;
@@ -132,14 +133,14 @@ internal static class ThreadPoolTests
             Assert.True(report.Task.Wait(5_000), "the handler never finished its rounds");
             Assert.Equal(Rounds, report.Task.Result);
             string[] where = resumed.ToArray();
-            Assert.True(where.All(w => w == "pool"), $"parked reads resumed on: {string.Join(", ", where)}");
+            Assert.True(where.All(w => w == "reactor"), $"parked reads resumed on: {string.Join(", ", where)}");
         });
 
-        runner.Test("threadpool: a parked flush awaited from the thread pool resumes on the thread pool, never on the reactor", () =>
+        runner.Test("threadpool: a parked flush awaited from the thread pool resumes inline on the reactor", () =>
         {
-            // Far more than the socket takes, at a client that is not reading yet: the flush sends what
-            // fits, parks, and the reactor sends the rest at the writable edges - finishing on its own
-            // thread, so the awaiter has to be handed to the pool.
+            // Far more than the socket takes, from the pool, at a client that is not reading yet: the
+            // flush sends what fits, parks, and the reactor sends the rest at the writable edges -
+            // finishing on its own thread, where the awaiter then runs.
             const int Rounds = 3;
             var resumed = new ConcurrentQueue<string>();
             var report = new TaskCompletionSource<int>(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -149,7 +150,6 @@ internal static class ThreadPoolTests
                 int parked = 0;
                 try
                 {
-                    await Hop.ToThreadPool();
                     for (int i = 0; i < Rounds; i++)
                     {
                         if (Drain(conn, await conn.ReadAsync()) == 0)
@@ -157,6 +157,7 @@ internal static class ThreadPoolTests
                             return;   // the harness's probe, or the client gone
                         }
 
+                        await Hop.ToThreadPool();
                         conn.Write(new byte[ParkingBytes / 4]);
                         ValueTask flush = conn.FlushAsync();
                         bool waited = !flush.IsCompleted;
@@ -189,14 +190,14 @@ internal static class ThreadPoolTests
             Assert.True(report.Task.Wait(10_000), "the handler never finished its rounds");
             Assert.Equal(Rounds, report.Task.Result);
             string[] where = resumed.ToArray();
-            Assert.True(where.All(w => w == "pool"), $"parked flushes resumed on: {string.Join(", ", where)}");
+            Assert.True(where.All(w => w == "reactor"), $"parked flushes resumed on: {string.Join(", ", where)}");
         });
 
         runner.Test("threadpool: an awaiter on the reactor still resumes inline, inside the edge", () =>
         {
             // The other half of the rule, and the reason for it: a handler that never left keeps the
             // fast path. A parked read resumes inside the readable edge's own call, and a parked flush
-            // inside the writable edge's. Anything else would resume it on the pool, where it would stay.
+            // inside the writable edge's.
             var report = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
 
             int port = TestServer.StartConfigured(async (r, conn) =>
@@ -246,9 +247,10 @@ internal static class ThreadPoolTests
         runner.Test("threadpool: a read on one pool thread and a flush on another share a connection, full duplex, byte-exact", () =>
         {
             // One reader and one writer at a time, as with any stream - and the two at once, on two
-            // threads, neither of them the reactor's. 8 MiB each way through small socket buffers, with
-            // the client pausing now and then on each side, so both directions park repeatedly while the
-            // other is mid-syscall.
+            // threads, neither of them the reactor's: each goes back to the pool after a wait, which
+            // resumes it on the reactor. 8 MiB each way through small socket buffers, with the client
+            // pausing now and then on each side, so both directions park repeatedly while the other is
+            // mid-syscall.
             const int Bytes = 8 * 1024 * 1024, Mebibyte = 1024 * 1024;
             var serverRead = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
             int parkedReads = 0, parkedFlushes = 0;
@@ -279,11 +281,16 @@ internal static class ThreadPoolTests
                         while (got < Bytes)
                         {
                             ValueTask<RecvSnapshot> pending = conn.ReadAsync();
-                            if (!pending.IsCompleted)
+                            bool waited = !pending.IsCompleted;
+                            if (waited)
                             {
                                 Interlocked.Increment(ref parkedReads);
                             }
                             RecvSnapshot snapshot = await pending;
+                            if (waited)
+                            {
+                                await Hop.ToThreadPool();
+                            }
                             while (conn.TryGetItem(snapshot, out SpscRecvRing.Item item))
                             {
                                 if (!item.HasBuffer)
@@ -325,8 +332,9 @@ internal static class ThreadPoolTests
                             if (!flush.IsCompleted)
                             {
                                 Interlocked.Increment(ref parkedFlushes);
+                                await flush;
+                                await Hop.ToThreadPool();
                             }
-                            await flush;
                         }
                     });
 
@@ -448,11 +456,12 @@ internal static class ThreadPoolTests
             client.Connect("127.0.0.1", port);
             client.GetStream().Write("x"u8);
             Assert.True(parked.Task.Wait(10_000), $"the flush never parked: {(outcome.Task.IsCompleted ? outcome.Task.Result : "no word")}");
+            Thread.Sleep(200);   // and awaited: a reset that beat the await would resume it where it awaited
             client.LingerState = new LingerOption(true, 0);
             client.Close();   // RST, with the server's flush parked
 
             Assert.True(outcome.Task.Wait(10_000), "the flush stayed parked after its peer reset the connection");
-            Assert.Equal("closed, on pool", outcome.Task.Result);
+            Assert.Equal("closed, on reactor", outcome.Task.Result);
             AssertClosesAfterRelease(parked.Task.Result);
         });
 
@@ -497,11 +506,12 @@ internal static class ThreadPoolTests
             client.Connect("127.0.0.1", port);
             client.GetStream().Write("x"u8);
             Assert.True(parked.Task.Wait(10_000), $"the read never parked: {(outcome.Task.IsCompleted ? outcome.Task.Result : "no word")}");
+            Thread.Sleep(200);   // and awaited: a reset that beat the await would resume it where it awaited
             client.LingerState = new LingerOption(true, 0);
             client.Close();   // RST, with the server's read parked
 
             Assert.True(outcome.Task.Wait(10_000), "the read stayed parked after its peer reset the connection");
-            Assert.Equal("the end, on pool", outcome.Task.Result);
+            Assert.Equal("the end, on reactor", outcome.Task.Result);
             AssertClosesAfterRelease(parked.Task.Result);
         });
 
@@ -567,6 +577,9 @@ internal static class ThreadPoolTests
                         Drain(conn, snapshot);
                     }
                     while (!snapshot.IsClosed);
+
+                    // The read resumed on the reactor: waiting here for the reactor's own work would hold it.
+                    await Hop.ToThreadPool();
                     Assert.True(SpinWait.SpinUntil(() => Internals.Refs(conn) == 1, 5_000), "the reactor never let go of the closed connection");
 
                     handled.Enqueue((conn, socket));
@@ -689,7 +702,7 @@ internal static class ThreadPoolTests
             Assert.True(leaked <= 2, $"{leaked} descriptors outlived the stopped server and every one of its handlers");
         });
 
-        runner.Test("threadpool: many connections handled entirely on the pool, under load, are all answered byte-exact", () =>
+        runner.Test("threadpool: many connections served from the pool, under load, are all answered byte-exact", () =>
         {
             // Two reactors, 48 clients, 40 requests each, answered from the pool with bodies from one
             // byte to well past the slab and the socket: correctness and no hang, nothing about speed.
@@ -743,10 +756,10 @@ internal static class ThreadPoolTests
             Assert.Equal(Clients * Requests, answered);
         });
 
-        runner.Test("threadpool: the pipe reader, the pipe writer and the stream resume a pool-thread caller on the pool", () =>
+        runner.Test("threadpool: the pipe reader, the pipe writer and the stream resume a pool-thread caller inline on the reactor", () =>
         {
             // The adapters chain onto the connection's own sources and resume their callers inline from
-            // that continuation - which must itself already be on the pool for a pool-thread caller.
+            // that continuation, which runs on the reactor wherever the caller awaited from.
             foreach (string adapter in (string[])["pipe", "stream"])
             {
                 var report = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -784,7 +797,7 @@ internal static class ThreadPoolTests
                 ReadExactly(client, ParkingBytes / 4);
 
                 Assert.True(report.Task.Wait(10_000), $"{adapter}: the handler never reported");
-                Assert.Equal($"{adapter}: read parked, resumed on pool; flush parked, resumed on pool", report.Task.Result);
+                Assert.Equal($"{adapter}: read parked, resumed on reactor; flush parked, resumed on reactor", report.Task.Result);
             }
         });
     }
@@ -842,7 +855,8 @@ internal static class ThreadPoolTests
          : $"thread {Environment.CurrentManagedThreadId}";
 
     // A keep-alive server whose handler leaves the reactor at once: each line is a size, answered with
-    // that many bytes of Body, written and flushed from the pool.
+    // that many bytes of Body, written and flushed from the pool - going back to it after any wait,
+    // which resumes it on the reactor.
     private static async Task PoolServe(Reactor r, TcpConnection conn)
     {
         var carry = new List<byte>();
@@ -852,6 +866,10 @@ internal static class ThreadPoolTests
             while (true)
             {
                 RecvSnapshot snapshot = await conn.ReadAsync();
+                if (r.OnReactorThread)
+                {
+                    await Hop.ToThreadPool();
+                }
                 while (conn.TryGetItem(snapshot, out SpscRecvRing.Item item))
                 {
                     if (item.HasBuffer)
@@ -868,6 +886,10 @@ internal static class ThreadPoolTests
                     carry.RemoveRange(0, at + 1);
                     conn.Write(Bodies.GetOrAdd(n, static size => [.. Enumerable.Range(0, size).Select(j => Body(j, size))]));
                     await conn.FlushAsync();
+                    if (r.OnReactorThread)
+                    {
+                        await Hop.ToThreadPool();
+                    }
                 }
 
                 if (snapshot.IsClosed)

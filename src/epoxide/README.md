@@ -35,14 +35,16 @@ reactor.TcpHandle = async (r, conn) =>
 ```
 
 Only a read with nothing to read, or a flush the socket cannot take yet, waits on the reactor: it
-parks, and the reactor finishes the recv or send at the next readiness edge and resumes the caller -
-inline when the caller is on that reactor, on the caller's own context or the thread pool when not.
+parks, and the reactor finishes the recv or send at the next readiness edge and resumes the caller
+inline, wherever it awaited from - the reactor is the thread that saw the event, so anywhere else
+would cost a hop. A caller with a `SynchronizationContext` of its own resumes on that instead.
 Outbound connections (`Reactor.ConnectAsync`) work the same way from any thread.
 
 Unlike ioxide, a reactor has no `SynchronizationContext`: an await of anything else (`Task.Delay`,
-`HttpClient`, a `Task.Run` result) continues where it completes, usually the thread pool, and nothing
-brings the handler back, since it has no need to be on the reactor. An `async void` that throws is
-therefore not caught by the reactor: it ends the process, as anywhere in .NET.
+`HttpClient`, a `Task.Run` result) continues where it completes, usually the thread pool, and the
+handler's next read or flush that has to wait brings it back to the reactor. So code after such a
+wait runs on the reactor, and blocking work belongs in `Task.Run`, as in ioxide. An `async void` that
+throws is not caught by the reactor: it ends the process, as anywhere in .NET.
 
 TLS terminates on the same bundled BoringSSL ioxide ships (`libioxide_boringssl.so`), with the same
 optional kernel TLS offload.
