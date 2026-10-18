@@ -192,15 +192,12 @@ internal static class ThreadPoolTests
             Assert.True(where.All(w => w == "pool"), $"parked flushes resumed on: {string.Join(", ", where)}");
         });
 
-        runner.Test("threadpool: an awaiter on the reactor still resumes inline, inside the edge, not through a post", () =>
+        runner.Test("threadpool: an awaiter on the reactor still resumes inline, inside the edge", () =>
         {
             // The other half of the rule, and the reason for it: a handler that never left keeps the
             // fast path. A parked read resumes inside the readable edge's own call, and a parked flush
-            // inside the writable edge's, rather than being posted to the reactor's
-            // SynchronizationContext and run from the next drain - which the counting context the
-            // reactor runs under would see.
+            // inside the writable edge's. Anything else would resume it on the pool, where it would stay.
             var report = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
-            CountingContext? counting = null;
 
             int port = TestServer.StartConfigured(async (r, conn) =>
             {
@@ -214,16 +211,14 @@ internal static class ThreadPoolTests
                     conn.ResetRead();
                     ValueTask<RecvSnapshot> read = conn.ReadAsync();
                     bool readParked = !read.IsCompleted;
-                    int posts = counting!.Posts;
                     Drain(conn, await read);
-                    string afterRead = Resumption(r, counting, posts);
+                    string afterRead = Where(r);
 
                     conn.Write(new byte[ParkingBytes / 4]);
                     ValueTask flush = conn.FlushAsync();
                     bool flushParked = !flush.IsCompleted;
-                    posts = counting.Posts;
                     await flush;
-                    string afterFlush = Resumption(r, counting, posts);
+                    string afterFlush = Where(r);
 
                     report.TrySetResult(readParked && flushParked
                         ? $"read: {afterRead}; flush: {afterFlush}"
@@ -233,7 +228,7 @@ internal static class ThreadPoolTests
                 {
                     conn.DecRef();
                 }
-            }, Config(), onStart: _ => counting = CountingContext.Install()).Port;
+            }, Config()).Port;
 
             using var client = new TcpClient { ReceiveBufferSize = 4096 };
             client.Connect("127.0.0.1", port);
@@ -245,7 +240,7 @@ internal static class ThreadPoolTests
             ReadExactly(client, ParkingBytes / 4);
 
             Assert.True(report.Task.Wait(10_000), "the handler never reported");
-            Assert.Equal("read: inline; flush: inline", report.Task.Result);
+            Assert.Equal("read: reactor; flush: reactor", report.Task.Result);
         });
 
         runner.Test("threadpool: a read on one pool thread and a flush on another share a connection, full duplex, byte-exact", () =>
@@ -845,16 +840,6 @@ internal static class ThreadPoolTests
         => r.OnReactorThread ? "reactor"
          : Thread.CurrentThread.IsThreadPoolThread ? "pool"
          : $"thread {Environment.CurrentManagedThreadId}";
-
-    /// <summary>
-    /// How the code calling this was resumed: inline on the reactor, posted back to it through its
-    /// context (more posts on <paramref name="context"/> than the <paramref name="postsBefore"/> taken
-    /// before the await), or off it.
-    /// </summary>
-    private static string Resumption(Reactor r, CountingContext context, int postsBefore)
-        => !r.OnReactorThread ? "off the reactor"
-         : context.Posts > postsBefore ? "posted to the reactor's context"
-         : "inline";
 
     // A keep-alive server whose handler leaves the reactor at once: each line is a size, answered with
     // that many bytes of Body, written and flushed from the pool.

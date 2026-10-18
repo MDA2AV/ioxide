@@ -283,7 +283,7 @@ internal static class HardeningTests
             (int port, _, _) = TestServer.StartConfigured(
                 async (_, _) =>
                 {
-                    await Task.Yield();   // to the reactor's own context, not the thread pool
+                    await Task.Yield();   // to the thread pool, so the fault is seen there
                     throw new InvalidOperationException("boom (test)");
                 },
                 new ServerConfig

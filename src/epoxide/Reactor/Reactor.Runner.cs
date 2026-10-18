@@ -63,12 +63,12 @@ public sealed unsafe partial class Reactor
         }
     }
 
-    // Record the owning thread, and route awaits made from reactor code (Task.Delay, HttpClient,
-    // Task.Run results) back here instead of the thread pool. Thread-lifetime; nothing to uninstall.
+    // Record the owning thread, and clear any SynchronizationContext it came with: a handler's await
+    // would capture it, and a context tied to this thread cannot run anything while the loop holds it.
     private void BindReactorThread()
     {
         _reactorThreadId = Environment.CurrentManagedThreadId;
-        SynchronizationContext.SetSynchronizationContext(new ReactorSynchronizationContext(this));
+        SynchronizationContext.SetSynchronizationContext(null);
     }
 
     private void AnnounceListening()
@@ -130,11 +130,11 @@ public sealed unsafe partial class Reactor
         DrainCloseQ();
         DrainRecycleQ();
 
-        // What only this loop would ever have run: continuations posted back to it, and its timers.
+        // What only this loop would ever have run: callbacks scheduled on it, and its timers.
         // A handler parked on either resumes now, finds its connection ended, and lets go - left
         // alone it never would, and its descriptor would stay open with it. A timer is cancelled, not
         // expired, so a loop on Expired() ends; anything posted or armed from here on is handled on
-        // the pool (EnqueuePost, ScheduleTimer).
+        // the pool (ScheduleOnReactor, ScheduleTimer).
         DrainPostQ();
         CancelTimers();
 

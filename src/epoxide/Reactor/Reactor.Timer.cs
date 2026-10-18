@@ -76,7 +76,7 @@ public sealed unsafe partial class Reactor
         {
             var (reactor, timer, at) = ((Reactor, ITimerCompletion, long))s!;
 
-            // Run on the pool by a stopped reactor (EnqueuePost): no loop will expire it.
+            // Run on the pool by a stopped reactor (ScheduleOnReactor): no loop will expire it.
             if (reactor._stopped)
             {
                 timer.Cancel();

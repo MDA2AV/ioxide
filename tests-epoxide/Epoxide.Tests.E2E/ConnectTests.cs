@@ -45,8 +45,7 @@ internal static class ConnectTests
         runner.Test("connect: on the reactor to an epoxide listener, the connect and the reads resume inline", () =>
         {
             int port = TestServer.Start(Handlers.Raw);
-            CountingContext? counting = null;
-            (Reactor client, _) = TestServer.StartClientOnly(onStart: _ => counting = CountingContext.Install());
+            (Reactor client, _) = TestServer.StartClientOnly();
 
             var report = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
             client.ScheduleOnReactor(_ => _ = OnReactor(), null);
@@ -55,13 +54,12 @@ internal static class ConnectTests
             {
                 try
                 {
-                    int posts = counting!.Posts;
                     TcpConnection conn = await client.ConnectAsync(new IPEndPoint(IPAddress.Loopback, port));
-                    string connected = Resumption(client, counting, posts);
+                    string connected = Where(client);
                     try
                     {
                         (int status, string body) = await GetAsync(conn);
-                        report.TrySetResult($"{status} {body}, connected {connected}, answered on {Where(client)}");
+                        report.TrySetResult($"{status} {body}, connected on {connected}, answered on {Where(client)}");
                     }
                     finally
                     {
@@ -75,7 +73,7 @@ internal static class ConnectTests
             }
 
             Assert.True(report.Task.Wait(10_000), "the exchange never finished");
-            Assert.Equal("200 ok, connected inline, answered on reactor", report.Task.Result);
+            Assert.Equal("200 ok, connected on reactor, answered on reactor", report.Task.Result);
         });
 
         runner.Test("connect: to a plain .NET socket listener, from the thread pool and from the reactor, byte-exact", () =>
@@ -225,11 +223,11 @@ internal static class ConnectTests
             Assert.True(SpinWait.SpinUntil(() => Internals.LiveConnections(client) == 0, 5_000), "the outbound connection was never recycled");
         });
 
-        runner.Test("connect: a read awaited on another reactor resumes on that reactor, not the connection's", () =>
+        runner.Test("connect: a read awaited on another reactor resumes on the pool, never on the connection's reactor", () =>
         {
             // The connection belongs to reactor B, the handler awaiting its read runs on reactor A. B
-            // finishes the recv at the edge, on B's thread, and must hand the continuation to A's
-            // context - not run it on B, and not drop it on the pool.
+            // finishes the recv at the edge, on B's thread, and must not run A's continuation there:
+            // a reactor has no context to hand it back to A, so it goes to the pool.
             int port = TestServer.Start(Handlers.Raw);
             (Reactor owner, _) = TestServer.StartClientOnly();
             (Reactor awaiter, _) = TestServer.StartClientOnly();
@@ -260,7 +258,7 @@ internal static class ConnectTests
             }
 
             Assert.True(report.Task.Wait(10_000), "the exchange never finished");
-            Assert.Equal("200 ok, connected on the awaiter's reactor, answered on the awaiter's reactor", report.Task.Result);
+            Assert.Equal("200 ok, connected on the pool, answered on the pool", report.Task.Result);
         });
 
         runner.Test("connect: after Stop() a connect fails at once with ObjectDisposedException", () =>
@@ -454,13 +452,6 @@ internal static class ConnectTests
          : owner.OnReactorThread ? "the connection's reactor"
          : Thread.CurrentThread.IsThreadPoolThread ? "the pool"
          : $"thread {Environment.CurrentManagedThreadId}";
-
-    // Inline on the reactor, posted back to it through its counting context (more posts than were
-    // counted before the await), or off it.
-    private static string Resumption(Reactor r, CountingContext context, int postsBefore)
-        => !r.OnReactorThread ? "off the reactor"
-         : context.Posts > postsBefore ? "posted to the reactor's context"
-         : "inline";
 }
 
 internal static class TaskWaits

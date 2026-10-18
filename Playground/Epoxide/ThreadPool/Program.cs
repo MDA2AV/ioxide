@@ -59,8 +59,7 @@ for (int i = 0; i < threads.Length; i++)
 {
     var reactor = new Reactor(i, config);
 
-    // Task.Run: the connection's whole life runs on the pool, where no SynchronizationContext pulls
-    // it back to the reactor.
+    // Task.Run: the connection's whole life runs on the pool.
     reactor.TcpHandle = (r, conn) => Task.Run(() => ServeAsync(conn));
 
     threads[i] = new Thread(reactor.Run) { Name = $"reactor-{i}" };

@@ -387,7 +387,7 @@ internal static class CoreTests
             (int port, _, _) = TestServer.StartConfigured(
                 async (_, conn) =>
                 {
-                    await Task.Yield();   // to the reactor's own context, not the thread pool
+                    await Task.Yield();   // to the thread pool, so the fault is seen there
                     conn.DecRef();
                     throw new InvalidOperationException("post-release boom (test)");
                 },

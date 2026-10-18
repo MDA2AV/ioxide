@@ -3,9 +3,9 @@
 ioxide's shared-nothing, thread-per-core runtime on **epoll** instead of io_uring.
 
 One reactor per core: its own thread, its own epoll set, its own `SO_REUSEPORT` listener and
-connections. Handlers start on the reactor and resume inline there, exactly as in ioxide - and the
-API is ioxide's: `Reactor`, `TcpConnection`, `TcpConnectionPipeReader`/`Writer`, `TcpConnectionStream`,
-`TlsService`.
+connections. Handlers start on the reactor, and a read or flush that has to wait resumes them inline
+there, as in ioxide - and the API is ioxide's: `Reactor`, `TcpConnection`,
+`TcpConnectionPipeReader`/`Writer`, `TcpConnectionStream`, `TlsService`.
 
 The difference is who may touch a connection. An io_uring ring has a single issuer, so ioxide hands
 every operation from another thread to the reactor. epoll has no such rule - a read is a `recv`, a
@@ -18,8 +18,8 @@ reactor.TcpHandle = async (r, conn) =>
     var writer = new TcpConnectionPipeWriter(conn);
     try
     {
-        // Off to the thread pool - and the connection keeps working from there.
-        await Task.Delay(1).ConfigureAwait(false);
+        // Continues on the thread pool - and the connection keeps working from there.
+        await Task.Delay(1);
 
         ReadResult result = await reader.ReadAsync();   // recv, on this thread
         reader.AdvanceTo(result.Buffer.End);
@@ -38,6 +38,11 @@ Only a read with nothing to read, or a flush the socket cannot take yet, waits o
 parks, and the reactor finishes the recv or send at the next readiness edge and resumes the caller -
 inline when the caller is on that reactor, on the caller's own context or the thread pool when not.
 Outbound connections (`Reactor.ConnectAsync`) work the same way from any thread.
+
+Unlike ioxide, a reactor has no `SynchronizationContext`: an await of anything else (`Task.Delay`,
+`HttpClient`, a `Task.Run` result) continues where it completes, usually the thread pool, and nothing
+brings the handler back, since it has no need to be on the reactor. An `async void` that throws is
+therefore not caught by the reactor: it ends the process, as anywhere in .NET.
 
 TLS terminates on the same bundled BoringSSL ioxide ships (`libioxide_boringssl.so`), with the same
 optional kernel TLS offload.

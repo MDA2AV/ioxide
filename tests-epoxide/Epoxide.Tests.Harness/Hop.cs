@@ -6,7 +6,7 @@ namespace Epoxide.Tests;
 /// The move a handler makes when it leaves its reactor for the thread pool, as one await:
 /// <c>await Hop.ToThreadPool();</c>. It always continues on a pool thread, whatever it starts from,
 /// and a pool thread has no SynchronizationContext - so nothing after it is posted back to the
-/// reactor, exactly as after an <c>await ... .ConfigureAwait(false)</c> that really suspended.
+/// reactor, exactly as after any await of something other than a connection that really suspended.
 /// </summary>
 /// <remarks>
 /// Only for the tests about epoxide's thread-pool support. Everywhere else a handler stays on its

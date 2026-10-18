@@ -61,7 +61,7 @@ for (int i = 0; i < threads.Length; i++)
     // Each reactor owns its epoll set, its SO_REUSEPORT listener and its connections outright.
     var reactor = new Reactor(i, config);
 
-    // The handler. It runs on the reactor thread and every await resumes right back on it.
+    // The handler. It starts on the reactor thread, and a read or flush that waits resumes it there.
     reactor.TcpHandle = async (r, conn) =>
     {
         try

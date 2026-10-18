@@ -5,8 +5,8 @@ namespace epoxide.utils;
 /// <summary>
 /// Where the awaiter of an operation a reactor completes resumes. The completion runs on the
 /// reactor thread: an awaiter that was on that same reactor resumes inline there, as in ioxide,
-/// and any other awaiter must never run on it - it resumes on its own SynchronizationContext
-/// (another reactor's, say) or on the thread pool.
+/// and any other awaiter must never run on it - it resumes on its own SynchronizationContext, if it
+/// has one, or on the thread pool.
 /// </summary>
 /// <remarks>
 /// Decided at OnCompleted, on the awaiting thread, and stored before the continuation is published,
@@ -19,8 +19,8 @@ internal static class Continuations
     {
         if (reactor.OnReactorThread)
         {
-            // Without stripping the context flag the core would post every resume to this reactor's
-            // own SynchronizationContext instead of running it.
+            // Stripped so a SynchronizationContext someone installs on the reactor thread cannot turn
+            // the inline resume into a post.
             core.RunContinuationsAsynchronously = false;
             core.OnCompleted(continuation, state, token, flags & ~ValueTaskSourceOnCompletedFlags.UseSchedulingContext);
         }
