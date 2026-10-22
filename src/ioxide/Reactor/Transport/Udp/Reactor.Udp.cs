@@ -571,6 +571,14 @@ public sealed unsafe partial class Reactor
             m->msg_controllen = 0;
         }
 
+        // Once a stop is requested no loop pass may submit an SQE: send now, or on a full socket not at all.
+        if (_stopRequested)
+        {
+            long sent = sendmsg(socketFd, m, MSG_DONTWAIT);
+            OnUdpSendCompletion(slot, sent < 0 ? -Marshal.GetLastPInvokeError() : (int)sent);
+            return;
+        }
+
         IoUringSqe* sqe = GetSqeOrFlush();
         Unsafe.InitBlockUnaligned(sqe, 0, 64);
         sqe->opcode    = IORING_OP_SENDMSG;
