@@ -160,7 +160,7 @@ public sealed unsafe partial class Reactor : IRingHost
     private void HandOff(byte opcode, int fd, nint buffer, int length, long offset, IRingCompletion completion)
     {
         _remoteOps.Enqueue(new RemoteOp(opcode, fd, buffer, length, offset, completion));
-        WakeFdWrite();
+        Wake();
     }
 
     private void SubmitClientOpCore(byte opcode, int fd, nint buffer, int length, long offset, IRingCompletion completion)

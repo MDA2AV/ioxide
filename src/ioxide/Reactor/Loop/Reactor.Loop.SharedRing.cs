@@ -46,6 +46,7 @@ public sealed unsafe partial class Reactor
     {
         while (!_stopRequested)
         {
+            ClearWakePending();
             DrainReturnQ();
             DrainFlushQ();
             DrainRecycleQ();
