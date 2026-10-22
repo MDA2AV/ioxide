@@ -48,6 +48,9 @@ public sealed partial class Nghttp3Connection : IDisposable
     // RFC 9114 H3_INTERNAL_ERROR: what a failure that cannot name itself closes with.
     private const ulong H3InternalError = 0x102;
 
+    // RFC 9114 H3_GENERAL_PROTOCOL_ERROR: what a connection that did not negotiate h3 is refused with.
+    private const ulong H3GeneralProtocolError = 0x101;
+
     // What the peer must be told, or null when there is nothing to tell it. Deliberately NOT
     // _protocolFailed: that flag also means "stop looping", and one site sets it on a perfectly
     // clean streamed response purely to unpark waiters - closing on it would send an error code to
@@ -199,6 +202,16 @@ public sealed partial class Nghttp3Connection : IDisposable
         if (controlStreamId < 0 || qpackEncoderStreamId < 0 || qpackDecoderStreamId < 0)
         {
             Console.Error.WriteLine("[ioxide.nghttp3] failed to open control/QPACK uni streams");
+            return false;
+        }
+
+        // RFC 9114 3.1, for an engine with no ALPN allow list. Not once closed: a connection evicted
+        // before its handshake finished reads as no protocol, and its transport already ended it.
+        string? protocol = _quicConnection.NegotiatedProtocol;
+        if (protocol != "h3" && !_quicConnection.IsClosed)
+        {
+            Console.Error.WriteLine($"[ioxide.nghttp3] protocol error: negotiated '{protocol ?? "(none)"}', not h3");
+            _peerCode = H3GeneralProtocolError;   // the caller's FailInternal keeps it: the first failure wins
             return false;
         }
 
