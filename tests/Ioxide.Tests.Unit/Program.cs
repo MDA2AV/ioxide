@@ -15,6 +15,7 @@ internal static class Program
         SyscallErrnoTests.Register(runner);
         ClockTests.Register(runner);
         RingSetupMessageTests.Register(runner);
+        CompletionQueueTests.Register(runner);
         ZeroCopySendTests.Register(runner);
         DemuxParseTests.Register(runner);
         MessageTests.Register(runner);

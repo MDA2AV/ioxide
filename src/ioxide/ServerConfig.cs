@@ -10,8 +10,17 @@ public sealed record ServerConfig
 {
     public int ReactorCount { get; init; } = 12;
 
-    // io_uring SQ/CQ depth.
+    // io_uring SQ depth. The CQ's is CqEntries, by default four times this.
     public uint RingEntries { get; init; } = 8192;
+
+    /// <summary>
+    /// io_uring CQ depth: 0 (default) is four times <see cref="RingEntries"/>, up to the kernel's 65536;
+    /// otherwise from RingEntries to 65536. A completion the CQ has no room for waits in a kernel list
+    /// until the next enter, and a multishot recv or accept whose completion lands there ends and has to
+    /// be re-armed. Completions outrun submissions - one multishot op posts many - so twice the SQ, the
+    /// kernel's default, is no bound. 16 bytes an entry, charged like the rest of the ring.
+    /// </summary>
+    public uint CqEntries { get; init; }
 
     /// <summary>
     /// Slots each reactor's table of in-flight ring operations starts with: every timer, and every

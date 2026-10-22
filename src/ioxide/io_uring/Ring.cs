@@ -65,12 +65,12 @@ public sealed unsafe class Ring : IDisposable
     }
 
     /// <summary>Roughly what one ring costs against RLIMIT_MEMLOCK, for the diagnostic above.</summary>
-    private static int EstimateRingKib(uint entries)
-        => (int)((entries * (64 + 4) + entries * 2 * 16 + 4096) / 1024);
+    private static int EstimateRingKib(uint entries, uint cqEntries)
+        => (int)((entries * (64 + 4) + (cqEntries != 0 ? cqEntries : entries * 2) * 16 + 4096) / 1024);
 
     // A failed setup in terms a host can act on: a bare "errno 22" sends people to limits and
     // permissions first, when the usual cause is a kernel older than the setup flags (#270).
-    internal static string DescribeSetupFailure(int errno, uint entries, string kernelRelease)
+    internal static string DescribeSetupFailure(int errno, uint entries, string kernelRelease, uint cqEntries = 0)
     {
         string failed = $"io_uring_setup failed with errno {errno} for a ring of {entries} entries on Linux {kernelRelease}";
         return errno switch
@@ -78,9 +78,9 @@ public sealed unsafe class Ring : IDisposable
             EINVAL when entries > 32768 => $"{failed}: the kernel allows at most 32768 (ServerConfig.RingEntries).",
             EINVAL when KernelOlderThan(kernelRelease, 6, 1)
                 => $"{failed}: the kernel does not know SINGLE_ISSUER | DEFER_TASKRUN, and ioxide needs Linux 6.1 or later.",
-            ENOMEM => $"{failed}: it costs roughly {EstimateRingKib(entries)} KiB of RLIMIT_MEMLOCK, and the kernel "
+            ENOMEM => $"{failed}: it costs roughly {EstimateRingKib(entries, cqEntries)} KiB of RLIMIT_MEMLOCK, and the kernel "
                       + "reclaims a closed ring's memory asynchronously - raise `ulimit -l`, lower "
-                      + "ServerConfig.RingEntries, or create reactors less abruptly.",
+                      + "ServerConfig.RingEntries or CqEntries, or create reactors less abruptly.",
             EPERM => $"{failed}: io_uring is disabled here, by the kernel.io_uring_disabled sysctl or by a seccomp "
                      + "profile such as a container runtime's default.",
             ENOSYS => $"{failed}: this kernel was built without io_uring.",
@@ -110,26 +110,36 @@ public sealed unsafe class Ring : IDisposable
                && (a < major || (a == major && b < minor));
     }
 
-    public static Ring Create(uint entries)
+    public static Ring Create(uint entries) => Create(entries, 0);
+
+    /// <summary>
+    /// As <see cref="Create(uint)"/>, with a CQ of <paramref name="cqEntries"/> (0: the kernel's
+    /// default, twice the SQ).
+    /// </summary>
+    public static Ring Create(uint entries, uint cqEntries)
     {
+        uint cqSize = cqEntries != 0 ? IORING_SETUP_CQSIZE : 0;
+
         // Prefer NO_SQARRAY (6.6+): the SQ slot index is implicit, dropping one
         // store + cache line per SQE. Fall back for older kernels (EINVAL).
         IoUringParams ioUringParams = default;
-        ioUringParams.flags = IORING_SETUP_SINGLE_ISSUER | IORING_SETUP_DEFER_TASKRUN | IORING_SETUP_NO_SQARRAY;
+        ioUringParams.flags = IORING_SETUP_SINGLE_ISSUER | IORING_SETUP_DEFER_TASKRUN | IORING_SETUP_NO_SQARRAY | cqSize;
+        ioUringParams.cq_entries = cqEntries;
         int fd = SetupWithMemlockRetry(entries, &ioUringParams);
         bool hasSqArray = false;
 
         if (fd == -EINVAL)
         {
             ioUringParams = default;
-            ioUringParams.flags = IORING_SETUP_SINGLE_ISSUER | IORING_SETUP_DEFER_TASKRUN;
+            ioUringParams.flags = IORING_SETUP_SINGLE_ISSUER | IORING_SETUP_DEFER_TASKRUN | cqSize;
+            ioUringParams.cq_entries = cqEntries;
             fd = SetupWithMemlockRetry(entries, &ioUringParams);
             hasSqArray = true;
         }
 
         if (fd < 0)
         {
-            throw new InvalidOperationException(DescribeSetupFailure(-fd, entries, KernelRelease()));
+            throw new InvalidOperationException(DescribeSetupFailure(-fd, entries, KernelRelease(), cqEntries));
         }
 
         var ring = new Ring

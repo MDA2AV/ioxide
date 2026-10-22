@@ -28,7 +28,7 @@ public sealed unsafe partial class Reactor
         // catch because there is nothing to tear down until Create returns.
         try
         {
-            _ring = Ring.Create(_ringEntries);
+            _ring = Ring.Create(_ringEntries, _cqEntries);
         }
         catch (Exception e) when (OnFault is not null)
         {
