@@ -6,7 +6,9 @@ namespace ioxide.http3;
 /// <summary>
 /// Pull surface for a streaming request body (the async <see cref="Http3Connection.RunAsync(Func{Http3Request, ValueTask{Http3Response}})"/>
 /// overload): the connection loop pushes body chunks in, the handler pulls with
-/// <see cref="ReadAsync"/>. An empty chunk means end of body (fin or stream reset).
+/// <see cref="ReadAsync"/>. An empty chunk means end of body (fin or stream reset). A body that
+/// contradicts the request's content-length ends with an <see cref="IOException"/> instead, so a
+/// short body cannot pass for a whole one (RFC 9114 4.1.2).
 ///
 /// Backpressure is real, not buffered-and-prayed: the request stream is flow-control paced, and
 /// each chunk is credited back to the peer's window only as it is handed to the handler - a slow
@@ -24,6 +26,7 @@ public sealed class Http3BodyReader : IValueTaskSource<ReadOnlyMemory<byte>>
     private readonly Queue<(byte[] Buf, int Len)> _chunks = new();
     private (byte[]? Buf, int Len) _handedOut;
     private bool _ended;
+    private Exception? _fault;   // what the end is reported as, when the body broke its content-length
     private bool _armed;
 
     private ManualResetValueTaskSourceCore<ReadOnlyMemory<byte>> _core = new()
@@ -39,8 +42,9 @@ public sealed class Http3BodyReader : IValueTaskSource<ReadOnlyMemory<byte>>
     }
 
     /// <summary>
-    /// Next body chunk; empty = end of body. The returned memory is valid until the next
-    /// ReadAsync call (or handler return), whichever comes first.
+    /// Next body chunk; empty = end of body. Throws <see cref="IOException"/> in place of the end
+    /// when the body did not match the request's content-length. The returned memory is valid
+    /// until the next ReadAsync call (or handler return), whichever comes first.
     /// </summary>
     public ValueTask<ReadOnlyMemory<byte>> ReadAsync()
     {
@@ -55,7 +59,7 @@ public sealed class Http3BodyReader : IValueTaskSource<ReadOnlyMemory<byte>>
 
         if (_ended)
         {
-            return default;
+            return _fault is null ? default : ValueTask.FromException<ReadOnlyMemory<byte>>(_fault);
         }
 
         _core.Reset();
@@ -79,6 +83,13 @@ public sealed class Http3BodyReader : IValueTaskSource<ReadOnlyMemory<byte>>
         {
             _owner.NoteBodyWake(this);
         }
+    }
+
+    // A malformed body: the chunks already queued still read, then the end throws.
+    internal void Fail(Exception fault)
+    {
+        _fault = fault;
+        End();
     }
 
     // End of body: fin, stream reset, or connection teardown. Idempotent.
@@ -112,7 +123,14 @@ public sealed class Http3BodyReader : IValueTaskSource<ReadOnlyMemory<byte>>
         else if (_ended)
         {
             _armed = false;
-            _core.SetResult(default);
+            if (_fault is null)
+            {
+                _core.SetResult(default);
+            }
+            else
+            {
+                _core.SetException(_fault);
+            }
         }
     }
 

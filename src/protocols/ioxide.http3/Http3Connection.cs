@@ -30,6 +30,7 @@ public sealed partial class Http3Connection
     private const ulong H3FrameError = 0x0106;
     private const ulong H3ExcessiveLoad = 0x0107;
     private const ulong H3RequestIncomplete = 0x010d;
+    private const ulong H3MessageError = 0x010e;
     private const ulong QpackDecompressionFailed = 0x0200;
 
     private ulong _fatalCode = H3GeneralProtocolError;
@@ -61,6 +62,7 @@ public sealed partial class Http3Connection
         HeadersPayload,  // accumulating an encoded field section
         DataPayload,     // streaming DATA payload through
         Skip,            // draining an unknown/greased frame
+        Refused,         // reset as malformed: the rest of the stream is dropped
     }
 
     private sealed class ReqStream
@@ -326,6 +328,15 @@ public sealed partial class Http3Connection
                             Fatal("DATA before HEADERS", H3FrameUnexpected);
                             return;
                         }
+                        if (rs.Request.ContentLengthLeft >= 0)
+                        {
+                            if (len > rs.Request.ContentLengthLeft)
+                            {
+                                RefuseMalformed(sid, rs, "the request body runs past its content-length");
+                                break;
+                            }
+                            rs.Request.ContentLengthLeft -= len;
+                        }
                         rs.State = len == 0 ? ParseState.FrameHeader : ParseState.DataPayload;
                         rs.Remaining = len;
                     }
@@ -373,10 +384,10 @@ public sealed partial class Http3Connection
 
                     if (rs.Remaining == 0)
                     {
+                        rs.State = ParseState.FrameHeader;   // first: the decode may refuse the stream
                         OnHeadersComplete(sid, rs);
                         ArrayPool<byte>.Shared.Return(rs.HeadersBuf!);
                         rs.HeadersBuf = null;
-                        rs.State = ParseState.FrameHeader;
                     }
                     break;
                 }
@@ -417,6 +428,16 @@ public sealed partial class Http3Connection
                     }
                     break;
                 }
+
+                case ParseState.Refused:
+                {
+                    if (rs.Sink is not null)
+                    {
+                        immediateCredit += data.Length;
+                    }
+                    data = default;
+                    break;
+                }
             }
         }
 
@@ -440,6 +461,12 @@ public sealed partial class Http3Connection
                 _requests.Remove(sid);
                 ReleaseParseBuffers(rs);
                 _quicConnection.ResetStream(sid, H3RequestIncomplete);
+                return;
+            }
+
+            if (rs.Request.ContentLengthLeft > 0)
+            {
+                RefuseMalformed(sid, rs, $"the request body ended {rs.Request.ContentLengthLeft} bytes short of its content-length");
                 return;
             }
 
@@ -469,6 +496,12 @@ public sealed partial class Http3Connection
             return;
         }
         rs.HeadersDone = true;
+
+        if (rs.Request.ContentLengthLeft < -1)
+        {
+            RefuseMalformed(sid, rs, "the request's content-length is invalid or repeated");
+            return;
+        }
 
         if (_streaming && !rs.Dispatched)
         {
@@ -831,6 +864,16 @@ public sealed partial class Http3Connection
             _bodyWakes[i].FireIfReady();
         }
         _bodyWakes.Clear();
+    }
+
+    // RFC 9114 4.1.2: a malformed request is a stream error, not a connection one. A handler already
+    // reading the body is told by its next read; nothing else on the stream is parsed.
+    private void RefuseMalformed(long sid, ReqStream rs, string reason)
+    {
+        rs.State = ParseState.Refused;
+        rs.Finished = true;
+        rs.Sink?.Fail(new IOException(reason));
+        _quicConnection.ResetStream(sid, H3MessageError);
     }
 
     private void Fatal(string reason, ulong code = H3GeneralProtocolError)
