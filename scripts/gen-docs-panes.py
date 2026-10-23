@@ -65,8 +65,9 @@ PANES = {
         "reactor, so a rotation is a single call and a handshake sees either every old certificate "
         "or every new one - never a mixture. The engine also REFUSES to replace the default alone "
         "while it answers for names, because that hook (renew the default, forget the rest) "
-        "silently published an empty table. What a rotation may never change on either stack: the "
-        "client trust anchors, and whether a client certificate is required."),
+        "silently published an empty table. On both stacks a rotation re-reads client trust "
+        "anchors given as a path, so an edited CA bundle takes effect with it; whether a client "
+        "certificate is required never changes."),
     "tlsmtls": (
         "Tls/MtlsOpenSslPipes", "mutual TLS &middot; openssl &middot; pipes", "ioxide",
         ["curl -k --cert client.pem --key client.key https://127.0.0.1:8443/"],
