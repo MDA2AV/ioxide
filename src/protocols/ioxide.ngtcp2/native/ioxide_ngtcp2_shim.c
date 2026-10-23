@@ -118,6 +118,25 @@ typedef struct iq_certs {
     iq_host                       **hosts;
     size_t                          host_count;
     size_t                          host_cap;
+    /* mTLS. verify_cert does the actual path validation; peer_verify wraps it so the identity it
+     * proved can be recorded on the connection - authenticating a client you cannot then name is
+     * rarely what anyone wanted. Both are unused unless the engine has client anchors. They are the
+     * GENERATION's, built from the engine's anchor source along with its certificate, so a rotation
+     * re-reads a CA file the way TCP re-reads TlsOptions.ClientCaPath - and a handshake that loaded
+     * a retired generation keeps validating against the verifier that generation was built with. */
+    ptls_openssl_verify_certificate_t verify_cert;
+    ptls_verify_certificate_t         peer_verify;
+    /* Optional mTLS: a CertificateRequest always goes out once there are anchors, and this decides
+     * what happens when the client answers with an empty certificate list. */
+    ptls_openssl_override_verify_certificate_t allow_anonymous;
+    int                             require_client_cert;   /* the engine's, copied */
+    /* Acceptable-issuer hint for the CertificateRequest, built from this generation's anchors.
+     * picotls sends certificate_authorities ONLY from this field, and without it a client holding
+     * several client certificates has nothing to choose by: it guesses, and a wrong guess is a
+     * refused handshake. The TCP side has always sent the hint from both anchor sources, so a
+     * configuration that worked there silently accepted a narrower set of clients here. */
+    ptls_iovec_t                   *ca_names;
+    size_t                          ca_name_count;
     struct iq_certs                *previous;   /* the generation this one replaced */
 } iq_certs;
 
@@ -126,25 +145,11 @@ typedef struct iq_engine {
      * across a load, so a reader sees one whole generation or the other and never a mixture. */
     iq_certs                       *certs;
     ptls_on_client_hello_t          on_client_hello;
-    /* mTLS. verify_cert does the actual path validation; peer_verify wraps it so the identity it
-     * proved can be recorded on the connection - authenticating a client you cannot then name is
-     * rarely what anyone wanted. Both are unused unless a client CA was configured. They live on
-     * the ENGINE rather than the generation: every generation points at these, so renewing a
-     * certificate cannot quietly change who is trusted to connect. */
-    ptls_openssl_verify_certificate_t verify_cert;
-    ptls_verify_certificate_t         peer_verify;
-    /* Optional mTLS: a CertificateRequest always goes out once there are anchors, and this decides
-     * what happens when the client answers with an empty certificate list. */
-    ptls_openssl_override_verify_certificate_t allow_anonymous;
+    /* Where every generation reads its client anchors from: a path, re-read by each rotation, or
+     * PEM text, which is data and does not move. At most one; both NULL leaves mTLS off. Owned. */
+    char                           *client_ca_path;
+    char                           *client_ca_pem;
     int                             require_client_cert;
-    /* Acceptable-issuer hint for the CertificateRequest, built once from the trust store. picotls
-     * sends certificate_authorities ONLY from this field, and without it a client holding several
-     * client certificates has nothing to choose by: it guesses, and a wrong guess is a refused
-     * handshake. The TCP side has always sent the hint from both anchor sources, so a
-     * configuration that worked there silently accepted a narrower set of clients here. Owned by
-     * the engine and pointed at by every context, so it outlives any generation. */
-    ptls_iovec_t                   *ca_names;
-    size_t                          ca_name_count;
     /* Absolute bound on a handshake that never finishes, in nanoseconds; 0 leaves it unbounded.
      * ngtcp2's own default is UINT64_MAX and max_idle_timeout defaults to disabled, so before this
      * the only bound was the transport's sliding idle sweep - which any datagram refreshes, so a
@@ -313,13 +318,13 @@ static void iq_record_subject(iq_conn *c, X509 *leaf)
 static int iq_allow_anonymous(ptls_openssl_override_verify_certificate_t *self, ptls_t *tls, int ret,
                               int ossl_ret, X509 *cert, STACK_OF(X509) * chain)
 {
-    iq_engine *e = (iq_engine *)((char *)self - offsetof(iq_engine, allow_anonymous));
+    iq_certs *certs = (iq_certs *)((char *)self - offsetof(iq_certs, allow_anonymous));
 
     (void)tls;
     (void)ossl_ret;
     (void)chain;
 
-    if (ret == PTLS_ALERT_CERTIFICATE_REQUIRED && cert == NULL && !e->require_client_cert) {
+    if (ret == PTLS_ALERT_CERTIFICATE_REQUIRED && cert == NULL && !certs->require_client_cert) {
         return 0;   /* no certificate offered, and none demanded: continue unauthenticated */
     }
 
@@ -335,10 +340,10 @@ static int iq_verify_certificate(ptls_verify_certificate_t *self, ptls_t *tls, c
                                                      ptls_iovec_t signature),
                                  void **verify_data, ptls_iovec_t *certs, size_t num_certs)
 {
-    iq_engine *e = (iq_engine *)((char *)self - offsetof(iq_engine, peer_verify));
+    iq_certs *gen = (iq_certs *)((char *)self - offsetof(iq_certs, peer_verify));
 
-    int rv = e->verify_cert.super.cb(&e->verify_cert.super, tls, server_name, verify_sign, verify_data,
-                                     certs, num_certs);
+    int rv = gen->verify_cert.super.cb(&gen->verify_cert.super, tls, server_name, verify_sign, verify_data,
+                                       certs, num_certs);
     if (rv != 0 || num_certs == 0) {
         return rv;   /* refused, or nothing offered - nothing to record either way */
     }
@@ -896,7 +901,7 @@ static int iq_cb_get_new_connection_id_noreport(ngtcp2_conn *conn, ngtcp2_cid *c
  * certificate_authorities extension. Best effort by design: the hint helps a client PICK among the
  * certificates it holds, and a client with one certificate does not need it - so a failure here
  * costs selection help, never verification, and must not fail the engine. */
-static void iq_build_ca_names(iq_engine *e, X509_STORE *store)
+static void iq_build_ca_names(iq_certs *certs, X509_STORE *store)
 {
     STACK_OF(X509_OBJECT) *objects = X509_STORE_get0_objects(store);
     int count = objects != NULL ? sk_X509_OBJECT_num(objects) : 0;
@@ -923,7 +928,7 @@ static void iq_build_ca_names(iq_engine *e, X509_STORE *store)
             continue;
         }
 
-        list[filled].base = der;   /* OPENSSL_malloc'd; released in iq_engine_free */
+        list[filled].base = der;   /* OPENSSL_malloc'd; released in iq_certs_free */
         list[filled].len  = (size_t)len;
         filled++;
     }
@@ -933,8 +938,8 @@ static void iq_build_ca_names(iq_engine *e, X509_STORE *store)
         return;
     }
 
-    e->ca_names      = list;
-    e->ca_name_count = filled;
+    certs->ca_names      = list;
+    certs->ca_name_count = filled;
 }
 
 iq_engine *iq_engine_new_mtls(const char *cert_pem_path, const char *key_pem_path,
@@ -1015,9 +1020,9 @@ static int iq_certs_add_host(iq_certs *certs, const char *host, const char *cert
      * certificate at all, and what to check the answer against. A host context that missed them
      * would serve without the mTLS the engine was configured for, so they are not optional.
      *
-     * The copy is a SNAPSHOT. It is sound only because client verification is fixed in the
-     * constructor - anything that configures anchors later would leave hosts registered before it
-     * on the old verifier, which is the bypass this comment exists to prevent. */
+     * The copy is a SNAPSHOT. It is sound only because a generation's verifier is fixed when the
+     * generation is built and a host belongs to one generation - a rotation builds every host
+     * again on the new generation's verifier, so no host is left validating against old anchors. */
     h->ptls_ctx.verify_certificate            = certs->ptls_ctx.verify_certificate;
     h->ptls_ctx.require_client_authentication = certs->ptls_ctx.require_client_authentication;
     h->ptls_ctx.client_ca_names               = certs->ptls_ctx.client_ca_names;
@@ -1050,7 +1055,8 @@ int iq_engine_add_host(iq_engine *e, const char *host, const char *cert_pem_path
     return iq_certs_add_host(e->certs, host, cert_pem_path, key_pem_path);
 }
 
-/* Frees one generation: every host it owns, and its own certificate material. */
+/* Frees one generation: every host it owns, its own certificate material, and its client anchors.
+ * Also what undoes a generation that failed part way through being built. */
 static void iq_certs_free(iq_certs *certs)
 {
     if (certs == NULL) {
@@ -1062,13 +1068,27 @@ static void iq_certs_free(iq_certs *certs)
     for (size_t i = 0; i < certs->host_count; i++) {
         iq_host_free(certs->hosts[i]);
     }
-
     free(certs->hosts);
+
+    /* The trust store the verifier took a reference to. */
+    if (certs->peer_verify.cb != NULL) {
+        ptls_openssl_dispose_verify_certificate(&certs->verify_cert);
+    }
+
+    /* Each DN was allocated by i2d_X509_NAME, the array by us. */
+    for (size_t i = 0; i < certs->ca_name_count; i++) {
+        OPENSSL_free((void *)certs->ca_names[i].base);
+    }
+    free(certs->ca_names);
+
     free(certs);
 }
 
-/* Builds one generation: the default certificate, configured the way the engine's first one was.
- * Hosts are added afterwards by the caller. Returns NULL with the reason on stderr. */
+static int iq_certs_load_anchors(iq_certs *certs, const iq_engine *e);
+
+/* Builds one generation: the default certificate, configured the way the engine's first one was,
+ * and the client anchors read from the engine's source again. Hosts are added afterwards by the
+ * caller. Returns NULL with the reason on stderr. */
 static iq_certs *iq_certs_new(iq_engine *e, const char *cert_pem_path, const char *key_pem_path)
 {
     iq_certs *certs = calloc(1, sizeof(*certs));
@@ -1096,20 +1116,35 @@ static iq_certs *iq_certs_new(iq_engine *e, const char *cert_pem_path, const cha
         goto fail;
     }
 
-    /* Who is trusted to connect belongs to the engine, not to the certificate being installed -
-     * so a renewal carries it over rather than restating it, and cannot drop mutual TLS. */
-    certs->ptls_ctx.verify_certificate            = e->peer_verify.cb != NULL ? &e->peer_verify : NULL;
-    certs->ptls_ctx.require_client_authentication = e->certs != NULL
-        ? e->certs->ptls_ctx.require_client_authentication
-        : 0;
-    certs->ptls_ctx.client_ca_names.list          = e->ca_names;
-    certs->ptls_ctx.client_ca_names.count         = e->ca_name_count;
+    /* Whether mTLS is on, and whether a certificate is required, belong to the engine and cannot
+     * change; which anchors validate one is read from its source again, so a renewal re-reads the
+     * CA file and an edit to it takes effect. */
+    if (e->client_ca_path != NULL || e->client_ca_pem != NULL) {
+        if (iq_certs_load_anchors(certs, e) != 0) {
+            goto fail;
+        }
+
+        certs->ptls_ctx.verify_certificate = &certs->peer_verify;
+
+        /* Ask every client for a certificate once there are anchors to judge one by. The flag is
+         * what makes picotls send the CertificateRequest at all, so leaving it off for optional
+         * mTLS would mean no client is ever asked and no client is ever identified - "optional"
+         * collapsing into "never". Whether an empty answer is fatal is iq_allow_anonymous's
+         * decision instead.
+         *
+         * Only when a verifier exists, and that condition is the point: requiring a certificate
+         * with nothing to validate it against asks every client for one, refuses the ones that
+         * have none, and then accepts whatever the rest send - a port that looks authenticated and
+         * is not. */
+        certs->ptls_ctx.require_client_authentication = 1;
+        certs->ptls_ctx.client_ca_names.list          = certs->ca_names;
+        certs->ptls_ctx.client_ca_names.count         = certs->ca_name_count;
+    }
 
     return certs;
 
 fail:
-    iq_dispose_keypair(&certs->ptls_ctx, &certs->sign_cert);
-    free(certs);
+    iq_certs_free(certs);
     return NULL;
 }
 
@@ -1120,8 +1155,11 @@ fail:
  * renewal is a server that kept working. Returns 0, or -1 with the reason on stderr.
  *
  * Connections already established keep the certificate they were given; the next handshake gets the
- * new one. What is NOT replaced: the client trust anchors and whether a client certificate is
- * required, which are the engine's and stay as they were. */
+ * new one. Client anchors given as a path are read from it again, as TCP re-reads
+ * TlsOptions.ClientCaPath, so an edit to the bundle takes effect here - and a bundle that no longer
+ * loads fails the replacement like a bad certificate would. Anchors given as PEM text are data and
+ * do not move. What is NOT replaced: whether a client certificate is required, which is the
+ * engine's. */
 int iq_engine_replace_certificates(iq_engine *e, const char *cert_pem_path, const char *key_pem_path,
                                    const char *const *hosts, const char *const *host_certs,
                                    const char *const *host_keys, size_t host_count)
@@ -1200,10 +1238,58 @@ static int iq_store_add_pem(X509_STORE *store, const char *pem)
     return added;
 }
 
-/* With mTLS: the client certificates are validated against client_ca_pem_path, a bundle on disk, or
- * client_ca_pem, the same bundle as PEM text - at most one, and require_client_cert decides whether
- * a client that offers none is refused outright or merely arrives unauthenticated. Both NULL leaves
- * mTLS off and the handshake is byte-for-byte what it was. */
+/* Reads the engine's client anchors into a generation being built: the trust store, the issuer hint
+ * read out of it, and the verifier over the store. Returns 0, or -1 with the reason on stderr and
+ * whatever it allocated left on the generation for iq_certs_free. */
+static int iq_certs_load_anchors(iq_certs *certs, const iq_engine *e)
+{
+    X509_STORE *store = X509_STORE_new();
+    if (store == NULL) {
+        fprintf(stderr, "[ioxide.ngtcp2] failed to allocate the client CA store\n");
+        return -1;
+    }
+    if (e->client_ca_path != NULL) {
+        if (X509_STORE_load_locations(store, e->client_ca_path, NULL) != 1) {
+            fprintf(stderr, "[ioxide.ngtcp2] failed to load client CA bundle from %s\n", e->client_ca_path);
+            X509_STORE_free(store);
+            return -1;
+        }
+    } else {
+        int added = iq_store_add_pem(store, e->client_ca_pem);
+        if (added <= 0) {
+            fprintf(stderr, added < 0
+                ? "[ioxide.ngtcp2] the client CA PEM text is malformed; the rest of the bundle "
+                  "would have been ignored\n"
+                : "[ioxide.ngtcp2] the client CA PEM text held no usable certificate\n");
+            X509_STORE_free(store);
+            return -1;
+        }
+    }
+    /* Before the store changes owner: the hint is read out of it, not kept from it. */
+    iq_build_ca_names(certs, store);
+
+    /* init takes a reference of its own, so this one is released whatever it returns. */
+    int rv = ptls_openssl_init_verify_certificate(&certs->verify_cert, store);
+    X509_STORE_free(store);
+    if (rv != 0) {
+        fprintf(stderr, "[ioxide.ngtcp2] failed to init client certificate verification\n");
+        return -1;
+    }
+
+    certs->peer_verify.cb    = iq_verify_certificate;
+    certs->peer_verify.algos = certs->verify_cert.super.algos;
+
+    certs->require_client_cert           = e->require_client_cert;
+    certs->allow_anonymous.cb            = iq_allow_anonymous;
+    certs->verify_cert.override_callback = &certs->allow_anonymous;
+    return 0;
+}
+
+/* With mTLS: the client certificates are validated against client_ca_pem_path, a bundle on disk that
+ * iq_engine_replace_certificates reads again, or client_ca_pem, the same bundle as PEM text - at most
+ * one, and require_client_cert decides whether a client that offers none is refused outright or
+ * merely arrives unauthenticated. Both NULL leaves mTLS off and the handshake is byte-for-byte what
+ * it was. */
 iq_engine *iq_engine_new_mtls(const char *cert_pem_path, const char *key_pem_path,
                               size_t cidlen, const uint8_t *alpn, size_t alpn_len,
                               const char *client_ca_pem_path, const char *client_ca_pem,
@@ -1243,48 +1329,18 @@ iq_engine *iq_engine_new_mtls(const char *cert_pem_path, const char *key_pem_pat
 
     e->on_client_hello.cb = iq_on_client_hello;
 
-    /* Who is trusted to connect is settled BEFORE the first certificate is built, because it
-       belongs to the engine rather than to any one generation - every generation, including the
-       ones a later renewal installs, points at the verifier set up here. */
-    if (client_ca_pem_path != NULL || client_ca_pem != NULL) {
-        X509_STORE *store = X509_STORE_new();
-        if (store == NULL) {
-            fprintf(stderr, "[ioxide.ngtcp2] failed to allocate the client CA store\n");
+    /* Who is trusted to connect: where the anchors come from and whether a certificate is required
+       are the engine's, fixed here, and every generation - this first one included - reads the
+       anchors from that source when it is built. */
+    e->require_client_cert = require_client_cert != 0;
+    if (client_ca_pem_path != NULL) {
+        if ((e->client_ca_path = strdup(client_ca_pem_path)) == NULL) {
             goto fail;
         }
-        if (client_ca_pem_path != NULL) {
-            if (X509_STORE_load_locations(store, client_ca_pem_path, NULL) != 1) {
-                fprintf(stderr, "[ioxide.ngtcp2] failed to load client CA bundle from %s\n", client_ca_pem_path);
-                X509_STORE_free(store);
-                goto fail;
-            }
-        } else {
-            int added = iq_store_add_pem(store, client_ca_pem);
-            if (added <= 0) {
-                fprintf(stderr, added < 0
-                    ? "[ioxide.ngtcp2] the client CA PEM text is malformed; the rest of the bundle "
-                      "would have been ignored\n"
-                    : "[ioxide.ngtcp2] the client CA PEM text held no usable certificate\n");
-                X509_STORE_free(store);
-                goto fail;
-            }
-        }
-        /* Before the store changes owner: the hint is read out of it, not kept from it. */
-        iq_build_ca_names(e, store);
-
-        /* The store is owned by the verifier from here; freeing it separately would double-free. */
-        if (ptls_openssl_init_verify_certificate(&e->verify_cert, store) != 0) {
-            fprintf(stderr, "[ioxide.ngtcp2] failed to init client certificate verification\n");
-            X509_STORE_free(store);
+    } else if (client_ca_pem != NULL) {
+        if ((e->client_ca_pem = strdup(client_ca_pem)) == NULL) {
             goto fail;
         }
-        X509_STORE_free(store);   /* init took its own reference */
-
-        e->peer_verify.cb         = iq_verify_certificate;
-        e->peer_verify.algos      = e->verify_cert.super.algos;
-
-        e->allow_anonymous.cb            = iq_allow_anonymous;
-        e->verify_cert.override_callback = &e->allow_anonymous;
     }
 
     /* The first generation. Every later one is built by the same function, so a renewed certificate
@@ -1294,27 +1350,11 @@ iq_engine *iq_engine_new_mtls(const char *cert_pem_path, const char *key_pem_pat
         goto fail;
     }
 
-    /* Ask every client for a certificate once there are anchors to judge one by. The flag is what
-     * makes picotls send the CertificateRequest at all, so leaving it off for optional mTLS would
-     * mean no client is ever asked and no client is ever identified - "optional" collapsing into
-     * "never". Whether an empty answer is fatal is iq_allow_anonymous's decision instead.
-     *
-     * Only when a verifier exists, and that condition is the point: requiring a certificate with
-     * nothing to validate it against asks every client for one, refuses the ones that have none,
-     * and then accepts whatever the rest send - a port that looks authenticated and is not. */
-    e->require_client_cert = require_client_cert != 0;
-    if (e->peer_verify.cb != NULL) {
-        e->certs->ptls_ctx.require_client_authentication = 1;
-    }
-
     return e;
 
 fail:
-    /* The verifier is built before the first certificate now, so this path can be reached with it
-     * holding a reference to the trust store - which nothing else would ever release. */
-    if (e->peer_verify.cb != NULL) {
-        ptls_openssl_dispose_verify_certificate(&e->verify_cert);
-    }
+    free(e->client_ca_path);
+    free(e->client_ca_pem);
     free(e);
     return NULL;
 }
@@ -1344,17 +1384,8 @@ void iq_engine_free(iq_engine *e)
         certs = previous;
     }
 
-    /* The trust store the verifier took a reference to. */
-    if (e->peer_verify.cb != NULL) {
-        ptls_openssl_dispose_verify_certificate(&e->verify_cert);
-    }
-
-    /* Each DN was allocated by i2d_X509_NAME, the array by us. */
-    for (size_t i = 0; i < e->ca_name_count; i++) {
-        OPENSSL_free((void *)e->ca_names[i].base);
-    }
-    free(e->ca_names);
-
+    free(e->client_ca_path);
+    free(e->client_ca_pem);
     free(e);
 }
 

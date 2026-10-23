@@ -232,9 +232,8 @@ internal static class RotationTests
         {
             // TlsOptions documents this as the way to revoke an issuer: ClientCaPath is re-read
             // whenever a context is built, and a rotation rebuilds every context. It is the only
-            // documented mechanism for changing who is allowed in without restarting, and nothing
-            // tested it - while the QUIC side, whose parameter doc claims the same behaviour, does
-            // not actually do it.
+            // documented mechanism for changing who is allowed in without restarting. The QUIC
+            // side's twin is "rotate/quic: trust anchors are re-read".
             //
             // Driven with a chain, because that makes the anchor set the ONLY variable: the client
             // certificate, the server certificate and the CA all stay exactly the same, and the

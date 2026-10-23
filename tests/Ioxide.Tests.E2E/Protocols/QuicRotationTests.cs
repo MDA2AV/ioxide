@@ -315,6 +315,119 @@ internal static class QuicRotationTests
             Assert.True(body.Contains("alice"), $"the identity should survive a rotation, got: {body}");
         });
 
+        runner.Test("rotate/quic: trust anchors are re-read, so who may connect can be changed", () =>
+        {
+            // The TCP side's "rotate: trust anchors are re-read", on the same fixture: the client,
+            // the server certificate and the CA stay exactly the same, and the only thing that
+            // changes is whether the anchor file names the intermediate the chain needs.
+            (string anchorsWithIntermediate, _, string clientCert, string clientKey) = TestCert.EnsureChainedClientCert();
+            (string ca, string serverCert, string serverKey, _, _, _, _) = TestCert.EnsureMutualTls();
+
+            string anchors = Path.Combine(Path.GetTempPath(), $"ioxide-quic-rotate-anchors-{Environment.ProcessId}.pem");
+            File.WriteAllText(anchors, File.ReadAllText(ca));   // the root alone
+
+            try
+            {
+                using var engine = new QuicEngine(serverCert, serverKey, cidLength: 8, alpn: ["h3"],
+                    clientCaPemPath: anchors, requireClientCertificate: true);
+                int udpPort = ServeIdentity(engine);
+
+                Assert.True(Status(udpPort, clientCert, clientKey, "localhost") != 200,
+                    "a leaf whose issuer is not anchored should not be served");
+
+                File.WriteAllText(anchors, File.ReadAllText(anchorsWithIntermediate));
+                engine.ReplaceCertificates(new QuicCertificate(serverCert, serverKey));
+
+                Assert.Equal(200, Status(udpPort, clientCert, clientKey, "localhost"));
+            }
+            finally
+            {
+                File.Delete(anchors);
+            }
+        });
+
+        runner.Test("rotate/quic: an anchor file emptied under a rotation stops admitting anyone", () =>
+        {
+            // The direction revocation needs: the anchor file loses the CA that issued the client,
+            // and the rotation has to apply that rather than keep serving whoever was admissible
+            // when the engine was built.
+            (string ca, string serverCert, string serverKey, string clientCert, string clientKey, _, _)
+                = TestCert.EnsureMutualTls();
+            (string unrelated, _) = TestCert.EnsureNamed("not-the-client-ca.test");
+
+            string anchors = Path.Combine(Path.GetTempPath(), $"ioxide-quic-revoke-anchors-{Environment.ProcessId}.pem");
+            File.WriteAllText(anchors, File.ReadAllText(ca));
+
+            try
+            {
+                using var engine = new QuicEngine(serverCert, serverKey, cidLength: 8, alpn: ["h3"],
+                    clientCaPemPath: anchors, requireClientCertificate: true);
+                int udpPort = ServeIdentity(engine);
+
+                Assert.Equal(200, Status(udpPort, clientCert, clientKey, "localhost"));
+
+                // Still a valid anchor file, just not one that admits this client.
+                File.WriteAllText(anchors, File.ReadAllText(unrelated));
+                engine.ReplaceCertificates(new QuicCertificate(serverCert, serverKey));
+
+                Assert.True(Status(udpPort, clientCert, clientKey, "localhost") != 200,
+                    "the client's issuer was removed from the anchors and the rotation should have applied it");
+            }
+            finally
+            {
+                File.Delete(anchors);
+            }
+        });
+
+        runner.Test("rotate/quic: an anchor file that no longer loads fails the rotation and keeps the anchors", () =>
+        {
+            // Read again means it can fail again. A bundle a rotation cannot load must fail that
+            // rotation the way a bad certificate does - not publish a generation with no anchors.
+            (string ca, string serverCert, string serverKey, string clientCert, string clientKey,
+             string rogueCert, string rogueKey) = TestCert.EnsureMutualTls();
+
+            string anchors = Path.Combine(Path.GetTempPath(), $"ioxide-quic-broken-anchors-{Environment.ProcessId}.pem");
+            File.WriteAllText(anchors, File.ReadAllText(ca));
+
+            try
+            {
+                using var engine = new QuicEngine(serverCert, serverKey, cidLength: 8, alpn: ["h3"],
+                    clientCaPemPath: anchors, requireClientCertificate: true);
+                int udpPort = ServeIdentity(engine);
+
+                File.WriteAllText(anchors, "not a certificate\n");
+                Assert.Throws<InvalidOperationException>(
+                    () => engine.ReplaceCertificates(new QuicCertificate(serverCert, serverKey)),
+                    "client CA");
+
+                Assert.Equal(200, Status(udpPort, clientCert, clientKey, "localhost"));
+                Assert.True(Status(udpPort, rogueCert, rogueKey, "localhost") != 200,
+                    "the anchors kept after a failed rotation must still refuse a stranger");
+            }
+            finally
+            {
+                File.Delete(anchors);
+            }
+        });
+
+        runner.Test("rotate/quic: anchors given as PEM text survive a rotation unchanged", () =>
+        {
+            // Text is data: every generation reads the same anchors from it, so a rotation neither
+            // drops nor changes them.
+            (string ca, string serverCert, string serverKey, string clientCert, string clientKey,
+             string rogueCert, string rogueKey) = TestCert.EnsureMutualTls();
+
+            using var engine = new QuicEngine(serverCert, serverKey, cidLength: 8, alpn: ["h3"],
+                requireClientCertificate: true, clientCaPem: File.ReadAllText(ca));
+            int udpPort = ServeIdentity(engine);
+
+            engine.ReplaceCertificates(new QuicCertificate(serverCert, serverKey));
+
+            Assert.Equal(200, Status(udpPort, clientCert, clientKey, "localhost"));
+            Assert.True(Status(udpPort, rogueCert, rogueKey, "localhost") != 200,
+                "a certificate from another CA must still be refused after a rotation");
+        });
+
         runner.Test("rotate/quic: requiring a client certificate without anchors is refused", () =>
         {
             // Otherwise the engine asks every client for a certificate, turns away the ones that

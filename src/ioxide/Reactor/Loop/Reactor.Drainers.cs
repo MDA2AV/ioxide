@@ -16,6 +16,23 @@ public sealed unsafe partial class Reactor
 
 #region Wake
 
+    // 1 from a handoff's eventfd write until the loop's next pass, which clears it before draining:
+    // the handoffs in between share that one write instead of making their own.
+    private int _wakePending;
+
+    // Every handoff from another thread ends here, after its enqueue.
+    private void Wake()
+    {
+        if (Interlocked.Exchange(ref _wakePending, 1) == 0)
+        {
+            WakeFdWrite();
+        }
+    }
+
+    // First in each loop pass, so a handoff landing during the drains still wakes the next one.
+    // An exchange, not a store: otherwise a queue can read empty before the clear is visible.
+    private void ClearWakePending() => Interlocked.Exchange(ref _wakePending, 0);
+
     // Writers currently holding the eventfd's number, so Teardown can wait them out before it
     // closes. Without the gate a writer that read the old number puts 8 bytes into whatever socket
     // took it next. Off-reactor callers only, next to a syscall, so the two interlocks are free.
@@ -69,7 +86,7 @@ public sealed unsafe partial class Reactor
         }
         // Without the wake, a queued return waits for an unrelated CQE; if the ring
         // drains meanwhile, recvs fail with ENOBUFS.
-        WakeFdWrite();
+        Wake();
     }
 
     private void DrainReturnQ()
@@ -99,7 +116,7 @@ public sealed unsafe partial class Reactor
             return;
         }
         _recycleQ.Enqueue(conn);
-        WakeFdWrite();
+        Wake();
     }
 
     private void DrainRecycleQ()
@@ -167,7 +184,7 @@ public sealed unsafe partial class Reactor
         {
             sw.SpinOnce();
         }
-        WakeFdWrite();
+        Wake();
 
     }
     private void DrainFlushQ()

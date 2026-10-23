@@ -1363,7 +1363,7 @@ foreach (Thread thread in threads)
 {
     thread.Join();
 }</code></pre>
-    <p class="ex-foot">The same operational need with a different shape under it: ONE engine shared by every reactor, so a rotation is a single call and a handshake sees either every old certificate or every new one - never a mixture. The engine also REFUSES to replace the default alone while it answers for names, because that hook (renew the default, forget the rest) silently published an empty table. What a rotation may never change on either stack: the client trust anchors, and whether a client certificate is required.</p>
+    <p class="ex-foot">The same operational need with a different shape under it: ONE engine shared by every reactor, so a rotation is a single call and a handshake sees either every old certificate or every new one - never a mixture. The engine also REFUSES to replace the default alone while it answers for names, because that hook (renew the default, forget the rest) silently published an empty table. On both stacks a rotation re-reads client trust anchors given as a path, so an edited CA bundle takes effect with it; whether a client certificate is required never changes.</p>
   </div>
   <div class="pane pane-aspnet">
     <div class="pane-head">

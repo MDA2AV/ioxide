@@ -309,5 +309,139 @@ internal static class QuicMutualTlsTests
                 () => new QuicEngine(certPath, keyPath, cidLength: 0).Dispose(),
                 "1..20");
         });
+
+        RegisterRefusedCertificates(runner);
+    }
+
+    /// <summary>
+    /// Client certificates that chain to the trusted anchor and must be refused anyway - the TCP
+    /// group of the same purpose (MutualTlsTests, RegisterBadClientCertificates), run against QUIC's
+    /// own verifier: picotls over the shim's X509_STORE, not BoringSSL's SSL_VERIFY_PEER. Everything
+    /// above is a clean, in-date, correctly purposed leaf, so it held the engine only to the chain,
+    /// while QuicEngine promises that the signatures verify and the certificate is inside its
+    /// validity window as well.
+    /// </summary>
+    /// <remarks>
+    /// Each refusal runs the clean client on the same engine first, so "refused" is about that one
+    /// certificate and not an engine that serves nobody. The shim closes every TLS failure with the
+    /// same transport error (see QuicSniHostileTests), so what is asserted is the refusal and that
+    /// the client is told, not which alert it was.
+    /// </remarks>
+    private static void RegisterRefusedCertificates(Runner runner)
+    {
+        (string Label, TestCert.ClientCertSpec Spec, string Why)[] rejects =
+        [
+            ("an expired client certificate", new TestCert.ClientCertSpec
+            {
+                Subject = "CN=expired-alice",
+                // Inside the CA's own window: .NET refuses to issue a leaf that predates its
+                // issuer, and the CA here starts a day ago.
+                NotBefore = TimeSpan.FromHours(-23),
+                NotAfter = TimeSpan.FromHours(-1),
+            }, "validity is checked, not just the signature"),
+
+            ("a client certificate that is not valid yet", new TestCert.ClientCertSpec
+            {
+                Subject = "CN=future-alice",
+                NotBefore = TimeSpan.FromDays(1),
+                NotAfter = TimeSpan.FromDays(30),
+            }, "notBefore is checked as well as notAfter"),
+
+            ("a client certificate for the wrong purpose", new TestCert.ClientCertSpec
+            {
+                Subject = "CN=server-alice",
+                ExtendedKeyUsage = "1.3.6.1.5.5.7.3.1",   // serverAuth only
+            }, "the extended key usage decides what a certificate may be USED for"),
+
+            ("a client certificate that names the trusted CA but was not signed by it", new TestCert.ClientCertSpec
+            {
+                Subject = "CN=forged-alice",
+                ForgedSignature = true,
+            }, "the signature is verified, not just the issuer's name - a stranger's CA fails earlier, at the name"),
+        ];
+
+        foreach ((string label, TestCert.ClientCertSpec spec, string why) in rejects)
+        {
+            runner.Test($"mtls/quic: {label} is refused", () =>
+            {
+                (string ca, string cert, string key) = TestCert.EnsureClientCert(spec);
+                (_, string serverCert, string serverKey, string goodCert, string goodKey, _, _) = TestCert.EnsureMutualTls();
+
+                using var engine = new QuicEngine(serverCert, serverKey, cidLength: 8, alpn: ["h3"],
+                    clientCaPemPath: ca, requireClientCertificate: true);
+                int udpPort = ServeCommonName(engine);
+
+                (int goodStatus, string goodName) = Ask(udpPort, goodCert, goodKey);
+                Assert.Equal(200, goodStatus);
+                Assert.Equal("alice", goodName);
+
+                using var client = new H3TestClient("127.0.0.1", udpPort, cert, key);
+                client.Connect();
+                client.CompleteHandshake(timeoutMs: 3000);
+
+                (int status, _) = client.Get("/", timeoutMs: 3000);
+                Assert.True(status != 200, $"{label} was SERVED - {why}");
+                Assert.True(client.PeerClosed, $"{label} was not refused with a close; the server went quiet instead");
+            });
+        }
+
+        runner.Test("mtls/quic: a client certificate that chains through an intermediate is accepted", () =>
+        {
+            // Every other fixture is signed DIRECTLY by the anchor, so a server that never built a
+            // chain at all would pass all of them. Here the anchors are the root and the intermediate,
+            // and the client presents the leaf alone.
+            (string anchors, _, string cert, string key) = TestCert.EnsureChainedClientCert();
+            (_, string serverCert, string serverKey, _, _, _, _) = TestCert.EnsureMutualTls();
+
+            using var engine = new QuicEngine(serverCert, serverKey, cidLength: 8, alpn: ["h3"],
+                clientCaPemPath: anchors, requireClientCertificate: true);
+            int udpPort = ServeCommonName(engine);
+
+            (int status, string name) = Ask(udpPort, cert, key);
+            Assert.Equal(200, status);
+            Assert.Equal("chained-alice", name);
+        });
+
+        runner.Test("mtls/quic: an EC client certificate is accepted", () =>
+        {
+            // Every other fixture is RSA, so nothing would notice a server that only took RSA
+            // client keys - a different CertificateVerify signature on the wire.
+            (string ca, string cert, string key) = TestCert.EnsureClientCert(new TestCert.ClientCertSpec
+            {
+                Subject = "CN=ec-alice",
+                EllipticCurve = true,
+            });
+            (_, string serverCert, string serverKey, _, _, _, _) = TestCert.EnsureMutualTls();
+
+            using var engine = new QuicEngine(serverCert, serverKey, cidLength: 8, alpn: ["h3"],
+                clientCaPemPath: ca, requireClientCertificate: true);
+            int udpPort = ServeCommonName(engine);
+
+            (int status, string name) = Ask(udpPort, cert, key);
+            Assert.Equal(200, status);
+            Assert.Equal("ec-alice", name);
+        });
+    }
+
+    private static int ServeCommonName(QuicEngine engine)
+    {
+        (_, int udpPort) = TestServer.StartDatagram(
+            onDatagram: null,
+            quicFactory: engine.CreateFactory(),
+            quicHandle: static (_, conn) => new Nghttp3Connection(conn).RunBufferedAsync(
+                _ => new Nghttp3Response
+                {
+                    Body = Encoding.ASCII.GetBytes((conn as QuicEngineConnection)?.PeerCommonName ?? "anonymous"),
+                }));
+
+        return udpPort;
+    }
+
+    private static (int Status, string Body) Ask(int udpPort, string certPath, string keyPath)
+    {
+        using var client = new H3TestClient("127.0.0.1", udpPort, certPath, keyPath);
+        client.Connect();
+        Assert.True(client.CompleteHandshake(timeoutMs: 5000), "handshake did not complete");
+        return client.Get("/", timeoutMs: 5000);
     }
 }

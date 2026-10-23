@@ -136,8 +136,8 @@ internal static class AffinityTests
 
         runner.Test("affinity: a post that races the drain is either run by it or keeps its wake", () =>
         {
-            // ScheduleOnReactor enqueues, then wakes the loop only if the pending flag was clear;
-            // DrainPostQ clears the flag, then drains. Each side is a store then a load, so each needs
+            // ScheduleOnReactor enqueues, then wakes the loop only if the pending flag was clear; a
+            // loop pass clears the flag, then drains. Each side is a store then a load, so each needs
             // a full fence: after a plain store the drain can read the queue empty before its clear
             // lands, the poster still reads the flag set and skips its wake, and the post waits for
             // some unrelated wake - up to a tick. Too narrow to hit through a running loop, so the two
@@ -183,6 +183,7 @@ internal static class AffinityTests
                         spin += i;
                     }
 
+                    ClearWakePending(reactor);
                     DrainPostQ(reactor);
                     while (Volatile.Read(ref race.Posted) < t) { }
                     if (Volatile.Read(ref race.Ran) == 0)
@@ -207,13 +208,93 @@ internal static class AffinityTests
             Assert.True(stranded == 0,
                 $"{stranded} of the {missed} posts the drain missed were left with the flag clear: queued, with no wake coming");
         }, skip: Environment.ProcessorCount < 2);
+
+        runner.Test("affinity: handoffs from another thread share one eventfd write until the loop's next pass", () =>
+        {
+            // Only posts shared a wake: a buffer return, a flush, a recycle or a client op handed over
+            // from another thread wrote the eventfd each, a syscall apiece for a handler that hops
+            // threads. On a reactor that never runs, whose wake is an eventfd of the test's own, so the
+            // counter it reads back is the number of writes.
+            var reactor = new Reactor(0, new ServerConfig
+            {
+                ReactorCount = 1, Tcp = null, Udp = null, Incremental = new IncrementalOptions(),
+            });
+            InitIncremental(reactor);
+            ReactorThreadId(reactor) = -1;   // every caller is another thread
+
+            int wake = eventfd(0, 0x800);   // EFD_NONBLOCK
+            Assert.True(wake > 0, "eventfd failed");
+            WakeFd(reactor) = wake;
+            try
+            {
+                var conn = (TcpConnection)RuntimeHelpers.GetUninitializedObject(typeof(TcpConnection));
+                var completion = new NoCompletion();
+                for (int i = 0; i < 100; i++)
+                {
+                    reactor.EnqueueReturnQ(0);
+                    reactor.EnqueueReturnQIncremental(3, 0, 0);
+                    EnqueueFlush(reactor, 3, 0);
+                    EnqueueRecycle(reactor, conn);
+                    reactor.SubmitRecv(3, 0, 0, completion);
+                    reactor.ScheduleOnReactor(static _ => { }, null);
+                }
+                ulong burst = Writes(wake);
+
+                ClearWakePending(reactor);   // what the loop's next pass does first
+                reactor.EnqueueReturnQ(0);
+                reactor.EnqueueReturnQ(0);
+                ulong nextPass = Writes(wake);
+
+                Assert.Equal(1UL, burst);
+                Assert.Equal(1UL, nextPass);
+            }
+            finally
+            {
+                WakeFd(reactor) = 0;
+                close(wake);
+            }
+        });
     }
 
-    [UnsafeAccessor(UnsafeAccessorKind.Field, Name = "_postSignalPending")]
+    [UnsafeAccessor(UnsafeAccessorKind.Field, Name = "_wakePending")]
     private static extern ref int PendingFlag(Reactor reactor);
+
+    [UnsafeAccessor(UnsafeAccessorKind.Method, Name = "ClearWakePending")]
+    private static extern void ClearWakePending(Reactor reactor);
 
     [UnsafeAccessor(UnsafeAccessorKind.Method, Name = "DrainPostQ")]
     private static extern void DrainPostQ(Reactor reactor);
+
+    [UnsafeAccessor(UnsafeAccessorKind.Field, Name = "_wakeFd")]
+    private static extern ref int WakeFd(Reactor reactor);
+
+    [UnsafeAccessor(UnsafeAccessorKind.Field, Name = "_reactorThreadId")]
+    private static extern ref int ReactorThreadId(Reactor reactor);
+
+    [UnsafeAccessor(UnsafeAccessorKind.Method, Name = "InitIncremental")]
+    private static extern void InitIncremental(Reactor reactor);
+
+    [UnsafeAccessor(UnsafeAccessorKind.Method, Name = "EnqueueFlush")]
+    private static extern void EnqueueFlush(Reactor reactor, int fd, int gen);
+
+    [UnsafeAccessor(UnsafeAccessorKind.Method, Name = "EnqueueRecycle")]
+    private static extern void EnqueueRecycle(Reactor reactor, TcpConnection conn);
+
+    [DllImport("libc")] private static extern int eventfd(uint initval, int flags);
+    [DllImport("libc")] private static extern unsafe long read(int fd, ulong* buf, nuint count);
+    [DllImport("libc")] private static extern int close(int fd);
+
+    // What the eventfd counted since it was last read: one per write.
+    private static unsafe ulong Writes(int fd)
+    {
+        ulong count = 0;
+        return read(fd, &count, 8) == 8 ? count : 0;
+    }
+
+    private sealed class NoCompletion : IRingCompletion
+    {
+        public void Complete(int result) { }
+    }
 
     // Each counter on its own line, so the race's own bookkeeping does not share one with the flag.
     [StructLayout(LayoutKind.Explicit, Size = 320)]

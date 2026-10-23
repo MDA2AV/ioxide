@@ -21,7 +21,6 @@ public sealed unsafe partial class Reactor
     }
 
     private readonly ConcurrentQueue<PostItem> _postQ = new();
-    private int _postSignalPending;   // 0 = no eventfd wake outstanding, 1 = one issued and undrained
 
     /// <summary>True when the caller is executing on this reactor's loop thread.</summary>
     public bool OnReactorThread => Environment.CurrentManagedThreadId == _reactorThreadId;
@@ -47,17 +46,11 @@ public sealed unsafe partial class Reactor
             return;
         }
 
-        if (Interlocked.Exchange(ref _postSignalPending, 1) == 0)
-        {
-            WakeFdWrite();
-        }
+        Wake();
     }
 
     private void DrainPostQ()
     {
-        // Clear before draining so a producer enqueuing during/after the drain still races to wake.
-        // An exchange, not a store: otherwise the queue can read empty before the clear is visible.
-        Interlocked.Exchange(ref _postSignalPending, 0);
         while (_postQ.TryDequeue(out PostItem item))
         {
             // A faulted continuation (e.g. an async-void rethrow delivered via Post) must not

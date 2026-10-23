@@ -150,7 +150,7 @@ public sealed unsafe partial class Reactor
         {
             sw.SpinOnce();
         }
-        WakeFdWrite();
+        Wake();
     }
 
     private void DrainReturnQIncremental()
@@ -182,6 +182,7 @@ public sealed unsafe partial class Reactor
     {
         while (!_stopRequested)
         {
+            ClearWakePending();
             DrainReturnQIncremental();
             DrainFlushQ();
             DrainRecycleQ();

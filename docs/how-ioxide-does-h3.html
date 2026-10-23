@@ -135,9 +135,12 @@ var quic = new QuicOptions { Port = 8443, ConnectionFactory = engine.CreateFacto
       <li><b>Connections in flight keep the generation they started with.</b> picotls keeps reading
       the context for the life of the connection, so a renewal a moment later installs a new
       generation without disturbing anything already handshaking or established.</li>
-      <li><b>It does not change who may connect.</b> Client trust anchors and whether a client
-      certificate is required belong to the engine, not to this call - so renewing a server
-      certificate can never quietly widen or narrow access.</li>
+      <li><b>It re-reads the client trust anchors from their file</b>, as the TCP side does. An
+      edit to the CA bundle given as <code>clientCaPemPath</code> takes effect at the next
+      renewal - which is how to revoke an issuer without a restart, and also how to widen access
+      without meaning to. A bundle that no longer loads fails the renewal and the engine keeps the
+      anchors it had. Anchors given as <code>clientCaPem</code> text do not move, and whether a
+      client certificate is required never changes.</li>
     </ul>
 
     <p>The old contexts are kept rather than freed, because a handshake may be between reading one
@@ -154,8 +157,9 @@ var quic = new QuicOptions { Port = 8443, ConnectionFactory = engine.CreateFacto
 
     <p>With <code>requireClientCertificate: false</code> a certificate is requested and verified if
     offered, but its absence is not fatal - useful when authorisation is decided per route rather
-    than per connection. Anchors are fixed when the engine is built; unlike server certificates they
-    are not replaceable on a running engine.</p>
+    than per connection. Anchors given as a path are read again by every
+    <code>ReplaceCertificates</code>, so editing the bundle and renewing changes who may connect
+    on a running engine.</p>
 
     <p>Once the handshake completes, the connection carries the peer's identity:</p>
     <table>
