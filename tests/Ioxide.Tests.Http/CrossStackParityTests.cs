@@ -1,4 +1,5 @@
 using ioxide;
+using ioxide.nghttp3;
 using ioxide.ngtcp2;
 using ioxide.tls;
 
@@ -102,5 +103,68 @@ internal static class CrossStackParityTests
             Assert.True(Client.ServerCertificateSubject(port, "named.test").Contains("localhost"),
                 "with the table emptied on purpose, the name falls back to the default certificate");
         });
+
+        runner.Test("rotate/parity: an anchor file edited before a rotation changes who may connect, on both stacks",
+        () =>
+        {
+            // The runbook for revoking an issuer without a restart: edit the CA bundle, rotate. One
+            // anchor file, one client, and the two stacks have to agree before and after.
+            (string ca, string serverCert, string serverKey, string clientCert, string clientKey, _, _)
+                = TestCert.EnsureMutualTls();
+            (string unrelated, _) = TestCert.EnsureNamed("not-the-client-ca.test");
+
+            string anchors = Path.Combine(Path.GetTempPath(), $"ioxide-parity-anchors-{Environment.ProcessId}.pem");
+            File.WriteAllText(anchors, File.ReadAllText(ca));
+
+            try
+            {
+                TlsService? service = null;
+                int tcpPort = TestServer.Start(Handlers.Tls, r => service = TlsService.Start(r, new TlsOptions
+                {
+                    CertificatePath = serverCert,
+                    KeyPath = serverKey,
+                    ClientCaPath = anchors,
+                    RequireClientCertificate = true,
+                }));
+
+                using var engine = new QuicEngine(serverCert, serverKey, cidLength: 8, alpn: ["h3"],
+                    clientCaPemPath: anchors, requireClientCertificate: true);
+                (_, int udpPort) = TestServer.StartDatagram(
+                    onDatagram: null,
+                    quicFactory: engine.CreateFactory(),
+                    quicHandle: static (_, conn) => new Nghttp3Connection(conn).RunBufferedAsync(
+                        static _ => Nghttp3Response.Text("ok")));
+
+                // Both admit the client while its issuer is anchored, or "both refuse" below could
+                // mean both were refusing from the start.
+                Assert.Equal(Client.TlsOutcome.Served, Client.TryGetTls(tcpPort, "/", clientCert, clientKey));
+                Assert.Equal(200, H3Status(udpPort, clientCert, clientKey));
+
+                File.WriteAllText(anchors, File.ReadAllText(unrelated));
+                service!.ReplaceCertificates(new TlsCertificate { CertificatePath = serverCert, KeyPath = serverKey });
+                engine.ReplaceCertificates(new QuicCertificate(serverCert, serverKey));
+
+                // Not Served and not TimedOut: under TLS 1.3 the client has sent its request by the
+                // time the alert arrives, so a reset can beat it - Dropped is a refusal here too.
+                Client.TlsOutcome tcp = Client.TryGetTls(tcpPort, "/", clientCert, clientKey);
+                int quic = H3Status(udpPort, clientCert, clientKey);
+                Assert.True(tcp is not (Client.TlsOutcome.Served or Client.TlsOutcome.TimedOut) && quic != 200,
+                    $"the issuer left the anchor file and both rotations should have applied it: TCP {tcp}, QUIC status {quic}");
+            }
+            finally
+            {
+                File.Delete(anchors);
+            }
+        });
+    }
+
+    private static int H3Status(int udpPort, string certPath, string keyPath)
+    {
+        using var client = new H3TestClient("127.0.0.1", udpPort, certPath, keyPath);
+        client.Connect();
+        client.CompleteHandshake(timeoutMs: 3000);
+
+        (int status, _) = client.Get("/", timeoutMs: 3000);
+        return status;
     }
 }

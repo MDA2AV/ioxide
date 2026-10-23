@@ -40,6 +40,9 @@ public sealed unsafe class QuicEngine : IDisposable
     // certificates and keys are never released and one of the two renewals silently did nothing.
     private readonly Lock _rotation = new();
 
+    // Named when a rotation fails, since every rotation reads it again.
+    private readonly string? _clientCaPemPath;
+
     /// <summary>CID length this endpoint mints; must match <see cref="QuicOptions.LocalCidLength"/>.</summary>
     public uint CidLength { get; }
 
@@ -63,17 +66,18 @@ public sealed unsafe class QuicEngine : IDisposable
     /// issuer keeps being accepted until it expires. Bound it another way: short-lived
     /// certificates, or an application check keyed on
     /// <see cref="QuicEngineConnection.PeerCommonName"/>.
+    ///
+    /// Read again from the path by every <see cref="ReplaceCertificates"/>, as the TCP side
+    /// re-reads <c>TlsOptions.ClientCaPath</c> - so an edit to the bundle takes effect at the next
+    /// rotation rather than at the next restart.
     /// </param>
     /// <param name="clientCaPem">
     /// The same trust anchors as PEM text - the in-memory alternative to
     /// <paramref name="clientCaPemPath"/>, for a host that carries its CA bundle as data rather than
     /// as a file. Set at most one of the two. Identical in what it trusts.
     ///
-    /// Note the two forms behave the SAME here, unlike on the TCP side. Both are read exactly once,
-    /// when the engine is constructed: the verifier belongs to the engine and every certificate
-    /// generation points at it, which is what stops a renewal from quietly changing who may
-    /// connect. Editing the file afterwards therefore changes nothing, and neither does
-    /// <see cref="ReplaceCertificates"/> - changing the anchors on QUIC needs a new engine.
+    /// Unlike the path, this is data: a rotation keeps these anchors as they were, as the TCP side
+    /// keeps <c>TlsOptions.ClientCaPem</c>.
     /// </param>
     /// <param name="requireClientCertificate">
     /// With a CA configured, whether a client offering no certificate is refused during the
@@ -121,6 +125,7 @@ public sealed unsafe class QuicEngine : IDisposable
         Ngtcp2.RequireAbi();
 
         CidLength = cidLength;
+        _clientCaPemPath = clientCaPemPath;
 
         var callbacks = new Ngtcp2.Callbacks
         {
@@ -251,15 +256,19 @@ public sealed unsafe class QuicEngine : IDisposable
     /// Nothing is published unless all of it built. A bad path or an unreadable key throws and
     /// LEAVES THE ENGINE SERVING WHAT IT WAS - a failed renewal is a server that kept working.
     ///
-    /// What it does NOT change: the client trust anchors and whether a client certificate is
-    /// required. Those belong to the engine, so renewing a certificate cannot quietly change who is
-    /// allowed to connect.
+    /// One thing DOES follow the disk, as it does on the TCP side, and it is worth knowing before
+    /// automating this. Client trust anchors given as <c>clientCaPemPath</c> are read from that
+    /// path again, so an edit to the CA bundle takes effect at the next renewal - revoking an
+    /// issuer that way is possible, and so is widening who may connect without meaning to. A
+    /// bundle that no longer loads fails the rotation like a bad certificate, and the engine keeps
+    /// the anchors it had. Anchors given as <c>clientCaPem</c> are data and do not move, and
+    /// whether a client certificate is required never changes.
     ///
     /// The certificates it replaces are kept, not freed: a handshake may be between reading them
     /// and using what it found, and picotls does not refcount contexts. They are released when the
     /// engine is disposed. Renewing a handful of names a few times a year costs kilobytes.
     /// </remarks>
-    /// <exception cref="InvalidOperationException">The certificates could not be loaded; the engine still serves the previous ones.</exception>
+    /// <exception cref="InvalidOperationException">The certificates, or the client CA bundle they re-read, could not be loaded; the engine still serves the previous ones.</exception>
     public void ReplaceCertificates(QuicCertificate defaultCertificate,
         IReadOnlyDictionary<string, QuicCertificate>? certificatesByHost = null)
     {
@@ -357,8 +366,9 @@ public sealed unsafe class QuicEngine : IDisposable
             {
                 throw new InvalidOperationException(
                     $"ioxide.ngtcp2: could not replace the certificates from " +
-                    $"'{defaultCertificate.CertificatePath}' / '{defaultCertificate.KeyPath}'. " +
-                    "The engine still serves the ones it had.");
+                    $"'{defaultCertificate.CertificatePath}' / '{defaultCertificate.KeyPath}'" +
+                    (_clientCaPemPath is not null ? $" with the client CA re-read from '{_clientCaPemPath}'" : "") +
+                    ". The engine still serves what it had.");
             }
         }
         finally

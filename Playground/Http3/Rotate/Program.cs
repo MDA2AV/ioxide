@@ -47,10 +47,12 @@ using System.Runtime.InteropServices;
 //     long as a connection lives and does not refcount it. It is released when the engine is
 //     disposed.
 //
-//  What a rotation may NOT change, on either stack: the client trust anchors and whether a client
-//  certificate is required. Renewing a certificate cannot quietly change who is allowed to
-//  connect. Note that this is STRICTER than the TCP side, where anchors given as a path are
-//  re-read from disk on every rotation.
+//  One thing does follow the disk, as on the TCP side, and it is a foot-gun: client trust anchors
+//  given as clientCaPemPath are RE-READ from that path on every rotation. Editing the CA bundle
+//  then takes effect at the next renewal rather than the next restart - which is how you revoke
+//  an issuer without a restart, and how you widen who may connect without meaning to. Anchors
+//  given as clientCaPem are data and do not move, and whether a client certificate is required
+//  never changes.
 //
 //  Needs: ioxide, ioxide.ngtcp2, ioxide.http3
 // ─────────────────────────────────────────────────────────────────────────────────────────────
