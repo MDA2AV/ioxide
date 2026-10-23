@@ -140,6 +140,7 @@ TestCert.EnsureClientCert(new TestCert.ClientCertSpec
 
 TestCert.EnsureClientCert(new() { ExtendedKeyUsage = "1.3.6.1.5.5.7.3.1" });   // serverAuth only
 TestCert.EnsureClientCert(new() { EllipticCurve = true });                     // an EC key
+TestCert.EnsureClientCert(new() { ForgedSignature = true });                   // names the CA, signed by another key
 TestCert.EnsureChainedClientCert();                                            // root -> intermediate -> leaf
 TestCert.EnsureServerCert(TestCert.PemShape.Pkcs1Key);                         // and CrlfEndings, Utf8Bom, …
 ```
