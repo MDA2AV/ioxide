@@ -72,7 +72,9 @@
     <p>A thin <code>unsafe</code> wrapper over the mmapped submission and completion queues.
     <code>Create(entries)</code> calls <code>io_uring_setup</code> (preferring <code>NO_SQARRAY</code>,
     falling back on <code>EINVAL</code> for older kernels), then mmaps the SQ ring, the CQ ring, and
-    the SQE array, and caches pointers to the head/tail/mask fields the kernel shares.</p>
+    the SQE array, caches pointers to the head/tail/mask fields the kernel shares, and registers the
+    descriptor with <code>IORING_REGISTER_RING_FDS</code>: every <code>enter</code> passes the slot
+    it got, and <code>Dispose</code> frees it before closing the descriptor.</p>
     <ul>
       <li><code>GetSqe()</code> - claims the next SQE slot if the ring isn't full
       (<code>tail - head &lt; entries</code>), writing the implicit SQ-array slot when

@@ -32,6 +32,7 @@ public static unsafe partial class Native {
     public const byte IORING_OP_SEND_ZC = 47;
     public const uint IORING_ENTER_GETEVENTS = 1u << 0;
     public const uint IORING_ENTER_EXT_ARG   = 1u << 3;   // the enter's arg is an io_uring_getevents_arg: a wait with a timeout
+    public const uint IORING_ENTER_REGISTERED_RING = 1u << 4;   // the enter's fd is a slot from IORING_REGISTER_RING_FDS
     public const uint IORING_SQ_CQ_OVERFLOW  = 1u << 1;   // SQ ring flags: completions are waiting in the kernel's overflow list
     public const long IORING_OFF_SQ_RING = 0;
     public const long IORING_OFF_SQES    = 0x10000000;
@@ -46,6 +47,8 @@ public static unsafe partial class Native {
     public const int    IORING_CQE_BUFFER_SHIFT = 16;
     public const uint   IORING_REGISTER_PBUF_RING   = 22;
     public const uint   IORING_UNREGISTER_PBUF_RING = 23;
+    public const uint   IORING_REGISTER_RING_FDS    = 20;
+    public const uint   IORING_UNREGISTER_RING_FDS  = 21;
     public const uint   IORING_POLL_ADD_MULTI   = 1u << 0;
 
     // Incremental provided-buffer consumption (kernel 6.12+). IOU_PBUF_RING_INC
@@ -180,6 +183,15 @@ public static unsafe partial class Native {
         public ushort bgid;
         public ushort flags;
         public ulong  resv1, resv2, resv3;
+    }
+
+    // Argument struct for IORING_(UN)REGISTER_RING_FDS: data is the ring's descriptor, offset its slot
+    // (uint.MaxValue asks for any free one, and the kernel writes back which).
+    [StructLayout(LayoutKind.Sequential)]
+    public struct io_uring_rsrc_update {
+        public uint  offset;
+        public uint  resv;
+        public ulong data;
     }
 
     // include/uapi/linux/time_types.h - the timespec IORING_OP_TIMEOUT reads.

@@ -79,6 +79,10 @@
       interrupting the thread as task-work.</li>
       <li><b>NO_SQARRAY</b> (kernel 6.6+) - drops the SQ indirection array, one store fewer per
       SQE. Setup falls back automatically on older kernels (EINVAL probe).</li>
+      <li><b>Registered ring descriptor</b> - the descriptor is registered with
+      <code>IORING_REGISTER_RING_FDS</code>, so each <code>enter</code> takes the ring from the
+      thread's table instead of looking the descriptor up and refcounting it: about 7 ns an
+      enter. A thread with no slot left enters by descriptor.</li>
       <li><b>SQ-full handling</b> - if the submission queue fills mid-batch, the reactor flushes it
       with a no-wait <code>enter</code> and continues; submission never blocks on completions.</li>
     </ul>

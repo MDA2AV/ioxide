@@ -35,6 +35,14 @@ public sealed unsafe class Ring : IDisposable
 
     private bool _hasSqArray;
 
+    // What every enter is handed: the slot IORING_REGISTER_RING_FDS gave this ring, with
+    // IORING_ENTER_REGISTERED_RING, so the kernel takes the file from the thread's table instead of an
+    // fget/fput of the descriptor - or, with no slot, the descriptor and no flag.
+    private int  _enterFd;
+    private uint _enterFlags;
+
+    internal int EnterFd => _enterFd;
+
     /// <summary>ENOMEM here is transient, so it is worth a few milliseconds before giving up.</summary>
     /// <remarks>
     /// A ring's memory is charged against RLIMIT_MEMLOCK and released ASYNCHRONOUSLY after close,
@@ -178,7 +186,23 @@ public sealed unsafe class Ring : IDisposable
         ring._cqes   = (IoUringCqe*)(ringPointer + ioUringParams.cq_off.cqes);
         ring._cqMask = *(uint*)(ringPointer + ioUringParams.cq_off.ring_mask);
 
+        ring.RegisterFd();
+
         return ring;
+    }
+
+    // The slot is in the calling thread's table, which is no restriction: only the thread that created a
+    // SINGLE_ISSUER | DEFER_TASKRUN ring can enter it. A thread has 16 slots; without one, the descriptor.
+    private void RegisterFd()
+    {
+        _enterFd = _fd;
+
+        var update = new io_uring_rsrc_update { offset = uint.MaxValue, data = (ulong)_fd };
+        if (io_uring_register(_fd, IORING_REGISTER_RING_FDS, &update, 1) == 1)
+        {
+            _enterFd    = (int)update.offset;
+            _enterFlags = IORING_ENTER_REGISTERED_RING;
+        }
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
@@ -222,17 +246,17 @@ public sealed unsafe class Ring : IDisposable
 
         if (toSubmit == 0 && waitFor == 0) return 0;
 
-        uint flags = waitFor > 0 ? IORING_ENTER_GETEVENTS : 0;
+        uint flags = (waitFor > 0 ? IORING_ENTER_GETEVENTS : 0) | _enterFlags;
 
         if (timeoutMs < 0)
         {
-            return io_uring_enter(_fd, toSubmit, waitFor, flags);
+            return io_uring_enter(_enterFd, toSubmit, waitFor, flags);
         }
 
         // The kernel copies both during the call, so the stack is fine.
         var ts  = new __kernel_timespec { tv_sec = timeoutMs / 1000, tv_nsec = timeoutMs % 1000 * 1_000_000 };
         var arg = new io_uring_getevents_arg { ts = (ulong)&ts };
-        return io_uring_enter(_fd, toSubmit, waitFor, flags | IORING_ENTER_EXT_ARG, &arg, (nuint)sizeof(io_uring_getevents_arg));
+        return io_uring_enter(_enterFd, toSubmit, waitFor, flags | IORING_ENTER_EXT_ARG, &arg, (nuint)sizeof(io_uring_getevents_arg));
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
@@ -294,6 +318,16 @@ public sealed unsafe class Ring : IDisposable
         if (_sqePtr != null)
         {
             munmap(_sqePtr,  _sqeSize);  _sqePtr  = null;
+        }
+
+        // Before the descriptor goes: the slot holds a reference to the ring, which would otherwise outlive
+        // its close, memlock charge and all, until the thread exits. On the creating thread, like the rest
+        // of the ring - another thread's slot of the same number is that thread's own ring.
+        if (_enterFlags != 0)
+        {
+            var update = new io_uring_rsrc_update { offset = (uint)_enterFd };
+            io_uring_register(_fd, IORING_UNREGISTER_RING_FDS, &update, 1);
+            _enterFlags = 0;
         }
 
         if (_fd > 0 && _closeFd)
