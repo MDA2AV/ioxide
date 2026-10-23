@@ -63,6 +63,10 @@ internal static unsafe class Ngtcp2
     [DllImport(Lib)] internal static extern nuint iq_conn_peer_subject(nint conn, byte* outBuf, nuint outLen);
     [DllImport(Lib)] internal static extern nuint iq_conn_peer_cn(nint conn, byte* outBuf, nuint outLen);
 
+    /// <summary>The verified client certificate, DER, or null with 0 written when none was verified.
+    /// The bytes belong to the connection until it is freed; copy them.</summary>
+    [DllImport(Lib)] internal static extern byte* iq_conn_peer_certificate(nint conn, nuint* len);
+
     /// <summary>
     /// Registers a certificate for one SNI name, served instead of the default when a client asks
     /// for that host. Returns 0, or -1 with the reason on stderr. Call before accepting: the table
@@ -96,7 +100,7 @@ internal static unsafe class Ngtcp2
     [DllImport(Lib)] internal static extern uint iq_abi();
 
     /// <summary>What this managed binding was written against. Bump both together.</summary>
-    internal const uint Abi = 6;
+    internal const uint Abi = 7;
 
     /// <summary>
     /// Refuse to run against a native library this binding was not built for.

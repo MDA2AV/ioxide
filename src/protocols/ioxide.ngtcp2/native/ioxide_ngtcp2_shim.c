@@ -51,8 +51,9 @@ static ptls_key_exchange_algorithm_t *iq_client_key_exchanges[] = {
  *   3 - iq_conn_set_keep_alive added
  *   4 - iq_conn_shutdown_stream added
  *   5 - iq_client_engine_set_idle_timeout added
- *   6 - iq_conn_writev added */
-#define IQ_ABI 6
+ *   6 - iq_conn_writev added
+ *   7 - iq_conn_peer_certificate added */
+#define IQ_ABI 7
 
 /* ---- callback table into C# ------------------------------------------------------------- */
 
@@ -206,6 +207,11 @@ typedef struct iq_conn {
      * "we checked this" and "we saw this" would let an unverified name be read back as an
      * authenticated identity. */
     int  peer_recorded;
+    /* The verified client certificate, DER, as the client sent it - for whatever a name does not
+     * answer: a SAN, an extension, a fingerprint. Copied during verification for the reason the
+     * subject is, and read once by the managed side when the handshake completes. Owned. */
+    uint8_t *peer_cert_der;
+    size_t   peer_cert_der_len;
 } iq_conn;
 
 static int iq_paced_index(iq_conn *c, int64_t stream_id)
@@ -355,6 +361,15 @@ static int iq_verify_certificate(ptls_verify_certificate_t *self, ptls_t *tls, c
         iq_record_subject(c, leaf);
         c->peer_authenticated = 1;
         X509_free(leaf);
+
+        /* A failed copy costs the certificate, not the identity recorded above. */
+        uint8_t *copy = malloc(certs[0].len);
+        if (copy != NULL) {
+            memcpy(copy, certs[0].base, certs[0].len);
+            free(c->peer_cert_der);
+            c->peer_cert_der     = copy;
+            c->peer_cert_der_len = certs[0].len;
+        }
     }
 
     return rv;
@@ -722,6 +737,21 @@ size_t iq_conn_peer_cn(iq_conn *c, char *out, size_t outlen)
     memcpy(out, c->peer_cn, n);
     out[n] = '\0';
     return n;
+}
+
+/* The VERIFIED client certificate, DER, with its length in *len; NULL and 0 when there is none. The
+ * bytes are the connection's, valid until iq_conn_free - the caller copies them. */
+const uint8_t *iq_conn_peer_certificate(iq_conn *c, size_t *len)
+{
+    if (len == NULL) {
+        return NULL;
+    }
+    if (c == NULL || !c->peer_authenticated || c->peer_cert_der == NULL) {
+        *len = 0;
+        return NULL;
+    }
+    *len = c->peer_cert_der_len;
+    return c->peer_cert_der;
 }
 
 /* ---- ngtcp2 callbacks ------------------------------------------------------------------- */
@@ -1526,6 +1556,7 @@ void iq_conn_free(iq_conn *c)
         ptls_free(c->cptls.ptls);
     }
     ngtcp2_conn_del(c->conn);
+    free(c->peer_cert_der);
     free(c);
 }
 
