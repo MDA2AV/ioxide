@@ -408,8 +408,17 @@ public static class TestCert
         /// <summary>An EC key instead of RSA - a different signature algorithm on the wire.</summary>
         public bool EllipticCurve { get; init; }
 
+        /// <summary>
+        /// Names the CA as its issuer but is signed by a key that is not the CA's - the one shape here
+        /// the CA never issued. A verifier that matched the issuer's NAME and stopped would build the
+        /// chain to the anchor and accept it.
+        /// </summary>
+        public bool ForgedSignature { get; init; }
+
+        // Unchanged for every spec without a forged signature, so the fixtures cached under it stay valid.
         internal string Tag => Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(
-            $"{Subject}|{NotBefore}|{NotAfter}|{ExtendedKeyUsage}|{EllipticCurve}")))[..10];
+            $"{Subject}|{NotBefore}|{NotAfter}|{ExtendedKeyUsage}|{EllipticCurve}"
+            + (ForgedSignature ? "|forged" : ""))))[..10];
     }
 
     /// <summary>
@@ -469,7 +478,8 @@ public static class TestCert
             // derives the signature algorithm from the REQUEST's key, so an EC leaf issued by this
             // RSA CA is refused outright - which has nothing to do with what is being tested.
             using RSA caKey = caCert.GetRSAPrivateKey()!;
-            X509SignatureGenerator generator = X509SignatureGenerator.CreateForRSA(caKey, RSASignaturePadding.Pkcs1);
+            using RSA? forger = spec.ForgedSignature ? RSA.Create(2048) : null;
+            X509SignatureGenerator generator = X509SignatureGenerator.CreateForRSA(forger ?? caKey, RSASignaturePadding.Pkcs1);
             using X509Certificate2 signed = request.Create(
                 caCert.SubjectName, generator, notBefore, notAfter, serial);
 
