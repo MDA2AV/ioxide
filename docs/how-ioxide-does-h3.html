@@ -162,6 +162,9 @@ var quic = new QuicOptions { Port = 8443, ConnectionFactory = engine.CreateFacto
       <tr><td><code>PeerSubject</code></td><td>The full subject, rendered for humans to read.</td></tr>
       <tr><td><code>PeerCommonName</code></td><td>The CN taken <em>structurally</em> from the
       distinguished name.</td></tr>
+      <tr><td><code>PeerCertificateDer</code></td><td>The verified certificate itself, DER, for what a
+      name does not answer: a SAN, an extension, a fingerprint. A snapshot taken at the handshake,
+      so it is still there after the connection closes.</td></tr>
     </table>
 
     <div class="note"><b>Compare <code>PeerCommonName</code>, never a substring of

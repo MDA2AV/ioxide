@@ -94,6 +94,24 @@ public unsafe partial class QuicEngineConnection : QuicConnection
             }
         }
     }
+
+    /// <summary>
+    /// The verified client certificate in DER, or null when the peer presented none. Only
+    /// populated for a certificate that passed verification, on the same terms as
+    /// <see cref="PeerSubject"/>, and only once the handshake has completed.
+    /// </summary>
+    /// <remarks>
+    /// Exists because a name is not always enough: a host that authorizes on a SAN, a fingerprint
+    /// or a serial needs the certificate itself, and <c>X509CertificateLoader.LoadCertificate</c>
+    /// takes these bytes as they are. The TCP side's <c>TlsSession.PeerCertificateDer</c> is the
+    /// same value.
+    ///
+    /// A snapshot taken when the handshake completes, as TCP's is, so it stays readable after the
+    /// connection closes - unlike <see cref="PeerSubject"/> and <see cref="PeerCommonName"/>, which
+    /// read through the native connection and are null once it is gone. Captured only when a
+    /// certificate was verified, so a server not doing mutual TLS pays nothing.
+    /// </remarks>
+    public byte[]? PeerCertificateDer { get; private set; }
     private GCHandle _self;                    // stable void* user passed to the shim
     private bool _handshakeDone;
     private bool _closed;
@@ -311,6 +329,13 @@ public unsafe partial class QuicEngineConnection : QuicConnection
             {
                 NegotiatedProtocol = System.Text.Encoding.ASCII.GetString(alpn[..(int)len]);
             }
+        }
+
+        nuint derLength;
+        byte* der = Ngtcp2.iq_conn_peer_certificate(_conn, &derLength);
+        if (der != null)
+        {
+            PeerCertificateDer = new ReadOnlySpan<byte>(der, checked((int)derLength)).ToArray();
         }
 
         OnHandshakeCompleted();
