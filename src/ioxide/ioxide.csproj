@@ -8,7 +8,7 @@
     <RootNamespace>ioxide</RootNamespace>
 
     <PackageId>ioxide</PackageId>
-    <Version>0.18.374</Version>
+    <Version>0.20.392</Version>
     <Authors>MDA2AV</Authors>
     <Description>A shared-nothing io_uring runtime for .NET: one ring per reactor thread, inline completions, no system dependencies. The engine - reactor, connection, and the IRingHost client seam. Includes TLS termination on a bundled BoringSSL (libioxide_boringssl.so): the handshake driven over the ring, then optional kernel TLS (kTLS) offload, so handlers keep writing plaintext. kTLS needs the Linux tls module; nothing else does, and neither is loaded unless you use it.</Description>
     <PackageLicenseExpression>MIT</PackageLicenseExpression>
