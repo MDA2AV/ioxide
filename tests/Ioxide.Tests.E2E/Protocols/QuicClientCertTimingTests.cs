@@ -50,8 +50,8 @@ internal static class QuicClientCertTimingTests
             (string ca, string serverCert, string serverKey,
              string clientCert, string clientKey, _, _) = TestCert.EnsureMutualTls();
 
-            using var engine = new QuicEngine(serverCert, serverKey, cidLength: 8, alpn: ["h3"],
-                clientCaPemPath: ca, requireClientCertificate: true);
+            var engine = TestServer.Own(new QuicEngine(serverCert, serverKey, cidLength: 8, alpn: ["h3"],
+                clientCaPemPath: ca, requireClientCertificate: true));
 
             (_, int udpPort) = TestServer.StartDatagram(
                 onDatagram: null,

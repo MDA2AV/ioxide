@@ -67,7 +67,7 @@ internal static class QuicEngineTests
         runner.Test("quic: full ngtcp2 handshake + encrypted stream echo (loopback)", () =>
         {
             (string certPath, string keyPath) = TestCert.Ensure();
-            using var engine = new QuicEngine(certPath, keyPath, cidLength: 8);
+            var engine = TestServer.Own(new QuicEngine(certPath, keyPath, cidLength: 8));
 
             (_, int udpPort) = TestServer.StartDatagram(
                 onDatagram: null,
@@ -99,7 +99,7 @@ internal static class QuicEngineTests
             // false even with a working bound. The handler runs from accept, and it returns when
             // the connection is torn down.
             (string certPath, string keyPath) = TestCert.Ensure();
-            using var engine = new QuicEngine(certPath, keyPath, cidLength: 8, handshakeTimeoutMs: 1_000);
+            var engine = TestServer.Own(new QuicEngine(certPath, keyPath, cidLength: 8, handshakeTimeoutMs: 1_000));
 
             var torndown = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
             (_, int udpPort) = TestServer.StartDatagram(
@@ -121,7 +121,7 @@ internal static class QuicEngineTests
             // the connection went away here too, that assertion would be proving nothing about the
             // bound - only that a quiet peer gets dropped by something, somewhere.
             (string certPath, string keyPath) = TestCert.Ensure();
-            using var engine = new QuicEngine(certPath, keyPath, cidLength: 8, handshakeTimeoutMs: 0);
+            var engine = TestServer.Own(new QuicEngine(certPath, keyPath, cidLength: 8, handshakeTimeoutMs: 0));
 
             var torndown = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
             (_, int udpPort) = TestServer.StartDatagram(
@@ -145,7 +145,7 @@ internal static class QuicEngineTests
             // the peer address, after which the flush is a silent no-op. Pre-fix the peer received
             // only the CONNECTION_CLOSE and the response was dropped on the floor.
             (string certPath, string keyPath) = TestCert.Ensure();
-            using var engine = new QuicEngine(certPath, keyPath, cidLength: 8);
+            var engine = TestServer.Own(new QuicEngine(certPath, keyPath, cidLength: 8));
 
             (_, int udpPort) = TestServer.StartDatagram(
                 onDatagram: null,
@@ -166,7 +166,7 @@ internal static class QuicEngineTests
             // frame unwritten (-1). A bare FIN was counted as sent on any packet, so that ACK
             // swallowed it and nothing retried it: ~20 in 1.5M streamed h3 responses never ended.
             (string certPath, string keyPath) = TestCert.Ensure();
-            using var engine = new QuicEngine(certPath, keyPath, cidLength: 8);
+            var engine = TestServer.Own(new QuicEngine(certPath, keyPath, cidLength: 8));
 
             (_, int udpPort) = TestServer.StartDatagram(
                 onDatagram: null,
@@ -197,7 +197,7 @@ internal static class QuicEngineTests
             // were three packets - each write was packetized on the spot - where a buffered response
             // is one.
             (string certPath, string keyPath) = TestCert.Ensure();
-            using var engine = new QuicEngine(certPath, keyPath, cidLength: 8);
+            var engine = TestServer.Own(new QuicEngine(certPath, keyPath, cidLength: 8));
 
             (_, int udpPort) = TestServer.StartDatagram(
                 onDatagram: null,
@@ -222,7 +222,7 @@ internal static class QuicEngineTests
             // or close those bytes: each one stayed counted in the engine's send retention, which
             // drifted a long-lived connection toward the high-water and the backstop that closes it.
             (string certPath, string keyPath) = TestCert.Ensure();
-            using var engine = new QuicEngine(certPath, keyPath, cidLength: 8);
+            var engine = TestServer.Own(new QuicEngine(certPath, keyPath, cidLength: 8));
 
             RetentionProbe? probe = null;
             (_, int udpPort) = TestServer.StartDatagram(
@@ -258,7 +258,7 @@ internal static class QuicEngineTests
             // The same probe and the same rounds without the late send, so the bound above is a real
             // discriminator: if the baseline did not return to zero, the leak test would prove nothing.
             (string certPath, string keyPath) = TestCert.Ensure();
-            using var engine = new QuicEngine(certPath, keyPath, cidLength: 8);
+            var engine = TestServer.Own(new QuicEngine(certPath, keyPath, cidLength: 8));
 
             RetentionProbe? probe = null;
             (_, int udpPort) = TestServer.StartDatagram(
@@ -286,7 +286,7 @@ internal static class QuicEngineTests
         runner.Test("quic: dual-pipe (PipeReader/PipeWriter) stream echo (loopback)", () =>
         {
             (string certPath, string keyPath) = TestCert.Ensure();
-            using var engine = new QuicEngine(certPath, keyPath, cidLength: 8);
+            var engine = TestServer.Own(new QuicEngine(certPath, keyPath, cidLength: 8));
 
             (_, int udpPort) = TestServer.StartDatagram(
                 onDatagram: null,
@@ -319,7 +319,7 @@ internal static class QuicEngineTests
             const int ChunkBytes = 64 * 1024;
 
             (string certPath, string keyPath) = TestCert.Ensure();
-            using var engine = new QuicEngine(certPath, keyPath, cidLength: 8);
+            var engine = TestServer.Own(new QuicEngine(certPath, keyPath, cidLength: 8));
             var producer = new PipeProducer(Chunks, ChunkBytes, pauseMs: 0);
 
             (_, int udpPort) = TestServer.StartDatagram(
@@ -351,7 +351,7 @@ internal static class QuicEngineTests
             {
                 // 1 KiB every 20 ms never reaches the high-water; 64 KiB chunks do at once, and stay there once acks stop.
                 (string certPath, string keyPath) = TestCert.Ensure();
-                using var engine = new QuicEngine(certPath, keyPath, cidLength: 8);
+                var engine = TestServer.Own(new QuicEngine(certPath, keyPath, cidLength: 8));
                 PipeProducer producer = atHighWater
                     ? new PipeProducer(chunks: 64, chunkBytes: 64 * 1024, pauseMs: 0)
                     : new PipeProducer(chunks: 750, chunkBytes: 1024, pauseMs: 20);

@@ -20,8 +20,8 @@ internal static class QuicMutualTlsTests
             (string ca, string serverCert, string serverKey,
              string clientCert, string clientKey, _, _) = TestCert.EnsureMutualTls();
 
-            using var engine = new QuicEngine(serverCert, serverKey, cidLength: 8, alpn: ["h3"],
-                clientCaPemPath: ca, requireClientCertificate: true);
+            var engine = TestServer.Own(new QuicEngine(serverCert, serverKey, cidLength: 8, alpn: ["h3"],
+                clientCaPemPath: ca, requireClientCertificate: true));
 
             (_, int udpPort) = TestServer.StartDatagram(
                 onDatagram: null,
@@ -47,8 +47,8 @@ internal static class QuicMutualTlsTests
         {
             (string ca, string serverCert, string serverKey, _, _, _, _) = TestCert.EnsureMutualTls();
 
-            using var engine = new QuicEngine(serverCert, serverKey, cidLength: 8, alpn: ["h3"],
-                clientCaPemPath: ca, requireClientCertificate: true);
+            var engine = TestServer.Own(new QuicEngine(serverCert, serverKey, cidLength: 8, alpn: ["h3"],
+                clientCaPemPath: ca, requireClientCertificate: true));
 
             (_, int udpPort) = TestServer.StartDatagram(
                 onDatagram: null,
@@ -74,8 +74,8 @@ internal static class QuicMutualTlsTests
             (string ca, string serverCert, string serverKey, _, _,
              string rogueCert, string rogueKey) = TestCert.EnsureMutualTls();
 
-            using var engine = new QuicEngine(serverCert, serverKey, cidLength: 8, alpn: ["h3"],
-                clientCaPemPath: ca, requireClientCertificate: true);
+            var engine = TestServer.Own(new QuicEngine(serverCert, serverKey, cidLength: 8, alpn: ["h3"],
+                clientCaPemPath: ca, requireClientCertificate: true));
 
             (_, int udpPort) = TestServer.StartDatagram(
                 onDatagram: null,
@@ -99,8 +99,8 @@ internal static class QuicMutualTlsTests
 
             // The same anchors as the first test, handed over as data instead of as a path - what a
             // host keeping its bundle in a secrets store holds, without writing it out to read back.
-            using var engine = new QuicEngine(serverCert, serverKey, cidLength: 8, alpn: ["h3"],
-                requireClientCertificate: true, clientCaPem: File.ReadAllText(ca));
+            var engine = TestServer.Own(new QuicEngine(serverCert, serverKey, cidLength: 8, alpn: ["h3"],
+                requireClientCertificate: true, clientCaPem: File.ReadAllText(ca)));
 
             (_, int udpPort) = TestServer.StartDatagram(
                 onDatagram: null,
@@ -128,8 +128,8 @@ internal static class QuicMutualTlsTests
             (string ca, string serverCert, string serverKey, _, _,
              string rogueCert, string rogueKey) = TestCert.EnsureMutualTls();
 
-            using var engine = new QuicEngine(serverCert, serverKey, cidLength: 8, alpn: ["h3"],
-                requireClientCertificate: true, clientCaPem: File.ReadAllText(ca));
+            var engine = TestServer.Own(new QuicEngine(serverCert, serverKey, cidLength: 8, alpn: ["h3"],
+                requireClientCertificate: true, clientCaPem: File.ReadAllText(ca)));
 
             (_, int udpPort) = TestServer.StartDatagram(
                 onDatagram: null,
@@ -154,8 +154,8 @@ internal static class QuicMutualTlsTests
 
             try
             {
-                using var engine = new QuicEngine(serverCert, serverKey, cidLength: 8, alpn: ["h3"],
-                    clientCaPemPath: ca, requireClientCertificate: true, clientCaPem: File.ReadAllText(ca));
+                var engine = TestServer.Own(new QuicEngine(serverCert, serverKey, cidLength: 8, alpn: ["h3"],
+                    clientCaPemPath: ca, requireClientCertificate: true, clientCaPem: File.ReadAllText(ca)));
             }
             catch (ArgumentException)
             {
@@ -169,7 +169,7 @@ internal static class QuicMutualTlsTests
         {
             // The regression guard for everyone not using mTLS: the handshake must be untouched.
             (string certPath, string keyPath) = TestCert.Ensure();
-            using var engine = new QuicEngine(certPath, keyPath, cidLength: 8, alpn: ["h3"]);
+            var engine = TestServer.Own(new QuicEngine(certPath, keyPath, cidLength: 8, alpn: ["h3"]));
 
             (_, int udpPort) = TestServer.StartDatagram(
                 onDatagram: null,
@@ -200,8 +200,8 @@ internal static class QuicMutualTlsTests
             (string ca, string serverCert, string serverKey,
              string clientCert, string clientKey, _, _) = TestCert.EnsureMutualTls();
 
-            using var engine = new QuicEngine(serverCert, serverKey, cidLength: 8, alpn: ["h3"],
-                clientCaPemPath: ca, requireClientCertificate: false);
+            var engine = TestServer.Own(new QuicEngine(serverCert, serverKey, cidLength: 8, alpn: ["h3"],
+                clientCaPemPath: ca, requireClientCertificate: false));
 
             (_, int udpPort) = TestServer.StartDatagram(
                 onDatagram: null,
@@ -227,8 +227,8 @@ internal static class QuicMutualTlsTests
         {
             (string ca, string serverCert, string serverKey, _, _, _, _) = TestCert.EnsureMutualTls();
 
-            using var engine = new QuicEngine(serverCert, serverKey, cidLength: 8, alpn: ["h3"],
-                clientCaPemPath: ca, requireClientCertificate: false);
+            var engine = TestServer.Own(new QuicEngine(serverCert, serverKey, cidLength: 8, alpn: ["h3"],
+                clientCaPemPath: ca, requireClientCertificate: false));
 
             (_, int udpPort) = TestServer.StartDatagram(
                 onDatagram: null,
@@ -255,8 +255,8 @@ internal static class QuicMutualTlsTests
             (string ca, string serverCert, string serverKey, _, _,
              string rogueCert, string rogueKey) = TestCert.EnsureMutualTls();
 
-            using var engine = new QuicEngine(serverCert, serverKey, cidLength: 8, alpn: ["h3"],
-                clientCaPemPath: ca, requireClientCertificate: false);
+            var engine = TestServer.Own(new QuicEngine(serverCert, serverKey, cidLength: 8, alpn: ["h3"],
+                clientCaPemPath: ca, requireClientCertificate: false));
 
             (_, int udpPort) = TestServer.StartDatagram(
                 onDatagram: null,
@@ -278,8 +278,8 @@ internal static class QuicMutualTlsTests
             // timeout, which is indistinguishable from a server that has gone away.
             (string ca, string serverCert, string serverKey, _, _, _, _) = TestCert.EnsureMutualTls();
 
-            using var engine = new QuicEngine(serverCert, serverKey, cidLength: 8, alpn: ["h3"],
-                clientCaPemPath: ca, requireClientCertificate: true);
+            var engine = TestServer.Own(new QuicEngine(serverCert, serverKey, cidLength: 8, alpn: ["h3"],
+                clientCaPemPath: ca, requireClientCertificate: true));
 
             (_, int udpPort) = TestServer.StartDatagram(
                 onDatagram: null,
@@ -367,8 +367,8 @@ internal static class QuicMutualTlsTests
                 (string ca, string cert, string key) = TestCert.EnsureClientCert(spec);
                 (_, string serverCert, string serverKey, string goodCert, string goodKey, _, _) = TestCert.EnsureMutualTls();
 
-                using var engine = new QuicEngine(serverCert, serverKey, cidLength: 8, alpn: ["h3"],
-                    clientCaPemPath: ca, requireClientCertificate: true);
+                var engine = TestServer.Own(new QuicEngine(serverCert, serverKey, cidLength: 8, alpn: ["h3"],
+                    clientCaPemPath: ca, requireClientCertificate: true));
                 int udpPort = ServeCommonName(engine);
 
                 (int goodStatus, string goodName) = Ask(udpPort, goodCert, goodKey);
@@ -393,8 +393,8 @@ internal static class QuicMutualTlsTests
             (string anchors, _, string cert, string key) = TestCert.EnsureChainedClientCert();
             (_, string serverCert, string serverKey, _, _, _, _) = TestCert.EnsureMutualTls();
 
-            using var engine = new QuicEngine(serverCert, serverKey, cidLength: 8, alpn: ["h3"],
-                clientCaPemPath: anchors, requireClientCertificate: true);
+            var engine = TestServer.Own(new QuicEngine(serverCert, serverKey, cidLength: 8, alpn: ["h3"],
+                clientCaPemPath: anchors, requireClientCertificate: true));
             int udpPort = ServeCommonName(engine);
 
             (int status, string name) = Ask(udpPort, cert, key);
@@ -413,8 +413,8 @@ internal static class QuicMutualTlsTests
             });
             (_, string serverCert, string serverKey, _, _, _, _) = TestCert.EnsureMutualTls();
 
-            using var engine = new QuicEngine(serverCert, serverKey, cidLength: 8, alpn: ["h3"],
-                clientCaPemPath: ca, requireClientCertificate: true);
+            var engine = TestServer.Own(new QuicEngine(serverCert, serverKey, cidLength: 8, alpn: ["h3"],
+                clientCaPemPath: ca, requireClientCertificate: true));
             int udpPort = ServeCommonName(engine);
 
             (int status, string name) = Ask(udpPort, cert, key);

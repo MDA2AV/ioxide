@@ -43,7 +43,7 @@ internal static class QuicTeardownWireTests
         runner.Test("quic: an application Close reaches the peer as a CONNECTION_CLOSE", () =>
         {
             (string certPath, string keyPath) = TestCert.Ensure();
-            using var engine = new QuicEngine(certPath, keyPath, cidLength: 8);
+            var engine = TestServer.Own(new QuicEngine(certPath, keyPath, cidLength: 8));
 
             var accepted = new TaskCompletionSource<Reactor>(TaskCreationOptions.RunContinuationsAsynchronously);
             var torndown = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -70,7 +70,7 @@ internal static class QuicTeardownWireTests
             // 300 KiB queued in one call is past a 256 KiB high-water and under a 512 KiB ceiling. At
             // the 16 MiB default CanQueueSend would still be true - which is what tells them apart.
             (string certPath, string keyPath) = TestCert.Ensure();
-            using var engine = new QuicEngine(certPath, keyPath, cidLength: 8);
+            var engine = TestServer.Own(new QuicEngine(certPath, keyPath, cidLength: 8));
 
             var accepted = new TaskCompletionSource<Reactor>(TaskCreationOptions.RunContinuationsAsynchronously);
             var torndown = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -105,7 +105,7 @@ internal static class QuicTeardownWireTests
             // is silence. With a 512 KiB ceiling, 768 KiB queued in a single call is over it before
             // anything is pumped.
             (string certPath, string keyPath) = TestCert.Ensure();
-            using var engine = new QuicEngine(certPath, keyPath, cidLength: 8);
+            var engine = TestServer.Own(new QuicEngine(certPath, keyPath, cidLength: 8));
 
             var accepted = new TaskCompletionSource<Reactor>(TaskCreationOptions.RunContinuationsAsynchronously);
             var torndown = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -141,7 +141,7 @@ internal static class QuicTeardownWireTests
             // WITHOUT a CONNECTION_CLOSE - the peer is presumed gone, and answering an absent peer
             // is a datagram sent to whoever holds that address now.
             (string certPath, string keyPath) = TestCert.Ensure();
-            using var engine = new QuicEngine(certPath, keyPath, cidLength: 8);
+            var engine = TestServer.Own(new QuicEngine(certPath, keyPath, cidLength: 8));
 
             var accepted = new TaskCompletionSource<Reactor>(TaskCreationOptions.RunContinuationsAsynchronously);
             var torndown = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -175,7 +175,7 @@ internal static class QuicTeardownWireTests
             // without the loop, which has exited by the time TeardownQuic runs - an SQE queued
             // there is never submitted, and the UDP fd is closed a few lines later.
             (string certPath, string keyPath) = TestCert.Ensure();
-            using var engine = new QuicEngine(certPath, keyPath, cidLength: 8);
+            var engine = TestServer.Own(new QuicEngine(certPath, keyPath, cidLength: 8));
 
             var accepted = new TaskCompletionSource<Reactor>(TaskCreationOptions.RunContinuationsAsynchronously);
             var torndown = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);

@@ -35,7 +35,7 @@ internal static class QuicChaosTests
         runner.Test("quic: a garbage datagram flood doesn't stop h3 from serving", () =>
         {
             (string certPath, string keyPath) = TestCert.Ensure();
-            using var engine = new QuicEngine(certPath, keyPath, cidLength: 8);
+            var engine = TestServer.Own(new QuicEngine(certPath, keyPath, cidLength: 8));
             int udpPort = StartH3(engine);
 
             using (var udp = new UdpClient())
@@ -58,7 +58,7 @@ internal static class QuicChaosTests
         runner.Test("quic: malformed QUIC packets are dropped, a real handshake still completes", () =>
         {
             (string certPath, string keyPath) = TestCert.Ensure();
-            using var engine = new QuicEngine(certPath, keyPath, cidLength: 8);
+            var engine = TestServer.Own(new QuicEngine(certPath, keyPath, cidLength: 8));
             int udpPort = StartH3(engine);
 
             using (var udp = new UdpClient())
@@ -91,7 +91,7 @@ internal static class QuicChaosTests
         {
             // What a reactor allocates handing each one to the factory, measured on its own thread.
             (string certPath, string keyPath) = TestCert.Ensure();
-            using var engine = new QuicEngine(certPath, keyPath, cidLength: 8);
+            var engine = TestServer.Own(new QuicEngine(certPath, keyPath, cidLength: 8));
             var probe = new FactoryProbe(engine.CreateFactory());
 
             int udpPort = TestServer.StartDatagram(

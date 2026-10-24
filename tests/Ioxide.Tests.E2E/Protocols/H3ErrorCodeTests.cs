@@ -229,7 +229,7 @@ internal static class H3ErrorCodeTests
         runner.Test("http3/wire: control - a hand-framed GET over real QUIC is served and the connection stays open", () =>
         {
             (string certPath, string keyPath) = TestCert.Ensure();
-            using var engine = new QuicEngine(certPath, keyPath, cidLength: 8, alpn: ["h3"]);
+            var engine = TestServer.Own(new QuicEngine(certPath, keyPath, cidLength: 8, alpn: ["h3"]));
             (_, int udpPort) = TestServer.StartDatagram(
                 onDatagram: null,
                 quicFactory: engine.CreateFactory(),
@@ -260,7 +260,7 @@ internal static class H3ErrorCodeTests
             // The control above proves this exact rig serves; the only difference here is the two
             // malformed bytes. 15 s is a generous bound for "now" and far from the sweep.
             (string certPath, string keyPath) = TestCert.Ensure();
-            using var engine = new QuicEngine(certPath, keyPath, cidLength: 8, alpn: ["h3"]);
+            var engine = TestServer.Own(new QuicEngine(certPath, keyPath, cidLength: 8, alpn: ["h3"]));
             (_, int udpPort) = TestServer.StartDatagram(
                 onDatagram: null,
                 quicFactory: engine.CreateFactory(),

@@ -22,7 +22,7 @@ internal static class QuicSniTests
     {
         runner.Test("sni/quic: a named host is answered with its own certificate", () =>
         {
-            using var engine = NewEngine(out _);
+            var engine = TestServer.Own(NewEngine(out _));
             int udpPort = Serve(engine);
 
             // Both names, over separate connections to the same port - which is the point.
@@ -39,7 +39,7 @@ internal static class QuicSniTests
 
         runner.Test("sni/quic: an unknown name gets the default rather than a refusal", () =>
         {
-            using var engine = NewEngine(out _);
+            var engine = TestServer.Own(NewEngine(out _));
             int udpPort = Serve(engine);
 
             // Answering is deliberate: refusing a name this engine does not hold would surface as a
@@ -52,7 +52,7 @@ internal static class QuicSniTests
 
         runner.Test("sni/quic: the name is matched case-insensitively", () =>
         {
-            using var engine = NewEngine(out _);
+            var engine = TestServer.Own(NewEngine(out _));
             int udpPort = Serve(engine);
 
             // DNS names have no case, so a client shouting asks for the same host.
@@ -67,7 +67,7 @@ internal static class QuicSniTests
             (string cert, string key) = TestCert.Ensure();
             (string alphaCert, string alphaKey) = TestCert.EnsureNamed("alpha.test");
 
-            using var engine = new QuicEngine(cert, key, cidLength: 8, alpn: ["h3"]);
+            var engine = TestServer.Own(new QuicEngine(cert, key, cidLength: 8, alpn: ["h3"]));
             engine.AddHost("ALPHA.TEST", alphaCert, alphaKey);
 
             int udpPort = Serve(engine);
@@ -83,7 +83,7 @@ internal static class QuicSniTests
             // context alone, and a named request is answered exactly as it was before.
             (string cert, string key) = TestCert.Ensure();
 
-            using var engine = new QuicEngine(cert, key, cidLength: 8, alpn: ["h3"]);
+            var engine = TestServer.Own(new QuicEngine(cert, key, cidLength: 8, alpn: ["h3"]));
             int udpPort = Serve(engine);
 
             (string subject, int status) = Ask(udpPort, "alpha.test");
@@ -96,7 +96,7 @@ internal static class QuicSniTests
         {
             (string cert, string key) = TestCert.Ensure();
 
-            using var engine = new QuicEngine(cert, key, cidLength: 8, alpn: ["h3"]);
+            var engine = TestServer.Own(new QuicEngine(cert, key, cidLength: 8, alpn: ["h3"]));
 
             string refusal = "";
 
@@ -126,8 +126,8 @@ internal static class QuicSniTests
             (string ca, string serverCert, string serverKey, _, _, _, _) = TestCert.EnsureMutualTls();
             (string alphaCert, string alphaKey) = TestCert.EnsureNamed("alpha.test");
 
-            using var engine = new QuicEngine(serverCert, serverKey, cidLength: 8, alpn: ["h3"],
-                clientCaPemPath: ca, requireClientCertificate: true);
+            var engine = TestServer.Own(new QuicEngine(serverCert, serverKey, cidLength: 8, alpn: ["h3"],
+                clientCaPemPath: ca, requireClientCertificate: true));
             engine.AddHost("alpha.test", alphaCert, alphaKey);
 
             int udpPort = Serve(engine);
@@ -150,8 +150,8 @@ internal static class QuicSniTests
              string rogueCert, string rogueKey) = TestCert.EnsureMutualTls();
             (string alphaCert, string alphaKey) = TestCert.EnsureNamed("alpha.test");
 
-            using var engine = new QuicEngine(serverCert, serverKey, cidLength: 8, alpn: ["h3"],
-                clientCaPemPath: ca, requireClientCertificate: true);
+            var engine = TestServer.Own(new QuicEngine(serverCert, serverKey, cidLength: 8, alpn: ["h3"],
+                clientCaPemPath: ca, requireClientCertificate: true));
             engine.AddHost("alpha.test", alphaCert, alphaKey);
 
             int udpPort = ServeIdentity(engine);
@@ -180,7 +180,7 @@ internal static class QuicSniTests
 
         runner.Test("sni/quic: a name that merely starts with a registered one gets the default", () =>
         {
-            using var engine = NewEngine(out _);
+            var engine = TestServer.Own(NewEngine(out _));
             int udpPort = Serve(engine);
 
             // The matcher compares lengths first, so this cannot match - but an "optimisation" to
@@ -196,7 +196,7 @@ internal static class QuicSniTests
             // off-by-one at either end of the table shows up as the wrong certificate.
             (string cert, string key) = TestCert.Ensure();
 
-            using var engine = new QuicEngine(cert, key, cidLength: 8, alpn: ["h3"]);
+            var engine = TestServer.Own(new QuicEngine(cert, key, cidLength: 8, alpn: ["h3"]));
 
             for (int i = 1; i <= 12; i++)
             {
@@ -226,7 +226,7 @@ internal static class QuicSniTests
             (string ca, string alphaCert, string alphaKey) = TestCert.EnsureNamedFromCa("alpha.test");
             (string cert, string key) = TestCert.Ensure();
 
-            using var engine = new QuicEngine(cert, key, cidLength: 8, alpn: ["h3"]);
+            var engine = TestServer.Own(new QuicEngine(cert, key, cidLength: 8, alpn: ["h3"]));
             engine.AddHost("alpha.test", alphaCert, alphaKey);
 
             int udpPort = Serve(engine);
@@ -246,7 +246,7 @@ internal static class QuicSniTests
             (string ca, string alphaCert, string alphaKey) = TestCert.EnsureNamedFromCa("alpha.test");
             (string cert, string key) = TestCert.Ensure();
 
-            using var engine = new QuicEngine(cert, key, cidLength: 8, alpn: ["h3"]);
+            var engine = TestServer.Own(new QuicEngine(cert, key, cidLength: 8, alpn: ["h3"]));
             engine.AddHost("alpha.test", alphaCert, alphaKey);
 
             int udpPort = Serve(engine);
@@ -267,7 +267,7 @@ internal static class QuicSniTests
             (_, string betaCert, string betaKey) = TestCert.EnsureNamedFromCa("beta.test");
             (string cert, string key) = TestCert.Ensure();
 
-            using var engine = new QuicEngine(cert, key, cidLength: 8, alpn: ["h3"]);
+            var engine = TestServer.Own(new QuicEngine(cert, key, cidLength: 8, alpn: ["h3"]));
             engine.AddHost("alpha.test", alphaCert, alphaKey);
             engine.AddHost("beta.test", betaCert, betaKey);
 
@@ -288,7 +288,7 @@ internal static class QuicSniTests
             (string cert, string key) = TestCert.Ensure();
             (string alphaCert, string alphaKey) = TestCert.EnsureNamed("alpha.test");
 
-            using var engine = new QuicEngine(cert, key, cidLength: 8, alpn: ["h3"]);
+            var engine = TestServer.Own(new QuicEngine(cert, key, cidLength: 8, alpn: ["h3"]));
             _ = engine.CreateFactory();
 
             string refusal = "";
@@ -313,7 +313,7 @@ internal static class QuicSniTests
             (string cert, string key) = TestCert.Ensure();
             (string alphaCert, string alphaKey) = TestCert.EnsureNamed("alpha.test");
 
-            using var engine = new QuicEngine(cert, key, cidLength: 8, alpn: ["h3"]);
+            var engine = TestServer.Own(new QuicEngine(cert, key, cidLength: 8, alpn: ["h3"]));
             engine.AddHost("alpha.test", alphaCert, alphaKey);
 
             bool refused = false;
@@ -335,7 +335,7 @@ internal static class QuicSniTests
         {
             (string cert, string key) = TestCert.Ensure();
 
-            using var engine = new QuicEngine(cert, key, cidLength: 8, alpn: ["h3"]);
+            var engine = TestServer.Own(new QuicEngine(cert, key, cidLength: 8, alpn: ["h3"]));
             (string alphaCert, string alphaKey) = TestCert.EnsureNamed("alpha.test");
 
             bool refused = false;
@@ -358,7 +358,7 @@ internal static class QuicSniTests
             (string cert, string key) = TestCert.Ensure();
             (string alphaCert, string alphaKey) = TestCert.EnsureNamed("alpha.test");
 
-            using var engine = new QuicEngine(cert, key, cidLength: 8, alpn: ["h3"]);
+            var engine = TestServer.Own(new QuicEngine(cert, key, cidLength: 8, alpn: ["h3"]));
 
             // Both ways a name reaches the table: added before serving, and in a rotation.
             foreach ((string host, string reason) in Unservable)
@@ -378,7 +378,7 @@ internal static class QuicSniTests
             (string cert, string key) = TestCert.Ensure();
             (string alphaCert, string alphaKey) = TestCert.EnsureNamed("alpha.test");
 
-            using var engine = new QuicEngine(cert, key, cidLength: 8, alpn: ["h3"]);
+            var engine = TestServer.Own(new QuicEngine(cert, key, cidLength: 8, alpn: ["h3"]));
             engine.AddHost("xn--bcher-kva.test", alphaCert, alphaKey);
             engine.AddHost(Longest, alphaCert, alphaKey);
             int udpPort = Serve(engine);

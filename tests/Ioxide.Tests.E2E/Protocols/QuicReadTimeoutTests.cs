@@ -21,7 +21,7 @@ internal static class QuicReadTimeoutTests
         runner.Test("quic read timeout: a request answered after longer than the read timeout still gets its response", () =>
         {
             (string certPath, string keyPath) = TestCert.Ensure();
-            using var engine = new QuicEngine(certPath, keyPath, cidLength: 8);
+            var engine = TestServer.Own(new QuicEngine(certPath, keyPath, cidLength: 8));
             var torndown = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
 
             (_, int udpPort) = TestServer.StartDatagram(
@@ -42,7 +42,7 @@ internal static class QuicReadTimeoutTests
         {
             // The client ACKs whatever arrives, so pings that never stopped would keep it alive.
             (string certPath, string keyPath) = TestCert.Ensure();
-            using var engine = new QuicEngine(certPath, keyPath, cidLength: 8);
+            var engine = TestServer.Own(new QuicEngine(certPath, keyPath, cidLength: 8));
             var torndown = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
 
             (_, int udpPort) = TestServer.StartDatagram(
@@ -66,7 +66,7 @@ internal static class QuicReadTimeoutTests
         {
             // Nobody is left to answer, so pings would keep a peer that only acknowledges alive for good.
             (string certPath, string keyPath) = TestCert.Ensure();
-            using var engine = new QuicEngine(certPath, keyPath, cidLength: 8);
+            var engine = TestServer.Own(new QuicEngine(certPath, keyPath, cidLength: 8));
             var evicted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
             var gone = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
 
@@ -97,7 +97,7 @@ internal static class QuicReadTimeoutTests
             runner.Test($"quic read timeout ({stack}): a request answered after longer than the read timeout still gets its response", () =>
             {
                 (string certPath, string keyPath) = TestCert.Ensure();
-                using var engine = new QuicEngine(certPath, keyPath, cidLength: 8, alpn: ["h3"]);
+                var engine = TestServer.Own(new QuicEngine(certPath, keyPath, cidLength: 8, alpn: ["h3"]));
 
                 (_, int udpPort) = TestServer.StartDatagram(
                     onDatagram: null,

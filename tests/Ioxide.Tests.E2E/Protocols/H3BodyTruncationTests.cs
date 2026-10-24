@@ -72,7 +72,7 @@ internal static class H3BodyTruncationTests
             // content-length check the handler is handed a ten-byte Body for a request that said
             // one hundred, and cannot tell the difference.
             (string certPath, string keyPath) = TestCert.Ensure();
-            using var engine = new QuicEngine(certPath, keyPath, cidLength: 8, alpn: ["h3"]);
+            var engine = TestServer.Own(new QuicEngine(certPath, keyPath, cidLength: 8, alpn: ["h3"]));
 
             int served = -1;
             (_, int udpPort) = TestServer.StartDatagram(
@@ -104,7 +104,7 @@ internal static class H3BodyTruncationTests
             // same POST of ten bytes - announced honestly - is served. Without this, "the server
             // did not answer 200" would be satisfied by a server that answers nothing at all.
             (string certPath, string keyPath) = TestCert.Ensure();
-            using var engine = new QuicEngine(certPath, keyPath, cidLength: 8, alpn: ["h3"]);
+            var engine = TestServer.Own(new QuicEngine(certPath, keyPath, cidLength: 8, alpn: ["h3"]));
 
             int served = -1;
             (_, int udpPort) = TestServer.StartDatagram(
@@ -178,7 +178,7 @@ internal static class H3BodyTruncationTests
     private static string StreamedBodyOutcome(long promised, string? contentLength = null)
     {
         (string certPath, string keyPath) = TestCert.Ensure();
-        using var engine = new QuicEngine(certPath, keyPath, cidLength: 8, alpn: ["h3"]);
+        var engine = TestServer.Own(new QuicEngine(certPath, keyPath, cidLength: 8, alpn: ["h3"]));
 
         var started = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var readTen = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);

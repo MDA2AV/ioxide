@@ -37,7 +37,7 @@ internal static class H3AlpnTests
             // its backstop, but nothing else pins that the shim's read-back (iq_conn_get_alpn)
             // surfaces the very token the client offered.
             (string certPath, string keyPath) = TestCert.Ensure();
-            using var engine = new QuicEngine(certPath, keyPath, cidLength: 8, alpn: ["h3"]);
+            var engine = TestServer.Own(new QuicEngine(certPath, keyPath, cidLength: 8, alpn: ["h3"]));
 
             (_, int udpPort) = TestServer.StartDatagram(
                 onDatagram: null,
@@ -65,7 +65,7 @@ internal static class H3AlpnTests
             // connection would also fail CompleteHandshake, by timeout, and a hang is not a
             // refusal (it is also not the alert RFC 9001 requires).
             (string certPath, string keyPath) = TestCert.Ensure();
-            using var engine = new QuicEngine(certPath, keyPath, cidLength: 8, alpn: ["h3"]);
+            var engine = TestServer.Own(new QuicEngine(certPath, keyPath, cidLength: 8, alpn: ["h3"]));
 
             (_, int udpPort) = TestServer.StartDatagram(
                 onDatagram: null,
@@ -89,7 +89,7 @@ internal static class H3AlpnTests
             // "nothing to check". The permissive engine's documented default is to confirm even
             // this; pinning is what closes it, so the pinned refusal is the behaviour to hold.
             (string certPath, string keyPath) = TestCert.Ensure();
-            using var engine = new QuicEngine(certPath, keyPath, cidLength: 8, alpn: ["h3"]);
+            var engine = TestServer.Own(new QuicEngine(certPath, keyPath, cidLength: 8, alpn: ["h3"]));
 
             (_, int udpPort) = TestServer.StartDatagram(
                 onDatagram: null,
@@ -120,7 +120,7 @@ internal static class H3AlpnTests
             var recorded = new TaskCompletionSource<string?>(TaskCreationOptions.RunContinuationsAsynchronously);
 
             (string certPath, string keyPath) = TestCert.Ensure();
-            using var engine = new QuicEngine(certPath, keyPath, cidLength: 8);   // permissive: confirms the offer
+            var engine = TestServer.Own(new QuicEngine(certPath, keyPath, cidLength: 8));   // permissive: confirms the offer
 
             (_, int udpPort) = TestServer.StartDatagram(
                 onDatagram: null,
@@ -145,7 +145,7 @@ internal static class H3AlpnTests
         {
             // The same engine and handler as the refusal below, with the one offer that may be served.
             (string certPath, string keyPath) = TestCert.Ensure();
-            using var engine = new QuicEngine(certPath, keyPath, cidLength: 8);   // permissive, as below
+            var engine = TestServer.Own(new QuicEngine(certPath, keyPath, cidLength: 8));   // permissive, as below
 
             (_, int udpPort) = TestServer.StartDatagram(
                 onDatagram: null,
@@ -169,7 +169,7 @@ internal static class H3AlpnTests
             // default - confirms "echo", and the h3 layer must refuse it. Its close code is pinned in
             // H3ErrorCodeTests.
             (string certPath, string keyPath) = TestCert.Ensure();
-            using var engine = new QuicEngine(certPath, keyPath, cidLength: 8);   // permissive, on purpose
+            var engine = TestServer.Own(new QuicEngine(certPath, keyPath, cidLength: 8));   // permissive, on purpose
 
             (_, int udpPort) = TestServer.StartDatagram(
                 onDatagram: null,
@@ -202,26 +202,23 @@ internal static class H3AlpnTests
             QuicEngine engine;
             try
             {
-                engine = new QuicEngine(certPath, keyPath, cidLength: 8, alpn: ["Ũ2"]);
+                engine = TestServer.Own(new QuicEngine(certPath, keyPath, cidLength: 8, alpn: ["Ũ2"]));
             }
             catch (ArgumentException)
             {
                 return;   // refused at configuration - the defect is gone
             }
 
-            using (engine)
-            {
-                (_, int udpPort) = TestServer.StartDatagram(
-                    onDatagram: null,
-                    quicFactory: engine.CreateFactory(),
-                    quicHandle: static (_, conn) => new Nghttp3Connection(conn).RunBufferedAsync(
-                        static _ => Nghttp3Response.Text("must never serve")));
+            (_, int udpPort) = TestServer.StartDatagram(
+                onDatagram: null,
+                quicFactory: engine.CreateFactory(),
+                quicHandle: static (_, conn) => new Nghttp3Connection(conn).RunBufferedAsync(
+                    static _ => Nghttp3Response.Text("must never serve")));
 
-                using var client = new H3TestClient("127.0.0.1", udpPort) { Alpn = "?2" };
-                client.Connect();
-                Assert.True(!client.CompleteHandshake(timeoutMs: 5000),
-                    "a client offering '?2' completed the handshake against an allow list of 'Ũ2'");
-            }
+            using var client = new H3TestClient("127.0.0.1", udpPort) { Alpn = "?2" };
+            client.Connect();
+            Assert.True(!client.CompleteHandshake(timeoutMs: 5000),
+                "a client offering '?2' completed the handshake against an allow list of 'Ũ2'");
         });
     }
 }

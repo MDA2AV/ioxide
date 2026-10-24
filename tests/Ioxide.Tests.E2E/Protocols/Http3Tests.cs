@@ -25,7 +25,7 @@ internal static class Http3Tests
             // agreed to. Pinning ["h3"] on the engine is the real fix and refuses this during the
             // handshake; this asserts the h3 layer refuses it even on an engine that did not.
             (string certPath, string keyPath) = TestCert.Ensure();
-            using var engine = new QuicEngine(certPath, keyPath, cidLength: 8);   // permissive, on purpose
+            var engine = TestServer.Own(new QuicEngine(certPath, keyPath, cidLength: 8));   // permissive, on purpose
 
             (_, int udpPort) = TestServer.StartDatagram(
                 onDatagram: null,
@@ -45,7 +45,7 @@ internal static class Http3Tests
         runner.Test("http3: pure-C# parser GET vs nghttp3 client (loopback)", () =>
         {
             (string certPath, string keyPath) = TestCert.Ensure();
-            using var engine = new QuicEngine(certPath, keyPath, cidLength: 8, alpn: ["h3"]);
+            var engine = TestServer.Own(new QuicEngine(certPath, keyPath, cidLength: 8, alpn: ["h3"]));
 
             (_, int udpPort) = TestServer.StartDatagram(
                 onDatagram: null,
@@ -66,7 +66,7 @@ internal static class Http3Tests
         runner.Test("http3: pure-C# streaming body upload (paced window)", () =>
         {
             (string certPath, string keyPath) = TestCert.Ensure();
-            using var engine = new QuicEngine(certPath, keyPath, cidLength: 8, alpn: ["h3"]);
+            var engine = TestServer.Own(new QuicEngine(certPath, keyPath, cidLength: 8, alpn: ["h3"]));
 
             (_, int udpPort) = TestServer.StartDatagram(
                 onDatagram: null,
@@ -121,7 +121,7 @@ internal static class Http3Tests
     internal static void UnreadUploadsGiveCreditBack(Func<QuicConnection, UploadAnswer, Task> serve)
     {
         (string certPath, string keyPath) = TestCert.Ensure();
-        using var engine = new QuicEngine(certPath, keyPath, cidLength: 8, alpn: ["h3"]);
+        var engine = TestServer.Own(new QuicEngine(certPath, keyPath, cidLength: 8, alpn: ["h3"]));
 
         long read = 0;
         int unread = 0;

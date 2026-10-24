@@ -37,7 +37,7 @@ internal static class QuicUnansweredStreamTests
         runner.Test("quic read timeout: a pipe writer completed with an error resets its stream, and an idle peer is reaped", () =>
         {
             (string certPath, string keyPath) = TestCert.Ensure();
-            using var engine = new QuicEngine(certPath, keyPath, cidLength: 8);
+            var engine = TestServer.Own(new QuicEngine(certPath, keyPath, cidLength: 8));
             var torndown = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
 
             (_, int udpPort) = TestServer.StartDatagram(
@@ -68,7 +68,7 @@ internal static class QuicUnansweredStreamTests
         runner.Test("quic read timeout: nghttp3 resets a request that arrives after its GOAWAY, and the connection drains", () =>
         {
             (string certPath, string keyPath) = TestCert.Ensure();
-            using var engine = new QuicEngine(certPath, keyPath, cidLength: 8, alpn: ["h3"]);
+            var engine = TestServer.Own(new QuicEngine(certPath, keyPath, cidLength: 8, alpn: ["h3"]));
             var torndown = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
 
             (_, int udpPort) = TestServer.StartDatagram(
@@ -116,7 +116,7 @@ internal static class QuicUnansweredStreamTests
         runner.Test($"http3 ({stack}): a streamed response whose handler fails mid-body is reset, not ended, and the connection serves on", () =>
         {
             (string certPath, string keyPath) = TestCert.Ensure();
-            using var engine = new QuicEngine(certPath, keyPath, cidLength: 8, alpn: ["h3"]);
+            var engine = TestServer.Own(new QuicEngine(certPath, keyPath, cidLength: 8, alpn: ["h3"]));
 
             // The first response fails after its headers and part of its body; the next one completes.
             int calls = 0;
@@ -172,7 +172,7 @@ internal static class QuicUnansweredStreamTests
             // timers fire only when the reactor wakes, so junk datagrams keep it awake - an idle
             // reactor would hide a flood behind its 250 ms tick.
             (string certPath, string keyPath) = TestCert.Ensure();
-            using var engine = new QuicEngine(certPath, keyPath, cidLength: 8);
+            var engine = TestServer.Own(new QuicEngine(certPath, keyPath, cidLength: 8));
 
             (_, int udpPort) = TestServer.StartDatagram(
                 onDatagram: null,
@@ -217,7 +217,7 @@ internal static class QuicUnansweredStreamTests
         runner.Test($"quic read timeout: http3 resets {shape}, and an idle peer is reaped", () =>
         {
             (string certPath, string keyPath) = TestCert.Ensure();
-            using var engine = new QuicEngine(certPath, keyPath, cidLength: 8, alpn: ["h3"]);
+            var engine = TestServer.Own(new QuicEngine(certPath, keyPath, cidLength: 8, alpn: ["h3"]));
             var torndown = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
 
             (_, int udpPort) = TestServer.StartDatagram(

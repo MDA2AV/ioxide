@@ -31,7 +31,7 @@ internal static class QuicMigrationTests
         runner.Test("quic/migration: a client whose address changes keeps being served", () =>
         {
             (string certPath, string keyPath) = TestCert.Ensure();
-            using var engine = new QuicEngine(certPath, keyPath, cidLength: 8, alpn: ["h3"]);
+            var engine = TestServer.Own(new QuicEngine(certPath, keyPath, cidLength: 8, alpn: ["h3"]));
 
             (_, int serverPort) = TestServer.StartDatagram(
                 onDatagram: null,
@@ -80,7 +80,7 @@ internal static class QuicMigrationTests
             // (measured). What is real is whether datagrams arrived elsewhere and were handed on,
             // so the test drives the address until they do.
             (string certPath, string keyPath) = TestCert.Ensure();
-            using var engine = new QuicEngine(certPath, keyPath, cidLength: 8, alpn: ["h3"]);
+            var engine = TestServer.Own(new QuicEngine(certPath, keyPath, cidLength: 8, alpn: ["h3"]));
 
             const int reactors = 4;
 
@@ -148,7 +148,7 @@ internal static class QuicMigrationTests
             // datagram pays a hop. The claim ends that. This asserts the forwarding STOPS, not that
             // a claim was made - a claim that never receives anything would satisfy that.
             (string certPath, string keyPath) = TestCert.Ensure();
-            using var engine = new QuicEngine(certPath, keyPath, cidLength: 8, alpn: ["h3"]);
+            var engine = TestServer.Own(new QuicEngine(certPath, keyPath, cidLength: 8, alpn: ["h3"]));
 
             (int serverPort, Reactor[] fleet) = TestServer.StartQuicSharded(4,
                 engine.CreateFactory(),
@@ -221,7 +221,7 @@ internal static class QuicMigrationTests
             // alongside the sibling test above, which shows the same scenario produces forwards
             // when the kernel is not doing the routing.
             (string certPath, string keyPath) = TestCert.Ensure();
-            using var engine = new QuicEngine(certPath, keyPath, cidLength: 8, alpn: ["h3"]);
+            var engine = TestServer.Own(new QuicEngine(certPath, keyPath, cidLength: 8, alpn: ["h3"]));
 
             const int reactors = 4;
 
@@ -280,7 +280,7 @@ internal static class QuicMigrationTests
             runner.Test($"quic/migration: {name} - the SAME connection serves after the address changes", () =>
             {
                 (string certPath, string keyPath) = TestCert.Ensure();
-                using var engine = new QuicEngine(certPath, keyPath, cidLength: 8, alpn: ["h3"]);
+                var engine = TestServer.Own(new QuicEngine(certPath, keyPath, cidLength: 8, alpn: ["h3"]));
 
                 int accepts = 0;
                 (int serverPort, Reactor[] fleet) = TestServer.StartQuicSharded(4,
@@ -350,7 +350,7 @@ internal static class QuicMigrationTests
             // recorded the pin's fd would later send through a closed, maybe reused, descriptor.
             // The accepted connection must send from the shared serving socket instead.
             (string certPath, string keyPath) = TestCert.Ensure();
-            using var engine = new QuicEngine(certPath, keyPath, cidLength: 8, alpn: ["h3"]);
+            var engine = TestServer.Own(new QuicEngine(certPath, keyPath, cidLength: 8, alpn: ["h3"]));
 
             var accepts = new List<(Reactor R, int ArrivalFd, QuicConnection Conn)>();
             var gate = new object();
@@ -428,7 +428,7 @@ internal static class QuicMigrationTests
         {
             // A claim outranks the wildcard binds, so a socket outliving its release swallows its peer's datagrams.
             (string certPath, string keyPath) = TestCert.Ensure();
-            using var engine = new QuicEngine(certPath, keyPath, cidLength: 8, alpn: ["h3"]);
+            var engine = TestServer.Own(new QuicEngine(certPath, keyPath, cidLength: 8, alpn: ["h3"]));
             var evicted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
 
             (int serverPort, Reactor[] fleet) = TestServer.StartQuicSharded(4,
@@ -506,7 +506,7 @@ internal static class QuicMigrationTests
         {
             // The test above without a claim, which a server refusing a reconnecting address would fail too.
             (string certPath, string keyPath) = TestCert.Ensure();
-            using var engine = new QuicEngine(certPath, keyPath, cidLength: 8, alpn: ["h3"]);
+            var engine = TestServer.Own(new QuicEngine(certPath, keyPath, cidLength: 8, alpn: ["h3"]));
             var evicted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
 
             (int serverPort, Reactor[] fleet) = TestServer.StartQuicSharded(4,
@@ -547,7 +547,7 @@ internal static class QuicMigrationTests
             // 250 ms, so a guard asking only "is this claimed yet" would spend a descriptor and an
             // armed receive on every connection on the server to change nothing.
             (string certPath, string keyPath) = TestCert.Ensure();
-            using var engine = new QuicEngine(certPath, keyPath, cidLength: 8, alpn: ["h3"]);
+            var engine = TestServer.Own(new QuicEngine(certPath, keyPath, cidLength: 8, alpn: ["h3"]));
 
             (int serverPort, Reactor[] fleet) = TestServer.StartQuicSharded(4,
                 engine.CreateFactory(),
@@ -582,7 +582,7 @@ internal static class QuicMigrationTests
             // Without this, the test above is satisfied by a forwarder that works and a migration
             // that never happened - and it would also hide a forwarder too slow to relay in time.
             (string certPath, string keyPath) = TestCert.Ensure();
-            using var engine = new QuicEngine(certPath, keyPath, cidLength: 8, alpn: ["h3"]);
+            var engine = TestServer.Own(new QuicEngine(certPath, keyPath, cidLength: 8, alpn: ["h3"]));
 
             (_, int serverPort) = TestServer.StartDatagram(
                 onDatagram: null,

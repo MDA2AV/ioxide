@@ -60,7 +60,7 @@ internal static class StreamedPeerGoneTests
             runner.Test($"h3 peer gone ({stack}): a cancelled stream is reported by FlushAsync, and the connection serves on", () =>
             {
                 (string certPath, string keyPath) = TestCert.Ensure();
-                using var engine = new QuicEngine(certPath, keyPath, cidLength: 8, alpn: ["h3"]);
+                var engine = TestServer.Own(new QuicEngine(certPath, keyPath, cidLength: 8, alpn: ["h3"]));
                 var server = new EndlessServer();
                 int port = StartH3(ng, engine, server);
 

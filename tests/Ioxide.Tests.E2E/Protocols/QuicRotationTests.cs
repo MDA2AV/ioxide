@@ -23,7 +23,7 @@ internal static class QuicRotationTests
             (string first, string firstKey) = TestCert.EnsureNamed("first.test");
             (string second, string secondKey) = TestCert.EnsureNamed("second.test");
 
-            using var engine = new QuicEngine(first, firstKey, cidLength: 8, alpn: ["h3"]);
+            var engine = TestServer.Own(new QuicEngine(first, firstKey, cidLength: 8, alpn: ["h3"]));
             int udpPort = Serve(engine);
 
             Assert.True(Ask(udpPort, "first.test").Contains("first.test"),
@@ -41,7 +41,7 @@ internal static class QuicRotationTests
             (string alpha, string alphaKey) = TestCert.EnsureNamed("alpha.test");
             (string beta, string betaKey) = TestCert.EnsureNamed("beta.test");
 
-            using var engine = new QuicEngine(cert, key, cidLength: 8, alpn: ["h3"]);
+            var engine = TestServer.Own(new QuicEngine(cert, key, cidLength: 8, alpn: ["h3"]));
             engine.AddHost("named.test", alpha, alphaKey);
 
             int udpPort = Serve(engine);
@@ -68,7 +68,7 @@ internal static class QuicRotationTests
             (string cert, string key) = TestCert.Ensure();
             (string alpha, string alphaKey) = TestCert.EnsureNamed("alpha.test");
 
-            using var engine = new QuicEngine(cert, key, cidLength: 8, alpn: ["h3"]);
+            var engine = TestServer.Own(new QuicEngine(cert, key, cidLength: 8, alpn: ["h3"]));
             engine.AddHost("named.test", alpha, alphaKey);
 
             int udpPort = Serve(engine);
@@ -99,7 +99,7 @@ internal static class QuicRotationTests
             (string cert, string key) = TestCert.Ensure();
             (string alpha, string alphaKey) = TestCert.EnsureNamed("alpha.test");
 
-            using var engine = new QuicEngine(cert, key, cidLength: 8, alpn: ["h3"]);
+            var engine = TestServer.Own(new QuicEngine(cert, key, cidLength: 8, alpn: ["h3"]));
             engine.AddHost("named.test", alpha, alphaKey);
 
             int udpPort = Serve(engine);
@@ -119,7 +119,7 @@ internal static class QuicRotationTests
             (string cert, string key) = TestCert.Ensure();
             (string alpha, string alphaKey) = TestCert.EnsureNamed("alpha.test");
 
-            using var engine = new QuicEngine(cert, key, cidLength: 8, alpn: ["h3"]);
+            var engine = TestServer.Own(new QuicEngine(cert, key, cidLength: 8, alpn: ["h3"]));
             int udpPort = Serve(engine);
 
             Assert.True(Ask(udpPort, "alpha.test").Contains("localhost"),
@@ -138,7 +138,7 @@ internal static class QuicRotationTests
         {
             (string cert, string key) = TestCert.Ensure();
 
-            using var engine = new QuicEngine(cert, key, cidLength: 8, alpn: ["h3"]);
+            var engine = TestServer.Own(new QuicEngine(cert, key, cidLength: 8, alpn: ["h3"]));
             int udpPort = Serve(engine);
 
             Assert.Throws<InvalidOperationException>(
@@ -156,7 +156,7 @@ internal static class QuicRotationTests
             (string alpha, string alphaKey) = TestCert.EnsureNamed("alpha.test");
             (string beta, string betaKey) = TestCert.EnsureNamed("beta.test");
 
-            using var engine = new QuicEngine(cert, key, cidLength: 8, alpn: ["h3"]);
+            var engine = TestServer.Own(new QuicEngine(cert, key, cidLength: 8, alpn: ["h3"]));
             engine.AddHost("alpha.test", alpha, alphaKey);
 
             int udpPort = Serve(engine);
@@ -195,7 +195,7 @@ internal static class QuicRotationTests
                 () => new QuicEngine(alpha, betaKey, cidLength: 8, alpn: ["h3"]).Dispose(),
                 "engine init failed");
 
-            using var engine = new QuicEngine(alpha, alphaKey, cidLength: 8, alpn: ["h3"]);
+            var engine = TestServer.Own(new QuicEngine(alpha, alphaKey, cidLength: 8, alpn: ["h3"]));
 
             // Before serving, so the refusal is about the mismatched pair and not about the engine
             // already being live - which is what this asserted by accident until the reason was named.
@@ -221,7 +221,7 @@ internal static class QuicRotationTests
             (string alpha, string alphaKey) = TestCert.EnsureNamed("alpha.test");
             (string beta, string betaKey) = TestCert.EnsureNamed("beta.test");
 
-            using var engine = new QuicEngine(cert, key, cidLength: 8, alpn: ["h3"]);
+            var engine = TestServer.Own(new QuicEngine(cert, key, cidLength: 8, alpn: ["h3"]));
             engine.AddHost("alpha.test", alpha, alphaKey);
 
             int udpPort = Serve(engine);
@@ -284,8 +284,8 @@ internal static class QuicRotationTests
             (string alpha, string alphaKey) = TestCert.EnsureNamed("alpha.test");
             (string beta, string betaKey) = TestCert.EnsureNamed("beta.test");
 
-            using var engine = new QuicEngine(serverCert, serverKey, cidLength: 8, alpn: ["h3"],
-                clientCaPemPath: ca, requireClientCertificate: true);
+            var engine = TestServer.Own(new QuicEngine(serverCert, serverKey, cidLength: 8, alpn: ["h3"],
+                clientCaPemPath: ca, requireClientCertificate: true));
             engine.AddHost("alpha.test", alpha, alphaKey);
 
             int udpPort = ServeIdentity(engine);
@@ -328,8 +328,8 @@ internal static class QuicRotationTests
 
             try
             {
-                using var engine = new QuicEngine(serverCert, serverKey, cidLength: 8, alpn: ["h3"],
-                    clientCaPemPath: anchors, requireClientCertificate: true);
+                var engine = TestServer.Own(new QuicEngine(serverCert, serverKey, cidLength: 8, alpn: ["h3"],
+                    clientCaPemPath: anchors, requireClientCertificate: true));
                 int udpPort = ServeIdentity(engine);
 
                 Assert.True(Status(udpPort, clientCert, clientKey, "localhost") != 200,
@@ -360,8 +360,8 @@ internal static class QuicRotationTests
 
             try
             {
-                using var engine = new QuicEngine(serverCert, serverKey, cidLength: 8, alpn: ["h3"],
-                    clientCaPemPath: anchors, requireClientCertificate: true);
+                var engine = TestServer.Own(new QuicEngine(serverCert, serverKey, cidLength: 8, alpn: ["h3"],
+                    clientCaPemPath: anchors, requireClientCertificate: true));
                 int udpPort = ServeIdentity(engine);
 
                 Assert.Equal(200, Status(udpPort, clientCert, clientKey, "localhost"));
@@ -391,8 +391,8 @@ internal static class QuicRotationTests
 
             try
             {
-                using var engine = new QuicEngine(serverCert, serverKey, cidLength: 8, alpn: ["h3"],
-                    clientCaPemPath: anchors, requireClientCertificate: true);
+                var engine = TestServer.Own(new QuicEngine(serverCert, serverKey, cidLength: 8, alpn: ["h3"],
+                    clientCaPemPath: anchors, requireClientCertificate: true));
                 int udpPort = ServeIdentity(engine);
 
                 File.WriteAllText(anchors, "not a certificate\n");
@@ -417,8 +417,8 @@ internal static class QuicRotationTests
             (string ca, string serverCert, string serverKey, string clientCert, string clientKey,
              string rogueCert, string rogueKey) = TestCert.EnsureMutualTls();
 
-            using var engine = new QuicEngine(serverCert, serverKey, cidLength: 8, alpn: ["h3"],
-                requireClientCertificate: true, clientCaPem: File.ReadAllText(ca));
+            var engine = TestServer.Own(new QuicEngine(serverCert, serverKey, cidLength: 8, alpn: ["h3"],
+                requireClientCertificate: true, clientCaPem: File.ReadAllText(ca)));
             int udpPort = ServeIdentity(engine);
 
             engine.ReplaceCertificates(new QuicCertificate(serverCert, serverKey));
@@ -439,8 +439,8 @@ internal static class QuicRotationTests
 
             try
             {
-                using var engine = new QuicEngine(cert, key, cidLength: 8, alpn: ["h3"],
-                    requireClientCertificate: true);
+                var engine = TestServer.Own(new QuicEngine(cert, key, cidLength: 8, alpn: ["h3"],
+                    requireClientCertificate: true));
             }
             catch (ArgumentException)
             {
@@ -460,7 +460,7 @@ internal static class QuicRotationTests
             (string alpha, string alphaKey) = TestCert.EnsureNamed("alpha.test");
             (string beta, string betaKey) = TestCert.EnsureNamed("beta.test");
 
-            using var engine = new QuicEngine(cert, key, cidLength: 8, alpn: ["h3"]);
+            var engine = TestServer.Own(new QuicEngine(cert, key, cidLength: 8, alpn: ["h3"]));
             engine.AddHost("alpha.test", alpha, alphaKey);
 
             int udpPort = Serve(engine);
@@ -501,7 +501,7 @@ internal static class QuicRotationTests
             (_, string betaCert, string betaKey) = TestCert.EnsureNamedFromCa("beta.test");
             (string cert, string key) = TestCert.Ensure();
 
-            using var engine = new QuicEngine(cert, key, cidLength: 8, alpn: ["h3"]);
+            var engine = TestServer.Own(new QuicEngine(cert, key, cidLength: 8, alpn: ["h3"]));
             engine.AddHost("alpha.test", alphaCert, alphaKey);
 
             int udpPort = Serve(engine);

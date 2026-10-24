@@ -20,7 +20,7 @@ internal static class H3ChaosTests
         runner.Test("h3: a very long request path is served", () =>
         {
             (string certPath, string keyPath) = TestCert.Ensure();
-            using var engine = new QuicEngine(certPath, keyPath, cidLength: 8, alpn: ["h3"]);
+            var engine = TestServer.Own(new QuicEngine(certPath, keyPath, cidLength: 8, alpn: ["h3"]));
             int udpPort = Start(engine, static (_, conn) => new Nghttp3Connection(conn).RunBufferedAsync(
                 static req => Nghttp3Response.Text($"len {req.Path.Length}")));
 
@@ -37,7 +37,7 @@ internal static class H3ChaosTests
         runner.Test("h3: a request fat with header fields is served", () =>
         {
             (string certPath, string keyPath) = TestCert.Ensure();
-            using var engine = new QuicEngine(certPath, keyPath, cidLength: 8, alpn: ["h3"]);
+            var engine = TestServer.Own(new QuicEngine(certPath, keyPath, cidLength: 8, alpn: ["h3"]));
             int udpPort = Start(engine, static (_, conn) => new Nghttp3Connection(conn).RunBufferedAsync(
                 static _ => Nghttp3Response.Text("ok")));
 
@@ -60,7 +60,7 @@ internal static class H3ChaosTests
         runner.Test("h3: a body far past the stream window round-trips", () =>
         {
             (string certPath, string keyPath) = TestCert.Ensure();
-            using var engine = new QuicEngine(certPath, keyPath, cidLength: 8, alpn: ["h3"]);
+            var engine = TestServer.Own(new QuicEngine(certPath, keyPath, cidLength: 8, alpn: ["h3"]));
 
             // Streaming handler: drains the body, crediting the window mid-flight, so a body larger
             // than the 256 KB stream window completes rather than deadlocking.
@@ -95,7 +95,7 @@ internal static class H3ChaosTests
         runner.Test("h3: an empty-body request is served", () =>
         {
             (string certPath, string keyPath) = TestCert.Ensure();
-            using var engine = new QuicEngine(certPath, keyPath, cidLength: 8, alpn: ["h3"]);
+            var engine = TestServer.Own(new QuicEngine(certPath, keyPath, cidLength: 8, alpn: ["h3"]));
             int udpPort = Start(engine, static (_, conn) => new Nghttp3Connection(conn).RunBufferedAsync(
                 static req => Nghttp3Response.Text($"got {req.Body.Length}")));
 

@@ -22,8 +22,8 @@ internal static class QuicPeerCertificateTests
             (string ca, string serverCert, string serverKey, string clientCert, string clientKey, _, _)
                 = TestCert.EnsureMutualTls();
 
-            using var engine = new QuicEngine(serverCert, serverKey, cidLength: 8, alpn: ["h3"],
-                clientCaPemPath: ca, requireClientCertificate: true);
+            var engine = TestServer.Own(new QuicEngine(serverCert, serverKey, cidLength: 8, alpn: ["h3"],
+                clientCaPemPath: ca, requireClientCertificate: true));
             int udpPort = Serve(engine);
 
             (int status, string body) = Get(udpPort, clientCert, clientKey);
@@ -37,8 +37,8 @@ internal static class QuicPeerCertificateTests
         {
             (string ca, string serverCert, string serverKey, _, _, _, _) = TestCert.EnsureMutualTls();
 
-            using var engine = new QuicEngine(serverCert, serverKey, cidLength: 8, alpn: ["h3"],
-                clientCaPemPath: ca, requireClientCertificate: false);
+            var engine = TestServer.Own(new QuicEngine(serverCert, serverKey, cidLength: 8, alpn: ["h3"],
+                clientCaPemPath: ca, requireClientCertificate: false));
             int udpPort = Serve(engine);
 
             (int status, string body) = Get(udpPort, null, null);
@@ -52,7 +52,7 @@ internal static class QuicPeerCertificateTests
             (string serverCert, string serverKey) = TestCert.Ensure();
             (_, _, _, string clientCert, string clientKey, _, _) = TestCert.EnsureMutualTls();
 
-            using var engine = new QuicEngine(serverCert, serverKey, cidLength: 8, alpn: ["h3"]);
+            var engine = TestServer.Own(new QuicEngine(serverCert, serverKey, cidLength: 8, alpn: ["h3"]));
             int udpPort = Serve(engine);
 
             (int status, string body) = Get(udpPort, clientCert, clientKey);

@@ -124,6 +124,24 @@ public static class TestServer
         }
     }
 
+    // What those servers were handed and must not outlive, disposed once they have stopped.
+    private static readonly List<IDisposable> Owned = [];
+
+    /// <summary>
+    /// Disposes <paramref name="disposable"/> in <see cref="StopAll"/>, after the reactors have come
+    /// down, rather than where the test body ends. For a QuicEngine: its connections read the TLS
+    /// context it frees until the reactor tears them down, so it must outlive the server.
+    /// </summary>
+    public static T Own<T>(T disposable) where T : IDisposable
+    {
+        lock (StartedLock)
+        {
+            Owned.Add(disposable);
+        }
+
+        return disposable;
+    }
+
     /// <summary>
     /// Stops every server started since the last call. The runner does this after each test, so a
     /// suite runs against the servers the current test started and nothing else.
@@ -140,11 +158,14 @@ public static class TestServer
     public static void StopAll()
     {
         (Reactor Reactor, Thread Thread)[] running;
+        IDisposable[] owned;
 
         lock (StartedLock)
         {
             running = [.. Started];
             Started.Clear();
+            owned = [.. Owned];
+            Owned.Clear();
         }
 
         foreach ((Reactor reactor, _) in running)
@@ -171,7 +192,14 @@ public static class TestServer
 
         if (stuck > 0)
         {
+            // What they were handed is left to the process exit with them: a reactor still running may still read it.
             Console.WriteLine($"[harness] {stuck}/{running.Length} reactors did not stop");
+            return;
+        }
+
+        foreach (IDisposable disposable in owned)
+        {
+            disposable.Dispose();
         }
     }
 

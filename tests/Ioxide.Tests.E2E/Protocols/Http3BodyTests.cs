@@ -122,7 +122,7 @@ internal static class Http3BodyTests
     private static void AssertServedBy(byte[] file, Func<Nghttp3ResponseWriter, byte[], ValueTask> produce)
     {
         (string certPath, string keyPath) = TestCert.Ensure();
-        using var engine = new QuicEngine(certPath, keyPath, cidLength: 8, alpn: ["h3"]);
+        var engine = TestServer.Own(new QuicEngine(certPath, keyPath, cidLength: 8, alpn: ["h3"]));
 
         (_, int udpPort) = TestServer.StartDatagram(
             onDatagram: null,
@@ -140,7 +140,7 @@ internal static class Http3BodyTests
     private static void AssertServed(byte[] file, int chunk)
     {
         (string certPath, string keyPath) = TestCert.Ensure();
-        using var engine = new QuicEngine(certPath, keyPath, cidLength: 8, alpn: ["h3"]);
+        var engine = TestServer.Own(new QuicEngine(certPath, keyPath, cidLength: 8, alpn: ["h3"]));
 
         (_, int udpPort) = TestServer.StartDatagram(
             onDatagram: null,

@@ -34,7 +34,7 @@ internal static class QuicDeferredFaultTests
             // OnHandshakeCompleted is one of the two protected virtuals the callbacks dispatch to -
             // i.e. user code reached directly from inside iq_conn_read, with ngtcp2 on the stack.
             (string certPath, string keyPath) = TestCert.Ensure();
-            using var engine = new QuicEngine(certPath, keyPath, cidLength: 8);
+            var engine = TestServer.Own(new QuicEngine(certPath, keyPath, cidLength: 8));
             var faults = new FaultCounter();
 
             (_, int udpPort) = TestServer.StartDatagram(
@@ -63,7 +63,7 @@ internal static class QuicDeferredFaultTests
             // looks at the faulting connection reports exactly the same green with the reactor
             // thread dead underneath it.
             (string certPath, string keyPath) = TestCert.Ensure();
-            using var engine = new QuicEngine(certPath, keyPath, cidLength: 8);
+            var engine = TestServer.Own(new QuicEngine(certPath, keyPath, cidLength: 8));
             var faults = new FaultCounter();
             int adopted = 0;
 
@@ -96,7 +96,7 @@ internal static class QuicDeferredFaultTests
             // The handler parks without ever reading, so the 256-entry queue fills and the peer's
             // 257th single-byte STREAM frame overflows it.
             (string certPath, string keyPath) = TestCert.Ensure();
-            using var engine = new QuicEngine(certPath, keyPath, cidLength: 8);
+            var engine = TestServer.Own(new QuicEngine(certPath, keyPath, cidLength: 8));
 
             var park = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
             (_, int udpPort) = TestServer.StartDatagram(
@@ -145,7 +145,7 @@ internal static class QuicDeferredFaultTests
             // serving: the point is that this fault should be handled like the other eight, and a
             // Pending has to start passing the moment it is.
             (string certPath, string keyPath) = TestCert.Ensure();
-            using var engine = new QuicEngine(certPath, keyPath, cidLength: 8);
+            var engine = TestServer.Own(new QuicEngine(certPath, keyPath, cidLength: 8));
             var faults = new FaultCounter();
 
             (_, int udpPort) = TestServer.StartDatagram(
