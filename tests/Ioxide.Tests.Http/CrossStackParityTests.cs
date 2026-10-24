@@ -127,8 +127,8 @@ internal static class CrossStackParityTests
                     RequireClientCertificate = true,
                 }));
 
-                using var engine = new QuicEngine(serverCert, serverKey, cidLength: 8, alpn: ["h3"],
-                    clientCaPemPath: anchors, requireClientCertificate: true);
+                var engine = TestServer.Own(new QuicEngine(serverCert, serverKey, cidLength: 8, alpn: ["h3"],
+                    clientCaPemPath: anchors, requireClientCertificate: true));
                 (_, int udpPort) = TestServer.StartDatagram(
                     onDatagram: null,
                     quicFactory: engine.CreateFactory(),

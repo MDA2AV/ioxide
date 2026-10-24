@@ -21,7 +21,7 @@ internal static class QuicFleetJoinTests
             // dropped the Handshake packets they sent there - a long header, so never forwarded -
             // until the server gave up on the handshake 10 s later.
             (string certPath, string keyPath) = TestCert.Ensure();
-            using var engine = new QuicEngine(certPath, keyPath, cidLength: 8);
+            var engine = TestServer.Own(new QuicEngine(certPath, keyPath, cidLength: 8));
             using var holdLast = new ManualResetEventSlim(false);
             using var lastStarted = new ManualResetEventSlim(false);
 

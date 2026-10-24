@@ -40,8 +40,7 @@ internal static class H3LargeResponseTests
 
             runner.Test($"h3 buffered ({s}): a response past the send-retention ceiling is served whole", () =>
             {
-                using H3TestClient client = Connect(s, Big, out QuicEngine engine);
-                using QuicEngine _ = engine;
+                using H3TestClient client = Connect(s, Big);
 
                 (int status, string body) = client.Get("/big", timeoutMs: 60_000);
                 Assert.True(status == 200 && body.Length == Big.Length,
@@ -51,8 +50,7 @@ internal static class H3LargeResponseTests
             runner.Test($"h3 buffered ({s}): 40 one-MiB responses at once on one connection are all served", () =>
             {
                 // The shape that found it: h2load's 32 streams of 1 MiB each, handed over together.
-                using H3TestClient client = Connect(s, OneMiB, out QuicEngine engine);
-                using QuicEngine _ = engine;
+                using H3TestClient client = Connect(s, OneMiB);
 
                 (int Status, long BodyLength)[] responses = client.GetConcurrent(
                     Enumerable.Range(0, 40).Select(i => $"/part/{i}").ToArray(), timeoutMs: 60_000);
@@ -68,7 +66,7 @@ internal static class H3LargeResponseTests
             // The buffered path's capacity callback must not displace the streamed one: a writer
             // parked at the high-water is resumed by it.
             (string certPath, string keyPath) = TestCert.Ensure();
-            using var engine = new QuicEngine(certPath, keyPath, cidLength: 8, alpn: ["h3"]);
+            var engine = TestServer.Own(new QuicEngine(certPath, keyPath, cidLength: 8, alpn: ["h3"]));
 
             const int Chunks = 320;
             (_, int udpPort) = TestServer.StartDatagram(
@@ -96,10 +94,10 @@ internal static class H3LargeResponseTests
         });
     }
 
-    private static H3TestClient Connect(string stack, byte[] body, out QuicEngine engine)
+    private static H3TestClient Connect(string stack, byte[] body)
     {
         (string certPath, string keyPath) = TestCert.Ensure();
-        engine = new QuicEngine(certPath, keyPath, cidLength: 8, alpn: ["h3"]);
+        var engine = TestServer.Own(new QuicEngine(certPath, keyPath, cidLength: 8, alpn: ["h3"]));
 
         (_, int udpPort) = TestServer.StartDatagram(
             onDatagram: null,

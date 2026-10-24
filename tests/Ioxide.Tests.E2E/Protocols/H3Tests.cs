@@ -24,7 +24,7 @@ internal static class H3Tests
         runner.Test("h3: GET request/response through ioxide.nghttp3 (loopback)", () =>
         {
             (string certPath, string keyPath) = TestCert.Ensure();
-            using var engine = new QuicEngine(certPath, keyPath, cidLength: 8, alpn: ["h3"]);
+            var engine = TestServer.Own(new QuicEngine(certPath, keyPath, cidLength: 8, alpn: ["h3"]));
 
             (_, int udpPort) = TestServer.StartDatagram(
                 onDatagram: null,
@@ -44,7 +44,7 @@ internal static class H3Tests
         runner.Test("h3: streaming body upload (end-of-headers dispatch, paced window)", () =>
         {
             (string certPath, string keyPath) = TestCert.Ensure();
-            using var engine = new QuicEngine(certPath, keyPath, cidLength: 8, alpn: ["h3"]);
+            var engine = TestServer.Own(new QuicEngine(certPath, keyPath, cidLength: 8, alpn: ["h3"]));
 
             // The async overload: dispatch fires at end-of-headers and the body is pulled through
             // BodyReader while the stream is flow-control paced.
@@ -98,7 +98,7 @@ internal static class H3Tests
             // packets release, while the peer sat waiting for the response that would have
             // provoked them: first chunk stalled, second hung outright.
             (string certPath, string keyPath) = TestCert.Ensure();
-            using var engine = new QuicEngine(certPath, keyPath, cidLength: 8, alpn: ["h3"]);
+            var engine = TestServer.Own(new QuicEngine(certPath, keyPath, cidLength: 8, alpn: ["h3"]));
 
             (_, int udpPort) = TestServer.StartDatagram(
                 onDatagram: null,
@@ -136,7 +136,7 @@ internal static class H3Tests
             // 20 MiB in 64 KiB flushes, from the dispatch pass: past the 16 MiB high-water the writer
             // has to wait for acks, and its flush spun on the reactor thread that reads them instead.
             (string certPath, string keyPath) = TestCert.Ensure();
-            using var engine = new QuicEngine(certPath, keyPath, cidLength: 8, alpn: ["h3"]);
+            var engine = TestServer.Own(new QuicEngine(certPath, keyPath, cidLength: 8, alpn: ["h3"]));
 
             const int Chunks = 320;
             (_, int udpPort) = TestServer.StartDatagram(
@@ -166,7 +166,7 @@ internal static class H3Tests
         runner.Test("h3: buffered-async handler (whole body in req.Body, handler may await)", () =>
         {
             (string certPath, string keyPath) = TestCert.Ensure();
-            using var engine = new QuicEngine(certPath, keyPath, cidLength: 8, alpn: ["h3"]);
+            var engine = TestServer.Own(new QuicEngine(certPath, keyPath, cidLength: 8, alpn: ["h3"]));
 
             (_, int udpPort) = TestServer.StartDatagram(
                 onDatagram: null,
@@ -194,7 +194,7 @@ internal static class H3Tests
         runner.Test("h3: QPACK dynamic table enabled (fat cookie decodes via insertions)", () =>
         {
             (string certPath, string keyPath) = TestCert.Ensure();
-            using var engine = new QuicEngine(certPath, keyPath, cidLength: 8, alpn: ["h3"]);
+            var engine = TestServer.Own(new QuicEngine(certPath, keyPath, cidLength: 8, alpn: ["h3"]));
 
             var options = new Nghttp3Options
             {
@@ -233,7 +233,7 @@ internal static class H3Tests
         runner.Test("h3: cookies split across multiple field lines (RFC 9114 4.2.1)", () =>
         {
             (string certPath, string keyPath) = TestCert.Ensure();
-            using var engine = new QuicEngine(certPath, keyPath, cidLength: 8, alpn: ["h3"]);
+            var engine = TestServer.Own(new QuicEngine(certPath, keyPath, cidLength: 8, alpn: ["h3"]));
 
             // Echo every cookie found, in order - proves the enumerator walks BOTH field lines
             // (a Headers.TryGet("cookie") would only ever see the first).
@@ -265,7 +265,7 @@ internal static class H3Tests
         runner.Test("h3: graceful shutdown (GOAWAY) still answers the in-flight request", () =>
         {
             (string certPath, string keyPath) = TestCert.Ensure();
-            using var engine = new QuicEngine(certPath, keyPath, cidLength: 8, alpn: ["h3"]);
+            var engine = TestServer.Own(new QuicEngine(certPath, keyPath, cidLength: 8, alpn: ["h3"]));
 
             // The handler calls Shutdown() while ITS OWN request is in flight: the GOAWAY goes
             // out, new streams are refused, and this response must still reach the client.
@@ -313,7 +313,7 @@ internal static class H3Tests
     private static void LateAnswerThenGet(Func<QuicConnection, Func<ReadOnlyMemory<byte>, long, ValueTask<string>>, Task> serve)
     {
         (string certPath, string keyPath) = TestCert.Ensure();
-        using var engine = new QuicEngine(certPath, keyPath, cidLength: 8, alpn: ["h3"]);
+        var engine = TestServer.Own(new QuicEngine(certPath, keyPath, cidLength: 8, alpn: ["h3"]));
         var answeredLate = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
 
         (_, int udpPort) = TestServer.StartDatagram(

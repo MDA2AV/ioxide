@@ -26,7 +26,7 @@ internal static class QuicStreamingCreditTests
         runner.Test("quic: a paced upload whose handler credits off the engine cycle still completes", () =>
         {
             (string certPath, string keyPath) = TestCert.Ensure();
-            using var engine = new QuicEngine(certPath, keyPath, cidLength: 8);
+            var engine = TestServer.Own(new QuicEngine(certPath, keyPath, cidLength: 8));
 
             var obs = new UploadObserver();
             (_, int udpPort) = TestServer.StartDatagram(
@@ -51,7 +51,7 @@ internal static class QuicStreamingCreditTests
             // so the credit is flushed at the cycle's end. If this did not complete, the test above
             // would be measuring a broken uploader rather than the missing off-cycle flush.
             (string certPath, string keyPath) = TestCert.Ensure();
-            using var engine = new QuicEngine(certPath, keyPath, cidLength: 8);
+            var engine = TestServer.Own(new QuicEngine(certPath, keyPath, cidLength: 8));
 
             var obs = new UploadObserver();
             (_, int udpPort) = TestServer.StartDatagram(

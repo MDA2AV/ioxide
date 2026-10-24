@@ -51,7 +51,7 @@ internal static class QuicTimerTests
             TimerProbeConnection.Reset();
 
             (string certPath, string keyPath) = TestCert.Ensure();
-            using var engine = new QuicEngine(certPath, keyPath, cidLength: 8);
+            var engine = TestServer.Own(new QuicEngine(certPath, keyPath, cidLength: 8));
 
             (_, int udpPort) = TestServer.StartDatagram(
                 onDatagram: null,
@@ -120,7 +120,7 @@ internal static class QuicTimerTests
             // answer that arrives afterwards was framed by OnTimer/handle_expiry out of the send
             // retention. That is the only thing in ioxide that can produce it.
             (string certPath, string keyPath) = TestCert.Ensure();
-            using var engine = new QuicEngine(certPath, keyPath, cidLength: 8);
+            var engine = TestServer.Own(new QuicEngine(certPath, keyPath, cidLength: 8));
 
             (_, int udpPort) = TestServer.StartDatagram(
                 onDatagram: null,
@@ -154,7 +154,7 @@ internal static class QuicTimerTests
             // the answer lost and the peer silent, it was resent at the next deadline the reactor did
             // know of: the keep-alive, half the 60 s read timeout away.
             (string certPath, string keyPath) = TestCert.Ensure();
-            using var engine = new QuicEngine(certPath, keyPath, cidLength: 8);
+            var engine = TestServer.Own(new QuicEngine(certPath, keyPath, cidLength: 8));
             var answered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
 
             (_, int udpPort) = TestServer.StartDatagram(
@@ -194,7 +194,7 @@ internal static class QuicTimerTests
             // still found its way back here, the recovery above would be coming from somewhere
             // else and would say nothing about the code this file is for.
             (string certPath, string keyPath) = TestCert.Ensure();
-            using var engine = new QuicEngine(certPath, keyPath, cidLength: 8);
+            var engine = TestServer.Own(new QuicEngine(certPath, keyPath, cidLength: 8));
 
             (_, int udpPort) = TestServer.StartDatagram(
                 onDatagram: null,
@@ -225,7 +225,7 @@ internal static class QuicTimerTests
             // The client cannot resend its own Initial (no handle_expiry), so the server's flight
             // comes back only if the server's timer resends it.
             (string certPath, string keyPath) = TestCert.Ensure();
-            using var engine = new QuicEngine(certPath, keyPath, cidLength: 8);
+            var engine = TestServer.Own(new QuicEngine(certPath, keyPath, cidLength: 8));
 
             (_, int udpPort) = TestServer.StartDatagram(
                 onDatagram: null,
@@ -265,7 +265,7 @@ internal static class QuicTimerTests
             TimerFaultConnection.Reset();
 
             (string certPath, string keyPath) = TestCert.Ensure();
-            using var engine = new QuicEngine(certPath, keyPath, cidLength: 8);
+            var engine = TestServer.Own(new QuicEngine(certPath, keyPath, cidLength: 8));
 
             // Only the FIRST connection faults, so the second one measures a reactor that has
             // already survived a fault rather than one that is about to have another.
@@ -322,7 +322,7 @@ internal static class QuicTimerTests
             TimerFaultConnection.Reset();
 
             (string certPath, string keyPath) = TestCert.Ensure();
-            using var engine = new QuicEngine(certPath, keyPath, cidLength: 8);
+            var engine = TestServer.Own(new QuicEngine(certPath, keyPath, cidLength: 8));
 
             (_, int udpPort) = TestServer.StartDatagram(
                 onDatagram: null,
@@ -438,7 +438,7 @@ internal static class QuicTimerTests
             // the answer is lost and the peer stays silent, so the retransmit timer fires again and
             // again with backoff, each firing timed against the engine's own deadline.
             (string certPath, string keyPath) = TestCert.Ensure();
-            using var engine = new QuicEngine(certPath, keyPath, cidLength: 8);
+            var engine = TestServer.Own(new QuicEngine(certPath, keyPath, cidLength: 8));
             var answered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
 
             (_, int udpPort) = TestServer.StartDatagram(
@@ -474,7 +474,7 @@ internal static class QuicTimerTests
             // connection leaves: the loop stops looking once there are none. A wait bounded by that
             // leftover would wake an empty reactor every millisecond, for good.
             (string certPath, string keyPath) = TestCert.Ensure();
-            using var engine = new QuicEngine(certPath, keyPath, cidLength: 8);
+            var engine = TestServer.Own(new QuicEngine(certPath, keyPath, cidLength: 8));
 
             (_, int udpPort) = TestServer.StartDatagram(
                 onDatagram: null,
