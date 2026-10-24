@@ -29,6 +29,13 @@
       Silencing it is cheaper than padding every signature back out with tags that say nothing.
     -->
     <NoWarn>$(NoWarn);CS1591;CS1573</NoWarn>
+
+    <!--
+      The packages carrying a native library pack one build per RID under runtimes/; a
+      ProjectReference or dev run gets the build machine's copied next to its output instead.
+    -->
+    <IoxideNativeRid>linux-x64</IoxideNativeRid>
+    <IoxideNativeRid Condition="'$([System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture)' == 'Arm64'">linux-arm64</IoxideNativeRid>
   </PropertyGroup>
 
 </Project>

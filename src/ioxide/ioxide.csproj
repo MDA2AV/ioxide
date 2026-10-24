@@ -21,11 +21,12 @@
 
   <ItemGroup>
     <None Include="../../README.md" Pack="true" PackagePath="/" />
-    <!-- BoringSSL (built by scripts/build-boringssl-native.sh): packed into the nupkg's runtimes/ so
-         consumers get it with no prerequisites, and copied next to the output for ProjectReference/dev
-         runs so DllImport probing finds it. -->
-    <None Include="runtimes/linux-x64/native/libioxide_boringssl.so"
-          Pack="true" PackagePath="runtimes/linux-x64/native/"
+    <!-- BoringSSL (built by scripts/build-boringssl-native.sh), one build per RID: packed into the
+         nupkg's runtimes/ so consumers get it with no prerequisites, and the build machine's copied
+         next to the output for ProjectReference/dev runs so DllImport probing finds it. -->
+    <None Include="runtimes/linux-x64/native/libioxide_boringssl.so" Pack="true" PackagePath="runtimes/linux-x64/native/" />
+    <None Include="runtimes/linux-arm64/native/libioxide_boringssl.so" Pack="true" PackagePath="runtimes/linux-arm64/native/" />
+    <None Include="runtimes/$(IoxideNativeRid)/native/libioxide_boringssl.so"
           CopyToOutputDirectory="PreserveNewest" Link="libioxide_boringssl.so" />
   </ItemGroup>
 

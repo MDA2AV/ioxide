@@ -10,8 +10,8 @@ namespace ioxide.ngtcp2;
 /// </summary>
 internal static unsafe class Ngtcp2
 {
-    // Resolves runtimes/linux-x64/native/libioxide_ngtcp2.so from the package (or beside the app for
-    // ProjectReference builds).
+    // Resolves runtimes/<rid>/native/libioxide_ngtcp2.so (linux-x64, linux-arm64) from the package (or
+    // beside the app for ProjectReference builds).
     internal const string Lib = "ioxide_ngtcp2";
 
     // Mirrors iq_callbacks in the shim: engine events delivered on the reactor thread. Blittable

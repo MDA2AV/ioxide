@@ -51,7 +51,7 @@ the first.
 ## Requirements
 
 - **Nothing for TLS itself** - BoringSSL ships in the package as `libioxide_boringssl.so`
-  (linux-x64), built by `scripts/build-boringssl-native.sh` from a pinned commit.
+  (linux-x64 and linux-arm64), built by `scripts/build-boringssl-native.sh` from a pinned commit.
 - **Linux `tls` kernel module** - only for the kTLS opt-in (`modprobe tls`; standard on
   mainstream distros).
 
