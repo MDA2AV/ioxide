@@ -1,0 +1,25 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net11.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <RootNamespace>Epoxide.Tests</RootNamespace>
+    <AssemblyName>Epoxide.Tests.Tls</AssemblyName>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="../Epoxide.Tests.Harness/Epoxide.Tests.Harness.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- .NET 11 added System.Net.Security.TlsSession (SYSLIB5007, experimental). Every file here
+         that imports both System.Net.Security and epoxide.tls then sees an ambiguous TlsSession,
+         and neither import is droppable. One alias for the project rather than one per file, so
+         a file added later cannot reintroduce it. -->
+    <Using Include="epoxide.tls.TlsSession" Alias="TlsSession" />
+  </ItemGroup>
+
+</Project>
