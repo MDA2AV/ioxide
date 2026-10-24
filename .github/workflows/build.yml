@@ -14,7 +14,13 @@ permissions:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    # Every architecture the packages carry native libraries for runs every suite on its own
+    # hardware. Both legs pack the same tree; only x64 publishes it.
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-latest, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.runner }}
 
     # pg + redis sidecars so the e2e suite's pg/redis tests run (they skip cleanly if absent).
     services:
@@ -122,13 +128,13 @@ jobs:
         run: dotnet pack src/serving/ioxide.Kestrel/ioxide.Kestrel.csproj --configuration Release --no-build --output ./artifacts
 
       - name: Publish to NuGet
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && runner.arch == 'X64'
         env:
           NUGET_API_KEY: ${{ secrets.NUGET_API_KEY }}
         run: dotnet nuget push ./artifacts/*.nupkg --source https://api.nuget.org/v3/index.json --api-key $NUGET_API_KEY --skip-duplicate
 
       - name: Publish to GitHub Packages
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && runner.arch == 'X64'
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: dotnet nuget push ./artifacts/*.nupkg --source https://nuget.pkg.github.com/MDA2AV/index.json --api-key $GITHUB_TOKEN --skip-duplicate

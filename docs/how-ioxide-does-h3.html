@@ -489,8 +489,9 @@ reactor.QuicHandle = async (r, conn) =>
       read_stream, submit_response, writev, shutdown/close. Built by
       <code>scripts/build-nghttp3-native.sh</code>.</li>
     </ul>
-    <p>Both <code>.so</code> files are committed and packed into the NuGet
-    <code>runtimes/linux-x64/native/</code>, so consumers install nothing.</p>
+    <p>Both <code>.so</code> files are committed, one build per RID, and packed into the NuGet
+    <code>runtimes/linux-x64/native/</code> and <code>runtimes/linux-arm64/native/</code>, so
+    consumers install nothing.</p>
 
     <h2>TLS 1.3 and ALPN</h2>
     <p>QUIC folds TLS into the transport (RFC 9001): handshake messages travel in CRYPTO frames,

@@ -10,8 +10,8 @@ namespace ioxide.nghttp3;
 /// </summary>
 internal static unsafe class Nghttp3
 {
-    // Resolves runtimes/linux-x64/native/libioxide_nghttp3.so from the package (or beside the app for
-    // ProjectReference builds).
+    // Resolves runtimes/<rid>/native/libioxide_nghttp3.so (linux-x64, linux-arm64) from the package (or
+    // beside the app for ProjectReference builds).
     internal const string Lib = "ioxide_nghttp3";
 
     // Mirrors ih3_callbacks in the shim: request events delivered on the reactor thread. Blittable
