@@ -66,6 +66,10 @@ internal static class RingSetupMessageTests
                 new ServerConfig { Incremental = new IncrementalOptions { MaxConnections = 0 } }),
             ("Incremental.MaxConnections above 65534", "config.Incremental.MaxConnections",
                 new ServerConfig { Incremental = new IncrementalOptions { MaxConnections = 65_535 } }),
+            ("CqEntries below RingEntries", "config.CqEntries",
+                new ServerConfig { RingEntries = 8192, CqEntries = 4096 }),
+            ("CqEntries above 65536", "config.CqEntries",
+                new ServerConfig { CqEntries = 131_072 }),
         ];
 
         foreach ((string name, string property, ServerConfig config) in refused)
@@ -79,6 +83,7 @@ internal static class RingSetupMessageTests
             _ = new Reactor(0, new ServerConfig
             {
                 RecvSlots = 32_768,
+                CqEntries = 65_536,
                 Tcp = new TcpOptions { RecvQueueEntries = 1, WriteSlabSize = 1 },
             });
             _ = new Reactor(0, new ServerConfig

@@ -107,7 +107,7 @@ internal static class HardeningTests
             // kernel was still filling it - from the second such ending on a connection, the handler
             // was given the buffer's first bytes while the peer's new ones landed further along.
             //
-            // RingEntries 4 is an 8-entry CQ. Each round sends one message on every connection from the
+            // CqEntries 8 is an 8-entry CQ. Each round sends one message on every connection from the
             // reactor thread, so all 24 recvs complete in its next enter and most of them overflow it.
             // Nine 32-byte messages never fill a 1 KiB buffer, so every ending leaves one part filled.
             const int Connections = 24;
@@ -118,6 +118,7 @@ internal static class HardeningTests
                 new ServerConfig
                 {
                     RingEntries = 4,
+                    CqEntries = 8,
                     Incremental = new IncrementalOptions { MaxConnections = 64, RecvSlots = 4, RecvBufferSize = 1024 },
                     Tcp = new TcpOptions
                     {

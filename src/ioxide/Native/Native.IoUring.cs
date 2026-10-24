@@ -69,6 +69,9 @@ public static unsafe partial class Native {
     public const uint   IORING_SETUP_SINGLE_ISSUER = 1u << 12;
     public const uint   IORING_SETUP_DEFER_TASKRUN = 1u << 13;
 
+    // The CQ takes io_uring_params.cq_entries instead of twice the SQ.
+    public const uint   IORING_SETUP_CQSIZE        = 1u << 3;
+
     // Kernel 6.6+: drop the SQ indirection array (slot i in the SQ ring is
     // implicitly SQE i). One fewer store + cache line per submission.
     public const uint   IORING_SETUP_NO_SQARRAY    = 1u << 16;

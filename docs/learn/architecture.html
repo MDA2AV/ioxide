@@ -167,7 +167,8 @@
     <table>
       <tr><th>Option</th><th>Default</th><th>Meaning</th></tr>
       <tr><td><code>ReactorCount</code></td><td>12</td><td>reactors = threads; run one per core</td></tr>
-      <tr><td><code>RingEntries</code></td><td>8192</td><td>io_uring SQ/CQ depth</td></tr>
+      <tr><td><code>RingEntries</code></td><td>8192</td><td>io_uring SQ depth</td></tr>
+      <tr><td><code>CqEntries</code></td><td>4 &times; RingEntries</td><td>io_uring CQ depth, at most 65536</td></tr>
       <tr><td><code>DualStack</code></td><td>false</td><td>bind listeners (TCP and UDP) as dual-stack IPv6</td></tr>
       <tr><td><code>RecvBufferSize</code></td><td>32 KB</td><td>shared mode: bytes per recv buffer</td></tr>
       <tr><td><code>RecvSlots</code></td><td>4096</td><td>shared mode: buffers per reactor (power of two)</td></tr>

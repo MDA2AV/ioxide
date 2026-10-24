@@ -40,6 +40,7 @@ public sealed unsafe partial class Reactor
 
     private readonly ushort _port;
     private readonly uint _ringEntries;
+    private readonly uint _cqEntries;
     private readonly uint _recvBufferSize;
 
     // user_data: [63:56] kind | [47:32] connection generation | [31:0] fd (or client-op slot).
@@ -107,6 +108,9 @@ public sealed unsafe partial class Reactor
     // The kernel takes a provided-buffer ring of a power of two below 65536 entries.
     private const int MaxBufRingEntries = 32768;
 
+    // The kernel's CQ limit: twice the 32768 SQ entries it allows.
+    private const uint MaxCqEntries = 65536;
+
     // Per-connection gids run 2..MaxConnections+1 in a ushort; one more wraps onto 0 and 1, the UDP and
     // shared rings' ids.
     private const int MaxIncrementalConnections = ushort.MaxValue - 1;
@@ -129,10 +133,16 @@ public sealed unsafe partial class Reactor
 
         _port = _tcp.Port;
         _ringEntries = config.RingEntries;
+        _cqEntries = config.CqEntries != 0 ? config.CqEntries : (uint)Math.Min(4L * config.RingEntries, MaxCqEntries);
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(config.OpSlots);
 
         // Here rather than at first use, which for most of these is the first accept, inside CQE
         // dispatch, where a bad value ends or hangs the reactor (#102).
+        if (config.CqEntries != 0)
+        {
+            ArgumentOutOfRangeException.ThrowIfLessThan(config.CqEntries, config.RingEntries, "config.CqEntries");
+            ArgumentOutOfRangeException.ThrowIfGreaterThan(config.CqEntries, MaxCqEntries, "config.CqEntries");
+        }
         ThrowUnlessPow2(_tcp.RecvQueueEntries, "config.Tcp.RecvQueueEntries");
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(_tcp.WriteSlabSize, "config.Tcp.WriteSlabSize");
         if (config.Incremental is { } incremental)
