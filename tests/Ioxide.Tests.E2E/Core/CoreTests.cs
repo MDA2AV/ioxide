@@ -1,3 +1,6 @@
+using System.Buffers;
+using System.Buffers.Binary;
+using System.IO.Pipelines;
 using System.Net;
 using System.Net.Sockets;
 using System.Runtime.InteropServices;
@@ -108,6 +111,68 @@ internal static class CoreTests
 
         runner.Test("core: response larger than the write slab (Segmented SENDMSG)",
             () => BigBodyRoundTrip(WriteOverflowStrategy.Segmented));
+
+        runner.Test("core: two connections writing past their slabs from the thread pool each get only their own bytes (Segmented)", () =>
+        {
+            // Past the primary slab a Segmented response spills into slabs from the reactor's pool,
+            // rented on the writer's thread and returned on the reactor's when the send completes. A
+            // handler that resumes on the thread pool, as one written with ConfigureAwait(false) does,
+            // writes from there - so two connections rent while the reactor returns, and the unlocked
+            // pool handed one slab to both: each wrote into the other's response (#402). Every byte is
+            // checked against the pattern of the request it belongs to.
+            (int port, _, _) = TestServer.StartConfigured(PatternedResponses,
+                new ServerConfig
+                {
+                    RecvBufferSize = 4096, RecvSlots = 64,
+                    Tcp = new TcpOptions
+                    {
+                        WriteSlabSize = 4096, PoolMax = 8, RecvQueueEntries = 64,
+                        WriteOverflow = WriteOverflowStrategy.Segmented,
+                    },
+                });
+
+            const int Clients = 2, Requests = 60;
+            string?[] wrong = new string?[Clients];
+            int busy = 0, overlapped = 0;
+            Task[] clients = Enumerable.Range(0, Clients).Select(c => Task.Run(() =>
+            {
+                using var client = new TcpClient();
+                client.Connect(IPAddress.Loopback, port);
+                NetworkStream stream = client.GetStream();
+                stream.ReadTimeout = 10_000;
+                var rng = new Random(c);
+                byte[] request = new byte[8];
+                for (int r = 0; r < Requests && wrong[c] == null; r++)
+                {
+                    int length = rng.Next(20_000, 200_000);   // 5 to 50 slabs
+                    int seed = c * 1_000_000 + r;
+                    BinaryPrimitives.WriteInt32LittleEndian(request, length);
+                    BinaryPrimitives.WriteInt32LittleEndian(request.AsSpan(4), seed);
+                    if (Interlocked.Increment(ref busy) == Clients)
+                    {
+                        Interlocked.Increment(ref overlapped);   // every connection is mid-response at once
+                    }
+
+                    stream.Write(request);
+                    byte[] response = new byte[length];
+                    stream.ReadExactly(response);
+                    Interlocked.Decrement(ref busy);
+
+                    for (int i = 0; i < length; i++)
+                    {
+                        if (response[i] != Pattern(seed, i))
+                        {
+                            wrong[c] = $"connection {c}, request {r}: byte {i} of {length} was {response[i]}, not {Pattern(seed, i)}";
+                            break;
+                        }
+                    }
+                }
+            })).ToArray();
+
+            Assert.True(Task.WaitAll(clients, 30_000), "the clients never finished");
+            Assert.True(overlapped >= 10, $"only {overlapped} requests overlapped the other connection's: the race never ran");
+            Assert.True(wrong.All(w => w == null), wrong.FirstOrDefault(w => w != null) ?? "");
+        });
 
         runner.Test("core: a span the write slab cannot grow to fails the write instead of spinning the reactor (Grow)", () =>
         {
@@ -608,6 +673,65 @@ internal static class CoreTests
         Assert.True(bodyAt >= 0, $"no response from {address}: '{text}'");
         return text[(bodyAt + 4)..];
     }
+
+    // Answers each 8-byte request (length, seed) with that many bytes of Pattern(seed, i), written from
+    // the thread pool: the hop a handler awaiting with ConfigureAwait(false) takes.
+    private static async Task PatternedResponses(Reactor _, TcpConnection conn)
+    {
+        var reader = new TcpConnectionPipeReader(conn);
+        var writer = new TcpConnectionPipeWriter(conn);
+        try
+        {
+            while (true)
+            {
+                ReadResult read = await reader.ReadAsync();
+                ReadOnlySequence<byte> buffer = read.Buffer;
+                if (buffer.Length < 8)
+                {
+                    if (read.IsCompleted)
+                    {
+                        return;
+                    }
+                    reader.AdvanceTo(buffer.Start, buffer.End);
+                    continue;
+                }
+
+                byte[] head = buffer.Slice(0, 8).ToArray();
+                reader.AdvanceTo(buffer.GetPosition(8));
+
+                await Task.Run(() => { }).ConfigureAwait(false);
+                FillPattern(writer, BinaryPrimitives.ReadInt32LittleEndian(head), BinaryPrimitives.ReadInt32LittleEndian(head.AsSpan(4)));
+                if ((await writer.FlushAsync().ConfigureAwait(false)).IsCompleted)
+                {
+                    return;
+                }
+            }
+        }
+        finally
+        {
+            reader.Complete();
+            writer.Complete();
+            conn.DecRef();
+        }
+    }
+
+    private static void FillPattern(TcpConnectionPipeWriter writer, int length, int seed)
+    {
+        for (int at = 0; at < length;)
+        {
+            Span<byte> span = writer.GetSpan(Math.Min(4096, length - at));
+            int n = Math.Min(span.Length, length - at);
+            for (int i = 0; i < n; i++)
+            {
+                span[i] = Pattern(seed, at + i);
+            }
+            writer.Advance(n);
+            at += n;
+        }
+    }
+
+    // Differs per request and per 4 KiB, so a slab another response wrote into cannot pass for this one.
+    private static byte Pattern(int seed, int i) => unchecked((byte)(seed * 131 + i * 7 + (i >> 12)));
 
     // A 48 KiB body against a 4 KiB write slab forces the overflow machinery; the strategy picks
     // Grow (realloc, one SEND) or Segmented (pooled slabs, vectored SENDMSG).

@@ -80,23 +80,39 @@ public sealed unsafe partial class Reactor
     private readonly Stack<TcpConnection> _pool;
 
     // Per-reactor pool of base-size write slabs, rented by connections in Segmented overflow mode.
-    // Reactor-thread-only, so no locking. Capped so a burst of large responses doesn't retain memory.
+    // Capped so a burst of large responses doesn't retain memory. Locked: a slab is rented on the
+    // writer's thread, wherever its handler runs, and returned on the reactor's when the send that
+    // carried it completes. Unlocked, a push and a pop that overlap hand one slab to two connections
+    // (#402). The lock is only taken past the primary slab, where a response already pays for a SENDMSG.
     private readonly Stack<nint> _writeSlabPool = new();
+    private readonly object _writeSlabGate = new();
     private const int WriteSlabPoolMax = 4096;
 
     internal nint RentWriteSlab()
-        => _writeSlabPool.TryPop(out nint p) ? p : (nint)NativeMemory.AlignedAlloc((nuint)_tcp.WriteSlabSize, 64);
+    {
+        lock (_writeSlabGate)
+        {
+            if (_writeSlabPool.TryPop(out nint p))
+            {
+                return p;
+            }
+        }
+
+        return (nint)NativeMemory.AlignedAlloc((nuint)_tcp.WriteSlabSize, 64);
+    }
 
     internal void ReturnWriteSlab(nint p)
     {
-        if (_writeSlabPool.Count < WriteSlabPoolMax)
+        lock (_writeSlabGate)
         {
-            _writeSlabPool.Push(p);
+            if (_writeSlabPool.Count < WriteSlabPoolMax)
+            {
+                _writeSlabPool.Push(p);
+                return;
+            }
         }
-        else
-        {
-            NativeMemory.AlignedFree((void*)p);
-        }
+
+        NativeMemory.AlignedFree((void*)p);
     }
 
     // Incremental-mode sizing (see Reactor.Incremental.cs).

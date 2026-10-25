@@ -165,9 +165,12 @@ public sealed unsafe partial class Reactor
         {
             pooled.Dispose();
         }
-        while (_writeSlabPool.TryPop(out nint slab))
+        lock (_writeSlabGate)   // a live handler may still rent or return one (see RentWriteSlab)
         {
-            NativeMemory.AlignedFree((void*)slab);
+            while (_writeSlabPool.TryPop(out nint slab))
+            {
+                NativeMemory.AlignedFree((void*)slab);
+            }
         }
 
         // Shared provided-buffer ring (incremental mode allocates per connection instead).
