@@ -1,5 +1,4 @@
 using System.IO.Pipelines;
-using System.Runtime.CompilerServices;
 using System.Threading.Tasks.Sources;
 // ReSharper disable SuggestVarOrType_BuiltInTypes
 
@@ -7,10 +6,11 @@ namespace ioxide;
 
 /// <summary>
 /// Adapts the <see cref="TcpConnection"/> write API to a <see cref="PipeWriter"/>. Writes go straight
-/// into the connection's slab; a parked flush chains onto the connection's value-task source
-/// instead of an async state machine, so the adapter allocates nothing at steady state.
+/// into the connection's slab; a parked flush is the connection's own flush listener instead of an
+/// async state machine or a second value-task source (see <see cref="IFlushListener"/>), so the
+/// adapter allocates nothing at steady state.
 /// </summary>
-public sealed class TcpConnectionPipeWriter : PipeWriter, IValueTaskSource<FlushResult>
+public sealed class TcpConnectionPipeWriter : PipeWriter, IValueTaskSource<FlushResult>, IFlushListener
 {
     private readonly TcpConnection _conn;
 
@@ -18,8 +18,6 @@ public sealed class TcpConnectionPipeWriter : PipeWriter, IValueTaskSource<Flush
     {
         RunContinuationsAsynchronously = false,
     };
-    private ValueTaskAwaiter _pendingFlush;
-    private readonly Action _onFlushDone;
 
     private bool _completed;
     private bool _cancelRequested;
@@ -28,7 +26,6 @@ public sealed class TcpConnectionPipeWriter : PipeWriter, IValueTaskSource<Flush
     public TcpConnectionPipeWriter(TcpConnection connection)
     {
         _conn = connection ?? throw new ArgumentNullException(nameof(connection));
-        _onFlushDone = OnFlushDone;
     }
 
     public override bool CanGetUnflushedBytes => true;
@@ -53,24 +50,25 @@ public sealed class TcpConnectionPipeWriter : PipeWriter, IValueTaskSource<Flush
         }
 
         _unflushed = 0;
-        ValueTask inner = _conn.FlushAsync();
 
-        if (inner.IsCompletedSuccessfully)
+        if (_conn.TryFlushOrPark(this))
         {
             return new ValueTask<FlushResult>(new FlushResult(isCanceled: false, isCompleted: _completed || _conn.IsClosed));
         }
 
-        _core.Reset();
-        _pendingFlush = inner.GetAwaiter();
-        _pendingFlush.UnsafeOnCompleted(_onFlushDone);
+        // The arm reset the core first (OnParking), so the version is read after it.
         return new ValueTask<FlushResult>(this, _core.Version);
     }
 
-    // Completion of a parked flush - runs inline on the reactor.
-    private void OnFlushDone()
-    {
-        _pendingFlush.GetResult();
+    // The connection is arming this writer's flush, past its guards and with something staged: the
+    // caller's value task, ready before the arm - off the reactor, the flush can complete before
+    // FlushAsync returns.
+    void IFlushListener.OnParking() => _core.Reset();
 
+    // The connection's flush completed while this writer was parked on it - inline on the reactor
+    // for a send, on the releasing thread for a flush its connection closed under.
+    void IFlushListener.OnFlushDone()
+    {
         bool canceled = _cancelRequested;
         _cancelRequested = false;
 

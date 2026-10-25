@@ -311,7 +311,10 @@ internal void Clear()
       <li><b>Lost-wakeup-free read</b> - <code>ReadAsync</code> uses an <code>_armed</code> flag plus
       a sticky <code>_pending</code>, with a re-check between arming and returning the task, so a
       completion that races the arm is never lost. Continuations are synchronous
-      (<code>RunContinuationsAsynchronously = false</code>) - that's what makes resume inline.</li>
+      (<code>RunContinuationsAsynchronously = false</code>) - that's what makes resume inline. An
+      adapter parked through <code>TryReadOrPark</code> / <code>TryFlushOrPark</code> gets the same
+      protocol, plus one rule: whichever side takes the arm back delivers, so the adapter is called
+      exactly once - there is no unregistered value-task source to absorb a second delivery.</li>
       <li><b>Read snapshot</b> - <code>ReadAsync</code> returns a <code>RecvSnapshot</code> (a tail
       marker + closed flag). The handler then drains slices up to that tail with
       <code>TryGetItem</code> / <code>GetSnapshotMemories</code>, and returns their buffers with
@@ -402,13 +405,16 @@ internal void Clear()
     <ul>
       <li><b>TcpConnectionPipeReader</b> (<code>Connection/Tcp/TcpConnectionPipeReader.cs</code>) - adapts the
       raw read API to <code>System.IO.Pipelines.PipeReader</code>, allocation-free at steady state: a
-      parked read chains onto the connection's value-task source (no async state machine), recv slices
-      live in pooled segments on a persistent chain, and <code>AdvanceTo</code> trims the consumed
-      front and returns those buffers. It honors <code>examined</code> - when everything held has been
-      examined, it waits for new bytes instead of returning the same data.</li>
+      parked read is the connection's own read listener (<code>IRecvListener</code>) - the recv
+      completion calls the reader, which completes the one value task its caller awaits, so there is
+      no async state machine and no second value-task source in between. Recv slices live in pooled
+      segments on a persistent chain, and <code>AdvanceTo</code> trims the consumed front and returns
+      those buffers. It honors <code>examined</code> - when everything held has been examined, it
+      waits for new bytes instead of returning the same data.</li>
       <li><b>TcpConnectionPipeWriter</b> / <b>TcpConnectionStream</b> / <b>TcpConnectionDualPipe</b>
-      (<code>Connection/Tcp/</code>) - a <code>PipeWriter</code> over the write slab, a
-      <code>Stream</code> (so <code>SslStream</code> and other BCL code can ride a connection - see
+      (<code>Connection/Tcp/</code>) - a <code>PipeWriter</code> over the write slab, parked on the
+      connection's flush the same way (<code>IFlushListener</code>), a <code>Stream</code> (so
+      <code>SslStream</code> and other BCL code can ride a connection - see
       <a href="dev-tls.html">TLS internals</a>), and a duplex pipe pairing.</li>
     </ul>
 <p class="src"><b>TcpConnectionStream.cs</b> · the Stream write bridge - stage into the slab, then chain onto the connection's flush source (no async state machine, so an SslStream write still resumes inline)</p>

@@ -20,6 +20,10 @@ public sealed unsafe partial class TcpConnection : IValueTaskSource
     private int _flushArmed;
     private int _flushInProgress;
 
+    // The adapter parked on the flush in place of an awaiter (TryFlushOrPark), or null for FlushAsync's.
+    // Set past the in-progress guard and before the arm, so whoever disarms the flush sees it.
+    private IFlushListener? _flushListener;
+
     internal bool FlushSubmitted => Volatile.Read(ref _flushArmed) == 2;
 
     /// <summary>
@@ -105,6 +109,32 @@ public sealed unsafe partial class TcpConnection : IValueTaskSource
         return FlushCore();
     }
 
+    /// <summary>
+    /// <see cref="FlushAsync"/> for an adapter that parks itself instead of an awaiter: true when the
+    /// flush is already over (nothing staged, or the connection closed), false when it was handed to
+    /// the reactor - and then whichever path disarms it calls <paramref name="listener"/>, once, on
+    /// its own thread.
+    /// </summary>
+    internal bool TryFlushOrPark(IFlushListener listener)
+    {
+        if (Volatile.Read(ref _closed) == 1)
+        {
+            if (!FlushSubmitted)
+            {
+                DropStaged();
+            }
+
+            return true;
+        }
+
+        if (Interlocked.Exchange(ref _flushInProgress, 1) == 1)
+        {
+            throw new InvalidOperationException("FlushAsync already in progress.");
+        }
+
+        return !ArmFlush(listener, out _);
+    }
+
     // The connection is already torn down, so the staged bytes are dropped rather than kept:
     // nothing will ever send them, and leaving the tail where it was made every later write append
     // to a slab that only ever grew - a writer that keeps producing against a peer that has gone
@@ -123,9 +153,15 @@ public sealed unsafe partial class TcpConnection : IValueTaskSource
         }
     }
 
-    // Both entry points past their guards: whoever gets here owns _flushInProgress and is the one
-    // flush the connection is allowed to have outstanding.
     private ValueTask FlushCore()
+        => ArmFlush(null, out int gen) ? new ValueTask(this, (short)gen) : default;
+
+    // Every entry point past its guard: whoever gets here owns _flushInProgress and is the one flush
+    // the connection is allowed to have outstanding. False when nothing was staged - the flush is
+    // over before it started, and the listener slot was never touched. <paramref name="listener"/>
+    // is the adapter parking on the flush, or null for FlushAsync's awaiter; <paramref name="gen"/>
+    // is the generation the flush was queued under.
+    private bool ArmFlush(IFlushListener? listener, out int gen)
     {
         int target = WriteTail;
         for (int i = 0; i < _ovCount; i++)
@@ -135,12 +171,17 @@ public sealed unsafe partial class TcpConnection : IValueTaskSource
         if (target == 0)
         {
             Volatile.Write(ref _flushInProgress, 0);
+            gen = 0;
 
-            return default;
+            return false;
         }
 
         // Before arming: once armed, a close on the reactor can complete the flush, and a Reset after it would lose that.
+        // The same goes for the listener's own value task, and the slot the disarming path reads: both
+        // are set here, past the guard and with something to send, and published by the arm below.
         _flushSignal.Reset();
+        listener?.OnParking();
+        _flushListener = listener;
         if (Interlocked.CompareExchange(ref _flushArmed, 1, 0) != 0)
         {
             throw new InvalidOperationException("FlushAsync already armed.");
@@ -158,7 +199,7 @@ public sealed unsafe partial class TcpConnection : IValueTaskSource
 
         // The generation lets the reactor drop a flush whose connection closed (or
         // whose fd was reused) before the queue drained.
-        int gen = Volatile.Read(ref _generation);
+        gen = Volatile.Read(ref _generation);
 
         _reactor.EnqueueFlush(ClientFd, gen);
 
@@ -169,7 +210,7 @@ public sealed unsafe partial class TcpConnection : IValueTaskSource
             ReleaseParkedFlush();
         }
 
-        return new ValueTask(this, (short)gen);
+        return true;
     }
 
     // The reactor takes a queued flush to the kernel. Fails if it was released first.
@@ -181,8 +222,23 @@ public sealed unsafe partial class TcpConnection : IValueTaskSource
         if (Interlocked.CompareExchange(ref _flushArmed, 0, 1) == 1)
         {
             Volatile.Write(ref _flushInProgress, 0);
-            _flushSignal.SetResult(true);
+            DeliverFlush();
         }
+    }
+
+    // The one signal of a flush whose arm the caller took back: to the adapter parked on it, or to
+    // FlushAsync's awaiter. The slot is cleared first, as the listener may flush again inline.
+    private void DeliverFlush()
+    {
+        IFlushListener? listener = _flushListener;
+        if (listener != null)
+        {
+            _flushListener = null;
+            listener.OnFlushDone();
+            return;
+        }
+
+        _flushSignal.SetResult(true);
     }
 
     // Called by the reactor's send-completion path.
@@ -203,7 +259,7 @@ public sealed unsafe partial class TcpConnection : IValueTaskSource
         // reactor thread and crashes the process.
         if (Interlocked.Exchange(ref _flushArmed, 0) != 0)
         {
-            _flushSignal.SetResult(true);
+            DeliverFlush();
         }
     }
 

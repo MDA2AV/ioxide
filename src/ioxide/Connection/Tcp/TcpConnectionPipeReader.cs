@@ -1,6 +1,5 @@
 using System.Buffers;
 using System.IO.Pipelines;
-using System.Runtime.CompilerServices;
 using System.Threading.Tasks.Sources;
 using ioxide.utils;
 
@@ -8,12 +7,13 @@ namespace ioxide;
 
 /// <summary>
 /// Adapts the raw <see cref="TcpConnection"/> read API to a <see cref="PipeReader"/>, allocation-free
-/// at steady state: a parked read chains onto the connection's value-task source (no async state
-/// machine), recv slices live in pooled segments on a persistent chain, and consumption trims the
-/// chain's front. Honors <c>examined</c>: when everything held has been examined, ReadAsync waits
-/// for new bytes instead of returning the same data again.
+/// at steady state: a parked read is the connection's own read listener (no async state machine, and
+/// no second value-task source in between - see <see cref="IRecvListener"/>), recv slices live in
+/// pooled segments on a persistent chain, and consumption trims the chain's front. Honors
+/// <c>examined</c>: when everything held has been examined, ReadAsync waits for new bytes instead of
+/// returning the same data again.
 /// </summary>
-public sealed unsafe class TcpConnectionPipeReader : PipeReader, IValueTaskSource<ReadResult>, IRecvBufferHolder
+public sealed unsafe class TcpConnectionPipeReader : PipeReader, IValueTaskSource<ReadResult>, IRecvBufferHolder, IRecvListener
 {
     // One pooled object per held recv slice: sequence segment + reusable memory
     // manager + the original ring item (needed to return the buffer).
@@ -54,13 +54,12 @@ public sealed unsafe class TcpConnectionPipeReader : PipeReader, IValueTaskSourc
     private readonly Stack<Slice> _pool = new();
     private ReadOnlySequence<byte> _lastSequence;
 
-    // Parked-read plumbing: chain onto the connection's IVTS, complete our own.
+    // Parked-read plumbing: the connection calls OnRecvReady when its read completes, and that
+    // completes the one value task the caller awaits - this core's.
     private ManualResetValueTaskSourceCore<ReadResult> _core = new()
     {
         RunContinuationsAsynchronously = false,
     };
-    private ValueTaskAwaiter<RecvSnapshot> _pendingRead;
-    private readonly Action _onRecvReady;
 
     private bool _completed;
     private bool _cancelRequested;
@@ -72,7 +71,6 @@ public sealed unsafe class TcpConnectionPipeReader : PipeReader, IValueTaskSourc
     public TcpConnectionPipeReader(TcpConnection connection)
     {
         _conn = connection ?? throw new ArgumentNullException(nameof(connection));
-        _onRecvReady = OnRecvReady;
 
         // So the reactor can reclaim at recycle what this reader dequeued and never gave back.
         _conn.BufferHolder = this;
@@ -96,20 +94,16 @@ public sealed unsafe class TcpConnectionPipeReader : PipeReader, IValueTaskSourc
                 : new ValueTask<ReadResult>(BuildResult(isCanceled: false));
         }
 
-        // Everything held was examined - wait for new bytes.
+        // Everything held was examined - wait for new bytes. A park resets the core first (OnParking),
+        // so the version is read after it.
         while (true)
         {
-            ValueTask<RecvSnapshot> pending = _conn.ReadAsync();
-
-            if (!pending.IsCompletedSuccessfully)
+            if (!_conn.TryReadOrPark(this, out RecvSnapshot snapshot))
             {
-                _core.Reset();
-                _pendingRead = pending.GetAwaiter();
-                _pendingRead.UnsafeOnCompleted(_onRecvReady);
                 return new ValueTask<ReadResult>(this, _core.Version);
             }
 
-            if (Ingest(pending.Result) || _connectionClosed || _cancelRequested)
+            if (Ingest(snapshot) || _connectionClosed || _cancelRequested)
             {
                 if (LostToOverflow)
                 {
@@ -123,29 +117,45 @@ public sealed unsafe class TcpConnectionPipeReader : PipeReader, IValueTaskSourc
         }
     }
 
-    // Completion of a parked conn.ReadAsync - runs inline on the reactor.
-    private void OnRecvReady()
+    // The connection is parking this reader, past its guards: the caller's value task, ready before
+    // the arm. Not for a re-park from inside OnRecvReady, whose caller is still waiting on the one it has.
+    void IRecvListener.OnParking()
     {
-        RecvSnapshot snapshot = _pendingRead.GetResult();
+        if (!_reparking)
+        {
+            _core.Reset();
+        }
+    }
 
+    // OnRecvReady's re-park for the same caller, on the delivering thread.
+    private bool _reparking;
+
+    // The connection's read completed while this reader was parked on it - inline on the reactor for
+    // a recv, on the closing thread for a close.
+    void IRecvListener.OnRecvReady(RecvSnapshot snapshot)
+    {
         if (!Ingest(snapshot) && !_connectionClosed && !_cancelRequested)
         {
             // Nothing new: re-arm without completing the caller.
-            while (true)
+            _reparking = true;
+            try
             {
-                ValueTask<RecvSnapshot> pending = _conn.ReadAsync();
-
-                if (!pending.IsCompletedSuccessfully)
+                while (true)
                 {
-                    _pendingRead = pending.GetAwaiter();
-                    _pendingRead.UnsafeOnCompleted(_onRecvReady);
-                    return;
-                }
+                    if (!_conn.TryReadOrPark(this, out snapshot))
+                    {
+                        return;
+                    }
 
-                if (Ingest(pending.Result) || _connectionClosed || _cancelRequested)
-                {
-                    break;
+                    if (Ingest(snapshot) || _connectionClosed || _cancelRequested)
+                    {
+                        break;
+                    }
                 }
+            }
+            finally
+            {
+                _reparking = false;   // before the caller resumes: its next read is a new one
             }
         }
 
@@ -189,8 +199,6 @@ public sealed unsafe class TcpConnectionPipeReader : PipeReader, IValueTaskSourc
             _heldBytes += item.Len;
             any = true;
         }
-
-        _conn.ResetRead();
 
         if (snapshot.IsClosed)
         {

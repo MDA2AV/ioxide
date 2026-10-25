@@ -122,7 +122,7 @@ public sealed unsafe partial class TcpConnection
 
         if (Interlocked.Exchange(ref _armed, 0) == 1)
         {
-            _readSignal.SetResult(new RecvSnapshot(_recv.SnapshotTail(), isClosed: true));
+            DeliverRead(new RecvSnapshot(_recv.SnapshotTail(), isClosed: true));
         }
         else
         {
@@ -262,6 +262,9 @@ public sealed unsafe partial class TcpConnection
         Volatile.Write(ref _recvOverflowed, 0);
         Volatile.Write(ref _flushArmed, 0);
         Volatile.Write(ref _flushInProgress, 0);
+        // Normally empty already: the teardown's MarkClosed delivered to any adapter parked here.
+        _recvListener = null;
+        _flushListener = null;
         Volatile.Write(ref FlushArmedMs, 0);
         Volatile.Write(ref ReadParkedMs, 0);
         FlushSeenMs = 0;
