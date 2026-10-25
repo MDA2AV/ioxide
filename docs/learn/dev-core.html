@@ -289,7 +289,7 @@ internal void Clear()
     // Bump first: stale IVTS tokens now resolve to Closed(), stale CQEs fail the gen check.
     Interlocked.Increment(ref _generation);
 
-    Volatile.Write(ref _armed, 0);
+    Volatile.Write(ref _readWaiter, null);
     Volatile.Write(ref _closed, 0);
     // ...reset the rest of the per-connection state
 }</code></pre>
@@ -308,13 +308,21 @@ internal void Clear()
       connection's generation snapshot. After a pool recycle bumps the generation,
       <code>GetResult</code>/<code>GetStatus</code>/<code>OnCompleted</code> see the token mismatch
       and resolve the stale awaiter to <code>Closed()</code> instead of a torn result.</li>
-      <li><b>Lost-wakeup-free read</b> - <code>ReadAsync</code> uses an <code>_armed</code> flag plus
-      a sticky <code>_pending</code>, with a re-check between arming and returning the task, so a
-      completion that races the arm is never lost. Continuations are synchronous
-      (<code>RunContinuationsAsynchronously = false</code>) - that's what makes resume inline. An
-      adapter parked through <code>TryReadOrPark</code> / <code>TryFlushOrPark</code> gets the same
-      protocol, plus one rule: whichever side takes the arm back delivers, so the adapter is called
-      exactly once - there is no unregistered value-task source to absorb a second delivery.</li>
+      <li><b>One waiter slot</b> - a read that has to wait parks in <code>_readWaiter</code>: the
+      adapter that parked itself (<code>IRecvListener</code>, the pipe reader), or the connection
+      for <code>ReadAsync</code>'s own awaiter. Both go through <code>TryReadOrPark</code>, in three
+      steps: a <code>CompareExchange</code> claims the slot with a mark no completion delivers to, so
+      a read racing it is refused having touched nothing; the listener readies its value task
+      (<code>OnParking</code>); a second <code>CompareExchange</code> publishes the listener. A
+      re-check after the claim catches a completion that landed just before it; one that lands while
+      the listener readies marks the claim, and the read serves what it queued instead of parking.
+      A completion takes a published park back with one <code>CompareExchange</code> and is the only
+      side that delivers, so every park is delivered exactly once; with nothing parked, a sticky
+      <code>_pending</code> makes the next read return at once. Flushes signal the listener armed
+      with them the same way (<code>IFlushListener</code>), taken before the in-progress guard is
+      let go. Continuations are synchronous (<code>RunContinuationsAsynchronously = false</code>) -
+      that's what makes resume inline. <code>ResetRead</code> is a no-op kept for older callers:
+      a read readies its own value task when it parks.</li>
       <li><b>Read snapshot</b> - <code>ReadAsync</code> returns a <code>RecvSnapshot</code> (a tail
       marker + closed flag). The handler then drains slices up to that tail with
       <code>TryGetItem</code> / <code>GetSnapshotMemories</code>, and returns their buffers with

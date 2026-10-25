@@ -6,11 +6,13 @@ using ioxide.utils;
 namespace ioxide;
 
 /// <summary>
-/// Read side. The handler may run on any thread; coordination uses Interlocked on the arm flag
-/// plus a sticky _pending to close the lost-wakeup race. Pool-managed: _generation invalidates
-/// awaiters from a previous life.
+/// Read side. The handler may run on any thread. A read that has to wait parks in one slot,
+/// _readWaiter: it claims the slot, readies its value task, then publishes itself there, and only the
+/// completion that takes it back delivers - while a sticky _pending keeps a completion that found
+/// nothing parked for the next read. Pool-managed: _generation invalidates awaiters from a previous
+/// life.
 /// </summary>
-public sealed unsafe partial class TcpConnection : IValueTaskSource<RecvSnapshot>
+public sealed unsafe partial class TcpConnection : IValueTaskSource<RecvSnapshot>, IRecvListener
 {
     internal TcpConnection SetFd(int fd)
     {
@@ -22,13 +24,27 @@ public sealed unsafe partial class TcpConnection : IValueTaskSource<RecvSnapshot
     {
         RunContinuationsAsynchronously = false,
     };
-    private int _armed;
+
+    // The read parked on this connection, or null: the adapter that parked itself, or this connection
+    // for ReadAsync's awaiter. While a read readies its listener the slot holds Claimed, or
+    // ClaimedWoken once a completion has come to it meanwhile. The one field the park and the
+    // completion race on.
+    private IRecvListener? _readWaiter;
+
+    // Marks, never called: a read that has claimed the slot and is readying its listener - no completion
+    // delivers to it - and one a completion came to meanwhile, which serves what is queued instead.
+    private static readonly IRecvListener Claimed = new SlotMark();
+    private static readonly IRecvListener ClaimedWoken = new SlotMark();
+
+    private sealed class SlotMark : IRecvListener
+    {
+        public void OnParking() { }
+
+        public void OnRecvReady(RecvSnapshot snapshot) { }
+    }
+
     private int _pending;
     private int _closed;
-
-    // The adapter parked on the read in place of an awaiter (TryReadOrPark), or null for ReadAsync's.
-    // Set before the arm, so whoever takes the arm back sees it.
-    private IRecvListener? _recvListener;
 
     private readonly SpscRecvRing _recv;   // sized by TcpOptions.RecvQueueEntries
 
@@ -52,53 +68,26 @@ public sealed unsafe partial class TcpConnection : IValueTaskSource<RecvSnapshot
 
     public ValueTask<RecvSnapshot> ReadAsync()
     {
-        if (!_recv.IsEmpty() || Volatile.Read(ref _pending) == 1)
-        {
-            Volatile.Write(ref _pending, 0);
-            return new ValueTask<RecvSnapshot>(
-                new RecvSnapshot(_recv.SnapshotTail(), Volatile.Read(ref _closed) != 0));
-        }
-
-        if (Volatile.Read(ref _closed) != 0)
-        {
-            return new ValueTask<RecvSnapshot>(RecvSnapshot.Closed());
-        }
-
-        ReadParkedMs = _reactor.NowMs;   // the read clock; before arming, so the sweep sees both
-
-        if (Interlocked.Exchange(ref _armed, 1) == 1)
-        {
-            throw new InvalidOperationException("ReadAsync already armed.");
-        }
-
         // Generation is the IVTS token: a Clear() during pool recycle invalidates this awaiter.
         int gen = Volatile.Read(ref _generation);
 
-        // Race recovery: re-check between arming and returning the task.
-        if (!_recv.IsEmpty() || Volatile.Read(ref _pending) == 1 || Volatile.Read(ref _closed) != 0)
-        {
-            Volatile.Write(ref _pending, 0);
-            Interlocked.Exchange(ref _armed, 0);
-
-            return new ValueTask<RecvSnapshot>(
-                new RecvSnapshot(_recv.SnapshotTail(), Volatile.Read(ref _closed) != 0));
-        }
-
-        return new ValueTask<RecvSnapshot>(this, (short)gen);
+        // The connection parks itself: its OnParking readies _readSignal, its OnRecvReady completes it.
+        return TryReadOrPark(this, out RecvSnapshot snapshot)
+            ? new ValueTask<RecvSnapshot>(snapshot)
+            : new ValueTask<RecvSnapshot>(this, (short)gen);
     }
 
     /// <summary>
-    /// <see cref="ReadAsync"/> for an adapter that parks itself instead of an awaiter: true with the
-    /// snapshot when one is ready now, false when the read was armed - and then the completion that
-    /// disarms it calls <paramref name="listener"/>, once, on the completing thread.
+    /// The one way a read waits - for <see cref="ReadAsync"/>, and for an adapter that parks itself
+    /// instead of an awaiter: true with the snapshot when one is ready now, false when
+    /// <paramref name="listener"/> was parked - and then the completion that takes the park back
+    /// calls it, once, on the completing thread.
     /// </summary>
     internal bool TryReadOrPark(IRecvListener listener, out RecvSnapshot snapshot)
     {
         if (!_recv.IsEmpty() || Volatile.Read(ref _pending) == 1)
         {
-            Volatile.Write(ref _pending, 0);
-            snapshot = new RecvSnapshot(_recv.SnapshotTail(), Volatile.Read(ref _closed) != 0);
-            return true;
+            return Serve(out snapshot);
         }
 
         if (Volatile.Read(ref _closed) != 0)
@@ -107,54 +96,100 @@ public sealed unsafe partial class TcpConnection : IValueTaskSource<RecvSnapshot
             return true;
         }
 
-        // Before the listener readies anything or is stored, so a second read refused here leaves the
-        // parked one, and the value task its caller waits on, alone.
-        if (Volatile.Read(ref _armed) == 1)
+        // A read overlapping a parked one is refused before it writes anything - the read clock below
+        // included.
+        if (Volatile.Read(ref _readWaiter) != null)
         {
             throw new InvalidOperationException("ReadAsync already armed.");
         }
 
-        ReadParkedMs = _reactor.NowMs;   // the read clock; before arming, so the sweep sees both
-        listener.OnParking();            // its value task, ready before the arm the completion can follow at once
-        _recvListener = listener;        // published by the exchange below
+        ReadParkedMs = _reactor.NowMs;   // the read clock; before the claim, so the sweep sees both
 
-        if (Interlocked.Exchange(ref _armed, 1) == 1)
+        // The claim. The slot is this read's from here, so one racing it is refused having touched
+        // nothing of it - the listener's value task above all, which the two may share. No completion
+        // delivers to a claim; the park is published below.
+        if (Interlocked.CompareExchange(ref _readWaiter, Claimed, null) != null)
         {
             throw new InvalidOperationException("ReadAsync already armed.");
         }
 
-        // Race recovery, as in ReadAsync, with one difference: there the exchange's result is not
-        // looked at, so when a completion has already taken the arm both sides deliver - the second
-        // time into the connection's own value-task source, which can then look complete to the next
-        // read. Here the second delivery would run the listener again. So the exchange that takes the
-        // arm back decides who delivers: this call, or the completion.
-        if ((!_recv.IsEmpty() || Volatile.Read(ref _pending) == 1 || Volatile.Read(ref _closed) != 0)
-            && Interlocked.Exchange(ref _armed, 0) == 1)
+        // Race recovery: data or a close landed between the checks above and the claim.
+        if (!_recv.IsEmpty() || Volatile.Read(ref _pending) == 1 || Volatile.Read(ref _closed) != 0)
         {
-            _recvListener = null;
-            Volatile.Write(ref _pending, 0);
-            snapshot = new RecvSnapshot(_recv.SnapshotTail(), Volatile.Read(ref _closed) != 0);
-            return true;
+            Volatile.Write(ref _readWaiter, null);
+            return Serve(out snapshot);
+        }
+
+        listener.OnParking();   // its value task, ready before the park: the completion can follow at once
+
+        // The park. A completion that came while the listener was being readied marked the claim
+        // instead of delivering, and then this read serves what it queued.
+        if (Interlocked.CompareExchange(ref _readWaiter, listener, Claimed) != Claimed)
+        {
+            Volatile.Write(ref _readWaiter, null);
+            return Serve(out snapshot);
         }
 
         snapshot = default;
         return false;
     }
 
-    // The one delivery of a read whose arm the caller took back: to the adapter parked on it, or to
-    // ReadAsync's awaiter. The slot is cleared first, as the listener may park again inline.
-    private void DeliverRead(RecvSnapshot snapshot)
+    // A read that does not wait: what is queued now, and whether the connection has closed.
+    private bool Serve(out RecvSnapshot snapshot)
     {
-        IRecvListener? listener = _recvListener;
-        if (listener != null)
+        Volatile.Write(ref _pending, 0);
+        snapshot = new RecvSnapshot(_recv.SnapshotTail(), Volatile.Read(ref _closed) != 0);
+        return true;
+    }
+
+    // The completion side of the park, after what it brought is queued (or the close is set): the read
+    // parked, if any, is taken back and handed what is queued; a claim still readying its listener is
+    // marked, and serves that itself; with nothing parked, _pending makes the next read return at once.
+    private void DeliverRead()
+    {
+        IRecvListener? waiter = Volatile.Read(ref _readWaiter);
+        while (true)
         {
-            _recvListener = null;
-            listener.OnRecvReady(snapshot);
+            if (waiter == null || waiter == ClaimedWoken)
+            {
+                // Nothing to deliver to, as far as that read saw. Fenced and read again before leaving
+                // it at that, so a read claiming the slot from here on sees what this completion queued.
+                Interlocked.MemoryBarrier();
+                IRecvListener? again = Volatile.Read(ref _readWaiter);
+                if (again != waiter)
+                {
+                    waiter = again;
+                    continue;
+                }
+
+                if (waiter == null)
+                {
+                    Volatile.Write(ref _pending, 1);
+                }
+                return;
+            }
+
+            // A park, taken back - or a claim, marked. Lost to the read moving on, or to another
+            // completion: look again.
+            IRecvListener? seen = Interlocked.CompareExchange(ref _readWaiter, waiter == Claimed ? ClaimedWoken : null, waiter);
+            if (seen != waiter)
+            {
+                waiter = seen;
+                continue;
+            }
+
+            if (waiter != Claimed)
+            {
+                waiter.OnRecvReady(new RecvSnapshot(_recv.SnapshotTail(), Volatile.Read(ref _closed) != 0));
+            }
             return;
         }
-
-        _readSignal.SetResult(snapshot);
     }
+
+    // ReadAsync parks the connection itself, and its awaiter's value task is _readSignal.
+    void IRecvListener.OnParking() => _readSignal.Reset();
+
+    void IRecvListener.OnRecvReady(RecvSnapshot snapshot) => _readSignal.SetResult(snapshot);
 
     /// <summary>
     /// Take the next item of a snapshot. This is a DEQUEUE and it transfers ownership: every item
@@ -220,23 +255,19 @@ public sealed unsafe partial class TcpConnection : IValueTaskSource<RecvSnapshot
         }
     }
 
-    public void ResetRead() => _readSignal.Reset();
+    /// <summary>
+    /// Nothing to do any more. Code written for the earlier contract calls this after every read, to
+    /// recycle the value task the next one waits on; <see cref="ReadAsync"/> now readies that itself,
+    /// when it parks. Calling it is harmless - including while a read is parked, which used to throw
+    /// that read's continuation away.
+    /// </summary>
+    public void ResetRead() { }
 
     /// <summary>
     /// Wakes a parked <see cref="ReadAsync"/> with whatever is queued, possibly nothing, the way a
     /// recv completion does. Reactor thread only.
     /// </summary>
-    internal void WakeRead()
-    {
-        if (Interlocked.Exchange(ref _armed, 0) == 1)
-        {
-            DeliverRead(new RecvSnapshot(_recv.SnapshotTail(), Volatile.Read(ref _closed) != 0));
-        }
-        else
-        {
-            Volatile.Write(ref _pending, 1);
-        }
-    }
+    internal void WakeRead() => DeliverRead();
 
     // Returns false on recv-queue overflow; the reactor then tears the connection down.
     public bool Complete(int res, ushort bid, bool hasBuffer, byte* ptr)
@@ -259,14 +290,7 @@ public sealed unsafe partial class TcpConnection : IValueTaskSource<RecvSnapshot
             return false;
         }
 
-        if (Interlocked.Exchange(ref _armed, 0) == 1)
-        {
-            DeliverRead(new RecvSnapshot(_recv.SnapshotTail(), Volatile.Read(ref _closed) != 0));
-        }
-        else
-        {
-            Volatile.Write(ref _pending, 1);
-        }
+        DeliverRead();
         return true;
     }
 
