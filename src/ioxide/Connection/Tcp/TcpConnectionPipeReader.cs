@@ -243,16 +243,37 @@ public sealed unsafe class TcpConnectionPipeReader : PipeReader, IValueTaskSourc
             return;
         }
 
-        // GetOffset measures from the start *segment*, not the sequence's logical start. When the
-        // held sequence begins mid-segment (the head recv slice is partially consumed - a request
-        // whose header and body arrive in one recv), GetOffset over-counts by _headConsumed. Rebase
-        // by the sequence start so consumed/examined stay consistent with the relative
-        // _heldBytes/_examined counters below. Without this, _heldBytes underflows negative and the
-        // next ReadAsync parks forever waiting for bytes that already arrived (the hang seen on
-        // chunked request bodies, which read again for the terminating chunk).
-        long startOffset = _lastSequence.GetOffset(_lastSequence.Start);
-        long consumedBytes = _lastSequence.GetOffset(consumed) - startOffset;
-        long examinedBytes = _lastSequence.GetOffset(examined) - startOffset;
+        long consumedBytes;
+        long examinedBytes;
+
+        // One slice held - a request that arrived in one recv, the common case. A position into it is
+        // that slice and an index into its memory, so each offset is the index less what was already
+        // consumed: what the GetOffset calls below compute, without them. Anything else - more than
+        // one slice, a position on another segment, an index out of range - takes those calls, which
+        // also refuse what does not belong to the sequence.
+        if (_head == _tail
+            && ReferenceEquals(consumed.GetObject(), _head)
+            && ReferenceEquals(examined.GetObject(), _head)
+            && (uint)(consumed.GetInteger() - _headConsumed) <= (ulong)_heldBytes
+            && (uint)(examined.GetInteger() - _headConsumed) <= (ulong)_heldBytes)
+        {
+            consumedBytes = consumed.GetInteger() - _headConsumed;
+            examinedBytes = examined.GetInteger() - _headConsumed;
+        }
+        else
+        {
+            // GetOffset measures from the start *segment*, not the sequence's logical start. When the
+            // held sequence begins mid-segment (the head recv slice is partially consumed - a request
+            // whose header and body arrive in one recv), GetOffset over-counts by _headConsumed. Rebase
+            // by the sequence start so consumed/examined stay consistent with the relative
+            // _heldBytes/_examined counters below. Without this, _heldBytes underflows negative and the
+            // next ReadAsync parks forever waiting for bytes that already arrived (the hang seen on
+            // chunked request bodies, which read again for the terminating chunk).
+            long startOffset = _lastSequence.GetOffset(_lastSequence.Start);
+            consumedBytes = _lastSequence.GetOffset(consumed) - startOffset;
+            examinedBytes = _lastSequence.GetOffset(examined) - startOffset;
+        }
+
         if (examinedBytes < consumedBytes)
         {
             examinedBytes = consumedBytes;

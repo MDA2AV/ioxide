@@ -154,6 +154,83 @@ internal static class PipeReaderContractTests
             Assert.Equal("HEAD|BODY|BODY", report.Task.Result);
         });
 
+        runner.Test("pipereader: AdvanceTo refuses a position outside what it handed out, past a recv's end and inside its consumed part", () =>
+        {
+            // AdvanceTo computes the offsets of one recv's positions itself rather than through
+            // ReadOnlySequence.GetOffset, which is also what refused a position the sequence does not
+            // hold. Both kinds stay refused: past the end of the recv, and before the start of what
+            // is left of it once part was consumed. Accepted, either one moves the byte counters
+            // past what is held.
+            var report = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
+
+            int port = TestServer.Start(async (_, conn) =>
+            {
+                var reader = new TcpConnectionPipeReader(conn);
+                try
+                {
+                    ReadResult first = await reader.ReadAsync();
+                    if (first.Buffer.IsEmpty && first.IsCompleted)
+                    {
+                        return;
+                    }
+                    while (first.Buffer.Length < 9)
+                    {
+                        reader.AdvanceTo(first.Buffer.Start, first.Buffer.End);
+                        first = await reader.ReadAsync();
+                    }
+
+                    // One recv, so these positions take the one-slice path; otherwise this tests nothing new.
+                    if (!first.Buffer.IsSingleSegment)
+                    {
+                        report.TrySetResult("the request arrived in more than one recv");
+                        return;
+                    }
+                    object recv = first.Buffer.Start.GetObject()!;
+                    int end = first.Buffer.End.GetInteger();
+
+                    // Reported at once when accepted: the counters are wrong from then on, and the
+                    // next read parks on bytes that already arrived.
+                    string pastEnd = Refusal(() => reader.AdvanceTo(new SequencePosition(recv, end + 1)));
+                    if (pastEnd != "refused")
+                    {
+                        report.TrySetResult($"past the recv's end: {pastEnd}");
+                        return;
+                    }
+
+                    reader.AdvanceTo(first.Buffer.GetPosition(5));   // the header; the body stays, mid-recv
+                    ReadResult rest = await reader.ReadAsync();
+
+                    string beforeStart = Refusal(() => reader.AdvanceTo(new SequencePosition(recv, 2)));
+                    if (beforeStart != "refused")
+                    {
+                        report.TrySetResult($"inside its consumed part: {beforeStart}");
+                        return;
+                    }
+
+                    string body = Text(rest.Buffer);   // still all there after both refusals
+                    reader.AdvanceTo(rest.Buffer.End);
+
+                    report.TrySetResult($"refused|refused|{body}");
+                }
+                catch (Exception e)
+                {
+                    report.TrySetResult($"{e.GetType().Name}: {e.Message}");
+                }
+                finally
+                {
+                    reader.Complete();
+                    conn.DecRef();
+                }
+            });
+
+            using var client = new TcpClient();
+            client.Connect("127.0.0.1", port);
+            client.GetStream().Write("HEAD|BODY"u8);
+
+            Assert.True(report.Task.Wait(10_000), "the handler never reported");
+            Assert.Equal("refused|refused|BODY", report.Task.Result);
+        });
+
         runner.Test("pipereader: recv buffers go back to the ring as consumption passes them", () =>
         {
             // The direct form of "do we release the ring buffers as we advance". The buffer group is
@@ -312,4 +389,22 @@ internal static class PipeReaderContractTests
     }
 
     private static string Text(in ReadOnlySequence<byte> buffer) => Encoding.ASCII.GetString(buffer.ToArray());
+
+    // "refused" for the out-of-range refusal ReadOnlySequence makes, and what happened instead otherwise.
+    private static string Refusal(Action advance)
+    {
+        try
+        {
+            advance();
+            return "accepted";
+        }
+        catch (ArgumentOutOfRangeException)
+        {
+            return "refused";
+        }
+        catch (Exception e)
+        {
+            return $"{e.GetType().Name}: {e.Message}";
+        }
+    }
 }
