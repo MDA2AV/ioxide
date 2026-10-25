@@ -46,6 +46,10 @@ public static unsafe partial class Native {
     internal const int MSG_DONTWAIT = 0x40;
     [DllImport("libc", SetLastError = true)] internal static extern long sendmsg(int fd, msghdr* msg, int flags);
 
+    // Off the ring too: the sweep asks a socket whether it has hung up, without waiting (#403).
+    internal const short POLLHUP = 0x10;
+    [DllImport("libc")] internal static extern int poll(pollfd* fds, nuint nfds, int timeout);
+
     public static ushort Htons(ushort x) => (ushort)((x << 8) | (x >> 8));
 
     [StructLayout(LayoutKind.Sequential)]
@@ -88,6 +92,14 @@ public static unsafe partial class Native {
         [FieldOffset(32)] public void*  msg_control;
         [FieldOffset(40)] public nuint  msg_controllen;
         [FieldOffset(48)] public int    msg_flags;
+    }
+
+    // struct pollfd, for poll(2). POLLHUP and POLLERR come back in revents whatever events asks for.
+    [StructLayout(LayoutKind.Sequential)]
+    internal struct pollfd {
+        public int   fd;
+        public short events;
+        public short revents;
     }
 #pragma warning restore CS8981
 }

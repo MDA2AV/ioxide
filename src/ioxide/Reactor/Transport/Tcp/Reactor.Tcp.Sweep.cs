@@ -4,7 +4,7 @@ namespace ioxide;
 
 /// <summary>
 /// The clocks on a TCP connection's lifecycle: a connection waiting on a silent peer is reaped, and
-/// so is one whose send the peer stopped draining.
+/// so is one whose send the peer stopped draining - or whose peer hung up without its recv hearing.
 /// </summary>
 /// <remarks>
 /// Rides the reactor's existing ~250 ms ticker rather than arming anything of its own, which is
@@ -29,6 +29,9 @@ public sealed unsafe partial class Reactor
     // Whenever TCP is on: the deferred FIN (TcpConnection.DecRef) is sent from here, clocks or not.
     private bool TcpSweepEnabled => _tcpEnabled;
 
+    // A wait passes one tick between exactly one pair of sweeps, however late, so HungUp asks once per wait.
+    private long _lastTcpSweepMs;
+
     /// <summary>
     /// One pass over the connection table. Runs on the reactor thread from the ticker, so it owns
     /// the table outright and can touch a connection directly.
@@ -42,6 +45,8 @@ public sealed unsafe partial class Reactor
         _acceptPaused.Clear();
 
         long now = Native.MonotonicMs;
+        long last = _lastTcpSweepMs;
+        _lastTcpSweepMs = now;
         TcpConnection?[] conns = _connections;
 
         for (int fd = 0; fd < conns.Length; fd++)
@@ -70,11 +75,28 @@ public sealed unsafe partial class Reactor
                 conn.SendFin();
             }
 
-            if (_readTimeoutMs > 0 && conn.WaitingOnPeer(out long sinceMs) && now - sinceMs > _readTimeoutMs)
+            if (!conn.WaitingOnPeer(out long sinceMs))
+            {
+                continue;
+            }
+
+            if (_readTimeoutMs > 0 && now - sinceMs > _readTimeoutMs)
+            {
+                TcpSweepClose(conn);
+            }
+            else if (now - sinceMs > TickMs && last - sinceMs <= TickMs && HungUp(conn.ClientFd))
             {
                 TcpSweepClose(conn);
             }
         }
+    }
+
+    // A reset that came in with the peer's last bytes, which io_uring loses on kernels without a68ed2df7213
+    // (#403). poll() leaves the error in place for the recv that TcpSweepClose's shutdown wakes.
+    private static bool HungUp(int fd)
+    {
+        pollfd entry = new() { fd = fd };
+        return poll(&entry, 1, 0) == 1 && (entry.revents & POLLHUP) != 0;
     }
 
     /// <summary>

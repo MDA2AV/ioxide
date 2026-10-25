@@ -173,6 +173,12 @@ internal static class TcpTimeoutTests
             Assert.Equal(2, stream.Read(reply, 0, 2));
         });
 
+        runner.Test("tcp/reset: a reset that comes in with the peer's last bytes ends the read, with the clock off (#403)",
+            () => HangUpWithLastBytes(reset: true));
+
+        runner.Test("tcp/reset: control: a FIN that comes in with the peer's last bytes ends the read",
+            () => HangUpWithLastBytes(reset: false));
+
         runner.Test("tcp/read: a handler busy for longer than the read timeout still answers", () =>
         {
             // A slow answer with nothing on the wire meanwhile: the server is not waiting on the peer.
@@ -534,6 +540,123 @@ internal static class TcpTimeoutTests
     /// timeout. The sweep's shutdown ends a plain send; a zero-copy one also needs the kernel to let
     /// go of its pages, which it did not while the peer kept answering the window probes (#245).
     /// </summary>
+    /// <summary>
+    /// Clients that send their last bytes and hang up while the reactor is held, so both land in one
+    /// task-work pass: the shape a kernel without io_uring's poll fix loses a reset in (#403).
+    /// </summary>
+    private static void HangUpWithLastBytes(bool reset)
+    {
+        const int Clients = 8;
+        byte[] last = "ET / HTTP/1.1\r\nHost: x\r\n"u8.ToArray();   // the rest of a request that never completes
+
+        int ready = 0, ended = 0, endedShort = 0;
+        var allEnded = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        (int port, Reactor reactor, _) = TestServer.StartConfigured(async (_, conn) =>
+        {
+            try
+            {
+                if (!await IsThisTestsConnection(conn))
+                {
+                    return;
+                }
+                Interlocked.Increment(ref ready);
+
+                int got = 0;
+                while (true)
+                {
+                    RecvSnapshot snapshot = await conn.ReadAsync();
+                    while (conn.TryGetItem(snapshot, out SpscRecvRing.Item item))
+                    {
+                        if (item.HasBuffer)
+                        {
+                            got += item.Len;
+                            conn.ReturnBuffer(in item);
+                        }
+                    }
+
+                    if (snapshot.IsClosed)
+                    {
+                        if (got != last.Length)
+                        {
+                            Interlocked.Increment(ref endedShort);
+                        }
+                        if (Interlocked.Increment(ref ended) == Clients)
+                        {
+                            allEnded.TrySetResult();
+                        }
+                        return;
+                    }
+                }
+            }
+            finally
+            {
+                conn.DecRef();
+            }
+        }, new ServerConfig
+        {
+            RecvBufferSize = 4096,
+            RecvSlots = 256,
+            Tcp = new TcpOptions { PoolMax = 64, RecvQueueEntries = 64, ReadTimeoutMs = 0, SendTimeoutMs = 0 },
+        });
+
+        var clients = new List<Socket>();
+        try
+        {
+            for (int i = 0; i < Clients; i++)
+            {
+                var client = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp) { NoDelay = true };
+                clients.Add(client);
+                client.Connect(IPAddress.Loopback, port);
+                client.Send("G"u8);   // marks the connection as this test's; its handler then parks
+            }
+            Assert.True(SpinWait.SpinUntil(() => Volatile.Read(ref ready) == Clients, SweepGraceMs),
+                $"only {Volatile.Read(ref ready)} of {Clients} connections reached their handler");
+
+            // DEFER_TASKRUN: while the reactor runs this, none of its task work runs either.
+            using var held = new ManualResetEventSlim();
+            using var release = new ManualResetEventSlim();
+            reactor.ScheduleOnReactor(_ =>
+            {
+                held.Set();
+                release.Wait(SweepGraceMs);
+            }, null);
+            Assert.True(held.Wait(SweepGraceMs), "the reactor never ran the hold");
+
+            try
+            {
+                foreach (Socket client in clients)
+                {
+                    client.Send(last);
+                    if (reset)
+                    {
+                        client.LingerState = new LingerOption(true, 0);   // close() then sends an RST
+                    }
+                    client.Close();
+                }
+            }
+            finally
+            {
+                release.Set();
+            }
+
+            Assert.True(allEnded.Task.Wait(SweepGraceMs),
+                $"{Volatile.Read(ref ended)} of {Clients} reads ended within {SweepGraceMs} ms of the peer's "
+                + (reset ? "reset" : "FIN") + ": the rest are still parked on a peer that is gone");
+
+            // Each read took the bytes first: the hang-up came in with them.
+            Assert.True(Volatile.Read(ref endedShort) == 0,
+                $"{Volatile.Read(ref endedShort)} reads ended without the client's last {last.Length} bytes");
+        }
+        finally
+        {
+            foreach (Socket client in clients)
+            {
+                client.Dispose();
+            }
+        }
+    }
+
     private static void StalledResponse(bool zeroCopy)
     {
         const int SendMs = 1_000;
