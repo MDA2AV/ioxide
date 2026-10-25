@@ -120,15 +120,7 @@ public sealed unsafe partial class TcpConnection
     {
         Volatile.Write(ref _closed, 1);
 
-        if (Interlocked.Exchange(ref _armed, 0) == 1)
-        {
-            DeliverRead(new RecvSnapshot(_recv.SnapshotTail(), isClosed: true));
-        }
-        else
-        {
-            Volatile.Write(ref _pending, 1);
-        }
-
+        DeliverRead();   // after the store: the read it wakes, or the next one, sees closed = true
         ReleaseParkedFlush();
     }
 
@@ -224,7 +216,7 @@ public sealed unsafe partial class TcpConnection
             return sinceMs != 0;
         }
 
-        if (Volatile.Read(ref _armed) == 0 || Volatile.Read(ref _readTimeoutDisabled) != 0)
+        if (Volatile.Read(ref _readWaiter) == null || Volatile.Read(ref _readTimeoutDisabled) != 0)
         {
             sinceMs = 0;
             return false;
@@ -256,14 +248,13 @@ public sealed unsafe partial class TcpConnection
         // Bump generation first so stale IVTS tokens resolve to Closed()/no-op.
         Interlocked.Increment(ref _generation);
 
-        Volatile.Write(ref _armed, 0);
+        // Normally empty already: the teardown's MarkClosed delivered to any read or flush parked here.
+        Volatile.Write(ref _readWaiter, null);
         Volatile.Write(ref _pending, 0);
         Volatile.Write(ref _closed, 0);
         Volatile.Write(ref _recvOverflowed, 0);
         Volatile.Write(ref _flushArmed, 0);
         Volatile.Write(ref _flushInProgress, 0);
-        // Normally empty already: the teardown's MarkClosed delivered to any adapter parked here.
-        _recvListener = null;
         _flushListener = null;
         Volatile.Write(ref FlushArmedMs, 0);
         Volatile.Write(ref ReadParkedMs, 0);
