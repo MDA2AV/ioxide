@@ -2575,7 +2575,12 @@ for (int i = 0; i &lt; threads.Length; i++)
 
                 // Returns once nghttp3 has taken it. That await IS the backpressure - nothing
                 // queues up behind a peer that has stopped reading.
-                await writer.FlushAsync();
+                // IsCompleted: the peer is gone. Nothing written from here reaches anyone, and every flush
+                // returns at once - a loop that ignored it would never give this reactor back.
+                if ((await writer.FlushAsync()).IsCompleted)
+                {
+                    return;
+                }
             }
 
             // CompleteAsync ends the stream. The runner calls it too if a handler returns without
@@ -2697,7 +2702,12 @@ for (int i = 0; i &lt; threads.Length; i++)
 
                     part.Span.CopyTo(writer.GetSpan(part.Length));
                     writer.Advance(part.Length);
-                    await writer.FlushAsync();
+                    // IsCompleted: the peer is gone. Nothing written from here reaches anyone, and every flush
+                    // returns at once - a loop that ignored it would never give this reactor back.
+                    if ((await writer.FlushAsync()).IsCompleted)
+                    {
+                        return;
+                    }
                 }
 
                 await writer.CompleteAsync();
@@ -2739,7 +2749,10 @@ for (int i = 0; i &lt; threads.Length; i++)
 
                 // Returns once nghttp3 has taken the chunk. That await IS the backpressure -
                 // nothing queues up behind a peer that has stopped reading.
-                await writer.FlushAsync();
+                if ((await writer.FlushAsync()).IsCompleted)
+                {
+                    return;
+                }
             }
 
             await writer.CompleteAsync();
@@ -2859,7 +2872,12 @@ for (int i = 0; i &lt; threads.Length; i++)
 
                         part.Span.CopyTo(writer.GetSpan(part.Length));
                         writer.Advance(part.Length);
-                        await writer.FlushAsync();
+                        // IsCompleted: the peer is gone. Nothing written from here reaches anyone, and every flush
+                        // returns at once - a loop that ignored it would never give this reactor back.
+                        if ((await writer.FlushAsync()).IsCompleted)
+                        {
+                            return;
+                        }
                     }
                 }
 
@@ -2897,7 +2915,10 @@ for (int i = 0; i &lt; threads.Length; i++)
 
                 // Returns once the chunk is queued, and waits when the connection is at its
                 // send-retention high-water. That await IS the backpressure.
-                await writer.FlushAsync();
+                if ((await writer.FlushAsync()).IsCompleted)
+                {
+                    return;
+                }
             }
         });
 
@@ -5395,7 +5416,12 @@ for (int i = 0; i &lt; threads.Length; i++)
                     writer.Advance(chunk.Length);
 
                     // Waits when either window is exhausted, and resumes on the WINDOW_UPDATE.
-                    await writer.FlushAsync();
+                    // IsCompleted: the peer is gone. Nothing written from here reaches anyone, and every flush
+                    // returns at once - a loop that ignored it would never give this reactor back.
+                    if ((await writer.FlushAsync()).IsCompleted)
+                    {
+                        return;
+                    }
                 }
             });
         }
@@ -5615,7 +5641,12 @@ for (int i = 0; i &lt; threads.Length; i++)
 
                         incoming.Span.CopyTo(writer.GetSpan(incoming.Length));
                         writer.Advance(incoming.Length);
-                        await writer.FlushAsync();
+                        // IsCompleted: the peer is gone. Nothing written from here reaches anyone, and every flush
+                        // returns at once - a loop that ignored it would never give this reactor back.
+                        if ((await writer.FlushAsync()).IsCompleted)
+                        {
+                            return;
+                        }
                     }
                     return;
                 }
@@ -5626,7 +5657,10 @@ for (int i = 0; i &lt; threads.Length; i++)
                 {
                     chunk.CopyTo(writer.GetSpan(chunk.Length));
                     writer.Advance(chunk.Length);
-                    await writer.FlushAsync();
+                    if ((await writer.FlushAsync()).IsCompleted)
+                    {
+                        return;
+                    }
                 }
             });
         }
@@ -5811,7 +5845,12 @@ for (int i = 0; i &lt; threads.Length; i++)
                 {
                     chunk.CopyTo(writer.GetSpan(chunk.Length));
                     writer.Advance(chunk.Length);
-                    await writer.FlushAsync();
+                    // IsCompleted: the peer is gone. Nothing written from here reaches anyone, and every flush
+                    // returns at once - a loop that ignored it would never give this reactor back.
+                    if ((await writer.FlushAsync()).IsCompleted)
+                    {
+                        return;
+                    }
                 }
             });
         }

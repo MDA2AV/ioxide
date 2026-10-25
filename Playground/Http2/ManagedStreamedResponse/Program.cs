@@ -107,7 +107,12 @@ for (int i = 0; i < threads.Length; i++)
                     writer.Advance(chunk.Length);
 
                     // Waits when either window is exhausted, and resumes on the WINDOW_UPDATE.
-                    await writer.FlushAsync();
+                    // IsCompleted: the peer is gone. Nothing written from here reaches anyone, and every flush
+                    // returns at once - a loop that ignored it would never give this reactor back.
+                    if ((await writer.FlushAsync()).IsCompleted)
+                    {
+                        return;
+                    }
                 }
             });
         }

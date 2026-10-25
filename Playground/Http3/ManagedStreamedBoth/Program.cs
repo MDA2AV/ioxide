@@ -111,7 +111,12 @@ for (int i = 0; i < threads.Length; i++)
 
                         part.Span.CopyTo(writer.GetSpan(part.Length));
                         writer.Advance(part.Length);
-                        await writer.FlushAsync();
+                        // IsCompleted: the peer is gone. Nothing written from here reaches anyone, and every flush
+                        // returns at once - a loop that ignored it would never give this reactor back.
+                        if ((await writer.FlushAsync()).IsCompleted)
+                        {
+                            return;
+                        }
                     }
                 }
 
@@ -149,7 +154,10 @@ for (int i = 0; i < threads.Length; i++)
 
                 // Returns once the chunk is queued, and waits when the connection is at its
                 // send-retention high-water. That await IS the backpressure.
-                await writer.FlushAsync();
+                if ((await writer.FlushAsync()).IsCompleted)
+                {
+                    return;
+                }
             }
         });
 
