@@ -29,6 +29,7 @@ internal static class Program
         HpackEncodeTests.Register(runner);
         QpackStaticEncodeTests.Register(runner);
         SendWaitAllTests.Register(runner);
+        AdapterParkTests.Register(runner);
 
         return runner.Summary();
     }

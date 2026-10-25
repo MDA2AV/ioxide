@@ -26,6 +26,10 @@ public sealed unsafe partial class TcpConnection : IValueTaskSource<RecvSnapshot
     private int _pending;
     private int _closed;
 
+    // The adapter parked on the read in place of an awaiter (TryReadOrPark), or null for ReadAsync's.
+    // Set before the arm, so whoever takes the arm back sees it.
+    private IRecvListener? _recvListener;
+
     private readonly SpscRecvRing _recv;   // sized by TcpOptions.RecvQueueEntries
 
     /// <summary>
@@ -81,6 +85,71 @@ public sealed unsafe partial class TcpConnection : IValueTaskSource<RecvSnapshot
         }
 
         return new ValueTask<RecvSnapshot>(this, (short)gen);
+    }
+
+    /// <summary>
+    /// <see cref="ReadAsync"/> for an adapter that parks itself instead of an awaiter: true with the
+    /// snapshot when one is ready now, false when the read was armed - and then the completion that
+    /// disarms it calls <paramref name="listener"/>, once, on the completing thread.
+    /// </summary>
+    internal bool TryReadOrPark(IRecvListener listener, out RecvSnapshot snapshot)
+    {
+        if (!_recv.IsEmpty() || Volatile.Read(ref _pending) == 1)
+        {
+            Volatile.Write(ref _pending, 0);
+            snapshot = new RecvSnapshot(_recv.SnapshotTail(), Volatile.Read(ref _closed) != 0);
+            return true;
+        }
+
+        if (Volatile.Read(ref _closed) != 0)
+        {
+            snapshot = RecvSnapshot.Closed();
+            return true;
+        }
+
+        // Before the listener is stored, so a second read refused here leaves the parked one's alone.
+        if (Volatile.Read(ref _armed) == 1)
+        {
+            throw new InvalidOperationException("ReadAsync already armed.");
+        }
+
+        ReadParkedMs = _reactor.NowMs;   // the read clock; before arming, so the sweep sees both
+        _recvListener = listener;        // published by the exchange below
+
+        if (Interlocked.Exchange(ref _armed, 1) == 1)
+        {
+            throw new InvalidOperationException("ReadAsync already armed.");
+        }
+
+        // Race recovery, as in ReadAsync, with one difference: there a second delivery lands in a
+        // value-task source nobody registered on, and is harmless; here both would call the listener.
+        // So the exchange that takes the arm back decides who delivers - this call, or the completion.
+        if ((!_recv.IsEmpty() || Volatile.Read(ref _pending) == 1 || Volatile.Read(ref _closed) != 0)
+            && Interlocked.Exchange(ref _armed, 0) == 1)
+        {
+            _recvListener = null;
+            Volatile.Write(ref _pending, 0);
+            snapshot = new RecvSnapshot(_recv.SnapshotTail(), Volatile.Read(ref _closed) != 0);
+            return true;
+        }
+
+        snapshot = default;
+        return false;
+    }
+
+    // The one delivery of a read whose arm the caller took back: to the adapter parked on it, or to
+    // ReadAsync's awaiter. The slot is cleared first, as the listener may park again inline.
+    private void DeliverRead(RecvSnapshot snapshot)
+    {
+        IRecvListener? listener = _recvListener;
+        if (listener != null)
+        {
+            _recvListener = null;
+            listener.OnRecvReady(snapshot);
+            return;
+        }
+
+        _readSignal.SetResult(snapshot);
     }
 
     /// <summary>
@@ -157,7 +226,7 @@ public sealed unsafe partial class TcpConnection : IValueTaskSource<RecvSnapshot
     {
         if (Interlocked.Exchange(ref _armed, 0) == 1)
         {
-            _readSignal.SetResult(new RecvSnapshot(_recv.SnapshotTail(), Volatile.Read(ref _closed) != 0));
+            DeliverRead(new RecvSnapshot(_recv.SnapshotTail(), Volatile.Read(ref _closed) != 0));
         }
         else
         {
@@ -188,7 +257,7 @@ public sealed unsafe partial class TcpConnection : IValueTaskSource<RecvSnapshot
 
         if (Interlocked.Exchange(ref _armed, 0) == 1)
         {
-            _readSignal.SetResult(new RecvSnapshot(_recv.SnapshotTail(), Volatile.Read(ref _closed) != 0));
+            DeliverRead(new RecvSnapshot(_recv.SnapshotTail(), Volatile.Read(ref _closed) != 0));
         }
         else
         {
