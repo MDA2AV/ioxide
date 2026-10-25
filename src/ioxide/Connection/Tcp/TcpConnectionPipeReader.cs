@@ -246,19 +246,27 @@ public sealed unsafe class TcpConnectionPipeReader : PipeReader, IValueTaskSourc
         long consumedBytes;
         long examinedBytes;
 
-        // One slice held - a request that arrived in one recv, the common case. A position into it is
-        // that slice and an index into its memory, so each offset is the index less what was already
-        // consumed: what the GetOffset calls below compute, without them. Anything else - more than
-        // one slice, a position on another segment, an index out of range - takes those calls, which
-        // also refuse what does not belong to the sequence.
-        if (_head == _tail
-            && ReferenceEquals(consumed.GetObject(), _head)
-            && ReferenceEquals(examined.GetObject(), _head)
-            && (uint)(consumed.GetInteger() - _headConsumed) <= (ulong)_heldBytes
-            && (uint)(examined.GetInteger() - _headConsumed) <= (ulong)_heldBytes)
+        // One slice held - a request that arrived in one recv, the common case - and both positions on
+        // it, from the result whose sequence starts there. A position into the slice is the slice and an
+        // index into its memory, so each offset is the index less what was already consumed: what the
+        // GetOffset calls below compute, without them. The bound is the slice's own unconsumed length,
+        // as GetOffset's bounds check is, so it holds whatever the byte counters say; the casts wrap a
+        // negative offset into one past it. Anything else - more than one slice, a position on another
+        // segment, an index out of range, a sequence that is not the last result's - takes those calls,
+        // which refuse an index the sequence does not hold.
+        Slice head = _head;
+        uint unconsumed = unchecked((uint)(head.Memory.Length - _headConsumed));
+        uint consumedIndex = unchecked((uint)(consumed.GetInteger() - _headConsumed));
+        uint examinedIndex = unchecked((uint)(examined.GetInteger() - _headConsumed));
+        if (head == _tail
+            && ReferenceEquals(consumed.GetObject(), head)
+            && ReferenceEquals(examined.GetObject(), head)
+            && ReferenceEquals(_lastSequence.Start.GetObject(), head)
+            && consumedIndex <= unconsumed
+            && examinedIndex <= unconsumed)
         {
-            consumedBytes = consumed.GetInteger() - _headConsumed;
-            examinedBytes = examined.GetInteger() - _headConsumed;
+            consumedBytes = consumedIndex;
+            examinedBytes = examinedIndex;
         }
         else
         {

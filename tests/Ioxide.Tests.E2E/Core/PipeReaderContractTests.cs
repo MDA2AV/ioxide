@@ -158,9 +158,9 @@ internal static class PipeReaderContractTests
         {
             // AdvanceTo computes the offsets of one recv's positions itself rather than through
             // ReadOnlySequence.GetOffset, which is also what refused a position the sequence does not
-            // hold. Both kinds stay refused: past the end of the recv, and before the start of what
-            // is left of it once part was consumed. Accepted, either one moves the byte counters
-            // past what is held.
+            // hold. They stay refused: past the end of the recv, as consumed and as examined, and
+            // before the start of what is left of it once part was consumed. Accepted, any of them
+            // moves the byte counters past what is held.
             var report = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
 
             int port = TestServer.Start(async (_, conn) =>
@@ -197,6 +197,13 @@ internal static class PipeReaderContractTests
                         return;
                     }
 
+                    string examinedPastEnd = Refusal(() => reader.AdvanceTo(first.Buffer.Start, new SequencePosition(recv, end + 1)));
+                    if (examinedPastEnd != "refused")
+                    {
+                        report.TrySetResult($"examined past the recv's end: {examinedPastEnd}");
+                        return;
+                    }
+
                     reader.AdvanceTo(first.Buffer.GetPosition(5));   // the header; the body stays, mid-recv
                     ReadResult rest = await reader.ReadAsync();
 
@@ -229,6 +236,73 @@ internal static class PipeReaderContractTests
 
             Assert.True(report.Task.Wait(10_000), "the handler never reported");
             Assert.Equal("refused|refused|BODY", report.Task.Result);
+        });
+
+        runner.Test("pipereader: AdvanceTo refuses a position past the first recv while the reader holds two", () =>
+        {
+            // With two recvs held, a position on the first is in range only up to the first's own
+            // end, not up to everything held: past it, it is refused, and the bytes are all still
+            // there. Measured against everything held instead, it would be accepted, and consume
+            // bytes of the second recv that it never pointed at.
+            var report = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
+
+            int port = TestServer.Start(async (_, conn) =>
+            {
+                var reader = new TcpConnectionPipeReader(conn);
+                try
+                {
+                    ReadResult result = await reader.ReadAsync();
+                    if (result.Buffer.IsEmpty && result.IsCompleted)
+                    {
+                        return;
+                    }
+                    while (result.Buffer.Length < 5)
+                    {
+                        reader.AdvanceTo(result.Buffer.Start, result.Buffer.End);   // hold it, wait for more
+                        result = await reader.ReadAsync();
+                    }
+
+                    // Two recvs, so the first slice is not everything held; otherwise this tests nothing.
+                    if (result.Buffer.IsSingleSegment)
+                    {
+                        report.TrySetResult("the two sends arrived in one recv");
+                        return;
+                    }
+                    object first = result.Buffer.Start.GetObject()!;
+                    int firstLength = result.Buffer.First.Length;
+
+                    string pastFirst = Refusal(() => reader.AdvanceTo(new SequencePosition(first, firstLength + 1)));
+                    if (pastFirst != "refused")
+                    {
+                        report.TrySetResult($"past the first recv: {pastFirst}");
+                        return;
+                    }
+
+                    string all = Text(result.Buffer);   // still all there after the refusal
+                    reader.AdvanceTo(result.Buffer.End);
+
+                    report.TrySetResult($"refused|{all}");
+                }
+                catch (Exception e)
+                {
+                    report.TrySetResult($"{e.GetType().Name}: {e.Message}");
+                }
+                finally
+                {
+                    reader.Complete();
+                    conn.DecRef();
+                }
+            });
+
+            using var client = new TcpClient();
+            client.Connect("127.0.0.1", port);
+            NetworkStream stream = client.GetStream();
+            stream.Write("AB"u8);
+            Thread.Sleep(300);      // its own recv: the reader holds it, examined, until the next arrives
+            stream.Write("CDE"u8);
+
+            Assert.True(report.Task.Wait(10_000), "the handler never reported");
+            Assert.Equal("refused|ABCDE", report.Task.Result);
         });
 
         runner.Test("pipereader: recv buffers go back to the ring as consumption passes them", () =>
