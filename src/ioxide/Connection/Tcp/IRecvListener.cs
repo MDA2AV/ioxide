@@ -16,5 +16,14 @@ namespace ioxide;
 /// </remarks>
 internal interface IRecvListener
 {
+    /// <summary>
+    /// The connection is about to park this listener: every guard has passed, and the arm that
+    /// publishes the park comes next. The listener readies the value task its caller will wait on
+    /// here and nowhere earlier - a read refused for overlapping a parked one must leave that one's
+    /// source alone - and not later either, since off the reactor the completion can run
+    /// <see cref="OnRecvReady"/> before the park returns. Not called for a read served at once.
+    /// </summary>
+    void OnParking();
+
     void OnRecvReady(RecvSnapshot snapshot);
 }

@@ -11,5 +11,13 @@ namespace ioxide;
 /// </remarks>
 internal interface IFlushListener
 {
+    /// <summary>
+    /// The connection is about to arm this listener's flush: the in-progress guard has passed and
+    /// something is staged. As <see cref="IRecvListener.OnParking"/>: the listener readies its value
+    /// task here, so a flush refused for overlapping one in flight, or one that sends nothing, leaves
+    /// an earlier flush's source alone.
+    /// </summary>
+    void OnParking();
+
     void OnFlushDone();
 }

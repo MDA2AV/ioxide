@@ -94,16 +94,13 @@ public sealed unsafe class TcpConnectionPipeReader : PipeReader, IValueTaskSourc
                 : new ValueTask<ReadResult>(BuildResult(isCanceled: false));
         }
 
-        // Everything held was examined - wait for new bytes. The core is reset before the read can
-        // be armed: off the reactor, the completion may run OnRecvReady before this returns.
-        _core.Reset();
-        short version = _core.Version;
-
+        // Everything held was examined - wait for new bytes. A park resets the core first (OnParking),
+        // so the version is read after it.
         while (true)
         {
             if (!_conn.TryReadOrPark(this, out RecvSnapshot snapshot))
             {
-                return new ValueTask<ReadResult>(this, version);
+                return new ValueTask<ReadResult>(this, _core.Version);
             }
 
             if (Ingest(snapshot) || _connectionClosed || _cancelRequested)
@@ -120,6 +117,19 @@ public sealed unsafe class TcpConnectionPipeReader : PipeReader, IValueTaskSourc
         }
     }
 
+    // The connection is parking this reader, past its guards: the caller's value task, ready before
+    // the arm. Not for a re-park from inside OnRecvReady, whose caller is still waiting on the one it has.
+    void IRecvListener.OnParking()
+    {
+        if (!_reparking)
+        {
+            _core.Reset();
+        }
+    }
+
+    // OnRecvReady's re-park for the same caller, on the delivering thread.
+    private bool _reparking;
+
     // The connection's read completed while this reader was parked on it - inline on the reactor for
     // a recv, on the closing thread for a close.
     void IRecvListener.OnRecvReady(RecvSnapshot snapshot)
@@ -127,17 +137,25 @@ public sealed unsafe class TcpConnectionPipeReader : PipeReader, IValueTaskSourc
         if (!Ingest(snapshot) && !_connectionClosed && !_cancelRequested)
         {
             // Nothing new: re-arm without completing the caller.
-            while (true)
+            _reparking = true;
+            try
             {
-                if (!_conn.TryReadOrPark(this, out snapshot))
+                while (true)
                 {
-                    return;
-                }
+                    if (!_conn.TryReadOrPark(this, out snapshot))
+                    {
+                        return;
+                    }
 
-                if (Ingest(snapshot) || _connectionClosed || _cancelRequested)
-                {
-                    break;
+                    if (Ingest(snapshot) || _connectionClosed || _cancelRequested)
+                    {
+                        break;
+                    }
                 }
+            }
+            finally
+            {
+                _reparking = false;   // before the caller resumes: its next read is a new one
             }
         }
 

@@ -132,16 +132,7 @@ public sealed unsafe partial class TcpConnection : IValueTaskSource
             throw new InvalidOperationException("FlushAsync already in progress.");
         }
 
-        // Past the guard this is the connection's one flush, so the slot is free. Stored before the
-        // arm in ArmFlush, which publishes it to the path that disarms.
-        _flushListener = listener;
-        if (ArmFlush(out _))
-        {
-            return false;
-        }
-
-        _flushListener = null;   // nothing was staged, so nothing was armed
-        return true;
+        return !ArmFlush(listener, out _);
     }
 
     // The connection is already torn down, so the staged bytes are dropped rather than kept:
@@ -163,12 +154,14 @@ public sealed unsafe partial class TcpConnection : IValueTaskSource
     }
 
     private ValueTask FlushCore()
-        => ArmFlush(out int gen) ? new ValueTask(this, (short)gen) : default;
+        => ArmFlush(null, out int gen) ? new ValueTask(this, (short)gen) : default;
 
     // Every entry point past its guard: whoever gets here owns _flushInProgress and is the one flush
     // the connection is allowed to have outstanding. False when nothing was staged - the flush is
-    // over before it started. <paramref name="gen"/> is the generation the flush was queued under.
-    private bool ArmFlush(out int gen)
+    // over before it started, and the listener slot was never touched. <paramref name="listener"/>
+    // is the adapter parking on the flush, or null for FlushAsync's awaiter; <paramref name="gen"/>
+    // is the generation the flush was queued under.
+    private bool ArmFlush(IFlushListener? listener, out int gen)
     {
         int target = WriteTail;
         for (int i = 0; i < _ovCount; i++)
@@ -184,7 +177,11 @@ public sealed unsafe partial class TcpConnection : IValueTaskSource
         }
 
         // Before arming: once armed, a close on the reactor can complete the flush, and a Reset after it would lose that.
+        // The same goes for the listener's own value task, and the slot the disarming path reads: both
+        // are set here, past the guard and with something to send, and published by the arm below.
         _flushSignal.Reset();
+        listener?.OnParking();
+        _flushListener = listener;
         if (Interlocked.CompareExchange(ref _flushArmed, 1, 0) != 0)
         {
             throw new InvalidOperationException("FlushAsync already armed.");

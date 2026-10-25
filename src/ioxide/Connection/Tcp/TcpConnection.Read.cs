@@ -107,13 +107,15 @@ public sealed unsafe partial class TcpConnection : IValueTaskSource<RecvSnapshot
             return true;
         }
 
-        // Before the listener is stored, so a second read refused here leaves the parked one's alone.
+        // Before the listener readies anything or is stored, so a second read refused here leaves the
+        // parked one, and the value task its caller waits on, alone.
         if (Volatile.Read(ref _armed) == 1)
         {
             throw new InvalidOperationException("ReadAsync already armed.");
         }
 
         ReadParkedMs = _reactor.NowMs;   // the read clock; before arming, so the sweep sees both
+        listener.OnParking();            // its value task, ready before the arm the completion can follow at once
         _recvListener = listener;        // published by the exchange below
 
         if (Interlocked.Exchange(ref _armed, 1) == 1)
@@ -121,9 +123,11 @@ public sealed unsafe partial class TcpConnection : IValueTaskSource<RecvSnapshot
             throw new InvalidOperationException("ReadAsync already armed.");
         }
 
-        // Race recovery, as in ReadAsync, with one difference: there a second delivery lands in a
-        // value-task source nobody registered on, and is harmless; here both would call the listener.
-        // So the exchange that takes the arm back decides who delivers - this call, or the completion.
+        // Race recovery, as in ReadAsync, with one difference: there the exchange's result is not
+        // looked at, so when a completion has already taken the arm both sides deliver - the second
+        // time into the connection's own value-task source, which can then look complete to the next
+        // read. Here the second delivery would run the listener again. So the exchange that takes the
+        // arm back decides who delivers: this call, or the completion.
         if ((!_recv.IsEmpty() || Volatile.Read(ref _pending) == 1 || Volatile.Read(ref _closed) != 0)
             && Interlocked.Exchange(ref _armed, 0) == 1)
         {

@@ -51,17 +51,19 @@ public sealed class TcpConnectionPipeWriter : PipeWriter, IValueTaskSource<Flush
 
         _unflushed = 0;
 
-        // Reset before the flush is handed over: off the reactor, it can complete before this returns.
-        _core.Reset();
-        short version = _core.Version;
-
         if (_conn.TryFlushOrPark(this))
         {
             return new ValueTask<FlushResult>(new FlushResult(isCanceled: false, isCompleted: _completed || _conn.IsClosed));
         }
 
-        return new ValueTask<FlushResult>(this, version);
+        // The arm reset the core first (OnParking), so the version is read after it.
+        return new ValueTask<FlushResult>(this, _core.Version);
     }
+
+    // The connection is arming this writer's flush, past its guards and with something staged: the
+    // caller's value task, ready before the arm - off the reactor, the flush can complete before
+    // FlushAsync returns.
+    void IFlushListener.OnParking() => _core.Reset();
 
     // The connection's flush completed while this writer was parked on it - inline on the reactor
     // for a send, on the releasing thread for a flush its connection closed under.

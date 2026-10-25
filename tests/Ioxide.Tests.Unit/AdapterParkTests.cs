@@ -106,6 +106,108 @@ internal static class AdapterParkTests
             Assert.True(overlapped >= MinOverlapped, $"only {overlapped} closes landed while a flush was arming: the race never ran");
             Assert.True(lost == 0, $"{lost} of {Rounds} flushes never completed, or completed without the close, after it raced their arming");
         }, skip: Environment.ProcessorCount < 2);
+
+        // Overlapping calls break the PipeReader/PipeWriter contract, and the second one is refused or
+        // returns at once - but the first, already waited on, must still complete, as it did when the
+        // adapters waited on the connection's value tasks. An adapter that readied its own value task
+        // before the connection had decided anything threw the first one's continuation away.
+
+        runner.Test("pipereader: a second read refused while one is parked leaves the parked one to complete", () =>
+        {
+            (TcpConnection conn, _) = Connection();
+            var reader = new TcpConnectionPipeReader(conn);
+            ValueTask<ReadResult> first = reader.ReadAsync();
+            bool resumed = false;
+            first.GetAwaiter().UnsafeOnCompleted(() => resumed = true);
+
+            Assert.Throws<InvalidOperationException>(() => reader.ReadAsync(), "already armed");
+            conn.MarkClosed();
+
+            Assert.True(resumed, "the parked read was never resumed after the second one was refused");
+            Assert.True(first.Result.IsCompleted, "the parked read resumed without the close");
+            conn.Dispose();
+        });
+
+        runner.Test("pipereader: a wake with nothing new parks the read again without losing its caller", () =>
+        {
+            // WakeRead delivers whatever is queued, possibly nothing, and with nothing new the reader
+            // parks again for the same caller - who is still waiting on the value task it was handed,
+            // so that park must not ready a new one.
+            (TcpConnection conn, _) = Connection();
+            var reader = new TcpConnectionPipeReader(conn);
+            ValueTask<ReadResult> read = reader.ReadAsync();
+            bool resumed = false;
+            read.GetAwaiter().UnsafeOnCompleted(() => resumed = true);
+
+            conn.WakeRead();
+            Assert.True(!resumed, "a wake with nothing new completed the read");
+
+            conn.MarkClosed();
+            Assert.True(resumed, "the read parked again after the wake was never resumed");
+            Assert.True(read.Result.IsCompleted, "the read resumed without the close");
+            conn.Dispose();
+        });
+
+        runner.Test("pipewriter: a second flush refused while one is parked leaves the parked one to complete", () =>
+        {
+            (TcpConnection conn, _) = Connection();
+            var writer = new TcpConnectionPipeWriter(conn);
+            conn.Write(One);
+            ValueTask<FlushResult> first = writer.FlushAsync();
+            bool resumed = false;
+            first.GetAwaiter().UnsafeOnCompleted(() => resumed = true);
+
+            Assert.Throws<InvalidOperationException>(() => writer.FlushAsync(), "already in progress");
+            conn.MarkClosed();   // the kernel never took it, so the close releases it
+
+            Assert.True(resumed, "the parked flush was never resumed after the second one was refused");
+            Assert.True(first.Result.IsCompleted, "the parked flush resumed without the close");
+            conn.Dispose();
+        });
+
+        runner.Test("pipewriter: a flush made after the peer closed, while the kernel holds an earlier one, leaves that one to complete", () =>
+        {
+            // The second flush is not even refused here: on a closed connection it returns at once.
+            (TcpConnection conn, _) = Connection();
+            var writer = new TcpConnectionPipeWriter(conn);
+            conn.Write(One);
+            ValueTask<FlushResult> first = writer.FlushAsync();
+            bool resumed = false;
+            first.GetAwaiter().UnsafeOnCompleted(() => resumed = true);
+            Assert.True(conn.TryClaimFlush(), "the flush was not armed for the reactor to claim");   // the kernel has it now
+
+            conn.MarkClosed();   // which does not release a flush the kernel holds
+            ValueTask<FlushResult> second = writer.FlushAsync();
+            Assert.True(second.IsCompleted && second.Result.IsCompleted, "the flush on a closed connection did not return at once, completed");
+
+            conn.CompleteFlush();   // the send's completion
+            Assert.True(resumed, "the flush the kernel held was never resumed after its send completed");
+            conn.Dispose();
+        });
+
+        runner.Test("pipewriter: a flush with nothing staged leaves an earlier flush's unread result readable", () =>
+        {
+            (TcpConnection conn, _) = Connection();
+            var writer = new TcpConnectionPipeWriter(conn);
+            conn.Write(One);
+            ValueTask<FlushResult> first = writer.FlushAsync();
+            Assert.True(conn.TryClaimFlush(), "the flush was not armed for the reactor to claim");
+            conn.CompleteFlush();   // completed, and not yet read
+
+            ValueTask<FlushResult> second = writer.FlushAsync();   // nothing staged: over at once
+            Assert.True(second.IsCompleted, "a flush with nothing staged did not return at once");
+
+            Assert.True(first.IsCompleted, "the earlier flush was no longer complete");
+            Assert.True(!first.Result.IsCompleted, "the earlier flush reported the connection closed");
+            conn.Dispose();
+        });
+    }
+
+    // A connection on a reactor that never runs, as the races above use.
+    private static (TcpConnection Conn, Reactor Reactor) Connection()
+    {
+        var reactor = new Reactor(0, new ServerConfig { ReactorCount = 1, Tcp = null, Udp = null });
+        return (new TcpConnection(reactor, -1, 64, 8), reactor);
     }
 
     private static readonly byte[] One = [1];
@@ -227,9 +329,12 @@ internal static class AdapterParkTests
         }
     }
 
+    // No value task of their own to ready, so OnParking has nothing to do.
     private sealed class CountingRecvListener : IRecvListener
     {
         public int Calls;
+
+        public void OnParking() { }
 
         public void OnRecvReady(RecvSnapshot snapshot) => Interlocked.Increment(ref Calls);
     }
@@ -237,6 +342,8 @@ internal static class AdapterParkTests
     private sealed class CountingFlushListener : IFlushListener
     {
         public int Calls;
+
+        public void OnParking() { }
 
         public void OnFlushDone() => Interlocked.Increment(ref Calls);
     }
