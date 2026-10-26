@@ -22,6 +22,7 @@ internal static class Program
         H2ChaosTests.Register(runner);
         Nghttp2ChaosTests.Register(runner);
         Nghttp2StreamedRequestTests.Register(runner);
+        Nghttp2StreamedResponseTests.Register(runner);
         QuicChaosTests.Register(runner);
         H3ChaosTests.Register(runner);
 

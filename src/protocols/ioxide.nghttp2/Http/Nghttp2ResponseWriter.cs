@@ -1,5 +1,6 @@
 using System.Buffers;
 using System.IO.Pipelines;
+using System.Threading.Tasks.Sources;
 
 namespace ioxide.nghttp2;
 
@@ -12,13 +13,15 @@ namespace ioxide.nghttp2;
 /// nothing is buffered, and every write resumes the stream.
 ///
 /// The practical consequence: a flush here means "handed over", not "on the wire". nghttp2 decides
-/// frame boundaries and when to emit, and the connection's drain is what puts bytes on the socket.
+/// frame boundaries and when to emit, and the connection's drain is what puts bytes on the socket. A
+/// flush waits only once nghttp2 holds more than 64 KiB of the stream it has not framed, so a writer
+/// runs no further ahead of its peer than that.
 /// </summary>
 /// <remarks>
 /// Reactor thread only, one writer per stream. <see cref="WriteHeaders"/> must come first and only
 /// once; the connection completes the writer when the handler returns.
 /// </remarks>
-public sealed class Nghttp2ResponseWriter : IBufferWriter<byte>
+public sealed class Nghttp2ResponseWriter : IBufferWriter<byte>, IValueTaskSource
 {
     private readonly Nghttp2Connection _connection;
 
@@ -28,6 +31,16 @@ public sealed class Nghttp2ResponseWriter : IBufferWriter<byte>
     private bool _headersSent;
     private bool _completed;
     private bool _gone;   // the peer reset the stream; nghttp2 has forgotten it
+
+    // At least what nghttp2 holds of this stream unframed: grows by every chunk handed over, and is checked against
+    // nghttp2 only once it passes MaxUnframed, so a flush of a few small chunks makes no extra native call.
+    private long _unframedBound;
+
+    // What FlushAsync waits on while nghttp2 has not caught up with this stream.
+    private ManualResetValueTaskSourceCore<bool> _caughtUp = new()
+    {
+        RunContinuationsAsynchronously = false,
+    };
 
     internal Nghttp2ResponseWriter(Nghttp2Connection connection, int streamId)
     {
@@ -72,7 +85,7 @@ public sealed class Nghttp2ResponseWriter : IBufferWriter<byte>
     public void Advance(int count) => _staged += count;
 
     /// <summary>
-    /// Hand everything staged to nghttp2 and let the connection drain.
+    /// Hand everything staged to nghttp2 and let the connection drain, waiting if nghttp2 has fallen behind.
     /// </summary>
     /// <remarks>
     /// Headers are sent for you if the handler never called <see cref="WriteHeaders"/>, because a
@@ -97,22 +110,46 @@ public sealed class Nghttp2ResponseWriter : IBufferWriter<byte>
         }
 
         await _connection.FlushStreamedAsync();
-        return default;
+
+        // nghttp2 has fallen behind: another stream's drain holds the session, or the peer's window is shut. A
+        // loop that went on regardless would never give its reactor back, and nghttp2 would buffer without bound (#409).
+        if (!_gone && _unframedBound > Nghttp2Connection.MaxUnframed)
+        {
+            _unframedBound = _connection.Unframed(StreamId);
+            if (_unframedBound > Nghttp2Connection.MaxUnframed)
+            {
+                _caughtUp.Reset();
+                _connection.ParkWriter(this);
+                await new ValueTask(this, _caughtUp.Version);
+                _unframedBound = Nghttp2Connection.MaxUnframed;   // the most a wake lets through
+            }
+        }
+
+        return _gone || _connection.IsBroken ? PeerGone : default;
     }
 
     private static readonly FlushResult PeerGone = new(isCanceled: false, isCompleted: true);
 
     private void HandOverStaged()
     {
-        if (_staged > 0 && !_gone && !_connection.SendStreamedData(StreamId, _staging.AsSpan(0, _staged)))
+        if (_staged > 0 && !_gone)
         {
-            _gone = true;
+            _unframedBound += _staged;
+            if (!_connection.SendStreamedData(StreamId, _staging.AsSpan(0, _staged)))
+            {
+                _gone = true;
+            }
         }
         _staged = 0;
     }
 
     /// <summary>The peer reset this stream: from here on nothing is sent on it.</summary>
     internal void OnPeerReset() => _gone = true;
+
+    internal bool Gone => _gone;
+
+    /// <summary>A drain caught nghttp2 up with this stream, or the stream or its connection ended.</summary>
+    internal void WakeParked() => _caughtUp.SetResult(true);
 
     /// <summary>End the response: whatever is staged goes out, then END_STREAM. Idempotent.</summary>
     internal async ValueTask CompleteAsync()
@@ -191,6 +228,7 @@ public sealed class Nghttp2ResponseWriter : IBufferWriter<byte>
     {
         StreamId = streamId;
         _staged = 0;
+        _unframedBound = 0;
         _headersSent = false;
         _completed = false;
         _gone = false;
@@ -205,4 +243,13 @@ public sealed class Nghttp2ResponseWriter : IBufferWriter<byte>
         }
         _staged = 0;
     }
+
+    void IValueTaskSource.GetResult(short token) => _caughtUp.GetResult(token);
+
+    ValueTaskSourceStatus IValueTaskSource.GetStatus(short token) => _caughtUp.GetStatus(token);
+
+    // Woken on the reactor thread, at the end of a drain: resume there rather than post.
+    void IValueTaskSource.OnCompleted(Action<object?> continuation, object? state, short token,
+        ValueTaskSourceOnCompletedFlags flags)
+        => _caughtUp.OnCompleted(continuation, state, token, flags & ~ValueTaskSourceOnCompletedFlags.UseSchedulingContext);
 }
