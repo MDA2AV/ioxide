@@ -1,0 +1,25 @@
+syntax = "proto3";
+
+option csharp_namespace = "Streaming";
+
+package numbers;
+
+service Numbers {
+  rpc Count (CountRequest) returns (stream Number);     // server streaming
+  rpc Sum (stream Number) returns (Total);              // client streaming
+  rpc Running (stream Number) returns (stream Total);   // bidirectional
+}
+
+message CountRequest {
+  int32 to = 1;
+  int32 interval_ms = 2;
+}
+
+message Number {
+  int64 value = 1;
+}
+
+message Total {
+  int64 sum = 1;
+  int32 count = 2;
+}

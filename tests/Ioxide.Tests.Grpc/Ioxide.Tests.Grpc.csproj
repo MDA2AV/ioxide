@@ -1,0 +1,26 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net11.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <RootNamespace>Ioxide.Tests</RootNamespace>
+    <AssemblyName>Ioxide.Tests.Grpc</AssemblyName>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="../Ioxide.Tests.Harness/Ioxide.Tests.Harness.csproj" />
+    <ProjectReference Include="../../src/protocols/ioxide.grpc/ioxide.grpc.csproj" />
+  </ItemGroup>
+
+  <!-- The service is generated both ways: its server base class for ioxide.grpc to serve, and its
+       client for Grpc.Net.Client - the reference implementation - to call it with. -->
+  <ItemGroup>
+    <Protobuf Include="Protos/tester.proto" GrpcServices="Both" />
+    <PackageReference Include="Google.Protobuf" Version="3.36.2" />
+    <PackageReference Include="Grpc.Net.Client" Version="2.84.0" />
+    <PackageReference Include="Grpc.Tools" Version="2.84.0" PrivateAssets="All" />
+  </ItemGroup>
+
+</Project>

@@ -46,6 +46,12 @@ public sealed class Http2ResponseWriter : IBufferWriter<byte>
     // What a flush waits on while its bytes are queued behind the write pump's flush in flight.
     private readonly TurnWaiter _turn = new();
 
+    // The trailer section the completion in progress ends the stream with, in place of END_STREAM on DATA.
+    private KeyValueList? _trailers;
+
+    // Behind Aborted, made the first time a handler asks for it.
+    private CancellationTokenSource? _aborted;
+
     internal Http2ResponseWriter(Http2Connection connection, int streamId)
     {
         _connection = connection;
@@ -57,6 +63,27 @@ public sealed class Http2ResponseWriter : IBufferWriter<byte>
 
     /// <summary>True once the body has been finished and END_STREAM sent.</summary>
     public bool IsCompleted => _completed;
+
+    /// <summary>
+    /// Cancelled, on the reactor, once the stream is reset by either side or the connection goes while
+    /// its handler runs: a handler waiting on something other than this stream hears it too.
+    /// </summary>
+    public CancellationToken Aborted
+    {
+        get
+        {
+            if (_aborted is null)
+            {
+                // Two threads can ask at once: one source wins, and only it is watched.
+                var created = new CancellationTokenSource();
+                if (Interlocked.CompareExchange(ref _aborted, created, null) is null)
+                {
+                    _connection.WatchAbort(_streamId, created);
+                }
+            }
+            return _aborted.Token;
+        }
+    }
 
     /// <summary>
     /// Send the response headers. Exactly once, before any body byte - HTTP/2 puts HEADERS ahead
@@ -170,7 +197,20 @@ public sealed class Http2ResponseWriter : IBufferWriter<byte>
     /// Send what is left and mark END_STREAM. A handler that returns without calling this gets it
     /// called for it - the peer is owed an end either way.
     /// </summary>
-    public async ValueTask CompleteAsync()
+    public ValueTask CompleteAsync() => _completed ? default : CompleteCore(trailers: null);
+
+    /// <summary>
+    /// Send what is left, then <paramref name="trailers"/> as the trailer section that ends the
+    /// stream (RFC 9113 8.1), where gRPC carries its status. Field lines only, no pseudo-headers;
+    /// their memory must stay valid until the returned task completes.
+    /// </summary>
+    public ValueTask CompleteAsync(KeyValueList trailers)
+    {
+        ArgumentNullException.ThrowIfNull(trailers);
+        return CompleteCore(trailers.Count > 0 ? trailers : null);
+    }
+
+    private async ValueTask CompleteCore(KeyValueList? trailers)
     {
         if (_completed)
         {
@@ -182,9 +222,48 @@ public sealed class Http2ResponseWriter : IBufferWriter<byte>
             WriteHeaders(new Http2Response { Status = 500 });
         }
 
+        _trailers = trailers;
         await FlushCore(endStream: true);
+        _trailers = null;
         _completed = true;
+        ReturnStaging();
+    }
 
+    /// <summary>
+    /// End the stream with <paramref name="response"/>'s headers alone, END_STREAM on them: a response
+    /// with no body, as gRPC's trailers-only status is. In place of <see cref="WriteHeaders"/>, never
+    /// after it; the memories must stay valid until the returned task completes.
+    /// </summary>
+    public async ValueTask CompleteAsync(Http2Response response)
+    {
+        ArgumentNullException.ThrowIfNull(response);
+        if (_headersSent)
+        {
+            throw new InvalidOperationException("Response headers have already been written for this stream.");
+        }
+        if (!response.Body.IsEmpty)
+        {
+            throw new ArgumentException("A response that ends on its headers has no body; leave Response.Body empty.", nameof(response));
+        }
+
+        _headersSent = true;
+        _completed = true;
+        await new ReactorSwitch(_connection.Reactor);
+
+        if (_connection.IsResponseLive(_streamId))
+        {
+            _connection.SendHeadersOnly(_streamId, response);
+            if (!_connection.InDispatchPass)
+            {
+                await _connection.FlushOutboundAsync(_turn);
+            }
+        }
+        ReturnStaging();
+    }
+
+    private void ReturnStaging()
+    {
+        _staged = 0;
         if (_staging.Length > 0)
         {
             ArrayPool<byte>.Shared.Return(_staging);
@@ -205,12 +284,7 @@ public sealed class Http2ResponseWriter : IBufferWriter<byte>
         }
 
         _completed = true;
-        _staged = 0;
-        if (_staging.Length > 0)
-        {
-            ArrayPool<byte>.Shared.Return(_staging);
-            _staging = [];
-        }
+        ReturnStaging();
 
         // Not in answer to the peer's own reset (RFC 9113 5.4.2), and not on a connection that is gone.
         if (_connection.IsResponseLive(_streamId))
@@ -296,7 +370,7 @@ public sealed class Http2ResponseWriter : IBufferWriter<byte>
             }
 
             int chunk = Math.Min(credit, _staged - sent);
-            bool last = endStream && sent + chunk == _staged;
+            bool last = endStream && _trailers is null && sent + chunk == _staged;
 
             _connection.SendStreamedData(_streamId, _staging.AsSpan(sent, chunk), last);
             sent += chunk;
@@ -316,7 +390,11 @@ public sealed class Http2ResponseWriter : IBufferWriter<byte>
             return new ValueTask<FlushResult>(PeerGone);
         }
 
-        if (endStream && sent == 0)
+        if (endStream && _trailers is not null)
+        {
+            _connection.SendTrailers(_streamId, _trailers);   // END_STREAM rides the trailers, not the last DATA
+        }
+        else if (endStream && sent == 0)
         {
             // Nothing left to send, but the stream still needs its end.
             _connection.SendStreamedData(_streamId, ReadOnlySpan<byte>.Empty, endStream: true);
@@ -406,5 +484,12 @@ public sealed class Http2ResponseWriter : IBufferWriter<byte>
         _headersSent = false;
         _completed = false;
         _unsent = null;
+    }
+
+    /// <summary>Back to the pool: nothing of the stream stays alive in it, its handler's token or trailers least of all.</summary>
+    internal void Release()
+    {
+        _aborted = null;
+        _trailers = null;
     }
 }

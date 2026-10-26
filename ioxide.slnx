@@ -9,6 +9,7 @@
     <Project Path="src/protocols/ioxide.http2/ioxide.http2.csproj" />
     <Project Path="src/protocols/ioxide.http3/ioxide.http3.csproj" />
     <Project Path="src/protocols/ioxide.ngtcp2/ioxide.ngtcp2.csproj" />
+    <Project Path="src/protocols/ioxide.grpc/ioxide.grpc.csproj" />
   </Folder>
 
   <!-- Outbound: what an app calls out to. -->
@@ -77,6 +78,12 @@
     <Project Path="Playground/Http2/Rotate/Playground.Http2.Rotate.csproj" />
   </Folder>
 
+  <Folder Name="/apps/playground/grpc/">
+    <Project Path="Playground/Grpc/Greeter/Playground.Grpc.Greeter.csproj" />
+    <Project Path="Playground/Grpc/Streaming/Playground.Grpc.Streaming.csproj" />
+    <Project Path="Playground/Grpc/Tls/Playground.Grpc.Tls.csproj" />
+  </Folder>
+
   <Folder Name="/apps/playground/http3/">
     <Project Path="Playground/Http3/Nghttp3Request/Playground.Http3.Nghttp3Request.csproj" />
     <Project Path="Playground/Http3/Nghttp3Buffered/Playground.Http3.Nghttp3Buffered.csproj" />
@@ -129,6 +136,7 @@
     <Project Path="tests/Ioxide.Tests.Tls/Ioxide.Tests.Tls.csproj" />
     <Project Path="tests/Ioxide.Tests.File/Ioxide.Tests.File.csproj" />
     <Project Path="tests/Ioxide.Tests.Chaos/Ioxide.Tests.Chaos.csproj" />
+    <Project Path="tests/Ioxide.Tests.Grpc/Ioxide.Tests.Grpc.csproj" />
   </Folder>
 
   <Folder Name="/bench/">
