@@ -85,7 +85,7 @@ public sealed unsafe partial class Reactor
     // carried it completes. Unlocked, a push and a pop that overlap hand one slab to two connections
     // (#402). The lock is only taken past the primary slab, where a response already pays for a SENDMSG.
     private readonly Stack<nint> _writeSlabPool = new();
-    private readonly object _writeSlabGate = new();
+    private readonly Lock _writeSlabGate = new();
     private const int WriteSlabPoolMax = 4096;
 
     internal nint RentWriteSlab()
