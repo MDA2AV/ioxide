@@ -73,8 +73,11 @@ internal static unsafe partial class Nghttp2
     [DllImport(Lib)] internal static extern int ih2_stream_write(nint connection, int streamId,
         byte* data, nuint length);
 
-    /// <summary>No more body: END_STREAM goes out once what is buffered has been framed.</summary>
-    [DllImport(Lib)] internal static extern int ih2_stream_close(nint connection, int streamId);
+    /// <summary>No more body: END_STREAM goes out once what is buffered has been framed - on the last
+    /// DATA, or on a trailer HEADERS when <paramref name="trailers"/> (packed like headers, no
+    /// pseudo-headers) is given. The trailers are copied natively.</summary>
+    [DllImport(Lib)] internal static extern int ih2_stream_close(nint connection, int streamId,
+        byte* trailers, nuint trailersLen);
 
     /// <summary>Body bytes written to a stream that nghttp2 has not framed yet; 0 once the stream is gone.</summary>
     [DllImport(Lib)] internal static extern nuint ih2_stream_pending(nint connection, int streamId);

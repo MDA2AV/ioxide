@@ -82,7 +82,7 @@ jobs:
           # default 8 MB RLIMIT_MEMLOCK is exhausted. Raise it before the run.
           sudo prlimit --pid $$ --memlock=-1:-1 2>/dev/null || ulimit -l unlimited 2>/dev/null || true
           echo "memlock: $(ulimit -Sl) KB"
-          for suite in Unit E2E Http Pg Redis Tls File Chaos; do
+          for suite in Unit E2E Http Pg Redis Tls File Chaos Grpc; do
             echo "::group::$suite"
             dotnet run --project tests/Ioxide.Tests.$suite/Ioxide.Tests.$suite.csproj \
               --configuration Release --no-build

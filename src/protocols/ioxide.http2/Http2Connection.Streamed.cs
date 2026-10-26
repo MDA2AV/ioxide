@@ -89,9 +89,25 @@ public sealed partial class Http2Connection
             // the connection grows without bound - 20 GB over eight seconds of load, measured.
             _creditWaiters.Remove(writer.StreamId);
             _responseWindows.Remove(writer.StreamId);
+            _abortWatch?.Remove(writer.StreamId);
             _streams.Remove(writer.StreamId);
             pending.Dispose();
             _writerPool.Push(writer);
+        }
+    }
+
+    // Writers whose Aborted token a handler asked for, by stream: only these need telling when one goes.
+    private Dictionary<int, Http2ResponseWriter>? _abortWatch;
+
+    internal void WatchAbort(Http2ResponseWriter writer) => (_abortWatch ??= new())[writer.StreamId] = writer;
+
+    // Called once the stream's own state is gone, like a credit waiter's release: a token callback may
+    // resume its handler inline, and that handler must find the stream already over.
+    private void SignalAbort(int streamId)
+    {
+        if (_abortWatch is not null && _abortWatch.Remove(streamId, out Http2ResponseWriter? writer))
+        {
+            writer.SignalAborted();
         }
     }
 

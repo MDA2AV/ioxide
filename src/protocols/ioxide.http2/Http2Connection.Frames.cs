@@ -571,6 +571,8 @@ public sealed partial class Http2Connection
         {
             ReleaseCreditWaiters(header.StreamId);
         }
+
+        SignalAbort(header.StreamId);
     }
 
     /// <summary>

@@ -19,7 +19,8 @@ namespace ioxide.nghttp2;
 /// </summary>
 /// <remarks>
 /// Reactor thread only, one writer per stream. <see cref="WriteHeaders"/> must come first and only
-/// once; the connection completes the writer when the handler returns.
+/// once; the connection completes the writer when the handler returns, unless the handler ended it
+/// with trailers first.
 /// </remarks>
 public sealed class Nghttp2ResponseWriter : IBufferWriter<byte>, IValueTaskSource
 {
@@ -31,6 +32,9 @@ public sealed class Nghttp2ResponseWriter : IBufferWriter<byte>, IValueTaskSourc
     private bool _headersSent;
     private bool _completed;
     private bool _gone;   // the peer reset the stream; nghttp2 has forgotten it
+
+    // Behind Aborted, created only when a handler asks for it.
+    private CancellationTokenSource? _aborted;
 
     // At least what nghttp2 holds of this stream unframed: grows by every chunk handed over, and is checked against
     // nghttp2 only once it passes MaxUnframed, so a flush of a few small chunks makes no extra native call.
@@ -49,6 +53,20 @@ public sealed class Nghttp2ResponseWriter : IBufferWriter<byte>, IValueTaskSourc
     }
 
     public int StreamId { get; private set; }
+
+    /// <summary>
+    /// True once the stream has gone before this response completed: the peer reset it, or the
+    /// connection is gone. A streamed request body that came back empty was cut off, not ended,
+    /// when this is set.
+    /// </summary>
+    public bool IsAborted => !_completed && (_gone || _connection.IsBroken);
+
+    /// <summary>
+    /// Cancelled, on the reactor thread, when the stream is aborted before this response completes
+    /// (see <see cref="IsAborted"/>) - so a handler waiting on something else hears it too.
+    /// </summary>
+    public CancellationToken Aborted
+        => IsAborted ? new CancellationToken(canceled: true) : (_aborted ??= new CancellationTokenSource()).Token;
 
     /// <summary>
     /// Send the status and headers. No content-length is implied: a streamed body has no length
@@ -144,15 +162,57 @@ public sealed class Nghttp2ResponseWriter : IBufferWriter<byte>, IValueTaskSourc
     }
 
     /// <summary>The peer reset this stream: from here on nothing is sent on it.</summary>
-    internal void OnPeerReset() => _gone = true;
+    internal void OnPeerReset()
+    {
+        _gone = true;
+        NoteAborted();
+    }
 
     internal bool Gone => _gone;
+
+    // Inside a native callback, so the token is cancelled once nghttp2 has unwound.
+    internal void NoteAborted()
+    {
+        if (_aborted is not null && !_completed)
+        {
+            _connection.NoteAbortWake(this);
+        }
+    }
+
+    /// <summary>The deferred half of <see cref="NoteAborted"/>. A response that completed was not aborted.</summary>
+    internal void SignalAborted()
+    {
+        if (_aborted is { } aborted && !_completed)
+        {
+            try
+            {
+                aborted.Cancel();
+            }
+            catch
+            {
+                // A callback that throws is its own fault; it must not fail every stream on the connection.
+            }
+        }
+    }
 
     /// <summary>A drain caught nghttp2 up with this stream, or the stream or its connection ended.</summary>
     internal void WakeParked() => _caughtUp.SetResult(true);
 
     /// <summary>End the response: whatever is staged goes out, then END_STREAM. Idempotent.</summary>
-    internal async ValueTask CompleteAsync()
+    internal ValueTask CompleteAsync() => CompleteCore(trailers: null);
+
+    /// <summary>
+    /// End the response before the handler returns: whatever is staged goes out, then
+    /// <paramref name="trailers"/> as the trailer section that carries END_STREAM (RFC 9113 8.1) -
+    /// where gRPC puts its status. Field lines only, no pseudo-headers; copied before this returns.
+    /// </summary>
+    public ValueTask CompleteAsync(KeyValueList trailers)
+    {
+        ArgumentNullException.ThrowIfNull(trailers);
+        return CompleteCore(trailers.Count > 0 ? trailers : null);
+    }
+
+    private async ValueTask CompleteCore(KeyValueList? trailers)
     {
         if (_completed)
         {
@@ -173,7 +233,7 @@ public sealed class Nghttp2ResponseWriter : IBufferWriter<byte>, IValueTaskSourc
             return;   // reset by the peer: there is no end left to send
         }
 
-        _connection.EndStreamedBody(StreamId);
+        _connection.EndStreamedBody(StreamId, trailers);
         await _connection.FlushStreamedAsync();
     }
 
@@ -232,6 +292,7 @@ public sealed class Nghttp2ResponseWriter : IBufferWriter<byte>, IValueTaskSourc
         _headersSent = false;
         _completed = false;
         _gone = false;
+        _aborted = null;
     }
 
     internal void Release()

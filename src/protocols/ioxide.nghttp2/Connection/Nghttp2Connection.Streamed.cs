@@ -158,12 +158,40 @@ public sealed partial class Nghttp2Connection
         }
     }
 
-    /// <summary>No more body on this stream; END_STREAM follows what is already queued.</summary>
-    internal void EndStreamedBody(int streamId)
+    /// <summary>No more body on this stream; END_STREAM follows what is already queued, on the trailers when given.</summary>
+    internal unsafe void EndStreamedBody(int streamId, KeyValueList? trailers)
     {
-        if (_handle != 0)
+        if (_handle == 0)
         {
-            Nghttp2.ih2_stream_close(_handle, streamId);
+            return;
+        }
+
+        int result;
+        if (trailers is null)
+        {
+            result = Nghttp2.ih2_stream_close(_handle, streamId, null, 0);
+        }
+        else
+        {
+            byte[] packed = PackFields(status: null, trailers, out int packedLength);
+            try
+            {
+                fixed (byte* bytes = packed)
+                {
+                    result = Nghttp2.ih2_stream_close(_handle, streamId, bytes, (nuint)packedLength);
+                }
+            }
+            finally
+            {
+                ArrayPool<byte>.Shared.Return(packed);
+            }
+        }
+
+        // A stream the peer closed is dropped natively, so its end finds nothing. Trailers nghttp2 can't
+        // take end the stream with a reset instead: never an end without its trailers.
+        if (result != 0 && result != ErrInvalidArgument)
+        {
+            ResetStreamed(streamId);
         }
     }
 

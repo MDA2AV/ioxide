@@ -11,6 +11,8 @@
  *
  *   conn = ih2_server_new(cbs, user, manual)  one per accepted connection (server SETTINGS queued)
  *          ih2_submit_response(sid, hdrs, body)
+ *          ih2_submit_response_stream(sid, hdrs), ih2_stream_write(sid, data),
+ *          ih2_stream_close(sid, trailers)    a body pushed over time, ended by DATA or by trailers
  *          ih2_consume(sid, len)              manual flow control: credit DATA once it is read
  *
  *   both:  ih2_read(data, len)                feed received bytes; protocol events fire back
@@ -58,6 +60,8 @@ typedef struct ih2_stream {
     size_t   body_cap;      /* allocation behind body, streamed mode only */
     int      streaming;     /* body arrives over time rather than whole at submit */
     int      eof;           /* streamed: producer has said there is no more */
+    uint8_t *trailers;      /* streamed: packed trailer fields to end the stream with, or NULL */
+    size_t   trailers_len;
 } ih2_stream;
 
 typedef struct ih2_conn {
@@ -86,6 +90,7 @@ static void ih2_stream_drop(ih2_conn *c, int32_t stream_id)
             ih2_stream *dead = *link;
             *link = dead->next;
             free(dead->body);
+            free(dead->trailers);
             free(dead);
             return;
         }
@@ -185,10 +190,12 @@ static int on_stream_close(nghttp2_session *session, int32_t stream_id, uint32_t
  * itself, every DATA frame vanishes and the request hangs at the peer. The body is already copied
  * into s->body at submit time, so a plain copy here costs nothing extra and keeps the framing
  * inside nghttp2 where it belongs. */
+static int ih2_end_streamed(nghttp2_session *session, ih2_stream *s, uint32_t *data_flags);
+
 static ssize_t read_body(nghttp2_session *session, int32_t stream_id, uint8_t *buf, size_t length,
                          uint32_t *data_flags, nghttp2_data_source *source, void *user_data)
 {
-    (void)session; (void)source;
+    (void)source;
     ih2_conn *c = user_data;
     ih2_stream *s = ih2_stream_find(c, stream_id);
 
@@ -209,8 +216,7 @@ static ssize_t read_body(nghttp2_session *session, int32_t stream_id, uint8_t *b
             return 0;
         }
         if (s->eof) {
-            *data_flags |= NGHTTP2_DATA_FLAG_EOF;
-            return 0;
+            return ih2_end_streamed(session, s, data_flags);
         }
         return NGHTTP2_ERR_DEFERRED;
     }
@@ -226,7 +232,10 @@ static ssize_t read_body(nghttp2_session *session, int32_t stream_id, uint8_t *b
             s->body_sent = 0;
         }
         if (s->body_len == 0 && s->eof) {
-            *data_flags |= NGHTTP2_DATA_FLAG_EOF;
+            int rv = ih2_end_streamed(session, s, data_flags);
+            if (rv != 0) {
+                return rv;
+            }
         }
     } else if (s->body_sent == s->body_len) {
         *data_flags |= NGHTTP2_DATA_FLAG_EOF;
@@ -357,6 +366,28 @@ static int ih2_unpack_headers(const uint8_t *headers, size_t headers_len, nghttp
         return NGHTTP2_ERR_INVALID_ARGUMENT;
     }
     return (int)count;
+}
+
+/* The end of a streamed body: EOF, and with trailers, a trailer HEADERS that carries END_STREAM
+ * in place of the last DATA. nghttp2 takes the trailer submit from inside read_body. */
+static int ih2_end_streamed(nghttp2_session *session, ih2_stream *s, uint32_t *data_flags)
+{
+    *data_flags |= NGHTTP2_DATA_FLAG_EOF;
+    if (s->trailers == NULL) {
+        return 0;
+    }
+
+    nghttp2_nv nv[IH2_MAX_HEADERS];
+    int count = ih2_unpack_headers(s->trailers, s->trailers_len, nv);
+    int rv = count < 0 ? count : nghttp2_submit_trailer(session, s->stream_id, nv, (size_t)count);
+    free(s->trailers);   /* nghttp2 copied the fields */
+    s->trailers = NULL;
+    if (rv != 0) {
+        return NGHTTP2_ERR_TEMPORAL_CALLBACK_FAILURE;   /* resets the stream: never an end without its trailers */
+    }
+
+    *data_flags |= NGHTTP2_DATA_FLAG_NO_END_STREAM;
+    return 0;
 }
 
 /* Attach a body to a stream so read_body can feed it out. Ownership of the copy stays here until
@@ -491,8 +522,9 @@ int ih2_submit_rst_stream(ih2_conn *c, int32_t stream_id, uint32_t error_code)
     return nghttp2_submit_rst_stream(c->session, NGHTTP2_FLAG_NONE, stream_id, error_code);
 }
 
-/* No more body. read_body will flag EOF once what is buffered has gone out. */
-int ih2_stream_close(ih2_conn *c, int32_t stream_id)
+/* No more body. read_body will flag EOF once what is buffered has gone out - and end the stream
+ * with `trailers` (packed like headers, none when trailers_len is 0) rather than with the last DATA. */
+int ih2_stream_close(ih2_conn *c, int32_t stream_id, const uint8_t *trailers, size_t trailers_len)
 {
     if (c == NULL || c->session == NULL) {
         return NGHTTP2_ERR_INVALID_STATE;
@@ -501,6 +533,24 @@ int ih2_stream_close(ih2_conn *c, int32_t stream_id)
     ih2_stream *s = ih2_stream_find(c, stream_id);
     if (s == NULL || !s->streaming) {
         return NGHTTP2_ERR_INVALID_ARGUMENT;
+    }
+
+    if (trailers_len > 0) {
+        /* Refused here rather than from inside read_body, where it could only reset the stream - with
+         * its own code, as INVALID_ARGUMENT already means a stream the peer closed. */
+        nghttp2_nv nv[IH2_MAX_HEADERS];
+        if (ih2_unpack_headers(trailers, trailers_len, nv) < 0) {
+            return NGHTTP2_ERR_INVALID_HEADER_BLOCK;
+        }
+
+        uint8_t *copy = malloc(trailers_len);
+        if (copy == NULL) {
+            return NGHTTP2_ERR_NOMEM;
+        }
+        memcpy(copy, trailers, trailers_len);
+        free(s->trailers);
+        s->trailers = copy;
+        s->trailers_len = trailers_len;
     }
 
     s->eof = 1;

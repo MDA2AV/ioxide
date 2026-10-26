@@ -9,6 +9,7 @@
     <Project Path="src/protocols/ioxide.http2/ioxide.http2.csproj" />
     <Project Path="src/protocols/ioxide.http3/ioxide.http3.csproj" />
     <Project Path="src/protocols/ioxide.ngtcp2/ioxide.ngtcp2.csproj" />
+    <Project Path="src/protocols/ioxide.grpc/ioxide.grpc.csproj" />
   </Folder>
 
   <!-- Outbound: what an app calls out to. -->
@@ -128,6 +129,7 @@
     <Project Path="tests/Ioxide.Tests.Tls/Ioxide.Tests.Tls.csproj" />
     <Project Path="tests/Ioxide.Tests.File/Ioxide.Tests.File.csproj" />
     <Project Path="tests/Ioxide.Tests.Chaos/Ioxide.Tests.Chaos.csproj" />
+    <Project Path="tests/Ioxide.Tests.Grpc/Ioxide.Tests.Grpc.csproj" />
   </Folder>
 
   <Folder Name="/bench/">

@@ -129,6 +129,17 @@ public sealed partial class Http2Connection : IDisposable
 
         // Last: a handler parked on its body resumes into its end once everything above is released.
         FireBodyWakes();
+
+        if (_abortWatch is { Count: > 0 })
+        {
+            // Snapshot-and-clear: a cancelled handler can retire inline, and retiring takes it out of the table.
+            Http2ResponseWriter[] watching = [.. _abortWatch.Values];
+            _abortWatch.Clear();
+            foreach (Http2ResponseWriter writer in watching)
+            {
+                writer.SignalAborted();
+            }
+        }
     }
 
     /// <summary>Serve until the peer goes away, answering each request with <paramref name="handler"/>.</summary>

@@ -139,6 +139,10 @@ public sealed partial class Nghttp2Connection : IDisposable
             }
         }
         _pending.Clear();
+        foreach (Nghttp2ResponseWriter writer in _writers.Values)
+        {
+            writer.NoteAborted();   // a running handler's response can no longer complete
+        }
         FireBodyWakes();
         WakeParkedWriters();   // broken now, so every parked writer goes, to hear the peer is gone
     }

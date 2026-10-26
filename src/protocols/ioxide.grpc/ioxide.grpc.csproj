@@ -1,0 +1,28 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFrameworks>net10.0;net11.0</TargetFrameworks>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <RootNamespace>ioxide.grpc</RootNamespace>
+
+    <PackageId>ioxide.grpc</PackageId>
+    <Version>0.21.412</Version>
+    <Authors>MDA2AV</Authors>
+    <Description>gRPC server for the ioxide io_uring runtime. Serves the services Grpc.Tools generates - unary, client, server and bidirectional streaming, metadata, status trailers and client cancellation - over ioxide.http2 or ioxide.nghttp2, on the reactor that owns each connection.</Description>
+    <PackageLicenseExpression>MIT</PackageLicenseExpression>
+    <PackageProjectUrl>https://mda2av.github.io/ioxide/</PackageProjectUrl>
+    <RepositoryUrl>https://github.com/MDA2AV/ioxide</RepositoryUrl>
+    <RepositoryType>git</RepositoryType>
+    <PackageTags>io_uring;grpc;http2;protobuf;server;linux;ioxide</PackageTags>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <None Include="../../../README.md" Pack="true" PackagePath="/" />
+    <ProjectReference Include="../ioxide.http2/ioxide.http2.csproj" />
+    <ProjectReference Include="../ioxide.nghttp2/ioxide.nghttp2.csproj" />
+    <PackageReference Include="Grpc.Core.Api" Version="2.84.0" />
+  </ItemGroup>
+
+</Project>
