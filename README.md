@@ -5,77 +5,18 @@
 [![net](https://img.shields.io/badge/.NET-10%20%7C%2011-blue)](https://dotnet.microsoft.com/)
 [![linux](https://img.shields.io/badge/linux-6.1%2B-blue)](https://kernel.org/)
 
-**A shared-nothing io_uring runtime for .NET.**
-
-One ring per reactor thread, one reactor per core. Each reactor owns its ring, its SO_REUSEPORT
-listener, its connections and its clients outright, so nothing is shared and nothing is locked - a
-request never leaves the core it arrived on, inbound and outbound alike. What makes that practical
-in .NET is that you do not give up the platform's async model to get it: handlers are ordinary
-`async Task` code, ring completions resume their continuations **inline on the reactor thread**, and
-a per-reactor `SynchronizationContext` catches everything that would otherwise escape - timers,
-`HttpClient`, `Task.Run`. You always wake up on your reactor, so connection, pool and handler state
-stays single-threaded without a lock in sight.
-
-ioxide hands you raw bytes and stays out of HTTP; when you want a framework on top,
-`ioxide.Kestrel` swaps the transport under an existing ASP.NET Core app with your endpoints
-unchanged.
+**A shared-nothing io_uring runtime for .NET.** One reactor per core, each with its own ring, and
+handlers are plain `async` code that always resumes on its reactor.
 
 > Linux 6.1+ · .NET 10 / .NET 11 · experimental
 
-Each reactor is charged against `RLIMIT_MEMLOCK`: measured at 772 KB for the ring at the default
-`RingEntries`, plus 64 KB for a 4096-slot buffer ring, so about 836 KB per reactor. The common 8 MB
-`ulimit -l` fits roughly ten - which is fewer than the default `ReactorCount` of 12, so a default
-server does not start under it. The counter is **per uid**, not per process, so every process you run
-shares one budget. A closed ring's memory is reclaimed asynchronously, so standing servers up and
-tearing them down in quick succession can hit `ENOMEM` while nothing is leaking; `Ring.Create`
-retries briefly before giving up, and names the errno when it does.
->
-> Incremental mode charges a further page per live connection, so at the default `MaxConnections`
-> a reactor can want 16 MB on top of its ring.
+```bash
+dotnet add package ioxide
+```
 
-**[Documentation](https://mda2av.github.io/ioxide/)** - architecture, guides, and every example as
-runnable code side by side.
+HTTP/2, HTTP/3, QUIC, the clients and the ASP.NET Core transport are separate `ioxide.*` packages.
 
-## Packages
+- **[Documentation](https://mda2av.github.io/ioxide/)**: guides and runnable examples.
+- **[Playground](Playground/)**: one complete server per workload, ready to copy and run.
 
-Every package shares one version and depends only on the runtime. Start with
-**[`ioxide`](https://www.nuget.org/packages/ioxide/)** - reactors, TCP/UDP transports, connections,
-the ring-native client seam, and TLS termination (BoringSSL handshake over the ring, then kTLS, so
-handlers keep writing plaintext) - then add exactly what you use.
-
-**Protocols.** HTTP/2 and HTTP/3 each come twice: a bundled native, or the same surface in pure C#.
-
-| Package | What it does |
-| --- | --- |
-| [`ioxide.ngtcp2`](https://www.nuget.org/packages/ioxide.ngtcp2/) | QUIC. ngtcp2 + picotls on BoringSSL's libcrypto as one bundled native; needs nothing from the system. |
-| [`ioxide.nghttp3`](https://www.nuget.org/packages/ioxide.nghttp3/) | HTTP/3 + QPACK (nghttp3), bundled native. Rides any QUIC connection. |
-| [`ioxide.http3`](https://www.nuget.org/packages/ioxide.http3/) | HTTP/3 in pure C# - frames, QPACK, Huffman. Zero native code, drop-in for `ioxide.nghttp3`. |
-| [`ioxide.nghttp2`](https://www.nuget.org/packages/ioxide.nghttp2/) | HTTP/2 (nghttp2), bundled native. h2c, or h2 over TLS via ALPN. |
-| [`ioxide.http2`](https://www.nuget.org/packages/ioxide.http2/) | HTTP/2 in pure C# - framing, HPACK, flow control. Zero native code, drop-in for `ioxide.nghttp2`. |
-
-**Clients.** One pool per reactor, opened on the reactor thread, so every call rides the ring that
-accepted the request.
-
-| Package | What it does |
-| --- | --- |
-| [`ioxide.httpclient`](https://www.nuget.org/packages/ioxide.httpclient/) | The HTTP/1.1 upstream leg between a proxy and an origin, with client-side TLS and mutual TLS for `https://`. |
-| [`ioxide.pg`](https://www.nuget.org/packages/ioxide.pg/) | Postgres. Connect, query and stream rows on the owning ring. |
-| `ioxide.redis.stackexchange` | Experimental, not published: StackExchange.Redis's whole API with its connections on a reactor's ring, through StackExchange.Redis's experimental transport seam. |
-| [`ioxide.file`](https://www.nuget.org/packages/ioxide.file/) | Static assets. Immutable snapshots, baked responses, positional ring reads. |
-| [`ioxide.timer`](https://www.nuget.org/packages/ioxide.timer/) | Deadlines. A wait is one `IORING_OP_TIMEOUT` on the caller's own ring - no timer thread, nothing allocated per wait. |
-
-**Serving.**
-
-| Package | What it does |
-| --- | --- |
-| [`ioxide.Kestrel`](https://www.nuget.org/packages/ioxide.Kestrel/) | ASP.NET Core transport: `UseIoxide()` and Kestrel runs one ring per core, its request loop pinned to the reactor thread. |
-
-## Where the code is
-
-Nothing here is pseudocode. Every pattern above exists as something you can run:
-
-| | What you get |
-| --- | --- |
-| **[Documentation](https://mda2av.github.io/ioxide/)** | The examples browser - TCP with and without kTLS, HTTP/2, QUIC, HTTP/3, every client, and all nine proxy combinations, side by side. |
-| **[Playground](Playground/)** | One project per workload, grouped by topic. Each `Program.cs` is a **complete** server - config, reactors, threads, handler - so you can copy the file out and run it. |
-| **[Playground/AspNet](Playground/AspNet/)** | `UseIoxide()` measured against a stock Kestrel baseline. |
+Each reactor locks about 1 MB of memory, so raise `ulimit -l` if a server with many reactors won't start.
