@@ -76,6 +76,9 @@ internal static unsafe partial class Nghttp2
     /// <summary>No more body: END_STREAM goes out once what is buffered has been framed.</summary>
     [DllImport(Lib)] internal static extern int ih2_stream_close(nint connection, int streamId);
 
+    /// <summary>Body bytes written to a stream that nghttp2 has not framed yet; 0 once the stream is gone.</summary>
+    [DllImport(Lib)] internal static extern nuint ih2_stream_pending(nint connection, int streamId);
+
     /// <summary>Abort a stream with RST_STREAM and this HTTP/2 error code.</summary>
     [DllImport(Lib)] internal static extern int ih2_submit_rst_stream(nint connection, int streamId, uint errorCode);
 

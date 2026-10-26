@@ -469,6 +469,18 @@ int ih2_stream_write(ih2_conn *c, int32_t stream_id, const uint8_t *data, size_t
     return rv == NGHTTP2_ERR_INVALID_ARGUMENT ? 0 : rv;
 }
 
+/* Bytes written to a streamed body that nghttp2 has not framed yet: how far the producer is ahead
+ * of what the peer can take. 0 for a stream that is gone. */
+size_t ih2_stream_pending(ih2_conn *c, int32_t stream_id)
+{
+    if (c == NULL || c->session == NULL) {
+        return 0;
+    }
+
+    ih2_stream *s = ih2_stream_find(c, stream_id);
+    return s == NULL || !s->streaming ? 0 : s->body_len - s->body_sent;
+}
+
 /* Abort a stream with RST_STREAM and an HTTP/2 error code: a response that cannot be finished. Its
  * queued body goes with it, and on_stream_close frees the stream like any other close. */
 int ih2_submit_rst_stream(ih2_conn *c, int32_t stream_id, uint32_t error_code)

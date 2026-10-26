@@ -143,6 +143,8 @@ public sealed partial class Nghttp2Connection
         {
             _draining = false;
         }
+
+        WakeParkedWriters();
     }
 
     private unsafe int DrainOnce()

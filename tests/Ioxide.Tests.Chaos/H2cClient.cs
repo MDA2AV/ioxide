@@ -276,6 +276,46 @@ public sealed class H2cClient : IDisposable
         return (frames, bytes, false);
     }
 
+    /// <summary>
+    /// Read until <paramref name="done"/> holds, counting DATA bytes per stream into <paramref name="bytes"/>
+    /// and the streams that end into <paramref name="ended"/>, answering SETTINGS. With
+    /// <paramref name="credit"/> every DATA byte goes straight back as WINDOW_UPDATE on its stream and the
+    /// connection, as a client that keeps up does; without it the server's windows only shrink. False on
+    /// timeout, GOAWAY or a closed connection.
+    /// </summary>
+    public bool ReadData(Dictionary<int, long> bytes, HashSet<int> ended, Func<bool> done, bool credit, int timeoutMs = 8000)
+    {
+        long deadline = Environment.TickCount64 + timeoutMs;
+        while (!done())
+        {
+            if (Environment.TickCount64 >= deadline
+                || !TryReadFrame(out byte type, out byte flags, out int sid, out byte[] payload)
+                || type == GoAway)
+            {
+                return false;
+            }
+
+            if (type == Settings && (flags & Ack) == 0)
+            {
+                WriteFrame(Settings, Ack, 0, ReadOnlySpan<byte>.Empty);
+            }
+            else if (type == Data)
+            {
+                bytes[sid] = bytes.GetValueOrDefault(sid) + payload.Length;
+                if ((flags & EndStream) != 0)
+                {
+                    ended.Add(sid);
+                }
+                if (credit && payload.Length > 0)
+                {
+                    WriteWindowUpdate(sid, payload.Length);
+                    WriteWindowUpdate(0, payload.Length);
+                }
+            }
+        }
+        return true;
+    }
+
     /// <summary>HEADERS that deliberately leaves the block OPEN, so CONTINUATION must follow.</summary>
     public void RequestHeadersOnly(int streamId, bool endHeaders = true, bool endStream = true)
         => WriteFrame(Headers, (byte)((endHeaders ? EndHeaders : 0) | (endStream ? EndStream : 0)),

@@ -173,4 +173,40 @@ public sealed partial class Nghttp2Connection
     /// the egress path makes safe.
     /// </summary>
     internal ValueTask FlushStreamedAsync() => FlushEgressAsync();
+
+    // How far a stream's writer may run ahead of what nghttp2 has framed before its flush waits (#409): room for a
+    // burst of small chunks to ride a drain already in flight, and a bound on what a stream nobody reads can buffer.
+    internal const int MaxUnframed = 64 * 1024;
+
+    // Writers whose flush waits for nghttp2 to catch up; woken after each drain.
+    private readonly List<Nghttp2ResponseWriter> _parkedWriters = [];
+
+    /// <summary>Body bytes of this stream that nghttp2 holds and has not framed yet.</summary>
+    internal long Unframed(int streamId) => IsBroken ? 0 : (long)Nghttp2.ih2_stream_pending(_handle, streamId);
+
+    internal void ParkWriter(Nghttp2ResponseWriter writer) => _parkedWriters.Add(writer);
+
+    private void WakeParkedWriters()
+    {
+        if (_parkedWriters.Count == 0)
+        {
+            return;
+        }
+
+        // Snapshot-and-clear, as FireBodyWakes: a writer resumes inline, and its next flush drains and comes back here.
+        Nghttp2ResponseWriter[] parked = _parkedWriters.ToArray();
+        _parkedWriters.Clear();
+
+        foreach (Nghttp2ResponseWriter writer in parked)
+        {
+            if (writer.Gone || Unframed(writer.StreamId) <= MaxUnframed)
+            {
+                writer.WakeParked();
+            }
+            else
+            {
+                _parkedWriters.Add(writer);
+            }
+        }
+    }
 }
