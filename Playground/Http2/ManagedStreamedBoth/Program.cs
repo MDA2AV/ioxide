@@ -104,7 +104,12 @@ for (int i = 0; i < threads.Length; i++)
 
                         incoming.Span.CopyTo(writer.GetSpan(incoming.Length));
                         writer.Advance(incoming.Length);
-                        await writer.FlushAsync();
+                        // IsCompleted: the peer is gone. Nothing written from here reaches anyone, and every flush
+                        // returns at once - a loop that ignored it would never give this reactor back.
+                        if ((await writer.FlushAsync()).IsCompleted)
+                        {
+                            return;
+                        }
                     }
                     return;
                 }
@@ -115,7 +120,10 @@ for (int i = 0; i < threads.Length; i++)
                 {
                     chunk.CopyTo(writer.GetSpan(chunk.Length));
                     writer.Advance(chunk.Length);
-                    await writer.FlushAsync();
+                    if ((await writer.FlushAsync()).IsCompleted)
+                    {
+                        return;
+                    }
                 }
             });
         }

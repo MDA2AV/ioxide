@@ -110,7 +110,12 @@ for (int i = 0; i < threads.Length; i++)
 
                 // Returns once nghttp3 has taken it. That await IS the backpressure - nothing
                 // queues up behind a peer that has stopped reading.
-                await writer.FlushAsync();
+                // IsCompleted: the peer is gone. Nothing written from here reaches anyone, and every flush
+                // returns at once - a loop that ignored it would never give this reactor back.
+                if ((await writer.FlushAsync()).IsCompleted)
+                {
+                    return;
+                }
             }
 
             // CompleteAsync ends the stream. The runner calls it too if a handler returns without
