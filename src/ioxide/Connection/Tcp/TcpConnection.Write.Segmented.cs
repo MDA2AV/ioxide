@@ -12,13 +12,17 @@ namespace ioxide;
 /// </summary>
 public sealed unsafe partial class TcpConnection
 {
-    // Once the primary slab (WriteBuffer/WriteTail) fills, further bytes spill into slabs rented from
-    // the reactor pool (base size) or a one-off oversized alloc. All empty on the fast path / in Grow mode.
+    // Once the primary slab (WriteBuffer/WriteTail) fills, further bytes spill into base-size slabs from
+    // this connection's spares, or a one-off oversized alloc. All empty on the fast path / in Grow mode.
     private struct OvSeg { public nint Ptr; public int Used; public int Cap; public bool Pooled; }
     private OvSeg[]? _ov;
     private int  _ovCount;
     private bool _inOverflow;
     private bool _flushVectored;       // pending flush spans segments -> SENDMSG instead of a plain SEND
+
+    // Slabs a sent response gave back, for this connection's next one; freed on recycle. Per connection, not
+    // per reactor: the flush orders its rent and return, which a pool shared between connections lacked (#402).
+    private Stack<nint>? _spareSlabs;
 
     // Stable scatter-gather descriptors for SENDMSG; the kernel reads them until the send completes.
     private iovec*  _iov;
@@ -29,7 +33,7 @@ public sealed unsafe partial class TcpConnection
     internal msghdr* MsgHdr => _msg;
     internal bool FlushVectored => _flushVectored;
 
-    // Chains a new overflow segment big enough for `need`: a base-size slab from the reactor pool, or a
+    // Chains a new overflow segment big enough for `need`: a base-size slab, a spare when there is one, or a
     // one-off oversized allocation when a single write/span exceeds a slab.
     private void RentOverflow(int need)
     {
@@ -38,7 +42,8 @@ public sealed unsafe partial class TcpConnection
         bool pooled;
         if (need <= _baseSlabSize)
         {
-            ptr = _reactor.RentWriteSlab();
+            _spareSlabs ??= new Stack<nint>();
+            ptr = _spareSlabs.TryPop(out nint spare) ? spare : (nint)NativeMemory.AlignedAlloc((nuint)_baseSlabSize, 64);
             cap = _baseSlabSize;
             pooled = true;
         }
@@ -111,14 +116,14 @@ public sealed unsafe partial class TcpConnection
         _msg->msg_iovlen = (nuint)(n - _sendIovIndex);
     }
 
-    // Returns overflow segments to the reactor pool (or frees one-offs) and clears the overflow state.
+    // Keeps base-size segments as spares (frees one-offs) and clears the overflow state.
     private void ReleaseOverflow()
     {
         for (int i = 0; i < _ovCount; i++)
         {
             if (_ov![i].Pooled)
             {
-                _reactor.ReturnWriteSlab(_ov[i].Ptr);
+                _spareSlabs!.Push(_ov[i].Ptr);
             }
             else
             {
@@ -128,5 +133,18 @@ public sealed unsafe partial class TcpConnection
         _ovCount = 0;
         _inOverflow = false;
         _flushVectored = false;
+    }
+
+    private void FreeSpareSlabs()
+    {
+        if (_spareSlabs == null)
+        {
+            return;
+        }
+
+        while (_spareSlabs.TryPop(out nint slab))
+        {
+            NativeMemory.AlignedFree((void*)slab);
+        }
     }
 }

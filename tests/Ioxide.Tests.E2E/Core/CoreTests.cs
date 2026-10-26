@@ -114,12 +114,8 @@ internal static class CoreTests
 
         runner.Test("core: two connections writing past their slabs from the thread pool each get only their own bytes (Segmented)", () =>
         {
-            // Past the primary slab a Segmented response spills into slabs from the reactor's pool,
-            // rented on the writer's thread and returned on the reactor's when the send completes. A
-            // handler that resumes on the thread pool, as one written with ConfigureAwait(false) does,
-            // writes from there - so two connections rent while the reactor returns, and the unlocked
-            // pool handed one slab to both: each wrote into the other's response (#402). Every byte is
-            // checked against the pattern of the request it belongs to.
+            // Spill slabs came from a pool the reactor's connections shared: a writer on the thread pool renting
+            // while the reactor returned another connection's got a slab that one still had (#402).
             (int port, _, _) = TestServer.StartConfigured(PatternedResponses,
                 new ServerConfig
                 {

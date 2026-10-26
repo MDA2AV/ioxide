@@ -162,7 +162,7 @@ internal static class ReactorSetupTeardownTests
     private const int ResponseBytes = 3 * SlabSize;
 
     // A pooled connection owns native memory - its write slab, and in incremental mode its buffer ring -
-    // and so does the reactor's pool of spare write slabs. A stop freed neither, and a connection has no
+    // and a segmented write leaves spare write slabs. A stop freed none of it, and a connection has no
     // finalizer, so a host that starts and stops servers leaked them every time (#223).
     private static void RegisterStopFrees(Runner runner)
     {
@@ -192,7 +192,7 @@ internal static class ReactorSetupTeardownTests
                 bool hadRing = false;
                 using var released = new ManualResetEventSlim();
 
-                (int port, Reactor reactor, Thread thread) = TestServer.StartConfigured(async (r, conn) =>
+                (int port, Reactor reactor, Thread thread) = TestServer.StartConfigured(async (_, conn) =>
                 {
                     try
                     {
@@ -206,7 +206,7 @@ internal static class ReactorSetupTeardownTests
 
                         conn.Write(new byte[ResponseBytes]);   // past the slab, so a segmented write rents spare slabs
                         await conn.FlushAsync();
-                        spareSlabs = WriteSlabPool(r).Count;   // handed back as the flush completed
+                        spareSlabs = SpareSlabsOf(conn)?.Count ?? 0;   // handed back as the flush completed
                         hadRing = HasRing(conn);
                         keptGeneration = GenerationOf(conn);
                         kept = conn;
@@ -252,8 +252,8 @@ internal static class ReactorSetupTeardownTests
                 else
                 {
                     Assert.True(spareSlabs > 0, "the response never spilled past the slab, so no spare slab was pooled");
-                    Assert.True(WriteSlabPool(reactor).Count == 0,
-                        $"{WriteSlabPool(reactor).Count} spare write slabs outlived their reactor");
+                    int outlived = SpareSlabsOf(kept!)?.Count ?? 0;
+                    Assert.True(outlived == 0, $"{outlived} spare write slabs outlived their reactor");
                 }
             }, skip: incremental && !TestServer.KernelAtLeast(6, 12));
         }
@@ -263,8 +263,8 @@ internal static class ReactorSetupTeardownTests
 
     private static unsafe bool HasRing(TcpConnection connection) => BufRingOf(connection) != null && BufSlabOf(connection) != null;
 
-    [UnsafeAccessor(UnsafeAccessorKind.Field, Name = "_writeSlabPool")]
-    private static extern ref Stack<nint> WriteSlabPool(Reactor reactor);
+    [UnsafeAccessor(UnsafeAccessorKind.Field, Name = "_spareSlabs")]
+    private static extern ref Stack<nint>? SpareSlabsOf(TcpConnection connection);
 
     [UnsafeAccessor(UnsafeAccessorKind.Field, Name = "_generation")]
     private static extern ref int GenerationOf(TcpConnection connection);
