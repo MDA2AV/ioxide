@@ -206,7 +206,7 @@ internal static class ReactorSetupTeardownTests
 
                         conn.Write(new byte[ResponseBytes]);   // past the slab, so a segmented write rents spare slabs
                         await conn.FlushAsync();
-                        spareSlabs = SpareSlabsOf(conn)?.Count ?? 0;   // handed back as the flush completed
+                        spareSlabs = KeptSegmentsOf(conn);   // kept as the flush completed
                         hadRing = HasRing(conn);
                         keptGeneration = GenerationOf(conn);
                         kept = conn;
@@ -252,7 +252,7 @@ internal static class ReactorSetupTeardownTests
                 else
                 {
                     Assert.True(spareSlabs > 0, "the response never spilled past the slab, so no spare slab was pooled");
-                    int outlived = SpareSlabsOf(kept!)?.Count ?? 0;
+                    int outlived = KeptSegmentsOf(kept!);
                     Assert.True(outlived == 0, $"{outlived} spare write slabs outlived their reactor");
                 }
             }, skip: incremental && !TestServer.KernelAtLeast(6, 12));
@@ -263,8 +263,8 @@ internal static class ReactorSetupTeardownTests
 
     private static unsafe bool HasRing(TcpConnection connection) => BufRingOf(connection) != null && BufSlabOf(connection) != null;
 
-    [UnsafeAccessor(UnsafeAccessorKind.Field, Name = "_spareSlabs")]
-    private static extern ref Stack<nint>? SpareSlabsOf(TcpConnection connection);
+    [UnsafeAccessor(UnsafeAccessorKind.Field, Name = "_ovKept")]
+    private static extern ref int KeptSegmentsOf(TcpConnection connection);
 
     [UnsafeAccessor(UnsafeAccessorKind.Field, Name = "_generation")]
     private static extern ref int GenerationOf(TcpConnection connection);

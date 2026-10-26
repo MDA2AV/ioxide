@@ -7,22 +7,22 @@ namespace ioxide;
 
 /// <summary>
 /// Segmented write overflow (<see cref="WriteOverflowStrategy.Segmented"/>). When a response outgrows
-/// the primary write slab (see TcpConnection.Write.cs) the extra bytes spill into pooled fixed-size slabs
-/// chained here, then flushed with a single vectored SENDMSG instead of growing one contiguous buffer.
+/// the primary write slab (see TcpConnection.Write.cs) the extra bytes spill into segments chained here,
+/// each twice the last, then flushed with a single vectored SENDMSG instead of growing one contiguous buffer.
 /// </summary>
 public sealed unsafe partial class TcpConnection
 {
-    // Once the primary slab (WriteBuffer/WriteTail) fills, further bytes spill into base-size slabs from
-    // this connection's spares, or a one-off oversized alloc. All empty on the fast path / in Grow mode.
-    private struct OvSeg { public nint Ptr; public int Used; public int Cap; public bool Pooled; }
+    // Once the primary slab (WriteBuffer/WriteTail) fills, further bytes spill into these segments. All empty
+    // on the fast path / in Grow mode.
+    private struct OvSeg { public nint Ptr; public int Used; public int Cap; }
     private OvSeg[]? _ov;
     private int  _ovCount;
     private bool _inOverflow;
     private bool _flushVectored;       // pending flush spans segments -> SENDMSG instead of a plain SEND
 
-    // Slabs a sent response gave back, for this connection's next one; freed on recycle. Per connection, not
-    // per reactor: the flush orders its rent and return, which a pool shared between connections lacked (#402).
-    private Stack<nint>? _spareSlabs;
+    // Segments stay in _ov after their response, for this connection's next one, until recycle. Per connection,
+    // not per reactor: the flush orders their rent and return, which a pool shared between connections lacked (#402).
+    private int _ovKept;
 
     // Stable scatter-gather descriptors for SENDMSG; the kernel reads them until the send completes.
     private iovec*  _iov;
@@ -33,33 +33,31 @@ public sealed unsafe partial class TcpConnection
     internal msghdr* MsgHdr => _msg;
     internal bool FlushVectored => _flushVectored;
 
-    // Chains a new overflow segment big enough for `need`: a base-size slab, a spare when there is one, or a
-    // one-off oversized allocation when a single write/span exceeds a slab.
+    // Chains the next segment, big enough for `need`: the one kept at this position if it is, else a new one
+    // twice the size of the last (from twice the slab, up to 64 slabs), so a response that spills a lot
+    // spills into few segments.
     private void RentOverflow(int need)
     {
-        nint ptr;
-        int  cap;
-        bool pooled;
-        if (need <= _baseSlabSize)
-        {
-            _spareSlabs ??= new Stack<nint>();
-            ptr = _spareSlabs.TryPop(out nint spare) ? spare : (nint)NativeMemory.AlignedAlloc((nuint)_baseSlabSize, 64);
-            cap = _baseSlabSize;
-            pooled = true;
-        }
-        else
-        {
-            ptr = (nint)NativeMemory.AlignedAlloc((nuint)need, 64);
-            cap = need;
-            pooled = false;
-        }
-
         _ov ??= new OvSeg[8];
-        if (_ovCount == _ov.Length)
+        int k = _ovCount;
+        if (k == _ov.Length)
         {
             Array.Resize(ref _ov, _ov.Length * 2);
         }
-        _ov[_ovCount++] = new OvSeg { Ptr = ptr, Used = 0, Cap = cap, Pooled = pooled };
+
+        if (k >= _ovKept || _ov[k].Cap < need)
+        {
+            if (k < _ovKept)
+            {
+                NativeMemory.AlignedFree((void*)_ov[k].Ptr);   // kept, but too small for this write
+            }
+
+            int cap = (int)Math.Min(Math.Max((long)_baseSlabSize << Math.Min(k + 1, 6), need), int.MaxValue);
+            _ov[k] = new OvSeg { Ptr = (nint)NativeMemory.AlignedAlloc((nuint)cap, 64), Used = 0, Cap = cap };
+            _ovKept = Math.Max(_ovKept, k + 1);
+        }
+
+        _ovCount = k + 1;
         _inOverflow = true;
     }
 
@@ -116,35 +114,25 @@ public sealed unsafe partial class TcpConnection
         _msg->msg_iovlen = (nuint)(n - _sendIovIndex);
     }
 
-    // Keeps base-size segments as spares (frees one-offs) and clears the overflow state.
+    // Keeps the segments for the next response and clears the overflow state.
     private void ReleaseOverflow()
     {
         for (int i = 0; i < _ovCount; i++)
         {
-            if (_ov![i].Pooled)
-            {
-                _spareSlabs!.Push(_ov[i].Ptr);
-            }
-            else
-            {
-                NativeMemory.AlignedFree((void*)_ov[i].Ptr);
-            }
+            _ov![i].Used = 0;
         }
         _ovCount = 0;
         _inOverflow = false;
         _flushVectored = false;
     }
 
-    private void FreeSpareSlabs()
+    private void FreeKeptSegments()
     {
-        if (_spareSlabs == null)
+        for (int i = 0; i < _ovKept; i++)
         {
-            return;
+            NativeMemory.AlignedFree((void*)_ov![i].Ptr);
+            _ov[i] = default;
         }
-
-        while (_spareSlabs.TryPop(out nint slab))
-        {
-            NativeMemory.AlignedFree((void*)slab);
-        }
+        _ovKept = 0;
     }
 }
