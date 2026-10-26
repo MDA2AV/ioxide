@@ -79,26 +79,6 @@ public sealed unsafe partial class Reactor
     private readonly int _poolMax;
     private readonly Stack<TcpConnection> _pool;
 
-    // Per-reactor pool of base-size write slabs, rented by connections in Segmented overflow mode.
-    // Reactor-thread-only, so no locking. Capped so a burst of large responses doesn't retain memory.
-    private readonly Stack<nint> _writeSlabPool = new();
-    private const int WriteSlabPoolMax = 4096;
-
-    internal nint RentWriteSlab()
-        => _writeSlabPool.TryPop(out nint p) ? p : (nint)NativeMemory.AlignedAlloc((nuint)_tcp.WriteSlabSize, 64);
-
-    internal void ReturnWriteSlab(nint p)
-    {
-        if (_writeSlabPool.Count < WriteSlabPoolMax)
-        {
-            _writeSlabPool.Push(p);
-        }
-        else
-        {
-            NativeMemory.AlignedFree((void*)p);
-        }
-    }
-
     // Incremental-mode sizing (see Reactor.Incremental.cs).
     private readonly int  _maxConnections;       // one bgid per active connection
     private readonly int  _connBufRingEntries;

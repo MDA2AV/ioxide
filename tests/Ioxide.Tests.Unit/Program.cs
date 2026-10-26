@@ -31,6 +31,7 @@ internal static class Program
         SendWaitAllTests.Register(runner);
         AdapterParkTests.Register(runner);
         WaiterSlotTests.Register(runner);
+        SpillSegmentTests.Register(runner);
 
         return runner.Summary();
     }

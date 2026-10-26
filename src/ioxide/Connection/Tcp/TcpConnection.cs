@@ -270,11 +270,13 @@ public sealed unsafe partial class TcpConnection
         WriteInFlight = 0;
         ZcNotifPending = 0;
 
-        // Segmented: hand any overflow slabs back to the pool (a connection recycled mid-response).
+        // Segmented: free the overflow segments, in use (a connection recycled mid-response) or kept, so the
+        // pool doesn't retain them either.
         if (_ovCount > 0)
         {
             ReleaseOverflow();
         }
+        FreeKeptSegments();
 
         // Restore an overgrown write slab to its base size so the pool doesn't retain large buffers.
         if (_writeSlabSize != _baseSlabSize)

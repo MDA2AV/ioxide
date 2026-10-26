@@ -165,10 +165,6 @@ public sealed unsafe partial class Reactor
         {
             pooled.Dispose();
         }
-        while (_writeSlabPool.TryPop(out nint slab))
-        {
-            NativeMemory.AlignedFree((void*)slab);
-        }
 
         // Shared provided-buffer ring (incremental mode allocates per connection instead).
         if (_bufRing != null)
