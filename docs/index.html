@@ -1174,7 +1174,7 @@ for (int i = 0; i &lt; threads.Length; i++)
     var reactor = new Reactor(i, config);
 
     reactor.QuicHandle = (_, connection) =&gt;
-        new Http3Connection(connection).RunAsync(_ =&gt;
+        new Http3Connection(connection).RunBufferedAsync(_ =&gt;
         {
             // The certificate was chosen during the handshake, before this ever runs. Routing a
             // request to the right site is a separate job, and the :authority header is where you
@@ -1325,7 +1325,7 @@ for (int i = 0; i &lt; threads.Length; i++)
     var reactor = new Reactor(i, config);
 
     reactor.QuicHandle = (_, connection) =&gt;
-        new Http3Connection(connection).RunAsync(_ =&gt;
+        new Http3Connection(connection).RunBufferedAsync(_ =&gt;
         {
             // What the SERVER believes it published. The client&#x27;s view is the certificate it just
             // validated, and only pinning with --cacert can tell you that.
@@ -2471,7 +2471,7 @@ for (int i = 0; i &lt; threads.Length; i++)
 {
     var reactor = new Reactor(i, config);
 
-    reactor.QuicHandle = (r, conn) =&gt; new Http3Connection(conn).RunAsync(_ =&gt; response);
+    reactor.QuicHandle = (r, conn) =&gt; new Http3Connection(conn).RunBufferedAsync(_ =&gt; response);
 
     threads[i] = new Thread(reactor.Run) { Name = $&quot;reactor-{i}&quot; };
     threads[i].Start();
@@ -2668,6 +2668,7 @@ var h3Options = new Nghttp3Options
 {
     QpackDynamicTableCapacity = qpackCapacity,                // 0 (default) = headers stay literal
     QpackBlockedStreams       = qpackCapacity &gt; 0 ? 100 : 0,  // raise both together for the dynamic table
+    StreamRequestBodies       = true,                         // dispatch at end-of-headers, body through BodyReader
 };
 
 byte[] chunk = Encoding.ASCII.GetBytes(new string(&#x27;x&#x27;, chunkBytes - 1) + &quot;\n&quot;);
@@ -2776,7 +2777,7 @@ static Nghttp3Response Plain()
     response.Headers.Add(&quot;content-type&quot;u8.ToArray(), &quot;text/plain&quot;u8.ToArray());
     return response;
 }</code></pre>
-    <p class="ex-foot">The fourth corner the other three nghttp3 samples leave empty: the request pulled through <code>BodyReader</code> while the response is pushed through the writer, both in one handler. One call arranges it - <code>RunStreamedResponseAsync</code> dispatches at end-of-headers, so the handler is running while the upload is still on the wire. <code>/echo</code> is the shape a proxy needs: read a chunk, write a chunk, never hold more than one, and neither side can outrun the other because <code>ReadAsync</code> waits on the peer and <code>FlushAsync</code> waits on nghttp3. Measured here on a 64 MiB echo: byte-identical out, and the server's RSS moved 51&rarr;57 MB - flat, in the sense that matters. Diff it against <label for="tab-h3csstream" class="ex-jump">the pure-C# twin</label>: same routes, opposite mechanism underneath. nghttp3 owns the framing and <b>pulls</b> body bytes when it has room to emit DATA, so a flush here means <em>nghttp3 has taken the chunk</em>, where the managed writer stages a DATA frame the moment you flush. That twin also serves an endless <code>/feed</code>; this one deliberately does not, because on this stack an endless response never reaches the wire.</p>
+    <p class="ex-foot">The fourth corner the other three nghttp3 samples leave empty: the request pulled through <code>BodyReader</code> while the response is pushed through the writer, both in one handler. <code>RunStreamedResponseAsync</code> with <code>StreamRequestBodies</code> arranges it: dispatch at end-of-headers, so the handler is running while the upload is still on the wire. <code>/echo</code> is the shape a proxy needs: read a chunk, write a chunk, never hold more than one, and neither side can outrun the other because <code>ReadAsync</code> waits on the peer and <code>FlushAsync</code> waits on nghttp3. Measured here on a 64 MiB echo: byte-identical out, and the server's RSS moved 51&rarr;57 MB - flat, in the sense that matters. Diff it against <label for="tab-h3csstream" class="ex-jump">the pure-C# twin</label>: same routes, opposite mechanism underneath. nghttp3 owns the framing and <b>pulls</b> body bytes when it has room to emit DATA, so a flush here means <em>nghttp3 has taken the chunk</em>, where the managed writer stages a DATA frame the moment you flush. That twin also serves an endless <code>/feed</code>; this one deliberately does not, because on this stack an endless response never reaches the wire.</p>
   </div>
   <div class="pane pane-h3csstream">
     <div class="pane-head">
@@ -2846,7 +2847,7 @@ for (int i = 0; i &lt; threads.Length; i++)
     var reactor = new Reactor(i, config);
 
     reactor.QuicHandle = (r, conn) =&gt;
-        new Http3Connection(conn).RunStreamedResponseAsync(async (request, writer) =&gt;
+        new Http3Connection(conn, new Http3Options { StreamRequestBodies = true }).RunStreamedResponseAsync(async (request, writer) =&gt;
         {
             bool endless = request.Path.Span.SequenceEqual(&quot;/feed&quot;u8);
             bool upload  = request.Path.Span.SequenceEqual(&quot;/upload&quot;u8);
@@ -2941,7 +2942,7 @@ static Http3Response Plain(bool eventStream = false)
         eventStream ? &quot;text/event-stream&quot;u8.ToArray() : &quot;text/plain&quot;u8.ToArray()));
     return response;
 }</code></pre>
-    <p class="ex-foot">Both directions streamed, in pure C#. The request body is PULLED a chunk at a time through <code>Http3Request.BodyReader</code>, so a large upload is never held whole; the response is PUSHED through <code>Http3ResponseWriter</code>, one DATA frame per flush, so a large download is never built whole. <code>/echo</code> runs both at once - read a chunk, write a chunk - which is what a proxy does. Owning the framing is what makes the push side simple: a chunk is just <code>[0x00][varint length][payload]</code> handed to the QUIC stream, with no data-reader callback to answer and nothing to defer. <label for="tab-h3stream" class="ex-jump">nghttp3 &middot; streamed</label> carries a resume and a drain because nghttp3 pulls instead; this measures <b>1.32&times;</b> its throughput on the same 8&times;1&nbsp;KiB response.</p>
+    <p class="ex-foot">Both directions streamed, in pure C#. With <code>StreamRequestBodies</code> on, the request body is PULLED a chunk at a time through <code>Http3Request.BodyReader</code>, so a large upload is never held whole; the response is PUSHED through <code>Http3ResponseWriter</code>, one DATA frame per flush, so a large download is never built whole. <code>/echo</code> runs both at once - read a chunk, write a chunk - which is what a proxy does. Owning the framing is what makes the push side simple: a chunk is just <code>[0x00][varint length][payload]</code> handed to the QUIC stream, with no data-reader callback to answer and nothing to defer. <label for="tab-h3stream" class="ex-jump">nghttp3 &middot; streamed</label> carries a resume and a drain because nghttp3 pulls instead; this measures <b>1.32&times;</b> its throughput on the same 8&times;1&nbsp;KiB response.</p>
   </div>
   <div class="pane pane-h3mtls">
     <div class="pane-head">
@@ -3028,7 +3029,7 @@ for (int i = 0; i &lt; threads.Length; i++)
     var reactor = new Reactor(i, config);
 
     reactor.QuicHandle = (_, connection) =&gt;
-        new Http3Connection(connection).RunAsync(_ =&gt;
+        new Http3Connection(connection).RunBufferedAsync(_ =&gt;
         {
             // Read HERE, per request - not where the connection is accepted. That callback runs
             // before the handshake finishes, so there is no identity yet at that point.
@@ -3187,7 +3188,7 @@ for (int i = 0; i &lt; threads.Length; i++)
             live.Add((r, h3));
         }
 
-        // RunBufferedAsync, not RunStreamingAsync - that one call is the whole difference.
+        // No StreamRequestBodies in h3Options - that one setting is the whole difference.
         return h3.RunBufferedAsync(request =&gt;
         {
             // Dispatch waited for end-of-stream, so the body is ALREADY here: request.Body is
@@ -5399,7 +5400,7 @@ for (int i = 0; i &lt; threads.Length; i++)
     {
         try
         {
-            await new Http2Connection(conn).RunAsync(async (request, writer) =&gt;
+            await new Http2Connection(conn).RunStreamedResponseAsync(async (request, writer) =&gt;
             {
                 bool endless = request.Path.Span.SequenceEqual(&quot;/feed&quot;u8);
 
@@ -5600,8 +5601,8 @@ var config = new ServerConfig
     },
 };
 
-// Both halves are opt-in and independent: this one turns the REQUEST direction on, RunAsync below
-// is what turns the RESPONSE direction on.
+// Both halves are opt-in and independent: this one turns the REQUEST direction on,
+// RunStreamedResponseAsync below is what turns the RESPONSE direction on.
 var http2 = new Http2Options { StreamRequestBodies = true };
 
 byte[] chunk = [.. Enumerable.Repeat((byte)&#x27;x&#x27;, chunkBytes)];
@@ -5616,7 +5617,7 @@ for (int i = 0; i &lt; threads.Length; i++)
     {
         try
         {
-            await new Http2Connection(conn, http2).RunAsync(async (request, writer) =&gt;
+            await new Http2Connection(conn, http2).RunStreamedResponseAsync(async (request, writer) =&gt;
             {
                 bool echo = request.Path.Span.SequenceEqual(&quot;/echo&quot;u8);
 
@@ -5681,7 +5682,7 @@ foreach (Thread thread in threads)
 {
     thread.Join();
 }</code></pre>
-    <p class="ex-foot">Both at once, which is the shape a proxy needs: <code>/echo</code> reads a chunk and writes a chunk, so neither the upload nor the download is ever held whole. The two directions are separate switches - <code>StreamRequestBodies</code> for the read side, <code>RunAsync</code> with a writer for the write side - because they solve different problems and most servers want exactly one of them. Mirrors <label for="tab-h3csstream" class="ex-jump">h3 &middot; request + response streamed</label>; the difference is HTTP/2's shared connection window, which a handler that stops reading holds down for every other stream on the connection.</p>
+    <p class="ex-foot">Both at once, which is the shape a proxy needs: <code>/echo</code> reads a chunk and writes a chunk, so neither the upload nor the download is ever held whole. The two directions are separate switches - <code>StreamRequestBodies</code> for the read side, <code>RunStreamedResponseAsync</code> for the write side - because they solve different problems and most servers want exactly one of them. Mirrors <label for="tab-h3csstream" class="ex-jump">h3 &middot; request + response streamed</label>; the difference is HTTP/2's shared connection window, which a handler that stops reading holds down for every other stream on the connection.</p>
   </div>
   <div class="pane pane-h2ng">
     <div class="pane-head">
@@ -5830,7 +5831,7 @@ for (int i = 0; i &lt; threads.Length; i++)
     {
         try
         {
-            await new Nghttp2Connection(conn).RunAsync(async (request, writer) =&gt;
+            await new Nghttp2Connection(conn).RunStreamedResponseAsync(async (request, writer) =&gt;
             {
                 bool endless = request.Path.Span.SequenceEqual(&quot;/feed&quot;u8);
 
@@ -6304,6 +6305,7 @@ var h3Options = new Nghttp3Options
 {
     QpackDynamicTableCapacity = qpackCapacity,                // 0 (default) = headers stay literal
     QpackBlockedStreams       = qpackCapacity &gt; 0 ? 100 : 0,  // raise both together for the dynamic table
+    StreamRequestBodies       = true,                         // dispatch at end-of-headers, body through BodyReader
 };
 
 // THE allocation-free pattern: build the response ONCE and reuse the instance for every request.
@@ -6342,7 +6344,7 @@ for (int i = 0; i &lt; threads.Length; i++)
             live.Add((r, h3));
         }
 
-        return h3.RunStreamingAsync(async request =&gt;
+        return h3.RunBufferedAsync(async request =&gt;
         {
             // Streamed dispatch, so we are running while the body is still on the wire. Read it to
             // the end: every read credits the peer&#x27;s flow-control window, which is what throttles a

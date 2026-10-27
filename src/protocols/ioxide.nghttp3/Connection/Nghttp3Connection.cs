@@ -1,3 +1,4 @@
+using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using ioxide;
 
@@ -14,12 +15,14 @@ namespace ioxide.nghttp3;
 ///     static request => Nghttp3Response.Text("hello"));
 /// </code>
 ///
-/// One instance per connection, two dispatch flavors: the sync overload assembles each request in
-/// full (headers + body) and dispatches at end-of-stream; the async overload dispatches at
-/// end-of-headers and streams the body through <see cref="Nghttp3Request.BodyReader"/> under
-/// flow-control pacing. Everything runs on the reactor thread; request objects (arena, header
-/// lists, body buffer) are pooled per connection and recycled when the handler's
-/// valid-until-return contract ends.
+/// One instance per connection: <see cref="RunBufferedAsync(Func{Nghttp3Request, Nghttp3Response})"/>
+/// for a handler that returns the whole response, <see cref="RunStreamedResponseAsync"/> for one
+/// that writes it through a writer. Either assembles each request in full (headers + body) and
+/// dispatches at end-of-stream or, with <see cref="Nghttp3Options.StreamRequestBodies"/>,
+/// dispatches at end-of-headers and streams the body through
+/// <see cref="Nghttp3Request.BodyReader"/> under flow-control pacing. Everything runs on the
+/// reactor thread; request objects (arena, header lists, body buffer) are pooled per connection
+/// and recycled when the handler's valid-until-return contract ends.
 ///
 /// File layout: this file owns state, the run loop and pooling; PushToEngine (ingress into nghttp3),
 /// Dispatch (handler invocation), Egress (queue/pump/pack) and Callbacks (the unmanaged shim
@@ -39,7 +42,7 @@ public sealed partial class Nghttp3Connection : IDisposable
     // inside a callback (nghttp3 is on the stack below it), so the callbacks record here and
     // _protocolFailed carries the decision out to the run loops - see Callbacks.Fault.
     private Exception? _callbackFault;
-    private bool _streaming;
+    private bool _streamBodies;
     private bool _draining;
 
     // RFC 9114 H3_NO_ERROR - the application error code a graceful close carries.
@@ -117,11 +120,101 @@ public sealed partial class Nghttp3Connection : IDisposable
     {
         _quicConnection = quicConnection;
         _options = options ?? Nghttp3Options.Default;
+        _streamBodies = _options.StreamRequestBodies;
+    }
 
-        // A response larger than the QUIC send-retention window is drained in PumpEgress under
-        // backpressure (it stops at the high-water); this resumes it as acks free retention, since
-        // the run loop only wakes on inbound request data - not on the acks of a download.
-        _quicConnection.OnSendCapacityAvailable = () => PumpEgress();
+    // The serving loop behind every entry point, which differ only in how a ready request is
+    // dispatched. Owns the handler's connection ref.
+    private async Task RunCoreAsync(Action dispatchReady)
+    {
+        // A response larger than the QUIC send-retention window is drained under backpressure (the
+        // pump stops at the high-water); this resumes it as acks free retention, since the loop only
+        // wakes on inbound request data - not on the acks of a download. The drain also releases
+        // streamed-response writers parked at the high-water, where a bare PumpEgress would leave
+        // them parked.
+        _quicConnection.OnSendCapacityAvailable = DrainStreamed;
+
+        try
+        {
+            while (true)
+            {
+                QuicRecvSnapshot snapshot = await _quicConnection.ReadAsync();
+
+                if (_nghttp3Handle == 0 && !_protocolFailed && !TrySetup())
+                {
+                    FailInternal();
+                }
+
+                while (_quicConnection.TryGetDelivery(in snapshot, out QuicRecvRing.Delivery item))
+                {
+                    if (!_protocolFailed)
+                    {
+                        PushToEngine(in item);
+                    }
+                    _quicConnection.ReturnBuffer(in item);
+                }
+
+                if (!_protocolFailed)
+                {
+                    // Deferred body wakes first: a resumed body-await may complete its request and
+                    // its Submit/Drain rides this same pass. nghttp3 has fully unwound here.
+                    FireBodyWakes();
+                    dispatchReady();
+                    DrainStreamed();
+                    CloseIfShutdownComplete();
+                }
+
+                if (snapshot.IsClosed || _protocolFailed)
+                {
+                    break;
+                }
+                _quicConnection.ResetRead();
+            }
+        }
+        finally
+        {
+            TearDown();
+        }
+    }
+
+    // Not inline in RunCoreAsync's finally: there, its loops made every request on a buffered
+    // connection 7% dearer, though they run once per connection.
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private void TearDown()
+    {
+        // Unpark any handler still awaiting a body: reads return empty, its response submit
+        // no-ops against the disposed engine. In-flight requests die with the connection.
+        foreach (Nghttp3BodyReader sink in _sinks.Values)
+        {
+            sink.Drop();
+        }
+        FireBodyWakes();
+        _sinks.Clear();
+
+        // Unpark anything still waiting on a pass; IsBroken makes them return rather than loop.
+        // Deliberately the bare flag and NOT FailInternal(): this runs on a response that
+        // completed perfectly well, and giving it a peer code would close every successful
+        // streamed connection with an error.
+        _protocolFailed = true;
+        ReleasePassWaiters();
+
+        foreach (Nghttp3ResponseWriter writer in _writers.Values)
+        {
+            writer.Release();
+        }
+        _writers.Clear();
+
+        while (_writerPool.TryPop(out Nghttp3ResponseWriter? pooled))
+        {
+            pooled.Release();   // the native blocks die with the connection, not the stream
+        }
+
+        // Before letting go, because letting go is all the transport sees: DecRef neither
+        // closes nor unregisters.
+        CloseWithPeerCode();
+
+        _quicConnection.DecRef();
+        Dispose();
     }
 
     /// <summary>

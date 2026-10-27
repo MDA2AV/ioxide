@@ -1,4 +1,5 @@
 using System.Buffers;
+using System.Diagnostics.CodeAnalysis;
 using ioxide;
 
 namespace ioxide.http3;
@@ -6,9 +7,12 @@ namespace ioxide.http3;
 /// <summary>
 /// HTTP/3 over any <see cref="QuicConnection"/>, implemented entirely in C# - frame parsing,
 /// QPACK (static table + Huffman) and request dispatch, no native dependencies. The public
-/// surface mirrors ioxide.nghttp3's H3Connection: a buffered overload (dispatch at end-of-stream,
-/// body pre-assembled) and a streaming overload (dispatch at end-of-headers, body pulled through
-/// <see cref="Http3Request.BodyReader"/> while the request stream is flow-control paced).
+/// surface mirrors ioxide.nghttp3's: <see cref="RunBufferedAsync(Func{Http3Request, Http3Response})"/>
+/// for a handler that returns the whole response, <see cref="RunStreamedResponseAsync"/> for one
+/// that writes it through a writer. Either takes the request body assembled (dispatch at
+/// end-of-stream) or, with <see cref="Http3Options.StreamRequestBodies"/>, pulled through
+/// <see cref="Http3Request.BodyReader"/> while the request stream is flow-control paced (dispatch
+/// at end-of-headers).
 ///
 /// Our SETTINGS advertise QPACK dynamic-table capacity 0, which pins conforming peers to
 /// static-table references and literals - the entire decoder surface this library implements.
@@ -42,7 +46,7 @@ public sealed partial class Http3Connection
 
     // ALPN is settled once, and only once the handshake has finished.
     private bool _alpnChecked;
-    private bool _streaming;
+    private bool _streamBodies;
     private bool _controlSent;
 
     // Per-stream ingress state, keyed by stream id. Client bidi (id % 4 == 0) = request streams;
@@ -96,27 +100,28 @@ public sealed partial class Http3Connection
         public long Remaining;
     }
 
-    public Http3Connection(QuicConnection quicConnection)
+    public Http3Connection(QuicConnection quicConnection, Http3Options? options = null)
     {
         _quicConnection = quicConnection;
+        _streamBodies = options?.StreamRequestBodies ?? false;
     }
 
-    /// <summary>Buffered flavor: dispatch at end-of-stream with the whole body in <see cref="Http3Request.Body"/>.
+    /// <summary>Serve until the peer goes away, answering each request with <paramref name="handler"/>.
     /// Owns the handler's connection ref (DecRef on exit).</summary>
-    public Task RunAsync(Func<Http3Request, Http3Response> handler)
-        => RunCoreAsync(handler, null);
+    public Task RunBufferedAsync(Func<Http3Request, Http3Response> handler)
+        => RunBufferedAsync(request => new ValueTask<Http3Response>(handler(request)));
 
-    /// <summary>Streaming flavor: dispatch at END-OF-HEADERS, body pulled through
-    /// <see cref="Http3Request.BodyReader"/> while the stream's flow-control window paces the peer.
-    /// The handler must resume on the reactor (every ioxide await does). Owns the handler's
-    /// connection ref (DecRef on exit).</summary>
-    public Task RunAsync(Func<Http3Request, ValueTask<Http3Response>> handler)
-        => RunCoreAsync(null, handler);
+    /// <summary>Serve until the peer goes away, with an asynchronous handler. The handler must
+    /// resume on the reactor (every ioxide await does). Owns the handler's connection ref (DecRef
+    /// on exit).</summary>
+    public Task RunBufferedAsync(Func<Http3Request, ValueTask<Http3Response>> handler)
+        => RunCoreAsync(() => DispatchBuffered(handler), SendPendingBodies);
 
-    private async Task RunCoreAsync(Func<Http3Request, Http3Response>? buffered, Func<Http3Request, ValueTask<Http3Response>>? streaming)
+    // The serving loop behind every entry point, which differ in how a ready request is dispatched
+    // and in what more send capacity resumes.
+    private async Task RunCoreAsync(Action dispatchReady, Action onSendCapacity)
     {
-        _streaming = streaming is not null;
-        _quicConnection.OnSendCapacityAvailable ??= SendPendingBodies;   // a streamed connection has its own
+        _quicConnection.OnSendCapacityAvailable = onSendCapacity;
         try
         {
             while (true)
@@ -161,14 +166,7 @@ public sealed partial class Http3Connection
                 if (!_fatal)
                 {
                     FireBodyWakes();
-                    if (_streaming)
-                    {
-                        DispatchReadyStreaming(streaming!);
-                    }
-                    else
-                    {
-                        DispatchReady(buffered!);
-                    }
+                    dispatchReady();
                 }
 
                 if (snap.IsClosed || _fatal)
@@ -199,6 +197,10 @@ public sealed partial class Http3Connection
             }
 
             _quicConnection.DecRef();
+
+            // A streamed response parked on send capacity wakes into IsBroken and lets go of its writer.
+            ReleaseCapacityWaiters();
+            while (_writerPool.TryPop(out _)) { }
         }
     }
 
@@ -399,7 +401,7 @@ public sealed partial class Http3Connection
                     {
                         rs.Sink.Push(data[..take]);   // credited on hand-out, not here
                     }
-                    else if (!_streaming)   // streaming: the body is retired and the engine credits it
+                    else if (!_streamBodies)   // streamed: the body is retired and the engine credits it
                     {
                         rs.Request.BodyBuffer ??= new MemoryStream();
                         rs.Request.BodyBuffer.Write(data[..take]);
@@ -470,7 +472,7 @@ public sealed partial class Http3Connection
                 return;
             }
 
-            if (_streaming)
+            if (_streamBodies)
             {
                 rs.Sink?.End();
             }
@@ -503,7 +505,7 @@ public sealed partial class Http3Connection
             return;
         }
 
-        if (_streaming && !rs.Dispatched)
+        if (_streamBodies && !rs.Dispatched)
         {
             rs.Dispatched = true;
             var sink = new Http3BodyReader(this, sid, ended: false);
@@ -593,47 +595,27 @@ public sealed partial class Http3Connection
 
     // --- dispatch ------------------------------------------------------------------------------
 
-    private void DispatchReady(Func<Http3Request, Http3Response> handler)
+    // A request whose body streams stays in _requests while its handler runs, because the rest of
+    // its DATA still arrives there; a buffered one is complete, so it leaves now.
+    private bool TakeReady(long sid, [NotNullWhen(true)] out ReqStream? rs)
     {
-        for (int i = 0; i < _ready.Count && !_fatal; i++)
+        if (_streamBodies ? !_requests.TryGetValue(sid, out rs) : !_requests.Remove(sid, out rs))
         {
-            if (!_requests.Remove(_ready[i], out ReqStream? rs))
-            {
-                continue;
-            }
-            rs.Request.Freeze();
-
-            if (TryDispatchStreamedResponse(rs.Request))
-            {
-                continue;   // the writer owns this stream now
-            }
-
-            Http3Response resp;
-            try
-            {
-                resp = handler(rs.Request);
-            }
-            catch (Exception e)
-            {
-                Console.Error.WriteLine($"[ioxide.http3] request handler faulted: {e.GetBaseException().Message}");
-                resp = new Http3Response { Status = 500 };
-            }
-
-            Submit(rs.Request.StreamId, resp);
+            return false;
         }
-        _ready.Clear();
+        rs.Request.Freeze();
+        return true;
     }
 
-    private void DispatchReadyStreaming(Func<Http3Request, ValueTask<Http3Response>> handler)
+    private void DispatchBuffered(Func<Http3Request, ValueTask<Http3Response>> handler)
     {
         for (int i = 0; i < _ready.Count && !_fatal; i++)
         {
             long sid = _ready[i];
-            if (!_requests.TryGetValue(sid, out ReqStream? rs))
+            if (!TakeReady(sid, out ReqStream? rs))
             {
                 continue;
             }
-            rs.Request.Freeze();
 
             ValueTask<Http3Response> pending;
             try
@@ -655,13 +637,13 @@ public sealed partial class Http3Connection
             }
             else
             {
-                _ = CompleteStreamingAsync(pending, rs);
+                _ = CompleteBufferedAsync(pending, rs);
             }
         }
         _ready.Clear();
     }
 
-    private async Task CompleteStreamingAsync(ValueTask<Http3Response> pending, ReqStream rs)
+    private async Task CompleteBufferedAsync(ValueTask<Http3Response> pending, ReqStream rs)
     {
         Http3Response resp;
         try

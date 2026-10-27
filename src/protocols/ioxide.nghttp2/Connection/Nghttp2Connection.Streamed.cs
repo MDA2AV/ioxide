@@ -23,16 +23,11 @@ public sealed partial class Nghttp2Connection
     /// Serve this connection with each response body produced through a writer rather than
     /// returned whole. The handler owns its stream until it returns.
     /// </summary>
-    public Task RunAsync(Func<Nghttp2Request, Nghttp2ResponseWriter, ValueTask> handler)
+    public Task RunStreamedResponseAsync(Func<Nghttp2Request, Nghttp2ResponseWriter, ValueTask> handler)
     {
         _streamedHandler = handler;
-        return RunBufferedAsync(NoBufferedHandler);
+        return RunCoreAsync(null);
     }
-
-    // Never invoked: a streamed connection hands every ready request to a writer before the
-    // buffered path would reach this. It exists only because RunBufferedAsync needs a handler.
-    private static Nghttp2Response NoBufferedHandler(Nghttp2Request _)
-        => throw new InvalidOperationException("A streamed connection dispatches through its writer.");
 
     /// <summary>
     /// Hand a ready request to the streamed path, if this connection has one. Called from the

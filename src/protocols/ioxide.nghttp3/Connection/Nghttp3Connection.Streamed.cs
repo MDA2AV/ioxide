@@ -46,86 +46,10 @@ public sealed partial class Nghttp3Connection
     /// <summary>
     /// Serve this connection with the body of each response produced through a writer rather than
     /// returned whole. The handler owns the stream until it completes the writer: write headers,
-    /// push body, complete.
+    /// push body, complete. Owns the handler's connection ref.
     /// </summary>
-    public async Task RunStreamedResponseAsync(Func<Nghttp3Request, Nghttp3ResponseWriter, ValueTask> handler)
-    {
-        _streaming = true;
-
-        // Writers parked at the retention high-water resume when acks drain it: the drain pumps and
-        // releases them, where a bare PumpEgress would leave them parked.
-        _quicConnection.OnSendCapacityAvailable = DrainStreamed;
-
-        try
-        {
-            while (true)
-            {
-                QuicRecvSnapshot snapshot = await _quicConnection.ReadAsync();
-
-                if (_nghttp3Handle == 0 && !_protocolFailed && !TrySetup())
-                {
-                    FailInternal();
-                }
-
-                while (_quicConnection.TryGetDelivery(in snapshot, out QuicRecvRing.Delivery item))
-                {
-                    if (!_protocolFailed)
-                    {
-                        PushToEngine(in item);
-                    }
-                    _quicConnection.ReturnBuffer(in item);
-                }
-
-                if (!_protocolFailed)
-                {
-                    FireBodyWakes();
-                    DispatchStreamedResponse(handler);
-                    DrainStreamed();
-                    CloseIfShutdownComplete();
-                }
-
-                if (snapshot.IsClosed || _protocolFailed)
-                {
-                    break;
-                }
-                _quicConnection.ResetRead();
-            }
-        }
-        finally
-        {
-            foreach (Nghttp3BodyReader sink in _sinks.Values)
-            {
-                sink.Drop();
-            }
-            FireBodyWakes();
-            _sinks.Clear();
-
-            // Unpark anything still waiting on a pass; IsBroken makes them return rather than loop.
-            // Deliberately the bare flag and NOT FailInternal(): this runs on a response that
-            // completed perfectly well, and giving it a peer code would close every successful
-            // streamed connection with an error.
-            _protocolFailed = true;
-            ReleasePassWaiters();
-
-            foreach (Nghttp3ResponseWriter writer in _writers.Values)
-            {
-                writer.Release();
-            }
-            _writers.Clear();
-
-            while (_writerPool.TryPop(out Nghttp3ResponseWriter? pooled))
-            {
-                pooled.Release();   // the native blocks die with the connection, not the stream
-            }
-
-            // Before letting go, because letting go is all the transport sees: DecRef neither
-            // closes nor unregisters.
-            CloseWithPeerCode();
-
-            _quicConnection.DecRef();
-            Dispose();
-        }
-    }
+    public Task RunStreamedResponseAsync(Func<Nghttp3Request, Nghttp3ResponseWriter, ValueTask> handler)
+        => RunCoreAsync(() => DispatchStreamedResponse(handler));
 
     /// <summary>
     /// Pump until the streamed responses stop making progress.

@@ -76,7 +76,7 @@ internal static class Http2OutputQueueTests
             using var client = new StrictClient();
 
             var gate = new TaskCompletionSource();
-            Task run = client.Connection.RunAsync(async (_, writer) =>
+            Task run = client.Connection.RunStreamedResponseAsync(async (_, writer) =>
             {
                 writer.WriteHeaders(new Http2Response { Status = 200 });
                 Push(writer, "live");

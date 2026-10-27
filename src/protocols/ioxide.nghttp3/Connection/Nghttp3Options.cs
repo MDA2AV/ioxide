@@ -26,4 +26,15 @@ public sealed record Nghttp3Options
     /// 100 is a conventional value when the table is on.
     /// </summary>
     public long QpackBlockedStreams { get; init; }
+
+    /// <summary>
+    /// Dispatch each request as soon as its HEADERS are in, with the body arriving through
+    /// <see cref="Nghttp3Request.BodyReader"/> instead of assembled into
+    /// <see cref="Nghttp3Request.Body"/>.
+    ///
+    /// The trade is what memory is bound by. Buffered holds the whole body; streamed holds one
+    /// flow-control window, because the stream is paced and credit goes back to the peer only as
+    /// the handler reads.
+    /// </summary>
+    public bool StreamRequestBodies { get; init; }
 }

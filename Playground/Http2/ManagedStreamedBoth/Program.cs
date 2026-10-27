@@ -19,7 +19,7 @@ using Playground.Shared;
 //          bounds what an upload can make the server hold. A read returns the peer's credit, so a
 //          slow handler makes the PEER slow down.
 //
-//      RESPONSE streamed (Http2ResponseWriter, RunAsync)
+//      RESPONSE streamed (Http2ResponseWriter, RunStreamedResponseAsync)
 //          lets a body exist that has no length and no end - /feed has no final byte, so a
 //          buffered API cannot express it at all. A flush waits when either window is exhausted
 //          and resumes on the WINDOW_UPDATE.
@@ -63,8 +63,8 @@ var config = new ServerConfig
     },
 };
 
-// Both halves are opt-in and independent: this one turns the REQUEST direction on, RunAsync below
-// is what turns the RESPONSE direction on.
+// Both halves are opt-in and independent: this one turns the REQUEST direction on,
+// RunStreamedResponseAsync below is what turns the RESPONSE direction on.
 var http2 = new Http2Options { StreamRequestBodies = true };
 
 byte[] chunk = [.. Enumerable.Repeat((byte)'x', chunkBytes)];
@@ -79,7 +79,7 @@ for (int i = 0; i < threads.Length; i++)
     {
         try
         {
-            await new Http2Connection(conn, http2).RunAsync(async (request, writer) =>
+            await new Http2Connection(conn, http2).RunStreamedResponseAsync(async (request, writer) =>
             {
                 bool echo = request.Path.Span.SequenceEqual("/echo"u8);
 

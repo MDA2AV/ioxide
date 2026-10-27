@@ -30,7 +30,7 @@ internal static class Http3Tests
             (_, int udpPort) = TestServer.StartDatagram(
                 onDatagram: null,
                 quicFactory: engine.CreateFactory(),
-                quicHandle: static (_, conn) => new Http3Connection(conn).RunAsync(
+                quicHandle: static (_, conn) => new Http3Connection(conn).RunBufferedAsync(
                     static req => Http3Response.Text("served")));
 
             using var client = new H3TestClient("127.0.0.1", udpPort) { Alpn = "echo" };
@@ -50,7 +50,7 @@ internal static class Http3Tests
             (_, int udpPort) = TestServer.StartDatagram(
                 onDatagram: null,
                 quicFactory: engine.CreateFactory(),
-                quicHandle: static (_, conn) => new Http3Connection(conn).RunAsync(
+                quicHandle: static (_, conn) => new Http3Connection(conn).RunBufferedAsync(
                     static req => Http3Response.Text(
                         $"pure {Encoding.ASCII.GetString(req.Path.Span)} via {Encoding.ASCII.GetString(req.Method.Span)}")));
 
@@ -71,7 +71,7 @@ internal static class Http3Tests
             (_, int udpPort) = TestServer.StartDatagram(
                 onDatagram: null,
                 quicFactory: engine.CreateFactory(),
-                quicHandle: static (_, conn) => new Http3Connection(conn).RunAsync(
+                quicHandle: static (_, conn) => new Http3Connection(conn, new Http3Options { StreamRequestBodies = true }).RunBufferedAsync(
                     static async req =>
                     {
                         long total = 0;
@@ -102,8 +102,88 @@ internal static class Http3Tests
         });
 
         runner.Test("http3: uploads a streaming handler never reads give their connection credit back", () =>
-            UnreadUploadsGiveCreditBack((conn, answer) => new Http3Connection(conn).RunAsync(
+            UnreadUploadsGiveCreditBack((conn, answer) => new Http3Connection(conn, new Http3Options { StreamRequestBodies = true }).RunBufferedAsync(
                 async req => new Http3Response { Status = await answer(req.Path, req.BodyReader!.ReadAsync) })));
+
+        runner.Test("http3: a streamed response pulls its request body through BodyReader with StreamRequestBodies (#414)", () =>
+        {
+            (string certPath, string keyPath) = TestCert.Ensure();
+            var engine = TestServer.Own(new QuicEngine(certPath, keyPath, cidLength: 8, alpn: ["h3"]));
+
+            (_, int udpPort) = TestServer.StartDatagram(
+                onDatagram: null,
+                quicFactory: engine.CreateFactory(),
+                quicHandle: static (_, conn) => new Http3Connection(conn, new Http3Options { StreamRequestBodies = true })
+                    .RunStreamedResponseAsync(static async (req, writer) =>
+                    {
+                        string answer;
+                        if (req.BodyReader is { } reader)
+                        {
+                            long total = 0;
+                            ReadOnlyMemory<byte> chunk;
+                            while (!(chunk = await reader.ReadAsync()).IsEmpty)
+                            {
+                                total += chunk.Length;
+                            }
+                            answer = $"read {total}";
+                        }
+                        else
+                        {
+                            answer = $"no BodyReader, Body {req.Body.Length}";
+                        }
+
+                        writer.WriteHeaders(new Http3Response { Status = 200 });
+                        int length = Encoding.ASCII.GetBytes(answer, writer.GetSpan(answer.Length));
+                        writer.Advance(length);
+                        await writer.FlushAsync();
+                    }));
+
+            using var client = new H3TestClient("127.0.0.1", udpPort);
+            client.Connect();
+            Assert.True(client.CompleteHandshake(timeoutMs: 5000), "handshake did not complete");
+
+            // 600 KB > the 256 KB stream window: it arrives only if the reads credit it back mid-flight.
+            (int status, string text) = client.Request("POST", "/upload", new byte[600_000], timeoutMs: 10_000);
+            Assert.Equal(200, status);
+            Assert.Equal("read 600000", text);
+        });
+
+        runner.Test("http3: uploads a streamed-response handler never reads give their connection credit back", () =>
+            UnreadUploadsGiveCreditBack((conn, answer) => new Http3Connection(conn, new Http3Options { StreamRequestBodies = true })
+                .RunStreamedResponseAsync(async (req, writer) =>
+                    writer.WriteHeaders(new Http3Response { Status = await answer(req.Path, req.BodyReader!.ReadAsync) }))));
+
+        runner.Test("http3: a buffered handler that awaits gets the whole body in Body (#414)", () =>
+        {
+            (string certPath, string keyPath) = TestCert.Ensure();
+            var engine = TestServer.Own(new QuicEngine(certPath, keyPath, cidLength: 8, alpn: ["h3"]));
+
+            (_, int udpPort) = TestServer.StartDatagram(
+                onDatagram: null,
+                quicFactory: engine.CreateFactory(),
+                quicHandle: static (reactor, conn) =>
+                {
+                    var timer = new RingTimer(reactor);
+                    return new Http3Connection(conn).RunBufferedAsync(async req =>
+                    {
+                        await timer.DelayAsync(20);   // parks, so the answer leaves after its pass
+                        return Http3Response.Text(
+                            $"buffered got {req.Body.Length} first {req.Body.Span[0]} last {req.Body.Span[^1]}, " +
+                            $"reader {(req.BodyReader is null ? "absent" : "present")}");
+                    });
+                });
+
+            using var client = new H3TestClient("127.0.0.1", udpPort);
+            client.Connect();
+            Assert.True(client.CompleteHandshake(timeoutMs: 5000), "handshake did not complete");
+
+            var body = new byte[200_000];
+            new Random(23).NextBytes(body);
+
+            (int status, string text) = client.Request("POST", "/upload", body, timeoutMs: 10_000);
+            Assert.Equal(200, status);
+            Assert.Equal($"buffered got 200000 first {body[0]} last {body[^1]}, reader absent", text);
+        });
     }
 
     /// <summary>The status a test handler answers once it is done with the body behind <c>readBody</c>.</summary>

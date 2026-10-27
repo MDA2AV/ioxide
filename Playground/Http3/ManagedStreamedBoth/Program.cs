@@ -7,8 +7,8 @@ using Playground.Shared;
 // ─────────────────────────────────────────────────────────────────────────────────────────────
 //  http3-managed-streamed-both - HTTP/3 in pure C# with BOTH directions streamed.
 //
-//  The request body arrives through Http3Request.BodyReader, pulled a chunk at a time under
-//  flow control, so a large upload is never held whole. The response body goes out through an
+//  The request body arrives through Http3Request.BodyReader (Http3Options.StreamRequestBodies),
+//  pulled a chunk at a time under flow control, so a large upload is never held whole. The response body goes out through an
 //  Http3ResponseWriter, one DATA frame per flush, so a large download is never built whole.
 //
 //  "/echo" runs both at once - read a chunk, write a chunk - which is what a proxy does and the
@@ -85,7 +85,7 @@ for (int i = 0; i < threads.Length; i++)
     var reactor = new Reactor(i, config);
 
     reactor.QuicHandle = (r, conn) =>
-        new Http3Connection(conn).RunStreamedResponseAsync(async (request, writer) =>
+        new Http3Connection(conn, new Http3Options { StreamRequestBodies = true }).RunStreamedResponseAsync(async (request, writer) =>
         {
             bool endless = request.Path.Span.SequenceEqual("/feed"u8);
             bool upload  = request.Path.Span.SequenceEqual("/upload"u8);

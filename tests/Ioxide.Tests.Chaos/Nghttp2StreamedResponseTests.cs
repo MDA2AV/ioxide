@@ -98,7 +98,7 @@ internal static class Nghttp2StreamedResponseTests
     {
         try
         {
-            await new Nghttp2Connection(conn).RunAsync(async (request, writer) =>
+            await new Nghttp2Connection(conn).RunStreamedResponseAsync(async (request, writer) =>
             {
                 writer.WriteHeaders(new Nghttp2Response { Status = 200 });
                 if (!request.Path.Span.SequenceEqual("/feed"u8))

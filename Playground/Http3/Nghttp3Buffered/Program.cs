@@ -145,7 +145,7 @@ for (int i = 0; i < threads.Length; i++)
             live.Add((r, h3));
         }
 
-        // RunBufferedAsync, not RunStreamingAsync - that one call is the whole difference.
+        // No StreamRequestBodies in h3Options - that one setting is the whole difference.
         return h3.RunBufferedAsync(request =>
         {
             // Dispatch waited for end-of-stream, so the body is ALREADY here: request.Body is

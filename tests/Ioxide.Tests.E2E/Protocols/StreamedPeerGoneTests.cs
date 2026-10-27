@@ -146,7 +146,7 @@ internal static class StreamedPeerGoneTests
             {
                 if (native)
                 {
-                    await new Nghttp2Connection(conn).RunAsync((request, writer) => serve(Path(request.Path),
+                    await new Nghttp2Connection(conn).RunStreamedResponseAsync((request, writer) => serve(Path(request.Path),
                         body =>
                         {
                             writer.Write(body.Span);
@@ -156,7 +156,7 @@ internal static class StreamedPeerGoneTests
                 }
                 else
                 {
-                    await new Http2Connection(conn).RunAsync((request, writer) => serve(Path(request.Path),
+                    await new Http2Connection(conn).RunStreamedResponseAsync((request, writer) => serve(Path(request.Path),
                         body =>
                         {
                             writer.Write(body.Span);

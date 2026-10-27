@@ -230,8 +230,9 @@ PANES = {
         ["curl --http3-only -k https://127.0.0.1:8443/",
          "curl --http3-only -kN https://127.0.0.1:8443/feed        # never ends",
          "curl --http3-only -k --data-binary @big.bin https://127.0.0.1:8443/echo"],
-        "Both directions streamed, in pure C#. The request body is PULLED a chunk at a time through "
-        "<code>Http3Request.BodyReader</code>, so a large upload is never held whole; the response is "
+        "Both directions streamed, in pure C#. With <code>StreamRequestBodies</code> on, the request "
+        "body is PULLED a chunk at a time through <code>Http3Request.BodyReader</code>, so a large "
+        "upload is never held whole; the response is "
         "PUSHED through <code>Http3ResponseWriter</code>, one DATA frame per flush, so a large "
         "download is never built whole. <code>/echo</code> runs both at once - read a chunk, write a "
         "chunk - which is what a proxy does. "
@@ -248,8 +249,9 @@ PANES = {
          "curl --http3-only -k --data-binary @big.bin https://127.0.0.1:8443/echo"],
         "The fourth corner the other three nghttp3 samples leave empty: the request pulled through "
         "<code>BodyReader</code> while the response is pushed through the writer, both in one "
-        "handler. One call arranges it - <code>RunStreamedResponseAsync</code> dispatches at "
-        "end-of-headers, so the handler is running while the upload is still on the wire. "
+        "handler. <code>RunStreamedResponseAsync</code> with <code>StreamRequestBodies</code> "
+        "arranges it: dispatch at end-of-headers, so the handler is running while the upload is "
+        "still on the wire. "
         "<code>/echo</code> is the shape a proxy needs: read a chunk, write a chunk, never hold "
         "more than one, and neither side can outrun the other because <code>ReadAsync</code> waits "
         "on the peer and <code>FlushAsync</code> waits on nghttp3. Measured here on a 64 MiB echo: "
@@ -376,7 +378,7 @@ PANES = {
         "Both at once, which is the shape a proxy needs: <code>/echo</code> reads a chunk and "
         "writes a chunk, so neither the upload nor the download is ever held whole. The two "
         "directions are separate switches - <code>StreamRequestBodies</code> for the read side, "
-        "<code>RunAsync</code> with a writer for the write side - because they solve different "
+        "<code>RunStreamedResponseAsync</code> for the write side - because they solve different "
         "problems and most servers want exactly one of them. Mirrors "
         "<label for=\"tab-h3csstream\" class=\"ex-jump\">h3 &middot; request + response "
         "streamed</label>; the difference is HTTP/2's shared connection window, which a handler "

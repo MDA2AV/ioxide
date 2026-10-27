@@ -24,62 +24,46 @@ public sealed partial class Http3Connection
 
     /// <summary>
     /// Serve this connection with each response body produced through a writer rather than
-    /// returned whole. The handler owns its stream until it completes the writer.
+    /// returned whole. The handler owns its stream until it completes the writer. Owns the
+    /// handler's connection ref (DecRef on exit).
     /// </summary>
-    public async Task RunStreamedResponseAsync(Func<Http3Request, Http3ResponseWriter, ValueTask> handler)
-    {
-        _quicConnection.OnSendCapacityAvailable = ReleaseCapacityWaiters;
-
-        try
-        {
-            // Its own dispatch, rather than tunnelling through the buffered one: a streamed
-            // response has no Http3Response to return, and pretending otherwise meant handing
-            // back a sentinel that Submit then had to recognise and skip.
-            _streamedResponseHandler = handler;
-            await RunAsync(NoBufferedHandler);
-        }
-        finally
-        {
-            ReleaseCapacityWaiters();
-            while (_writerPool.TryPop(out _)) { }
-        }
-    }
-
-    private Func<Http3Request, Http3ResponseWriter, ValueTask>? _streamedResponseHandler;
-
-    // Never invoked: DispatchReady hands streamed requests to the writer path before it would be
-    // reached. It exists only because RunAsync's signature demands a handler.
-    private static Http3Response NoBufferedHandler(Http3Request _)
-        => throw new InvalidOperationException("A streamed connection dispatches through its writer.");
+    public Task RunStreamedResponseAsync(Func<Http3Request, Http3ResponseWriter, ValueTask> handler)
+        => RunCoreAsync(() => DispatchStreamedResponse(handler), ReleaseCapacityWaiters);
 
     /// <summary>
     /// The streamed dispatch, called from the pass that made the request ready - so the writer's
     /// sends happen inside that pass, like a buffered Submit does.
     /// </summary>
-    private bool TryDispatchStreamedResponse(Http3Request request)
+    private void DispatchStreamedResponse(Func<Http3Request, Http3ResponseWriter, ValueTask> handler)
     {
-        if (_streamedResponseHandler is null)
+        for (int i = 0; i < _ready.Count && !_fatal; i++)
         {
-            return false;
-        }
+            long sid = _ready[i];
+            if (!TakeReady(sid, out ReqStream? rs))
+            {
+                continue;
+            }
 
-        Http3ResponseWriter writer = RentWriter(request.StreamId);
-        _writers[request.StreamId] = writer;
-        _ = ServeAsync(_streamedResponseHandler, request, writer);
-        return true;
+            Http3ResponseWriter writer = RentWriter(sid);
+            _writers[sid] = writer;
+            _ = ServeAsync(handler, rs, writer);
+        }
+        _ready.Clear();
     }
 
     private async Task ServeAsync(Func<Http3Request, Http3ResponseWriter, ValueTask> handler,
-        Http3Request request, Http3ResponseWriter writer)
+        ReqStream rs, Http3ResponseWriter writer)
     {
         try
         {
-            await handler(request, writer);
+            await handler(rs.Request, writer);
+            RetireBody(rs);
             await writer.CompleteAsync();
         }
         catch (Exception exception)
         {
             Console.Error.WriteLine($"[ioxide.http3] request handler faulted: {exception.GetBaseException().Message}");
+            RetireBody(rs);
             await writer.FailAsync();
         }
         finally

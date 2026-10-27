@@ -106,7 +106,7 @@ public sealed partial class Nghttp3Connection
             }
             request.HeadersDone = true;
 
-            if (!connection._streaming)
+            if (!connection._streamBodies)
             {
                 return;   // buffered: body (if any) follows via CallbackData; dispatch at CallbackEndStream
             }
@@ -140,7 +140,7 @@ public sealed partial class Nghttp3Connection
         try
         {
             Nghttp3Connection connection = From(user);
-            if (connection._streaming)
+            if (connection._streamBodies)
             {
                 if (connection._sinks.TryGetValue(streamId, out Nghttp3BodyReader? sink))
                 {
@@ -166,7 +166,7 @@ public sealed partial class Nghttp3Connection
         try
         {
             Nghttp3Connection connection = From(user);
-            if (connection._streaming)
+            if (connection._streamBodies)
             {
                 if (connection._sinks.Remove(streamId, out Nghttp3BodyReader? sink))
                 {

@@ -233,7 +233,7 @@ internal static class H3ErrorCodeTests
             (_, int udpPort) = TestServer.StartDatagram(
                 onDatagram: null,
                 quicFactory: engine.CreateFactory(),
-                quicHandle: static (_, conn) => new Http3Connection(conn).RunAsync(
+                quicHandle: static (_, conn) => new Http3Connection(conn).RunBufferedAsync(
                     static _ => Http3Response.Text("raw served")));
 
             using var peer = new RawH3Peer("127.0.0.1", udpPort);
@@ -264,7 +264,7 @@ internal static class H3ErrorCodeTests
             (_, int udpPort) = TestServer.StartDatagram(
                 onDatagram: null,
                 quicFactory: engine.CreateFactory(),
-                quicHandle: static (_, conn) => new Http3Connection(conn).RunAsync(
+                quicHandle: static (_, conn) => new Http3Connection(conn).RunBufferedAsync(
                     static _ => Http3Response.Text("unreached")));
 
             using var peer = new RawH3Peer("127.0.0.1", udpPort);
@@ -336,7 +336,7 @@ internal static class H3ErrorCodeTests
                     s.Count++;
                     return ValueTask.FromResult(Nghttp3Response.Text("ok"));
                 })),
-                ("streaming", (q, s) => new Nghttp3Connection(q).RunStreamingAsync(_ =>
+                ("streaming", (q, s) => new Nghttp3Connection(q, new Nghttp3Options { StreamRequestBodies = true }).RunBufferedAsync(_ =>
                 {
                     s.Count++;
                     return ValueTask.FromResult(Nghttp3Response.Text("ok"));
@@ -396,7 +396,7 @@ internal static class H3ErrorCodeTests
 
         Served count = new();
         served = count;
-        return new Http3Connection(quic).RunAsync(req =>
+        return new Http3Connection(quic).RunBufferedAsync(req =>
         {
             count.Count++;
             return Http3Response.Text("ok");

@@ -49,14 +49,13 @@ public sealed class Nghttp3Request
         return false;
     }
 
-    /// <summary>Whole body - buffered flavor only (empty under the streaming overload).</summary>
+    /// <summary>Whole body, assembled before dispatch (empty with <see cref="Nghttp3Options.StreamRequestBodies"/>).</summary>
     public ReadOnlyMemory<byte> Body { get; internal set; }
 
     /// <summary>
-    /// Streaming body pull surface - non-null only under the async
-    /// <see cref="Nghttp3Connection.RunStreamingAsync"/> overload, where
-    /// dispatch happens at end-of-headers and the body arrives while the handler runs. Under the
-    /// sync overload the body is pre-buffered into <see cref="Body"/> instead.
+    /// The body as it arrives, set only with <see cref="Nghttp3Options.StreamRequestBodies"/>,
+    /// where dispatch happens at end-of-headers and the body arrives while the handler runs.
+    /// Without it the body is assembled into <see cref="Body"/> instead.
     /// </summary>
     public Nghttp3BodyReader? BodyReader { get; internal set; }
 

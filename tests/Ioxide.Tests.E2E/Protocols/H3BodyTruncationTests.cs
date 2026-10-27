@@ -78,7 +78,7 @@ internal static class H3BodyTruncationTests
             (_, int udpPort) = TestServer.StartDatagram(
                 onDatagram: null,
                 quicFactory: engine.CreateFactory(),
-                quicHandle: (_, conn) => new Http3Connection(conn).RunAsync(
+                quicHandle: (_, conn) => new Http3Connection(conn).RunBufferedAsync(
                     req =>
                     {
                         Volatile.Write(ref served, req.Body.Length);
@@ -110,7 +110,7 @@ internal static class H3BodyTruncationTests
             (_, int udpPort) = TestServer.StartDatagram(
                 onDatagram: null,
                 quicFactory: engine.CreateFactory(),
-                quicHandle: (_, conn) => new Http3Connection(conn).RunAsync(
+                quicHandle: (_, conn) => new Http3Connection(conn).RunBufferedAsync(
                     req =>
                     {
                         Volatile.Write(ref served, req.Body.Length);
@@ -131,7 +131,7 @@ internal static class H3BodyTruncationTests
 
         runner.Test("http3: a streamed body shorter than its content-length raises on read instead of ending", () =>
         {
-            // The streaming overload dispatched at end-of-headers, so refusing the request cannot
+            // A streamed body is dispatched at end-of-headers, so refusing the request cannot
             // keep the handler from the ten bytes. What it can do is make the read after them say
             // the body was cut. Same frames as the clean-end control at the top; only the header differs.
             Assert.Equal("raised IOException after 10", StreamedBodyOutcome(promised: 10, contentLength: "100"));
@@ -187,7 +187,7 @@ internal static class H3BodyTruncationTests
         (_, int udpPort) = TestServer.StartDatagram(
             onDatagram: null,
             quicFactory: engine.CreateFactory(),
-            quicHandle: (_, conn) => new Http3Connection(conn).RunAsync(
+            quicHandle: (_, conn) => new Http3Connection(conn, new Http3Options { StreamRequestBodies = true }).RunBufferedAsync(
                 async req =>
                 {
                     started.TrySetResult();
@@ -256,7 +256,7 @@ internal static class H3BodyTruncationTests
             (_, int udpPort) = TestServer.StartDatagram(
                 onDatagram: null,
                 quicFactory: engine.CreateFactory(),
-                quicHandle: (_, conn) => new Http3Connection(conn).RunAsync(
+                quicHandle: (_, conn) => new Http3Connection(conn).RunBufferedAsync(
                     req =>
                     {
                         Interlocked.Increment(ref served);

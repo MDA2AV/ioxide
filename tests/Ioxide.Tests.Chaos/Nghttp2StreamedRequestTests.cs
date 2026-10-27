@@ -36,7 +36,7 @@ internal static class Nghttp2StreamedRequestTests
         foreach (bool streamedResponse in new[] { false, true })
         {
             bool sr = streamedResponse;
-            string flavor = sr ? "RunAsync" : "RunBufferedAsync";
+            string flavor = sr ? "RunStreamedResponseAsync" : "RunBufferedAsync";
 
             runner.Test($"nghttp2 streamed request ({flavor}): a 4 MiB upload read a chunk at a time arrives whole and in order", () =>
             {
@@ -214,7 +214,7 @@ internal static class Nghttp2StreamedRequestTests
                 try
                 {
                     await new Nghttp2Connection(conn, new Nghttp2Options { StreamRequestBodies = true })
-                        .RunAsync(async (request, writer) =>
+                        .RunStreamedResponseAsync(async (request, writer) =>
                         {
                             ReadOnlyMemory<byte> chunk = await request.BodyReader!.ReadAsync();
                             writer.WriteHeaders(new Nghttp2Response { Status = 200 });
@@ -377,7 +377,7 @@ internal static class Nghttp2StreamedRequestTests
     /// A server over <see cref="Nghttp2Connection"/>, either flavor, recording what each handler saw.
     /// "/read" reads its body to the end; "/hold" does the same once "/go" on its connection releases
     /// it; "/unread" answers without reading, and "/unread-after-a-wait" after a ring wait. Under
-    /// RunAsync, "/fail" sends its headers and fails once released.
+    /// RunStreamedResponseAsync, "/fail" sends its headers and fails once released.
     /// </summary>
     private static int Start(ConcurrentQueue<Seen> seen, bool streamedResponse, bool streamBodies = true,
         int maxRequestBytes = 8 * 1024 * 1024) => TestServer.Start(async (reactor, conn) =>
@@ -391,7 +391,7 @@ internal static class Nghttp2StreamedRequestTests
 
             if (streamedResponse)
             {
-                await connection.RunAsync(async (request, writer) =>
+                await connection.RunStreamedResponseAsync(async (request, writer) =>
                 {
                     if (request.Path.Span.SequenceEqual("/fail"u8))
                     {

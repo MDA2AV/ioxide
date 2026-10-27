@@ -169,7 +169,7 @@ for (int i = 0; i < threads.Length; i++)
     var reactor = new Reactor(i, config);
 
     reactor.QuicHandle = (_, connection) =>
-        new Http3Connection(connection).RunAsync(_ =>
+        new Http3Connection(connection).RunBufferedAsync(_ =>
         {
             // What the SERVER believes it published. The client's view is the certificate it just
             // validated, and only pinning with --cacert can tell you that.

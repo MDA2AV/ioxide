@@ -511,7 +511,7 @@ reactor.QuicHandle = async (r, conn) =>
     unchanged. One <code>Nghttp3Connection</code> wraps one <code>QuicConnection</code>:</p>
 <pre><code class="language-csharp">reactor.QuicHandle = (r, conn) => new Nghttp3Connection(conn).RunBufferedAsync(
     static req => Nghttp3Response.Text($"hello {Encoding.ASCII.GetString(req.Path.Span)} via {Encoding.ASCII.GetString(req.Method.Span)}"));</code></pre>
-    <p>Inside <code>RunAsync</code>:</p>
+    <p>Inside <code>RunBufferedAsync</code>:</p>
     <ol>
       <li><b>Lazy setup.</b> On the first wake (which is by definition post-handshake), it opens
       the three server unidirectional streams H3 requires - control + QPACK encoder/decoder -

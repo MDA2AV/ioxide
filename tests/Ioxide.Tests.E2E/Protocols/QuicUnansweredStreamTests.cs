@@ -228,7 +228,7 @@ internal static class QuicUnansweredStreamTests
                 {
                     try
                     {
-                        await new Http3Connection(conn).RunAsync(static _ => Http3Response.Text("ok"));
+                        await new Http3Connection(conn).RunBufferedAsync(static _ => Http3Response.Text("ok"));
                     }
                     finally
                     {

@@ -1,140 +1,23 @@
 namespace ioxide.nghttp3;
 
 /// <summary>
-/// The BUFFERED flavor, both handler shapes: dispatch at end-of-stream with the whole body
-/// pre-assembled into <see cref="Nghttp3Request.Body"/>. Requests recycle the moment their
-/// valid-until-return contract ends - right after a sync handler returns, or when an async
-/// handler's task completes (sole owner: the request left _requests at dispatch).
+/// The BUFFERED response, both handler shapes. With the body assembled, dispatch is at end-of-stream
+/// and requests recycle the moment their valid-until-return contract ends - right after a handler
+/// that never awaited returns, or when its task completes (sole owner: the request left _requests at
+/// dispatch). A streamed body dispatches through <see cref="DispatchStreaming"/> instead.
 /// </summary>
 public sealed partial class Nghttp3Connection
 {
-    /// <summary>Buffered, synchronous: dispatch at end-of-stream with the whole body pre-assembled
-    /// into <see cref="Nghttp3Request.Body"/>; the handler computes and returns - it must not wait
-    /// for anything (blocking would stall the reactor). Owns the handler's connection ref.</summary>
-    public async Task RunBufferedAsync(Func<Nghttp3Request, Nghttp3Response> handler)
-    {
-        try
-        {
-            while (true)
-            {
-                QuicRecvSnapshot snapshot = await _quicConnection.ReadAsync();
+    /// <summary>Serve until the peer goes away, answering each request with <paramref name="handler"/>,
+    /// which computes and returns - it must not wait for anything (blocking would stall the
+    /// reactor). Owns the handler's connection ref.</summary>
+    public Task RunBufferedAsync(Func<Nghttp3Request, Nghttp3Response> handler)
+        => RunBufferedAsync(request => new ValueTask<Nghttp3Response>(handler(request)));
 
-                if (_nghttp3Handle == 0 && !_protocolFailed && !TrySetup())
-                {
-                    FailInternal();
-                }
-
-                while (_quicConnection.TryGetDelivery(in snapshot, out QuicRecvRing.Delivery item))
-                {
-                    if (!_protocolFailed)
-                    {
-                        PushToEngine(in item);
-                    }
-                    _quicConnection.ReturnBuffer(in item);
-                }
-
-                if (!_protocolFailed)
-                {
-                    DispatchBufferedSync(handler);
-                    PumpEgress();
-                    CloseIfShutdownComplete();
-                }
-
-                if (snapshot.IsClosed || _protocolFailed)
-                {
-                    break;
-                }
-                _quicConnection.ResetRead();
-            }
-        }
-        finally
-        {
-            // Before letting go, because letting go is all the transport sees: DecRef neither
-            // closes nor unregisters.
-            CloseWithPeerCode();
-
-            _quicConnection.DecRef();
-            Dispose();
-        }
-    }
-
-    /// <summary>Buffered, asynchronous: same end-of-stream dispatch and pre-assembled
-    /// <see cref="Nghttp3Request.Body"/>, but the handler may await (a database, a cache - any
-    /// ioxide-native awaitable resumes inline on the reactor). Owns the handler's connection ref.</summary>
-    public async Task RunBufferedAsync(Func<Nghttp3Request, ValueTask<Nghttp3Response>> handler)
-    {
-        try
-        {
-            while (true)
-            {
-                QuicRecvSnapshot snapshot = await _quicConnection.ReadAsync();
-
-                if (_nghttp3Handle == 0 && !_protocolFailed && !TrySetup())
-                {
-                    FailInternal();
-                }
-
-                while (_quicConnection.TryGetDelivery(in snapshot, out QuicRecvRing.Delivery item))
-                {
-                    if (!_protocolFailed)
-                    {
-                        PushToEngine(in item);
-                    }
-                    _quicConnection.ReturnBuffer(in item);
-                }
-
-                if (!_protocolFailed)
-                {
-                    DispatchBufferedAsync(handler);
-                    PumpEgress();
-                    CloseIfShutdownComplete();
-                }
-
-                if (snapshot.IsClosed || _protocolFailed)
-                {
-                    break;
-                }
-                _quicConnection.ResetRead();
-            }
-        }
-        finally
-        {
-            // Before letting go, because letting go is all the transport sees: DecRef neither
-            // closes nor unregisters.
-            CloseWithPeerCode();
-
-            _quicConnection.DecRef();
-            Dispose();
-        }
-    }
-
-    private void DispatchBufferedSync(Func<Nghttp3Request, Nghttp3Response> handler)
-    {
-        for (int i = 0; i < _readyStreamIds.Count && !_protocolFailed; i++)
-        {
-            if (!_requests.Remove(_readyStreamIds[i], out Nghttp3Request? request))
-            {
-                continue;
-            }
-            request.Dispatched = true;
-            request.Freeze();   // arena is final - materialize the public memories
-
-            Nghttp3Response response;
-            try
-            {
-                response = handler(request);
-            }
-            catch (Exception exception)
-            {
-                Console.Error.WriteLine($"[ioxide.nghttp3] request handler faulted: {exception.GetBaseException().Message}");
-                response = new Nghttp3Response { Status = 500 };
-            }
-
-            QueueResponse(request.StreamId, response);
-            ReleaseRequest(request);   // sync handler returned - the contract just ended
-        }
-        _readyStreamIds.Clear();
-    }
+    /// <summary>Serve until the peer goes away, with a handler that may await (a database, a cache -
+    /// any ioxide-native awaitable resumes inline on the reactor). Owns the handler's connection ref.</summary>
+    public Task RunBufferedAsync(Func<Nghttp3Request, ValueTask<Nghttp3Response>> handler)
+        => RunCoreAsync(_streamBodies ? () => DispatchStreaming(handler) : () => DispatchBufferedAsync(handler));
 
     private void DispatchBufferedAsync(Func<Nghttp3Request, ValueTask<Nghttp3Response>> handler)
     {

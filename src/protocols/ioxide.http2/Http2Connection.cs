@@ -136,7 +136,11 @@ public sealed partial class Http2Connection : IDisposable
         => RunBufferedAsync(request => new ValueTask<Http2Response>(handler(request)));
 
     /// <summary>Serve until the peer goes away, with an asynchronous handler.</summary>
-    public async Task RunBufferedAsync(Func<Http2Request, ValueTask<Http2Response>> handler)
+    public Task RunBufferedAsync(Func<Http2Request, ValueTask<Http2Response>> handler) => RunCoreAsync(handler);
+
+    // The serving loop behind every entry point. A connection serving streamed responses has no
+    // handler here: TryDispatchStreamed hands each of its requests to a writer.
+    private async Task RunCoreAsync(Func<Http2Request, ValueTask<Http2Response>>? handler)
     {
         try
         {
@@ -234,7 +238,7 @@ public sealed partial class Http2Connection : IDisposable
         _inboundUsed += data.Length;
     }
 
-    private async ValueTask DispatchReadyAsync(Func<Http2Request, ValueTask<Http2Response>> handler)
+    private async ValueTask DispatchReadyAsync(Func<Http2Request, ValueTask<Http2Response>>? handler)
     {
         if (_ready.Count == 0)
         {
@@ -257,7 +261,7 @@ public sealed partial class Http2Connection : IDisposable
                     continue;   // the writer owns this stream, and retires it when done
                 }
 
-                inFlight = handler(request);
+                inFlight = handler!(request);
             }
             catch
             {
