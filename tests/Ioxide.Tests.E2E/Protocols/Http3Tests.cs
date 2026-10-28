@@ -30,7 +30,7 @@ internal static class Http3Tests
             (_, int udpPort) = TestServer.StartDatagram(
                 onDatagram: null,
                 quicFactory: engine.CreateFactory(),
-                quicHandle: static (_, conn) => new Http3Connection(conn).RunBufferedAsync(
+                quicHandle: static (_, conn) => new Http3Connection(conn).RunAsync(
                     static req => Http3Response.Text("served")));
 
             using var client = new H3TestClient("127.0.0.1", udpPort) { Alpn = "echo" };
@@ -50,7 +50,7 @@ internal static class Http3Tests
             (_, int udpPort) = TestServer.StartDatagram(
                 onDatagram: null,
                 quicFactory: engine.CreateFactory(),
-                quicHandle: static (_, conn) => new Http3Connection(conn).RunBufferedAsync(
+                quicHandle: static (_, conn) => new Http3Connection(conn).RunAsync(
                     static req => Http3Response.Text(
                         $"pure {Encoding.ASCII.GetString(req.Path.Span)} via {Encoding.ASCII.GetString(req.Method.Span)}")));
 
@@ -71,13 +71,13 @@ internal static class Http3Tests
             (_, int udpPort) = TestServer.StartDatagram(
                 onDatagram: null,
                 quicFactory: engine.CreateFactory(),
-                quicHandle: static (_, conn) => new Http3Connection(conn, new Http3Options { StreamRequestBodies = true }).RunBufferedAsync(
-                    static async req =>
+                quicHandle: static (_, conn) => new Http3Connection(conn).RunAsync(
+                    static async (_, reader) =>
                     {
                         long total = 0;
                         while (true)
                         {
-                            ReadOnlyMemory<byte> chunk = await req.BodyReader!.ReadAsync();
+                            ReadOnlyMemory<byte> chunk = await reader.ReadAsync();
                             if (chunk.IsEmpty)
                             {
                                 break;
@@ -102,12 +102,12 @@ internal static class Http3Tests
         });
 
         runner.Test("http3: uploads a streaming handler never reads give their connection credit back", () =>
-            UnreadUploadsGiveCreditBack((conn, answer) => new Http3Connection(conn, new Http3Options { StreamRequestBodies = true }).RunBufferedAsync(
-                async req => new Http3Response { Status = await answer(req.Path, req.BodyReader!.ReadAsync) })));
+            UnreadUploadsGiveCreditBack((conn, answer) => new Http3Connection(conn).RunAsync(
+                async (req, body) => new Http3Response { Status = await answer(req.Path, body.ReadAsync) })));
 
         runner.Test("http3: uploads a streamed-response handler never reads give their connection credit back", () =>
-            UnreadUploadsGiveCreditBack((conn, answer) => new Http3Connection(conn, new Http3Options { StreamRequestBodies = true }).RunStreamedResponseAsync(
-                async (req, writer) => writer.WriteHeaders(new Http3Response { Status = await answer(req.Path, req.BodyReader!.ReadAsync) }))));
+            UnreadUploadsGiveCreditBack((conn, answer) => new Http3Connection(conn).RunAsync(
+                async (req, body, writer) => writer.WriteHeaders(new Http3Response { Status = await answer(req.Path, body.ReadAsync) }))));
     }
 
     /// <summary>The status a test handler answers once it is done with the body behind <c>readBody</c>.</summary>

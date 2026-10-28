@@ -36,7 +36,7 @@ internal static class QuicMigrationTests
             (_, int serverPort) = TestServer.StartDatagram(
                 onDatagram: null,
                 quicFactory: engine.CreateFactory(),
-                quicHandle: static (_, conn) => new Nghttp3Connection(conn).RunBufferedAsync(
+                quicHandle: static (_, conn) => new Nghttp3Connection(conn).RunAsync(
                     static _ => Nghttp3Response.Text("migrated-ok")));
 
             using var forwarder = new UdpForwarder(serverPort);
@@ -86,7 +86,7 @@ internal static class QuicMigrationTests
 
             (int serverPort, Reactor[] fleet) = TestServer.StartQuicSharded(reactors,
                 engine.CreateFactory(),
-                quicHandle: static (_, conn) => new Nghttp3Connection(conn).RunBufferedAsync(
+                quicHandle: static (_, conn) => new Nghttp3Connection(conn).RunAsync(
                     static _ => Nghttp3Response.Text("migrated-ok")),
                 routing: QuicRouting.Forward);
 
@@ -152,7 +152,7 @@ internal static class QuicMigrationTests
 
             (int serverPort, Reactor[] fleet) = TestServer.StartQuicSharded(4,
                 engine.CreateFactory(),
-                quicHandle: static (_, conn) => new Nghttp3Connection(conn).RunBufferedAsync(
+                quicHandle: static (_, conn) => new Nghttp3Connection(conn).RunAsync(
                     static _ => Nghttp3Response.Text("migrated-ok")),
                 routing: QuicRouting.Forward);
 
@@ -227,7 +227,7 @@ internal static class QuicMigrationTests
 
             (int serverPort, Reactor[] fleet) = TestServer.StartQuicSharded(reactors,
                 engine.CreateFactory(),
-                quicHandle: static (_, conn) => new Nghttp3Connection(conn).RunBufferedAsync(
+                quicHandle: static (_, conn) => new Nghttp3Connection(conn).RunAsync(
                     static _ => Nghttp3Response.Text("migrated-ok")),
                 routing: QuicRouting.KernelFilter);
 
@@ -268,9 +268,9 @@ internal static class QuicMigrationTests
         foreach ((string stack, Func<Reactor, QuicConnection, Task> handler) in
                  new (string, Func<Reactor, QuicConnection, Task>)[]
                  {
-                     ("nghttp3", static (_, conn) => new Nghttp3Connection(conn).RunBufferedAsync(
+                     ("nghttp3", static (_, conn) => new Nghttp3Connection(conn).RunAsync(
                          _ => Nghttp3Response.Text($"conn-{conn.GetHashCode():x8}"))),
-                     ("pure-c#", static (_, conn) => new Http3Connection(conn).RunBufferedAsync(
+                     ("pure-c#", static (_, conn) => new Http3Connection(conn).RunAsync(
                          _ => Http3Response.Text($"conn-{conn.GetHashCode():x8}"))),
                  })
         {
@@ -365,7 +365,7 @@ internal static class QuicMigrationTests
                     }
                     return conn;
                 },
-                quicHandle: static (_, conn) => new Nghttp3Connection(conn).RunBufferedAsync(
+                quicHandle: static (_, conn) => new Nghttp3Connection(conn).RunAsync(
                     static _ => Nghttp3Response.Text("ok")),
                 routing: QuicRouting.Forward);
 
@@ -433,7 +433,7 @@ internal static class QuicMigrationTests
 
             (int serverPort, Reactor[] fleet) = TestServer.StartQuicSharded(4,
                 engine.CreateFactory(_ => new EvictionReporting(engine, evicted)),
-                quicHandle: static (_, conn) => new Nghttp3Connection(conn).RunBufferedAsync(
+                quicHandle: static (_, conn) => new Nghttp3Connection(conn).RunAsync(
                     static _ => Nghttp3Response.Text("ok")),
                 quicReadMs: VanishReadTimeoutMs,
                 routing: QuicRouting.Forward);
@@ -511,7 +511,7 @@ internal static class QuicMigrationTests
 
             (int serverPort, Reactor[] fleet) = TestServer.StartQuicSharded(4,
                 engine.CreateFactory(_ => new EvictionReporting(engine, evicted)),
-                quicHandle: static (_, conn) => new Nghttp3Connection(conn).RunBufferedAsync(
+                quicHandle: static (_, conn) => new Nghttp3Connection(conn).RunAsync(
                     static _ => Nghttp3Response.Text("ok")),
                 quicReadMs: VanishReadTimeoutMs,
                 routing: QuicRouting.Forward);
@@ -551,7 +551,7 @@ internal static class QuicMigrationTests
 
             (int serverPort, Reactor[] fleet) = TestServer.StartQuicSharded(4,
                 engine.CreateFactory(),
-                quicHandle: static (_, conn) => new Nghttp3Connection(conn).RunBufferedAsync(
+                quicHandle: static (_, conn) => new Nghttp3Connection(conn).RunAsync(
                     static _ => Nghttp3Response.Text("ok")),
                 routing: QuicRouting.Forward);
 
@@ -587,7 +587,7 @@ internal static class QuicMigrationTests
             (_, int serverPort) = TestServer.StartDatagram(
                 onDatagram: null,
                 quicFactory: engine.CreateFactory(),
-                quicHandle: static (_, conn) => new Nghttp3Connection(conn).RunBufferedAsync(
+                quicHandle: static (_, conn) => new Nghttp3Connection(conn).RunAsync(
                     static _ => Nghttp3Response.Text("migrated-ok")));
 
             using var forwarder = new UdpForwarder(serverPort);

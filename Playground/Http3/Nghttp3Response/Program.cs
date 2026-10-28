@@ -94,7 +94,7 @@ for (int i = 0; i < threads.Length; i++)
     var reactor = new Reactor(i, config);
 
     reactor.QuicHandle = (r, conn) =>
-        new Nghttp3Connection(conn).RunStreamedResponseAsync(async (request, writer) =>
+        new Nghttp3Connection(conn).RunAsync(async (request, writer) =>
         {
             bool endless = request.Path.Span.SequenceEqual("/feed"u8);
 

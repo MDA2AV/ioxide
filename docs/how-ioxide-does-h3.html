@@ -359,7 +359,7 @@ var h3Options = new Nghttp3Options    // the HTTP/3 layer's own knobs, passed to
 };
 
 reactor.TcpHandle  = Handlers.Raw;
-reactor.QuicHandle = (r, conn) => new Nghttp3Connection(conn, h3Options).RunBufferedAsync(
+reactor.QuicHandle = (r, conn) => new Nghttp3Connection(conn, h3Options).RunAsync(
     static req => Nghttp3Response.Text($"hello {Encoding.ASCII.GetString(req.Path.Span)}"));</code></pre>
 
     <h2>Ingress: the life of a datagram</h2>
@@ -509,7 +509,7 @@ reactor.QuicHandle = async (r, conn) =>
     <p><code>ioxide.nghttp3</code> references only the core - not <code>ioxide.ngtcp2</code>. It needs
     nothing but the abstract read/write surface, so it would ride any future engine (quicly, etc.)
     unchanged. One <code>Nghttp3Connection</code> wraps one <code>QuicConnection</code>:</p>
-<pre><code class="language-csharp">reactor.QuicHandle = (r, conn) => new Nghttp3Connection(conn).RunBufferedAsync(
+<pre><code class="language-csharp">reactor.QuicHandle = (r, conn) => new Nghttp3Connection(conn).RunAsync(
     static req => Nghttp3Response.Text($"hello {Encoding.ASCII.GetString(req.Path.Span)} via {Encoding.ASCII.GetString(req.Method.Span)}"));</code></pre>
     <p>Inside <code>RunAsync</code>:</p>
     <ol>

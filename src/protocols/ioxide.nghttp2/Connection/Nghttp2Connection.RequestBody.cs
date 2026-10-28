@@ -1,8 +1,8 @@
 namespace ioxide.nghttp2;
 
 /// <summary>
-/// The STREAMED-REQUEST half: with <see cref="Nghttp2Options.StreamRequestBodies"/> on, a request is
-/// dispatched at its headers and its body arrives through an <see cref="Nghttp2BodyReader"/>.
+/// The STREAMED-REQUEST half: for a handler that takes a body reader, a request is dispatched at its
+/// headers and its body arrives through an <see cref="Nghttp2BodyReader"/>.
 ///
 /// The session is created with nghttp2's automatic WINDOW_UPDATE off, so the only credit the peer
 /// ever gets back is what this side consumes - and every DATA byte nghttp2 hands out has to be

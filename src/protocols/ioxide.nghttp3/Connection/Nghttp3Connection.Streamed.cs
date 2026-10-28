@@ -46,16 +46,26 @@ public sealed partial class Nghttp3Connection
 
     /// <summary>
     /// Serve this connection with the body of each response produced through a writer rather than
-    /// returned whole. The handler owns the stream until it completes the writer: write headers,
-    /// push body, complete. With <see cref="Nghttp3Options.StreamRequestBodies"/> it starts at
-    /// END-OF-HEADERS and pulls the request body through <see cref="Nghttp3Request.BodyReader"/>
-    /// while it writes; without it, at end-of-stream with the whole body in
-    /// <see cref="Nghttp3Request.Body"/>. Owns the handler's connection ref.
+    /// returned whole, dispatched at end-of-stream with the whole request body in
+    /// <see cref="Nghttp3Request.Body"/>. The handler owns the stream until it completes the writer:
+    /// write headers, push body, complete. Owns the handler's connection ref.
     /// </summary>
-    public Task RunStreamedResponseAsync(Func<Nghttp3Request, Nghttp3ResponseWriter, ValueTask> handler)
-    {
-        _streamBodies = _options.StreamRequestBodies;
+    public Task RunAsync(Func<Nghttp3Request, Nghttp3ResponseWriter, ValueTask> handler)
+        => RunStreamedAsync(handler);
 
+    /// <summary>
+    /// Both directions streamed: each request is dispatched at END-OF-HEADERS, and the handler
+    /// pulls the body through its <see cref="Nghttp3BodyReader"/> while it writes the response.
+    /// Owns the handler's connection ref.
+    /// </summary>
+    public Task RunAsync(Func<Nghttp3Request, Nghttp3BodyReader, Nghttp3ResponseWriter, ValueTask> handler)
+    {
+        _streamBodies = true;
+        return RunStreamedAsync((request, writer) => handler(request, request.BodyReader!, writer));
+    }
+
+    private Task RunStreamedAsync(Func<Nghttp3Request, Nghttp3ResponseWriter, ValueTask> handler)
+    {
         // Writers parked at the retention high-water resume when acks drain it: the drain pumps and
         // releases them, where a bare PumpEgress would leave them parked.
         _quicConnection.OnSendCapacityAvailable = DrainStreamed;

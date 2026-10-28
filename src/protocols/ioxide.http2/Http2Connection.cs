@@ -9,8 +9,13 @@ namespace ioxide.http2;
 ///
 /// <code>
 /// reactor.TcpHandle = (r, conn) =>
-///     new Http2Connection(conn).RunBufferedAsync(request => Http2Response.Text("hello"));
+///     new Http2Connection(conn).RunAsync(request => Http2Response.Text("hello"));
 /// </code>
+///
+/// <c>RunAsync</c> serves it, and the handler's parameters choose both directions: one that
+/// returns a response answers whole, one given an <see cref="Http2ResponseWriter"/> streams it;
+/// one given an <see cref="Http2BodyReader"/> runs at the HEADERS and pulls the body as it arrives,
+/// one without gets it whole in <see cref="Http2Request.Body"/>.
 ///
 /// The default HTTP/2 here, and the one the features land on: streamed responses, streamed
 /// request bodies and non-blocking dispatch are all this side. <c>ioxide.nghttp2</c> remains as
@@ -55,6 +60,9 @@ public sealed partial class Http2Connection : IDisposable
     // The highest stream id the client has opened, refused ones included; a HEADERS at or below it
     // opens nothing (RFC 9113 5.1.1).
     private int _highestStream;
+
+    // The handler takes a body reader: a request is dispatched at END_HEADERS, its body to follow.
+    private bool _streamBodies;
 
     private bool _prefaceSeen;
     private bool _disposed;
@@ -131,13 +139,30 @@ public sealed partial class Http2Connection : IDisposable
         FireBodyWakes();
     }
 
-    /// <summary>Serve until the peer goes away, answering each request with <paramref name="handler"/>.</summary>
-    public Task RunBufferedAsync(Func<Http2Request, Http2Response> handler)
-        => RunBufferedAsync(request => new ValueTask<Http2Response>(handler(request)));
+    /// <summary>Serve until the peer goes away, answering each request with <paramref name="handler"/>
+    /// once it has arrived whole, body in <see cref="Http2Request.Body"/>.</summary>
+    public Task RunAsync(Func<Http2Request, Http2Response> handler)
+        => RunAsync(request => new ValueTask<Http2Response>(handler(request)));
 
     /// <summary>Serve until the peer goes away, with an asynchronous handler.</summary>
-    public Task RunBufferedAsync(Func<Http2Request, ValueTask<Http2Response>> handler)
+    public Task RunAsync(Func<Http2Request, ValueTask<Http2Response>> handler)
         => RunCoreAsync(() => DispatchBuffered(handler));
+
+    /// <summary>
+    /// Serve until the peer goes away, dispatching each request as soon as its HEADERS are in: the
+    /// handler pulls the body through its <see cref="Http2BodyReader"/> while it still arrives,
+    /// instead of finding it assembled in <see cref="Http2Request.Body"/>.
+    ///
+    /// The trade is what memory is bound by. A whole body is held whole, which suits ordinary
+    /// requests and not hostile uploads; a streamed one holds one flow-control window, because
+    /// credit is only returned to the peer as the handler reads.
+    /// </summary>
+    public Task RunAsync(Func<Http2Request, Http2BodyReader, ValueTask<Http2Response>> handler)
+    {
+        _streamBodies = true;
+        Func<Http2Request, ValueTask<Http2Response>> buffered = request => handler(request, request.BodyReader!);
+        return RunCoreAsync(() => DispatchBuffered(buffered));
+    }
 
     // The one serving loop. Each entry point hands it the dispatch for its response mode, run once
     // per read pass.

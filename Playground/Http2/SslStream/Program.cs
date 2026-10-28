@@ -93,7 +93,7 @@ for (int i = 0; i < threads.Length; i++)
                 return;   // this sample only serves h2; see Playground/Http2/Tls for the fallback
             }
 
-            await new Http2Connection(new StreamDuplexPipe(ssl)).RunBufferedAsync(
+            await new Http2Connection(new StreamDuplexPipe(ssl)).RunAsync(
                 _ => new Http2Response { Status = 200, Body = body });
         }
         catch (Exception e)

@@ -4,46 +4,43 @@ namespace ioxide.nghttp3;
 /// The BUFFERED response, both handler shapes. With the body assembled, dispatch is at end-of-stream
 /// with all of it in <see cref="Nghttp3Request.Body"/>, and requests recycle the moment their
 /// valid-until-return contract ends - right after a sync handler returns, or when an async
-/// handler's task completes (sole owner: the request left _requests at dispatch). With
-/// <see cref="Nghttp3Options.StreamRequestBodies"/> an async handler dispatches as RequestBody does.
+/// handler's task completes (sole owner: the request left _requests at dispatch). A handler that
+/// takes a body reader dispatches as RequestBody does.
 /// </summary>
 public sealed partial class Nghttp3Connection
 {
     /// <summary>Buffered, synchronous: dispatch at end-of-stream with the whole body pre-assembled
-    /// into <see cref="Nghttp3Request.Body"/> - a handler that cannot await cannot read a body still
-    /// arriving, so <see cref="Nghttp3Options.StreamRequestBodies"/> does not apply. The handler
-    /// computes and returns - it must not wait for anything (blocking would stall the reactor).
-    /// Owns the handler's connection ref.</summary>
-    public Task RunBufferedAsync(Func<Nghttp3Request, Nghttp3Response> handler)
+    /// into <see cref="Nghttp3Request.Body"/>; the handler computes and returns - it must not wait
+    /// for anything (blocking would stall the reactor). Owns the handler's connection ref.</summary>
+    public Task RunAsync(Func<Nghttp3Request, Nghttp3Response> handler)
         => RunCoreAsync(() =>
         {
             DispatchBufferedSync(handler);
             PumpEgress();
         });
 
-    /// <summary>Buffered, asynchronous: the handler may await (a database, a cache - any
-    /// ioxide-native awaitable resumes inline on the reactor). Dispatched at end-of-stream with the
-    /// whole body pre-assembled into <see cref="Nghttp3Request.Body"/>, or with
-    /// <see cref="Nghttp3Options.StreamRequestBodies"/> at END-OF-HEADERS, the body pulled through
-    /// <see cref="Nghttp3Request.BodyReader"/> while the request stream is flow-control paced - a slow
-    /// consumer freezes the peer's window instead of buffering (memory bound = one window, not the
-    /// body size). The handler must resume on the reactor (every ioxide await does). Owns the
-    /// handler's connection ref.</summary>
-    public Task RunBufferedAsync(Func<Nghttp3Request, ValueTask<Nghttp3Response>> handler)
-    {
-        _streamBodies = _options.StreamRequestBodies;
-        if (_streamBodies)
-        {
-            return RunCoreAsync(() =>
-            {
-                DispatchStreaming(handler);
-                PumpEgress();
-            });
-        }
-
-        return RunCoreAsync(() =>
+    /// <summary>Buffered, asynchronous: same end-of-stream dispatch and pre-assembled
+    /// <see cref="Nghttp3Request.Body"/>, but the handler may await (a database, a cache - any
+    /// ioxide-native awaitable resumes inline on the reactor). Owns the handler's connection ref.</summary>
+    public Task RunAsync(Func<Nghttp3Request, ValueTask<Nghttp3Response>> handler)
+        => RunCoreAsync(() =>
         {
             DispatchBufferedAsync(handler);
+            PumpEgress();
+        });
+
+    /// <summary>Streamed request body: dispatch at END-OF-HEADERS, the body pulled through the
+    /// handler's <see cref="Nghttp3BodyReader"/> while the request stream is flow-control paced - a
+    /// slow consumer freezes the peer's window instead of buffering (memory bound = one window, not
+    /// the body size). The handler must resume on the reactor (every ioxide await does). Owns the
+    /// handler's connection ref.</summary>
+    public Task RunAsync(Func<Nghttp3Request, Nghttp3BodyReader, ValueTask<Nghttp3Response>> handler)
+    {
+        _streamBodies = true;
+        Func<Nghttp3Request, ValueTask<Nghttp3Response>> buffered = request => handler(request, request.BodyReader!);
+        return RunCoreAsync(() =>
+        {
+            DispatchStreaming(buffered);
             PumpEgress();
         });
     }

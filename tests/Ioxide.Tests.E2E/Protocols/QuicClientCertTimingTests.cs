@@ -66,7 +66,7 @@ internal static class QuicClientCertTimingTests
                     string acceptSubject = qc?.PeerSubject ?? "<null>";
                     string acceptCommonName = qc?.PeerCommonName ?? "<null>";
 
-                    return new Nghttp3Connection(conn).RunBufferedAsync(
+                    return new Nghttp3Connection(conn).RunAsync(
                         _ => new Nghttp3Response
                         {
                             // Read again post-handshake, then hand both moments back. Same reactor

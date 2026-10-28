@@ -19,7 +19,7 @@ internal static class Nghttp2ChaosTests
     {
         try
         {
-            await new Nghttp2Connection(conn).RunBufferedAsync(
+            await new Nghttp2Connection(conn).RunAsync(
                 static _ => new Nghttp2Response { Status = 200, Body = "ok"u8.ToArray() });
         }
         finally
@@ -33,7 +33,7 @@ internal static class Nghttp2ChaosTests
     {
         try
         {
-            await new Nghttp2Connection(conn).RunBufferedAsync(static async request =>
+            await new Nghttp2Connection(conn).RunAsync(static async request =>
             {
                 if (request.Path.Span.SequenceEqual("/slow"u8))
                 {
@@ -68,7 +68,7 @@ internal static class Nghttp2ChaosTests
             var connection = new Nghttp2Connection(conn, new Nghttp2Options { MaxRequestBytes = cap });
             if (streamed)
             {
-                await connection.RunStreamedResponseAsync((request, writer) =>
+                await connection.RunAsync((request, writer) =>
                 {
                     seen.Enqueue((request.StreamId, request.Body.Length));
                     writer.WriteHeaders(new Nghttp2Response { Status = 200 });
@@ -77,7 +77,7 @@ internal static class Nghttp2ChaosTests
             }
             else
             {
-                await connection.RunBufferedAsync(request =>
+                await connection.RunAsync(request =>
                 {
                     seen.Enqueue((request.StreamId, request.Body.Length));
                     return new Nghttp2Response { Status = 200 };
@@ -338,7 +338,7 @@ internal static class Nghttp2ChaosTests
             {
                 try
                 {
-                    await new Nghttp2Connection(conn).RunStreamedResponseAsync(static async (_, writer) =>
+                    await new Nghttp2Connection(conn).RunAsync(static async (_, writer) =>
                     {
                         writer.WriteHeaders(new Nghttp2Response { Status = 200 });
                         for (int i = 0; i < Chunks; i++)

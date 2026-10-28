@@ -8,10 +8,11 @@ using Playground.Shared;
 //  nghttp3-streamed-both - HTTP/3 on nghttp3 with BOTH directions streamed, the fourth corner
 //  the other three nghttp3 samples leave empty.
 //
-//  The request body arrives through Nghttp3Request.BodyReader, pulled a chunk at a time under
-//  flow control; the response goes out through an Nghttp3ResponseWriter, one flush at a time.
-//  Two switches do it: StreamRequestBodies dispatches at end-of-headers, so the handler is running
-//  while the upload is still on the wire, and RunStreamedResponseAsync hands it the writer.
+//  The request body arrives through an Nghttp3BodyReader, pulled a chunk at a time under flow
+//  control; the response goes out through an Nghttp3ResponseWriter, one flush at a time. The
+//  handler takes both, and that is what does it: taking the reader dispatches at end-of-headers,
+//  so the handler is running while the upload is still on the wire, and taking the writer streams
+//  the response.
 //
 //  "/echo" runs the two at once - read a chunk, write a chunk - which is what a proxy does.
 //  Memory stays flat however large the exchange is, because each side blocks the other.
@@ -92,7 +93,6 @@ var h3Options = new Nghttp3Options
 {
     QpackDynamicTableCapacity = qpackCapacity,                // 0 (default) = headers stay literal
     QpackBlockedStreams       = qpackCapacity > 0 ? 100 : 0,  // raise both together for the dynamic table
-    StreamRequestBodies       = true,                         // the read half: the body through BodyReader
 };
 
 byte[] chunk = Encoding.ASCII.GetBytes(new string('x', chunkBytes - 1) + "\n");
@@ -104,7 +104,7 @@ for (int i = 0; i < threads.Length; i++)
     var reactor = new Reactor(i, config);
 
     reactor.QuicHandle = (r, conn) =>
-        new Nghttp3Connection(conn, h3Options).RunStreamedResponseAsync(async (request, writer) =>
+        new Nghttp3Connection(conn, h3Options).RunAsync(async (request, body, writer) =>
         {
             bool upload = request.Path.Span.SequenceEqual("/upload"u8);
             bool echo   = request.Path.Span.SequenceEqual("/echo"u8);
@@ -119,7 +119,7 @@ for (int i = 0; i < threads.Length; i++)
 
                 while (true)
                 {
-                    ReadOnlyMemory<byte> part = await request.BodyReader!.ReadAsync();
+                    ReadOnlyMemory<byte> part = await body.ReadAsync();
                     if (part.IsEmpty)
                     {
                         break;   // end of the request body
@@ -147,7 +147,7 @@ for (int i = 0; i < threads.Length; i++)
                 long total = 0;
                 while (true)
                 {
-                    ReadOnlyMemory<byte> part = await request.BodyReader!.ReadAsync();
+                    ReadOnlyMemory<byte> part = await body.ReadAsync();
                     if (part.IsEmpty) break;
                     total += part.Length;   // a real app would parse or store the chunk here
                 }

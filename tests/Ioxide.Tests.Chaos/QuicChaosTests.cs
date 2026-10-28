@@ -27,7 +27,7 @@ internal static class QuicChaosTests
     private static int StartH3(QuicEngine engine) => TestServer.StartDatagram(
         onDatagram: null,
         quicFactory: engine.CreateFactory(),
-        quicHandle: static (_, conn) => new Nghttp3Connection(conn).RunBufferedAsync(
+        quicHandle: static (_, conn) => new Nghttp3Connection(conn).RunAsync(
             static _ => Nghttp3Response.Text("ok"))).UdpPort;
 
     public static void Register(Runner runner)
@@ -97,7 +97,7 @@ internal static class QuicChaosTests
             int udpPort = TestServer.StartDatagram(
                 onDatagram: null,
                 quicFactory: probe.Create,
-                quicHandle: static (_, conn) => new Nghttp3Connection(conn).RunBufferedAsync(
+                quicHandle: static (_, conn) => new Nghttp3Connection(conn).RunAsync(
                     static _ => Nghttp3Response.Text("ok"))).UdpPort;
 
             const int Sent = 200;

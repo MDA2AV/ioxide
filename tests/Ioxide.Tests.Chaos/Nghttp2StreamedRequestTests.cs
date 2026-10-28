@@ -9,7 +9,7 @@ using ioxide.timer;
 namespace Ioxide.Tests;
 
 /// <summary>
-/// Streamed request bodies on the nghttp2 server (<see cref="Nghttp2Options.StreamRequestBodies"/>),
+/// Streamed request bodies on the nghttp2 server (a handler that takes an <see cref="Nghttp2BodyReader"/>),
 /// driven by a raw client that keeps to the server's flow-control windows.
 ///
 /// The session runs with nghttp2's automatic WINDOW_UPDATE off, so the only credit a peer gets back
@@ -36,7 +36,7 @@ internal static class Nghttp2StreamedRequestTests
         foreach (bool streamedResponse in new[] { false, true })
         {
             bool sr = streamedResponse;
-            string flavor = sr ? "RunAsync" : "RunBufferedAsync";
+            string flavor = sr ? "streamed response" : "whole response";
 
             runner.Test($"nghttp2 streamed request ({flavor}): a 4 MiB upload read a chunk at a time arrives whole and in order", () =>
             {
@@ -213,10 +213,10 @@ internal static class Nghttp2StreamedRequestTests
                 var torn = new TaskCompletionSource();
                 try
                 {
-                    await new Nghttp2Connection(conn, new Nghttp2Options { StreamRequestBodies = true })
-                        .RunStreamedResponseAsync(async (request, writer) =>
+                    await new Nghttp2Connection(conn)
+                        .RunAsync(async (_, body, writer) =>
                         {
-                            ReadOnlyMemory<byte> chunk = await request.BodyReader!.ReadAsync();
+                            ReadOnlyMemory<byte> chunk = await body.ReadAsync();
                             writer.WriteHeaders(new Nghttp2Response { Status = 200 });
                             await writer.FlushAsync();   // tells the client the chunk is taken
                             await torn.Task;
@@ -251,12 +251,12 @@ internal static class Nghttp2StreamedRequestTests
             {
                 try
                 {
-                    await new Nghttp2Connection(conn, new Nghttp2Options { StreamRequestBodies = true })
-                        .RunBufferedAsync(async request =>
+                    await new Nghttp2Connection(conn)
+                        .RunAsync(async (_, body) =>
                         {
                             long bytes = 0;
                             ReadOnlyMemory<byte> chunk;
-                            while (!(chunk = await request.BodyReader!.ReadAsync()).IsEmpty)
+                            while (!(chunk = await body.ReadAsync()).IsEmpty)
                             {
                                 bytes += chunk.Length;
                             }
@@ -316,7 +316,7 @@ internal static class Nghttp2StreamedRequestTests
             Assert.True(read.Streamed && read.Bytes == Large && read.Broken < 0, $"the handler read {Describe(seen)}");
         });
 
-        runner.Test("nghttp2 streamed request: control: with StreamRequestBodies off the body arrives whole, and one past MaxRequestBytes is still reset", () =>
+        runner.Test("nghttp2 streamed request: control: without a body reader the body arrives whole, and one past MaxRequestBytes is still reset", () =>
         {
             const int Cap = Large / 4;
             var seen = new ConcurrentQueue<Seen>();
@@ -376,38 +376,40 @@ internal static class Nghttp2StreamedRequestTests
     /// <summary>
     /// A server over <see cref="Nghttp2Connection"/>, either flavor, recording what each handler saw.
     /// "/read" reads its body to the end; "/hold" does the same once "/go" on its connection releases
-    /// it; "/unread" answers without reading, and "/unread-after-a-wait" after a ring wait. Under
-    /// RunAsync, "/fail" sends its headers and fails once released.
+    /// it; "/unread" answers without reading, and "/unread-after-a-wait" after a ring wait. With a
+    /// streamed response, "/fail" sends its headers and fails once released.
     /// </summary>
     private static int Start(ConcurrentQueue<Seen> seen, bool streamedResponse, bool streamBodies = true,
         int maxRequestBytes = 8 * 1024 * 1024) => TestServer.Start(async (reactor, conn) =>
     {
         try
         {
-            var connection = new Nghttp2Connection(conn,
-                new Nghttp2Options { StreamRequestBodies = streamBodies, MaxRequestBytes = maxRequestBytes });
+            var connection = new Nghttp2Connection(conn, new Nghttp2Options { MaxRequestBytes = maxRequestBytes });
             var timer = new RingTimer(reactor);
             var gate = new TaskCompletionSource();
 
-            if (streamedResponse)
+            async ValueTask Write(Nghttp2Request request, Nghttp2BodyReader? body, Nghttp2ResponseWriter writer)
             {
-                await connection.RunStreamedResponseAsync(async (request, writer) =>
+                if (request.Path.Span.SequenceEqual("/fail"u8))
                 {
-                    if (request.Path.Span.SequenceEqual("/fail"u8))
-                    {
-                        writer.WriteHeaders(new Nghttp2Response { Status = 200 });
-                        await writer.FlushAsync();
-                        await gate.Task;
-                        throw new InvalidOperationException("the handler failed mid-upload");
-                    }
-                    writer.WriteHeaders(new Nghttp2Response { Status = await Serve(request, timer, gate, seen) });
-                });
+                    writer.WriteHeaders(new Nghttp2Response { Status = 200 });
+                    await writer.FlushAsync();
+                    await gate.Task;
+                    throw new InvalidOperationException("the handler failed mid-upload");
+                }
+                writer.WriteHeaders(new Nghttp2Response { Status = await Serve(request, body, timer, gate, seen) });
             }
-            else
+
+            async ValueTask<Nghttp2Response> Answer(Nghttp2Request request, Nghttp2BodyReader? body)
+                => new Nghttp2Response { Status = await Serve(request, body, timer, gate, seen) };
+
+            await ((streamedResponse, streamBodies) switch
             {
-                await connection.RunBufferedAsync(async request =>
-                    new Nghttp2Response { Status = await Serve(request, timer, gate, seen) });
-            }
+                (true, true) => connection.RunAsync((request, body, writer) => Write(request, body, writer)),
+                (true, false) => connection.RunAsync((request, writer) => Write(request, null, writer)),
+                (false, true) => connection.RunAsync((request, body) => Answer(request, body)),
+                (false, false) => connection.RunAsync(request => Answer(request, null)),
+            });
         }
         finally
         {
@@ -415,8 +417,8 @@ internal static class Nghttp2StreamedRequestTests
         }
     });
 
-    private static async ValueTask<int> Serve(Nghttp2Request request, RingTimer timer, TaskCompletionSource gate,
-        ConcurrentQueue<Seen> seen)
+    private static async ValueTask<int> Serve(Nghttp2Request request, Nghttp2BodyReader? body, RingTimer timer,
+        TaskCompletionSource gate, ConcurrentQueue<Seen> seen)
     {
         string path = Encoding.ASCII.GetString(request.Path.Span);
         switch (path)
@@ -439,7 +441,7 @@ internal static class Nghttp2StreamedRequestTests
                 break;
         }
 
-        if (request.BodyReader is not { } reader)
+        if (body is not { } reader)
         {
             seen.Enqueue(new Seen(request.StreamId, path, request.Body.Length, 0, FirstBreak(request.Body.Span, 0), Streamed: false));
             return 200;

@@ -4,8 +4,8 @@ using System.Threading.Tasks.Sources;
 namespace ioxide.http3;
 
 /// <summary>
-/// Pull surface for a streaming request body (<see cref="Http3Options.StreamRequestBodies"/>):
-/// the connection loop pushes body chunks in, the handler pulls with
+/// Pull surface for a streaming request body, handed to a handler that takes one: the connection
+/// loop pushes body chunks in, the handler pulls with
 /// <see cref="ReadAsync"/>. An empty chunk means end of body (fin or stream reset). A body that
 /// contradicts the request's content-length ends with an <see cref="IOException"/> instead, so a
 /// short body cannot pass for a whole one (RFC 9114 4.1.2).

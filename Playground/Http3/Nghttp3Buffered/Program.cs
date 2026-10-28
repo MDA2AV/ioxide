@@ -10,7 +10,7 @@ using Playground.Shared;
 //  OTHER request dispatch mode.
 //
 //  BUFFERED: dispatch waits for end-of-stream, so the whole body is already in request.Body when
-//  your handler runs - no BodyReader, no pacing - and the handler may still await (a PgPool query,
+//  your handler runs - no body reader, no pacing - and the handler may still await (a PgPool query,
 //  anything ioxide-native resumes inline on the reactor).
 //
 //  The trade: memory holds the entire body, so this suits normal-sized requests. Use Playground/Http3/Nghttp3Request
@@ -145,11 +145,11 @@ for (int i = 0; i < threads.Length; i++)
             live.Add((r, h3));
         }
 
-        // No StreamRequestBodies in h3Options, unlike Nghttp3Request - that one option is the whole difference.
-        return h3.RunBufferedAsync(request =>
+        // No body reader in the handler, unlike Nghttp3Request - that one parameter is the whole difference.
+        return h3.RunAsync(request =>
         {
             // Dispatch waited for end-of-stream, so the body is ALREADY here: request.Body is
-            // complete and request.Body.Length is just a property read. No BodyReader, no pacing.
+            // complete and request.Body.Length is just a property read. No body reader, no pacing.
             // This overload is synchronous, but the awaiting one exists too - a PgPool query
             // resumes inline on this reactor, so you can await it right here.
             _ = request.Body.Length;

@@ -18,7 +18,7 @@ internal static class Http2BufferedCreditTests
         runner.Test("h2 flow: a buffered response past the connection window waits for a WINDOW_UPDATE instead of being reset", () =>
         {
             using var client = new StrictClient();
-            Task run = client.Connection.RunBufferedAsync(_ => new Http2Response { Status = 200, Body = new byte[100 * 1024] });
+            Task run = client.Connection.RunAsync(_ => new Http2Response { Status = 200, Body = new byte[100 * 1024] });
 
             client.ReleaseFlush();
             client.Feed([.. Open((InitialWindowSize, 1 << 20)), .. Get(1)]);    // the connection window stays at 65535
@@ -40,7 +40,7 @@ internal static class Http2BufferedCreditTests
         {
             // The request leaves _streams once it is whole, so a WINDOW_UPDATE right behind it found no window.
             using var client = new StrictClient();
-            Task run = client.Connection.RunBufferedAsync(_ => new Http2Response { Status = 200, Body = new byte[100 * 1024] });
+            Task run = client.Connection.RunAsync(_ => new Http2Response { Status = 200, Body = new byte[100 * 1024] });
 
             client.ReleaseFlush();
             client.Feed([.. Open(), .. Get(1), .. WindowUpdate(1, 1 << 20), .. WindowUpdate(0, 1 << 20)]);
@@ -63,7 +63,7 @@ internal static class Http2BufferedCreditTests
             byte[] given = body.ToArray();
 
             using var client = new StrictClient();
-            Task run = client.Connection.RunBufferedAsync(_ => new Http2Response { Status = 200, Body = body });
+            Task run = client.Connection.RunAsync(_ => new Http2Response { Status = 200, Body = body });
 
             client.ReleaseFlush();
             client.Feed([.. Open((InitialWindowSize, 16384)), .. WindowUpdate(0, 1 << 20), .. Get(1)]);
@@ -82,7 +82,7 @@ internal static class Http2BufferedCreditTests
         runner.Test("h2 flow: a parked buffered response stops at the peer's RST_STREAM, and the connection serves on", () =>
         {
             using var client = new StrictClient();
-            Task run = client.Connection.RunBufferedAsync(
+            Task run = client.Connection.RunAsync(
                 request => new Http2Response { Status = 200, Body = new byte[request.StreamId == 1 ? 64 * 1024 : 10] });
 
             client.ReleaseFlush();
@@ -105,7 +105,7 @@ internal static class Http2BufferedCreditTests
             foreach (bool goAway in new[] { true, false })
             {
                 using var client = new StrictClient();
-                Task run = client.Connection.RunBufferedAsync(_ => new Http2Response { Status = 200, Body = new byte[64 * 1024] });
+                Task run = client.Connection.RunAsync(_ => new Http2Response { Status = 200, Body = new byte[64 * 1024] });
 
                 client.ReleaseFlush();
                 client.Feed([.. Open((InitialWindowSize, 16384)), .. WindowUpdate(0, 1 << 20), .. Get(1)]);

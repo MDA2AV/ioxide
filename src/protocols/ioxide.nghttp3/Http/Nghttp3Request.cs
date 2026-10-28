@@ -49,15 +49,11 @@ public sealed class Nghttp3Request
         return false;
     }
 
-    /// <summary>Whole body, assembled before dispatch (empty with <see cref="Nghttp3Options.StreamRequestBodies"/>).</summary>
+    /// <summary>Whole body, assembled before dispatch - empty when the handler takes a body reader.</summary>
     public ReadOnlyMemory<byte> Body { get; internal set; }
 
-    /// <summary>
-    /// Streaming body pull surface - non-null only with <see cref="Nghttp3Options.StreamRequestBodies"/>,
-    /// where dispatch happens at end-of-headers and the body arrives while the handler runs.
-    /// Otherwise the body is pre-buffered into <see cref="Body"/> instead.
-    /// </summary>
-    public Nghttp3BodyReader? BodyReader { get; internal set; }
+    // The body as it arrives, for a handler that takes a body reader - which is how it is handed one.
+    internal Nghttp3BodyReader? BodyReader { get; set; }
 
     // --- assembly state (reactor thread, inside ih3_read_stream) -------------------------------
     // Header bytes are copied into one growable arena as the callbacks fire (nghttp3 reclaims its

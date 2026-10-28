@@ -7,7 +7,7 @@ using Playground.Shared;
 // ─────────────────────────────────────────────────────────────────────────────────────────────
 //  http3-managed-streamed-both - HTTP/3 in pure C# with BOTH directions streamed.
 //
-//  The request body arrives through Http3Request.BodyReader, pulled a chunk at a time under
+//  The request body arrives through the handler's Http3BodyReader, pulled a chunk at a time under
 //  flow control, so a large upload is never held whole. The response body goes out through an
 //  Http3ResponseWriter, one DATA frame per flush, so a large download is never built whole.
 //
@@ -78,17 +78,15 @@ var config = new ServerConfig
 
 byte[] chunk = Encoding.ASCII.GetBytes(new string('x', chunkBytes - 1) + "\n");
 
-// The read half: each request's body streams in through BodyReader rather than arriving whole.
-var h3Options = new Http3Options { StreamRequestBodies = true };
-
 var threads = new Thread[config.ReactorCount];
 
 for (int i = 0; i < threads.Length; i++)
 {
     var reactor = new Reactor(i, config);
 
+    // The handler takes both halves: the body reader to read the request, the writer to answer it.
     reactor.QuicHandle = (r, conn) =>
-        new Http3Connection(conn, h3Options).RunStreamedResponseAsync(async (request, writer) =>
+        new Http3Connection(conn).RunAsync(async (request, body, writer) =>
         {
             bool endless = request.Path.Span.SequenceEqual("/feed"u8);
             bool upload  = request.Path.Span.SequenceEqual("/upload"u8);
@@ -102,24 +100,21 @@ for (int i = 0; i < threads.Length; i++)
                 // connection to have room - so memory stays flat however large the exchange is.
                 writer.WriteHeaders(Plain());
 
-                if (request.BodyReader is { } duplex)
+                while (true)
                 {
-                    while (true)
+                    ReadOnlyMemory<byte> part = await body.ReadAsync();
+                    if (part.IsEmpty)
                     {
-                        ReadOnlyMemory<byte> part = await duplex.ReadAsync();
-                        if (part.IsEmpty)
-                        {
-                            break;   // end of the request body
-                        }
+                        break;   // end of the request body
+                    }
 
-                        part.Span.CopyTo(writer.GetSpan(part.Length));
-                        writer.Advance(part.Length);
-                        // IsCompleted: the peer is gone. Nothing written from here reaches anyone, and every flush
-                        // returns at once - a loop that ignored it would never give this reactor back.
-                        if ((await writer.FlushAsync()).IsCompleted)
-                        {
-                            return;
-                        }
+                    part.Span.CopyTo(writer.GetSpan(part.Length));
+                    writer.Advance(part.Length);
+                    // IsCompleted: the peer is gone. Nothing written from here reaches anyone, and every flush
+                    // returns at once - a loop that ignored it would never give this reactor back.
+                    if ((await writer.FlushAsync()).IsCompleted)
+                    {
+                        return;
                     }
                 }
 
@@ -131,14 +126,11 @@ for (int i = 0; i < threads.Length; i++)
                 // The other direction: pull the body a chunk at a time rather than waiting for
                 // all of it, so memory is bound by one chunk however large the upload is.
                 long total = 0;
-                if (request.BodyReader is { } body)
+                while (true)
                 {
-                    while (true)
-                    {
-                        ReadOnlyMemory<byte> part = await body.ReadAsync();
-                        if (part.IsEmpty) break;
-                        total += part.Length;
-                    }
+                    ReadOnlyMemory<byte> part = await body.ReadAsync();
+                    if (part.IsEmpty) break;
+                    total += part.Length;
                 }
 
                 writer.WriteHeaders(Plain());

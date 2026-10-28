@@ -82,7 +82,7 @@ for (int i = 0; i < threads.Length; i++)
 {
     var reactor = new Reactor(i, config);
 
-    reactor.QuicHandle = (r, conn) => new Http3Connection(conn).RunBufferedAsync(_ => response);
+    reactor.QuicHandle = (r, conn) => new Http3Connection(conn).RunAsync(_ => response);
 
     threads[i] = new Thread(reactor.Run) { Name = $"reactor-{i}" };
     threads[i].Start();

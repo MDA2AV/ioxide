@@ -69,7 +69,7 @@ for (int i = 0; i < threads.Length; i++)
     {
         try
         {
-            await new Nghttp2Connection(conn).RunStreamedResponseAsync(async (request, writer) =>
+            await new Nghttp2Connection(conn).RunAsync(async (request, writer) =>
             {
                 bool endless = request.Path.Span.SequenceEqual("/feed"u8);
 

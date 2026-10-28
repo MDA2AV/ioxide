@@ -29,7 +29,7 @@ internal static class H3Tests
             (_, int udpPort) = TestServer.StartDatagram(
                 onDatagram: null,
                 quicFactory: engine.CreateFactory(),
-                quicHandle: static (_, conn) => new Nghttp3Connection(conn).RunBufferedAsync(
+                quicHandle: static (_, conn) => new Nghttp3Connection(conn).RunAsync(
                     static req => Nghttp3Response.Text($"hello {Encoding.ASCII.GetString(req.Path.Span)} via {Encoding.ASCII.GetString(req.Method.Span)}")));
 
             using var client = new H3TestClient("127.0.0.1", udpPort);
@@ -46,18 +46,18 @@ internal static class H3Tests
             (string certPath, string keyPath) = TestCert.Ensure();
             var engine = TestServer.Own(new QuicEngine(certPath, keyPath, cidLength: 8, alpn: ["h3"]));
 
-            // The async overload: dispatch fires at end-of-headers and the body is pulled through
-            // BodyReader while the stream is flow-control paced.
+            // The body-reader overload: dispatch fires at end-of-headers and the body is pulled through
+            // the reader while the stream is flow-control paced.
             (_, int udpPort) = TestServer.StartDatagram(
                 onDatagram: null,
                 quicFactory: engine.CreateFactory(),
-                quicHandle: static (_, conn) => new Nghttp3Connection(conn, new Nghttp3Options { StreamRequestBodies = true }).RunBufferedAsync(
-                    static async req =>
+                quicHandle: static (_, conn) => new Nghttp3Connection(conn).RunAsync(
+                    static async (_, reader) =>
                     {
                         long total = 0;
                         while (true)
                         {
-                            ReadOnlyMemory<byte> chunk = await req.BodyReader!.ReadAsync();
+                            ReadOnlyMemory<byte> chunk = await reader.ReadAsync();
                             if (chunk.IsEmpty)
                             {
                                 break;
@@ -82,12 +82,12 @@ internal static class H3Tests
         });
 
         runner.Test("h3: uploads a streaming handler never reads give their connection credit back", () =>
-            Http3Tests.UnreadUploadsGiveCreditBack((conn, answer) => new Nghttp3Connection(conn, new Nghttp3Options { StreamRequestBodies = true }).RunBufferedAsync(
-                async req => new Nghttp3Response { Status = await answer(req.Path, req.BodyReader!.ReadAsync) })));
+            Http3Tests.UnreadUploadsGiveCreditBack((conn, answer) => new Nghttp3Connection(conn).RunAsync(
+                async (req, body) => new Nghttp3Response { Status = await answer(req.Path, body.ReadAsync) })));
 
         runner.Test("h3: uploads a streamed-response handler never reads give their connection credit back", () =>
-            Http3Tests.UnreadUploadsGiveCreditBack((conn, answer) => new Nghttp3Connection(conn, new Nghttp3Options { StreamRequestBodies = true }).RunStreamedResponseAsync(
-                async (req, writer) => writer.WriteHeaders(new Nghttp3Response { Status = await answer(req.Path, req.BodyReader!.ReadAsync) }))));
+            Http3Tests.UnreadUploadsGiveCreditBack((conn, answer) => new Nghttp3Connection(conn).RunAsync(
+                async (req, body, writer) => writer.WriteHeaders(new Nghttp3Response { Status = await answer(req.Path, body.ReadAsync) }))));
 
         runner.Test("h3: a streamed response whose handler awaits between chunks still arrives", () =>
         {
@@ -103,8 +103,8 @@ internal static class H3Tests
             (_, int udpPort) = TestServer.StartDatagram(
                 onDatagram: null,
                 quicFactory: engine.CreateFactory(),
-                quicHandle: static (_, conn) => new Nghttp3Connection(conn, new Nghttp3Options { StreamRequestBodies = true }).RunStreamedResponseAsync(
-                    static async (_, writer) =>
+                quicHandle: static (_, conn) => new Nghttp3Connection(conn).RunAsync(
+                    static async (_, _, writer) =>
                     {
                         writer.WriteHeaders(new Nghttp3Response { Status = 200 });
 
@@ -142,8 +142,8 @@ internal static class H3Tests
             (_, int udpPort) = TestServer.StartDatagram(
                 onDatagram: null,
                 quicFactory: engine.CreateFactory(),
-                quicHandle: static (_, conn) => new Nghttp3Connection(conn, new Nghttp3Options { StreamRequestBodies = true }).RunStreamedResponseAsync(
-                    static async (_, writer) =>
+                quicHandle: static (_, conn) => new Nghttp3Connection(conn).RunAsync(
+                    static async (_, _, writer) =>
                     {
                         writer.WriteHeaders(new Nghttp3Response { Status = 200 });
                         for (int i = 0; i < Chunks; i++)
@@ -171,7 +171,7 @@ internal static class H3Tests
             (_, int udpPort) = TestServer.StartDatagram(
                 onDatagram: null,
                 quicFactory: engine.CreateFactory(),
-                quicHandle: static (_, conn) => new Nghttp3Connection(conn).RunBufferedAsync(
+                quicHandle: static (_, conn) => new Nghttp3Connection(conn).RunAsync(
                     static async req =>
                     {
                         // Dispatch fired at end-of-stream: the body is complete before we run.
@@ -208,7 +208,7 @@ internal static class H3Tests
             (_, int udpPort) = TestServer.StartDatagram(
                 onDatagram: null,
                 quicFactory: engine.CreateFactory(),
-                quicHandle: (_, conn) => new Nghttp3Connection(conn, options).RunBufferedAsync(
+                quicHandle: (_, conn) => new Nghttp3Connection(conn, options).RunAsync(
                     static req =>
                     {
                         // Byte-level cookie lookup - no strings, and it sees cookie field lines
@@ -240,7 +240,7 @@ internal static class H3Tests
             (_, int udpPort) = TestServer.StartDatagram(
                 onDatagram: null,
                 quicFactory: engine.CreateFactory(),
-                quicHandle: static (_, conn) => new Nghttp3Connection(conn).RunBufferedAsync(
+                quicHandle: static (_, conn) => new Nghttp3Connection(conn).RunAsync(
                     static req =>
                     {
                         var pairs = new List<string>();
@@ -275,7 +275,7 @@ internal static class H3Tests
                 quicHandle: static (_, conn) =>
                 {
                     Nghttp3Connection h3 = new(conn);
-                    return h3.RunBufferedAsync(req =>
+                    return h3.RunAsync(req =>
                     {
                         h3.Shutdown();   // drain begins; this request completes normally
                         return Nghttp3Response.Text("bye after goaway");
@@ -297,16 +297,16 @@ internal static class H3Tests
     private static void RegisterLateAnswer(Runner runner)
     {
         runner.Test("h3: a late buffered answer to a cancelled request leaves the connection serving", () =>
-            LateAnswerThenGet((conn, answer) => new Nghttp3Connection(conn).RunBufferedAsync(
+            LateAnswerThenGet((conn, answer) => new Nghttp3Connection(conn).RunAsync(
                 async req => Nghttp3Response.Text(await answer(req.Path, req.StreamId)))));
 
         runner.Test("h3: a late streaming answer to a cancelled request leaves the connection serving", () =>
-            LateAnswerThenGet((conn, answer) => new Nghttp3Connection(conn, new Nghttp3Options { StreamRequestBodies = true }).RunBufferedAsync(
-                async req => Nghttp3Response.Text(await answer(req.Path, req.StreamId)))));
+            LateAnswerThenGet((conn, answer) => new Nghttp3Connection(conn).RunAsync(
+                async (req, _) => Nghttp3Response.Text(await answer(req.Path, req.StreamId)))));
 
         runner.Test("control: a late answer to a cancelled request leaves an ioxide.http3 connection serving", () =>
-            LateAnswerThenGet((conn, answer) => new Http3Connection(conn, new Http3Options { StreamRequestBodies = true }).RunBufferedAsync(
-                async req => Http3Response.Text(await answer(req.Path, req.StreamId)))));
+            LateAnswerThenGet((conn, answer) => new Http3Connection(conn).RunAsync(
+                async (req, _) => Http3Response.Text(await answer(req.Path, req.StreamId)))));
     }
 
     // "/slow" is cancelled by the client and answered only once its stream has closed on the server.

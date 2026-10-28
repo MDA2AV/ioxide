@@ -10,17 +10,17 @@ namespace ioxide.nghttp3;
 /// and drains its egress back through SendStream. Use from a <c>Reactor.QuicHandle</c>:
 ///
 /// <code>
-/// reactor.QuicHandle = (r, conn) => new Nghttp3Connection(conn).RunBufferedAsync(
+/// reactor.QuicHandle = (r, conn) => new Nghttp3Connection(conn).RunAsync(
 ///     static request => Nghttp3Response.Text("hello"));
 /// </code>
 ///
-/// One instance per connection. <c>RunBufferedAsync</c> answers with a whole response and
-/// <c>RunStreamedResponseAsync</c> through a writer, while
-/// <see cref="Nghttp3Options.StreamRequestBodies"/> decides how the request body arrives: assembled in
-/// full and dispatched at end-of-stream, or dispatched at end-of-headers and streamed through
-/// <see cref="Nghttp3Request.BodyReader"/> under flow-control pacing. Everything runs on the reactor
-/// thread; request objects (arena, header lists, body buffer) are pooled per connection and
-/// recycled when the handler's valid-until-return contract ends.
+/// One instance per connection, served by <c>RunAsync</c>, whose handler's parameters choose both
+/// directions: one that returns a response answers whole, one given an
+/// <see cref="Nghttp3ResponseWriter"/> streams it; one given an <see cref="Nghttp3BodyReader"/> is
+/// dispatched at end-of-headers and pulls the body under flow-control pacing, one without gets it
+/// assembled in full at end-of-stream. Everything runs on the reactor thread; request objects (arena,
+/// header lists, body buffer) are pooled per connection and recycled when the handler's
+/// valid-until-return contract ends.
 ///
 /// File layout: this file owns state, the run loop and pooling; PushToEngine (ingress into nghttp3),
 /// RunBuffered, RequestBody and Streamed (dispatch, per response and body mode), Egress
@@ -40,6 +40,8 @@ public sealed partial class Nghttp3Connection : IDisposable
     // inside a callback (nghttp3 is on the stack below it), so the callbacks record here and
     // _protocolFailed carries the decision out to the run loops - see Callbacks.Fault.
     private Exception? _callbackFault;
+
+    // The handler takes a body reader: a request is dispatched at end-of-headers, its stream paced.
     private bool _streamBodies;
     private bool _draining;
 

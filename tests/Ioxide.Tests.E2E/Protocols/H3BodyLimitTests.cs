@@ -36,30 +36,30 @@ internal static class H3BodyLimitTests
     }
 
     private static Task Nghttp3Assembled(QuicConnection conn, Action<long> served)
-        => new Nghttp3Connection(conn, new Nghttp3Options { MaxRequestBytes = Cap }).RunBufferedAsync(req =>
+        => new Nghttp3Connection(conn, new Nghttp3Options { MaxRequestBytes = Cap }).RunAsync(req =>
         {
             served(req.Body.Length);
             return Nghttp3Response.Text("ok");
         });
 
     private static Task Nghttp3Streamed(QuicConnection conn, Action<long> served)
-        => new Nghttp3Connection(conn, new Nghttp3Options { MaxRequestBytes = Cap, StreamRequestBodies = true }).RunBufferedAsync(async req =>
+        => new Nghttp3Connection(conn, new Nghttp3Options { MaxRequestBytes = Cap }).RunAsync(async (_, body) =>
         {
-            served(await ReadToEnd(req.BodyReader!.ReadAsync));
+            served(await ReadToEnd(body.ReadAsync));
             return Nghttp3Response.Text("ok");
         });
 
     private static Task ManagedAssembled(QuicConnection conn, Action<long> served)
-        => new Http3Connection(conn, new Http3Options { MaxRequestBytes = Cap }).RunBufferedAsync(req =>
+        => new Http3Connection(conn, new Http3Options { MaxRequestBytes = Cap }).RunAsync(req =>
         {
             served(req.Body.Length);
             return Http3Response.Text("ok");
         });
 
     private static Task ManagedStreamed(QuicConnection conn, Action<long> served)
-        => new Http3Connection(conn, new Http3Options { MaxRequestBytes = Cap, StreamRequestBodies = true }).RunBufferedAsync(async req =>
+        => new Http3Connection(conn, new Http3Options { MaxRequestBytes = Cap }).RunAsync(async (_, body) =>
         {
-            served(await ReadToEnd(req.BodyReader!.ReadAsync));
+            served(await ReadToEnd(body.ReadAsync));
             return Http3Response.Text("ok");
         });
 

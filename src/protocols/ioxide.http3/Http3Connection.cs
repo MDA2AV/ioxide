@@ -7,11 +7,11 @@ namespace ioxide.http3;
 /// <summary>
 /// HTTP/3 over any <see cref="QuicConnection"/>, implemented entirely in C# - frame parsing,
 /// QPACK (static table + Huffman) and request dispatch, no native dependencies. The public
-/// surface mirrors ioxide.nghttp3's Nghttp3Connection: <c>RunBufferedAsync</c> answers with a whole
-/// response and <c>RunStreamedResponseAsync</c> through a writer, while
-/// <see cref="Http3Options.StreamRequestBodies"/> decides how the request body arrives - assembled
-/// before dispatch at end-of-stream, or pulled through <see cref="Http3Request.BodyReader"/> from
-/// end-of-headers while the request stream is flow-control paced.
+/// surface mirrors ioxide.nghttp3's Nghttp3Connection: <c>RunAsync</c>, whose handler's parameters
+/// choose both directions. One that returns a response answers whole, one given an
+/// <see cref="Http3ResponseWriter"/> streams it; one given an <see cref="Http3BodyReader"/> runs at
+/// end-of-headers and pulls the body while the request stream is flow-control paced, one without
+/// gets it assembled in <see cref="Http3Request.Body"/> at end-of-stream.
 ///
 /// Our SETTINGS advertise QPACK dynamic-table capacity 0, which pins conforming peers to
 /// static-table references and literals - the entire decoder surface this library implements.
@@ -46,6 +46,8 @@ public sealed partial class Http3Connection
 
     // ALPN is settled once, and only once the handshake has finished.
     private bool _alpnChecked;
+
+    // The handler takes a body reader: a request is dispatched at end-of-headers, its stream paced.
     private bool _streamBodies;
     private bool _controlSent;
 
@@ -112,23 +114,26 @@ public sealed partial class Http3Connection
         _options = options ?? Http3Options.Default;
     }
 
-    /// <summary>Answer each request with a whole response from a synchronous handler, dispatched at
-    /// end-of-stream with the whole body in <see cref="Http3Request.Body"/> - a handler that cannot
-    /// await cannot read a body still arriving, so <see cref="Http3Options.StreamRequestBodies"/>
-    /// does not apply. Owns the handler's connection ref (DecRef on exit).</summary>
-    public Task RunBufferedAsync(Func<Http3Request, Http3Response> handler)
+    /// <summary>Answer each request with a whole response, dispatched at end-of-stream with the whole
+    /// body in <see cref="Http3Request.Body"/>. Owns the handler's connection ref (DecRef on exit).</summary>
+    public Task RunAsync(Func<Http3Request, Http3Response> handler)
         => RunCoreAsync(() => DispatchReady(handler));
 
-    /// <summary>Answer each request with a whole response from a handler that may await. Dispatched
-    /// at end-of-stream with the whole body in <see cref="Http3Request.Body"/>, or with
-    /// <see cref="Http3Options.StreamRequestBodies"/> at END-OF-HEADERS, the body pulled through
-    /// <see cref="Http3Request.BodyReader"/> while the stream's flow-control window paces the peer.
-    /// The handler must resume on the reactor (every ioxide await does). Owns the handler's
-    /// connection ref (DecRef on exit).</summary>
-    public Task RunBufferedAsync(Func<Http3Request, ValueTask<Http3Response>> handler)
+    /// <summary>The same with a handler that may await. It must resume on the reactor (every ioxide
+    /// await does). Owns the handler's connection ref (DecRef on exit).</summary>
+    public Task RunAsync(Func<Http3Request, ValueTask<Http3Response>> handler)
+        => RunCoreAsync(() => DispatchReadyAsync(handler));
+
+    /// <summary>Answer each request with a whole response, dispatched at END-OF-HEADERS: the handler
+    /// pulls the body through its <see cref="Http3BodyReader"/> while the stream's flow-control window
+    /// paces the peer, so memory is bound by one window rather than by the body. The handler must
+    /// resume on the reactor (every ioxide await does). Owns the handler's connection ref (DecRef on
+    /// exit).</summary>
+    public Task RunAsync(Func<Http3Request, Http3BodyReader, ValueTask<Http3Response>> handler)
     {
-        _streamBodies = _options.StreamRequestBodies;
-        return RunCoreAsync(() => DispatchReadyAsync(handler));
+        _streamBodies = true;
+        Func<Http3Request, ValueTask<Http3Response>> buffered = request => handler(request, request.BodyReader!);
+        return RunCoreAsync(() => DispatchReadyAsync(buffered));
     }
 
     // The one serving loop. Each entry point hands it the dispatch for its response mode, run once

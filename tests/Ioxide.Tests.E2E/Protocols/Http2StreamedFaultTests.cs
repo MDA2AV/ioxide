@@ -49,7 +49,7 @@ internal static class Http2StreamedFaultTests
             {
                 if (native)
                 {
-                    await new Nghttp2Connection(conn).RunStreamedResponseAsync(async (request, writer) =>
+                    await new Nghttp2Connection(conn).RunAsync(async (request, writer) =>
                     {
                         string path = System.Text.Encoding.ASCII.GetString(request.Path.Span);
                         if (path == "/fail-early")
@@ -68,7 +68,7 @@ internal static class Http2StreamedFaultTests
                 }
                 else
                 {
-                    await new Http2Connection(conn).RunStreamedResponseAsync(async (request, writer) =>
+                    await new Http2Connection(conn).RunAsync(async (request, writer) =>
                     {
                         string path = System.Text.Encoding.ASCII.GetString(request.Path.Span);
                         if (path == "/fail-early")

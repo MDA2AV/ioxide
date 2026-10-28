@@ -1,8 +1,8 @@
 namespace ioxide.nghttp3;
 
 /// <summary>
-/// The STREAMED request body (<see cref="Nghttp3Options.StreamRequestBodies"/>): dispatch at
-/// end-of-headers, body pulled through <see cref="Nghttp3Request.BodyReader"/> under flow-control
+/// The STREAMED request body, for a handler that takes a body reader: dispatch at end-of-headers,
+/// body pulled through its <see cref="Nghttp3BodyReader"/> under flow-control
 /// pacing, plus all the machinery only this mode uses - the body-wake deferral and window crediting.
 /// The dispatch here answers with a buffered response; a streamed one dispatches in Streamed.
 /// Requests recycle when the handler's task has completed AND the stream has left the tables

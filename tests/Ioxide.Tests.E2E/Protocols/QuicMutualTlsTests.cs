@@ -28,7 +28,7 @@ internal static class QuicMutualTlsTests
                 quicFactory: engine.CreateFactory(),
                 // Read inside the REQUEST handler, not at accept: the connection callback fires
                 // before the handshake finishes, so the identity does not exist yet there.
-                quicHandle: static (_, conn) => new Nghttp3Connection(conn).RunBufferedAsync(
+                quicHandle: static (_, conn) => new Nghttp3Connection(conn).RunAsync(
                     _ => new Nghttp3Response
                     {
                         Body = Encoding.ASCII.GetBytes((conn as QuicEngineConnection)?.PeerSubject ?? "anonymous"),
@@ -53,7 +53,7 @@ internal static class QuicMutualTlsTests
             (_, int udpPort) = TestServer.StartDatagram(
                 onDatagram: null,
                 quicFactory: engine.CreateFactory(),
-                quicHandle: static (_, conn) => new Nghttp3Connection(conn).RunBufferedAsync(
+                quicHandle: static (_, conn) => new Nghttp3Connection(conn).RunAsync(
                     static _ => new Nghttp3Response { Body = "should never be reached"u8.ToArray() }));
 
             // The stock client offers nothing, which is the whole point of requiring one.
@@ -80,7 +80,7 @@ internal static class QuicMutualTlsTests
             (_, int udpPort) = TestServer.StartDatagram(
                 onDatagram: null,
                 quicFactory: engine.CreateFactory(),
-                quicHandle: static (_, conn) => new Nghttp3Connection(conn).RunBufferedAsync(
+                quicHandle: static (_, conn) => new Nghttp3Connection(conn).RunAsync(
                     static _ => new Nghttp3Response { Body = "should never be reached"u8.ToArray() }));
 
             // Well-formed and correctly signed - by a CA this server has never heard of.
@@ -105,7 +105,7 @@ internal static class QuicMutualTlsTests
             (_, int udpPort) = TestServer.StartDatagram(
                 onDatagram: null,
                 quicFactory: engine.CreateFactory(),
-                quicHandle: static (_, conn) => new Nghttp3Connection(conn).RunBufferedAsync(
+                quicHandle: static (_, conn) => new Nghttp3Connection(conn).RunAsync(
                     _ => new Nghttp3Response
                     {
                         Body = Encoding.ASCII.GetBytes((conn as QuicEngineConnection)?.PeerSubject ?? "anonymous"),
@@ -134,7 +134,7 @@ internal static class QuicMutualTlsTests
             (_, int udpPort) = TestServer.StartDatagram(
                 onDatagram: null,
                 quicFactory: engine.CreateFactory(),
-                quicHandle: static (_, conn) => new Nghttp3Connection(conn).RunBufferedAsync(
+                quicHandle: static (_, conn) => new Nghttp3Connection(conn).RunAsync(
                     static _ => new Nghttp3Response { Body = "should never be reached"u8.ToArray() }));
 
             using var client = new H3TestClient("127.0.0.1", udpPort, rogueCert, rogueKey);
@@ -176,7 +176,7 @@ internal static class QuicMutualTlsTests
                 quicFactory: engine.CreateFactory(),
                 // Read inside the REQUEST handler, not at accept: the connection callback fires
                 // before the handshake finishes, so the identity does not exist yet there.
-                quicHandle: static (_, conn) => new Nghttp3Connection(conn).RunBufferedAsync(
+                quicHandle: static (_, conn) => new Nghttp3Connection(conn).RunAsync(
                     _ => new Nghttp3Response
                     {
                         Body = Encoding.ASCII.GetBytes((conn as QuicEngineConnection)?.PeerSubject ?? "anonymous"),
@@ -206,7 +206,7 @@ internal static class QuicMutualTlsTests
             (_, int udpPort) = TestServer.StartDatagram(
                 onDatagram: null,
                 quicFactory: engine.CreateFactory(),
-                quicHandle: static (_, conn) => new Nghttp3Connection(conn).RunBufferedAsync(
+                quicHandle: static (_, conn) => new Nghttp3Connection(conn).RunAsync(
                     _ => new Nghttp3Response
                     {
                         Body = Encoding.ASCII.GetBytes((conn as QuicEngineConnection)?.PeerCommonName ?? "anonymous"),
@@ -233,7 +233,7 @@ internal static class QuicMutualTlsTests
             (_, int udpPort) = TestServer.StartDatagram(
                 onDatagram: null,
                 quicFactory: engine.CreateFactory(),
-                quicHandle: static (_, conn) => new Nghttp3Connection(conn).RunBufferedAsync(
+                quicHandle: static (_, conn) => new Nghttp3Connection(conn).RunAsync(
                     _ => new Nghttp3Response
                     {
                         Body = Encoding.ASCII.GetBytes((conn as QuicEngineConnection)?.PeerCommonName ?? "anonymous"),
@@ -261,7 +261,7 @@ internal static class QuicMutualTlsTests
             (_, int udpPort) = TestServer.StartDatagram(
                 onDatagram: null,
                 quicFactory: engine.CreateFactory(),
-                quicHandle: static (_, conn) => new Nghttp3Connection(conn).RunBufferedAsync(
+                quicHandle: static (_, conn) => new Nghttp3Connection(conn).RunAsync(
                     static _ => new Nghttp3Response { Body = "should never be reached"u8.ToArray() }));
 
             using var client = new H3TestClient("127.0.0.1", udpPort, rogueCert, rogueKey);
@@ -284,7 +284,7 @@ internal static class QuicMutualTlsTests
             (_, int udpPort) = TestServer.StartDatagram(
                 onDatagram: null,
                 quicFactory: engine.CreateFactory(),
-                quicHandle: static (_, conn) => new Nghttp3Connection(conn).RunBufferedAsync(
+                quicHandle: static (_, conn) => new Nghttp3Connection(conn).RunAsync(
                     static _ => new Nghttp3Response { Body = "should never be reached"u8.ToArray() }));
 
             using var client = new H3TestClient("127.0.0.1", udpPort);
@@ -428,7 +428,7 @@ internal static class QuicMutualTlsTests
         (_, int udpPort) = TestServer.StartDatagram(
             onDatagram: null,
             quicFactory: engine.CreateFactory(),
-            quicHandle: static (_, conn) => new Nghttp3Connection(conn).RunBufferedAsync(
+            quicHandle: static (_, conn) => new Nghttp3Connection(conn).RunAsync(
                 _ => new Nghttp3Response
                 {
                     Body = Encoding.ASCII.GetBytes((conn as QuicEngineConnection)?.PeerCommonName ?? "anonymous"),

@@ -76,22 +76,22 @@ internal static class Http2BodyTests
             AssertServed(file, StartFileServer(file, park: true, chunk: 0));
         });
 
-        // StreamRequestBodies hands the handler a request whose body is still arriving, so the
-        // stream stays open for reading while the response is written. It is what a framework
-        // serving arbitrary request bodies turns on, and it changes the connection's stream
+        // A body reader hands the handler a request whose body is still arriving, so the stream
+        // stays open for reading while the response is written. It is what a framework serving
+        // arbitrary request bodies takes, and it changes the connection's stream
         // bookkeeping - so every body shape above has to hold under it too.
         runner.Test("h2 body: a file arrives whole with streamed request bodies", () =>
         {
             byte[] file = Pattern(8 * 1024);
             AssertServed(file, StartFileServer(file, park: true, chunk: FileChunk,
-                options: new Http2Options { StreamRequestBodies = true }));
+                streamBodies: true));
         });
 
         runner.Test("h2 body: a large file arrives whole with streamed request bodies", () =>
         {
             byte[] file = Pattern(256 * 1024);
             AssertServed(file, StartFileServer(file, park: true, chunk: FileChunk,
-                options: new Http2Options { StreamRequestBodies = true }));
+                streamBodies: true));
         });
 
         runner.Test("h2 body: a body copied in through GetMemory arrives whole", () =>
@@ -105,7 +105,7 @@ internal static class Http2BodyTests
             {
                 try
                 {
-                    await new Http2Connection(conn).RunStreamedResponseAsync(async (_, writer) =>
+                    await new Http2Connection(conn).RunAsync(async (_, writer) =>
                     {
                         writer.WriteHeaders(new Http2Response { Status = 200 });
                         await Task.Yield();
@@ -150,7 +150,7 @@ internal static class Http2BodyTests
             {
                 try
                 {
-                    await new Http2Connection(conn).RunStreamedResponseAsync(async (_, writer) =>
+                    await new Http2Connection(conn).RunAsync(async (_, writer) =>
                     {
                         var head = new Http2Response { Status = 200 };
                         head.Headers.Add("Content-Type"u8.ToArray(), "text/css"u8.ToArray());
@@ -218,40 +218,46 @@ internal static class Http2BodyTests
     /// rides its flush, which is a different write path entirely.
     /// </param>
     /// <param name="chunk">Bytes to stage per flush; 0 stages the whole body and never flushes.</param>
-    private static int StartFileServer(byte[] file, bool park, int chunk, Http2Options? options = null)
+    /// <param name="streamBodies">Take a body reader, so each request is served with its body still to come.</param>
+    private static int StartFileServer(byte[] file, bool park, int chunk, bool streamBodies = false)
         => TestServer.Start(async (_, conn) =>
     {
         try
         {
-            await new Http2Connection(conn, options).RunStreamedResponseAsync(async (_, writer) =>
-            {
-                writer.WriteHeaders(new Http2Response { Status = 200 });
-
-                if (park)
-                {
-                    // Resumes on the reactor, after the pass that dispatched this request has gone.
-                    await Task.Yield();
-                }
-
-                if (chunk <= 0)
-                {
-                    writer.Write(file);
-                }
-                else
-                {
-                    for (int at = 0; at < file.Length; at += chunk)
-                    {
-                        writer.Write(file.AsSpan(at, Math.Min(chunk, file.Length - at)));
-                        await writer.FlushAsync();
-                    }
-                }
-
-                await writer.CompleteAsync();
-            });
+            var connection = new Http2Connection(conn);
+            await (streamBodies
+                ? connection.RunAsync((request, _, writer) => Serve(request, writer))
+                : connection.RunAsync(Serve));
         }
         finally
         {
             conn.DecRef();
+        }
+
+        async ValueTask Serve(Http2Request request, Http2ResponseWriter writer)
+        {
+            writer.WriteHeaders(new Http2Response { Status = 200 });
+
+            if (park)
+            {
+                // Resumes on the reactor, after the pass that dispatched this request has gone.
+                await Task.Yield();
+            }
+
+            if (chunk <= 0)
+            {
+                writer.Write(file);
+            }
+            else
+            {
+                for (int at = 0; at < file.Length; at += chunk)
+                {
+                    writer.Write(file.AsSpan(at, Math.Min(chunk, file.Length - at)));
+                    await writer.FlushAsync();
+                }
+            }
+
+            await writer.CompleteAsync();
         }
     });
 

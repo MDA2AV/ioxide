@@ -16,8 +16,6 @@ internal static class Http2FlowControlTests
     internal const uint Cancel = 0x8;
     internal const byte RstStreamFrame = 0x3;
 
-    private static readonly Http2Options Streamed = new() { StreamRequestBodies = true };
-
     public static void Register(Runner runner)
     {
         // ---------------------------------------------------------------- reads outside the pass
@@ -27,11 +25,11 @@ internal static class Http2FlowControlTests
             var busy = new TaskCompletionSource();
             var read = new Tally();
 
-            using var client = new StrictClient(Streamed);
-            Task run = client.Connection.RunStreamedResponseAsync(async (request, writer) =>
+            using var client = new StrictClient();
+            Task run = client.Connection.RunAsync(async (_, body, writer) =>
             {
                 await busy.Task;
-                await ReadAll(request, read);
+                await ReadAll(body, read);
                 await Answer(writer, 200);
             });
 
@@ -57,10 +55,10 @@ internal static class Http2FlowControlTests
             var disk = new Queue<TaskCompletionSource>();
             var read = new Tally();
 
-            using var client = new StrictClient(Streamed);
-            Task run = client.Connection.RunStreamedResponseAsync(async (request, writer) =>
+            using var client = new StrictClient();
+            Task run = client.Connection.RunAsync(async (_, body, writer) =>
             {
-                await ReadAll(request, read, between: () =>
+                await ReadAll(body, read, between: () =>
                 {
                     var write = new TaskCompletionSource();          // a file write, completing off the ring
                     disk.Enqueue(write);
@@ -84,10 +82,10 @@ internal static class Http2FlowControlTests
             const int Size = 1_200_000;
             var read = new Tally();
 
-            using var client = new StrictClient(Streamed);
-            Task run = client.Connection.RunStreamedResponseAsync(async (request, writer) =>
+            using var client = new StrictClient();
+            Task run = client.Connection.RunAsync(async (_, body, writer) =>
             {
-                await ReadAll(request, read);
+                await ReadAll(body, read);
                 await Answer(writer, 200);
             });
 
@@ -101,8 +99,8 @@ internal static class Http2FlowControlTests
 
         runner.Test("h2 flow: a body answered without being read gives its credit back", () =>
         {
-            using var client = new StrictClient(Streamed);
-            Task run = client.Connection.RunStreamedResponseAsync((_, writer) => Answer(writer, 404));
+            using var client = new StrictClient();
+            Task run = client.Connection.RunAsync((_, _, writer) => Answer(writer, 404));
 
             client.ReleaseFlush();
             client.Feed([.. Open(), .. Post(1), .. Data(1, 10_000, endStream: true)]);   // one read, like a small POST
@@ -118,8 +116,8 @@ internal static class Http2FlowControlTests
 
         runner.Test("h2 flow: a body arriving after the answer is credited", () =>
         {
-            using var client = new StrictClient(Streamed);
-            Task run = client.Connection.RunStreamedResponseAsync((_, writer) => Answer(writer, 404));
+            using var client = new StrictClient();
+            Task run = client.Connection.RunAsync((_, _, writer) => Answer(writer, 404));
 
             client.ReleaseFlush();
             client.Feed([.. Open(), .. Post(1)]);
@@ -134,11 +132,11 @@ internal static class Http2FlowControlTests
         {
             var busy = new TaskCompletionSource();
 
-            using var client = new StrictClient(Streamed);
-            Task run = client.Connection.RunStreamedResponseAsync(async (request, writer) =>
+            using var client = new StrictClient();
+            Task run = client.Connection.RunAsync(async (_, body, writer) =>
             {
                 await busy.Task;
-                await ReadAll(request, new Tally());
+                await ReadAll(body, new Tally());
                 await Answer(writer, 200);
             });
 
@@ -158,15 +156,15 @@ internal static class Http2FlowControlTests
 
         runner.Test("h2 flow: bodies answered unread do not starve later uploads on the connection", () =>
         {
-            using var client = new StrictClient(Streamed);
-            Task run = client.Connection.RunStreamedResponseAsync(async (request, writer) =>
+            using var client = new StrictClient();
+            Task run = client.Connection.RunAsync(async (request, body, writer) =>
             {
                 if (request.StreamId <= 13)
                 {
                     await Answer(writer, 404);                       // seven bodies answered unread
                     return;
                 }
-                await ReadAll(request, new Tally());
+                await ReadAll(body, new Tally());
                 await Answer(writer, 200);
             });
 
@@ -184,10 +182,10 @@ internal static class Http2FlowControlTests
         {
             var read = new Tally();
 
-            using var client = new StrictClient(Streamed);
-            Task run = client.Connection.RunStreamedResponseAsync(async (request, writer) =>
+            using var client = new StrictClient();
+            Task run = client.Connection.RunAsync(async (_, body, writer) =>
             {
-                await ReadAll(request, read);
+                await ReadAll(body, read);
                 await Answer(writer, 200);
             });
 
@@ -206,7 +204,7 @@ internal static class Http2FlowControlTests
         runner.Test("h2 flow: padding on the buffered path is credited in full", () =>
         {
             using var client = new StrictClient(new Http2Options());
-            Task run = client.Connection.RunBufferedAsync(_ => new Http2Response { Status = 200 });
+            Task run = client.Connection.RunAsync(_ => new Http2Response { Status = 200 });
 
             client.ReleaseFlush();
             client.Feed([.. Open(), .. Post(1), .. PaddedBody(1)]);
@@ -218,7 +216,7 @@ internal static class Http2FlowControlTests
         runner.Test("h2 flow: a DATA frame past MaxRequestBytes is still credited", () =>
         {
             using var client = new StrictClient(new Http2Options { MaxRequestBytes = 20_000 });
-            Task run = client.Connection.RunBufferedAsync(_ => new Http2Response { Status = 200 });
+            Task run = client.Connection.RunAsync(_ => new Http2Response { Status = 200 });
 
             client.ReleaseFlush();
             client.Feed([.. Open(), .. Post(1), .. Data(1, 16384, endStream: false), .. Data(1, 16384, endStream: true)]);
@@ -236,7 +234,7 @@ internal static class Http2FlowControlTests
         runner.Test("h2 flow: a SETTINGS raise of the stream window resumes a parked writer", () =>
         {
             using var client = new StrictClient();
-            Task run = client.Connection.RunStreamedResponseAsync((_, writer) => AnswerWith(writer, new byte[64 * 1024]));
+            Task run = client.Connection.RunAsync((_, writer) => AnswerWith(writer, new byte[64 * 1024]));
 
             client.ReleaseFlush();
             client.Feed([.. Open((InitialWindowSize, 16384)), .. WindowUpdate(0, 1 << 20), .. Get(1)]);
@@ -258,7 +256,7 @@ internal static class Http2FlowControlTests
             bool finished = false;
 
             using var client = new StrictClient();
-            Task run = client.Connection.RunStreamedResponseAsync(async (_, writer) =>
+            Task run = client.Connection.RunAsync(async (_, writer) =>
             {
                 await AnswerWith(writer, new byte[64 * 1024]);
                 finished = true;
@@ -275,7 +273,7 @@ internal static class Http2FlowControlTests
         runner.Test("h2 flow: a buffered response waits on the peer's stream window instead of overrunning it", () =>
         {
             using var client = new StrictClient();
-            Task run = client.Connection.RunBufferedAsync(_ => new Http2Response { Status = 200, Body = new byte[64 * 1024] });
+            Task run = client.Connection.RunAsync(_ => new Http2Response { Status = 200, Body = new byte[64 * 1024] });
 
             client.ReleaseFlush();
             client.Feed([.. Open((InitialWindowSize, 16384)), .. WindowUpdate(0, 1 << 20), .. Get(1)]);
@@ -295,7 +293,7 @@ internal static class Http2FlowControlTests
         runner.Test("h2 flow: control: the streamed path stops at the same stream window", () =>
         {
             using var client = new StrictClient();
-            Task run = client.Connection.RunStreamedResponseAsync((_, writer) => AnswerWith(writer, new byte[64 * 1024]));
+            Task run = client.Connection.RunAsync((_, writer) => AnswerWith(writer, new byte[64 * 1024]));
 
             client.ReleaseFlush();
             client.Feed([.. Open((InitialWindowSize, 16384)), .. WindowUpdate(0, 1 << 20), .. Get(1)]);
@@ -387,11 +385,11 @@ internal static class Http2FlowControlTests
         public long Bytes;
     }
 
-    private static async ValueTask ReadAll(Http2Request request, Tally read, Func<Task>? between = null)
+    private static async ValueTask ReadAll(Http2BodyReader body, Tally read, Func<Task>? between = null)
     {
         while (true)
         {
-            ReadOnlyMemory<byte> chunk = await request.BodyReader!.ReadAsync();
+            ReadOnlyMemory<byte> chunk = await body.ReadAsync();
             if (chunk.IsEmpty)
             {
                 return;

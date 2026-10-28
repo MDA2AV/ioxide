@@ -109,7 +109,6 @@ var h3Options = new Nghttp3Options
 {
     QpackDynamicTableCapacity = qpackCapacity,                // 0 (default) = headers stay literal
     QpackBlockedStreams       = qpackCapacity > 0 ? 100 : 0,  // raise both together for the dynamic table
-    StreamRequestBodies       = true,                         // dispatch at end-of-headers, body through BodyReader
 };
 
 // THE allocation-free pattern: build the response ONCE and reuse the instance for every request.
@@ -148,16 +147,16 @@ for (int i = 0; i < threads.Length; i++)
             live.Add((r, h3));
         }
 
-        return h3.RunBufferedAsync(async request =>
+        return h3.RunAsync(async (request, body) =>
         {
-            // Streamed dispatch, so we are running while the body is still on the wire. Read it to
-            // the end: every read credits the peer's flow-control window, which is what throttles a
-            // fast sender instead of buffering it. Chunks are valid until the next ReadAsync, and a
-            // request with no body simply finds it empty on the first read.
+            // Taking the body reader dispatches at end-of-headers, so we are running while the body
+            // is still on the wire. Read it to the end: every read credits the peer's flow-control
+            // window, which is what throttles a fast sender instead of buffering it. Chunks are valid
+            // until the next ReadAsync, and a request with no body simply finds it empty on the first read.
             long total = 0;
             while (true)
             {
-                ReadOnlyMemory<byte> chunk = await request.BodyReader!.ReadAsync();
+                ReadOnlyMemory<byte> chunk = await body.ReadAsync();
                 if (chunk.IsEmpty) break;
                 total += chunk.Length;   // a real app would parse or store the chunk here
             }

@@ -128,7 +128,7 @@ for (int i = 0; i < threads.Length; i++)
 
         // Buffered + async: each request dispatches with its body assembled, and the handler may
         // await - the upstream round trip resumes inline on this reactor.
-        return new Nghttp3Connection(conn).RunBufferedAsync(async request =>
+        return new Nghttp3Connection(conn).RunAsync(async request =>
         {
             // The method and path are h3 field values, written back out below as an HTTP/1.1
             // request line, so one holding a CR, LF, NUL or space could add lines to the request

@@ -10,13 +10,30 @@ namespace ioxide.nghttp2;
 /// </summary>
 public sealed partial class Nghttp2Connection
 {
-    /// <summary>Serve until the peer goes away, answering each request with <paramref name="handler"/>.</summary>
-    public Task RunBufferedAsync(Func<Nghttp2Request, Nghttp2Response> handler)
-        => RunBufferedAsync(request => new ValueTask<Nghttp2Response>(handler(request)));
+    /// <summary>Serve until the peer goes away, answering each request with <paramref name="handler"/>
+    /// once it has arrived whole, body in <see cref="Nghttp2Request.Body"/>.</summary>
+    public Task RunAsync(Func<Nghttp2Request, Nghttp2Response> handler)
+        => RunAsync(request => new ValueTask<Nghttp2Response>(handler(request)));
 
     /// <summary>Serve until the peer goes away, with an asynchronous handler.</summary>
-    public Task RunBufferedAsync(Func<Nghttp2Request, ValueTask<Nghttp2Response>> handler)
+    public Task RunAsync(Func<Nghttp2Request, ValueTask<Nghttp2Response>> handler)
         => RunCoreAsync(() => DispatchBuffered(handler));
+
+    /// <summary>
+    /// Serve until the peer goes away, dispatching each request as soon as its HEADERS are in: the
+    /// handler pulls the body through its <see cref="Nghttp2BodyReader"/> while it still arrives,
+    /// instead of finding it assembled in <see cref="Nghttp2Request.Body"/>.
+    ///
+    /// The trade is what memory is bound by. A whole body is held whole, which suits ordinary
+    /// requests and not hostile uploads; a streamed one holds one flow-control window, because
+    /// credit is only returned to the peer as the handler reads.
+    /// </summary>
+    public Task RunAsync(Func<Nghttp2Request, Nghttp2BodyReader, ValueTask<Nghttp2Response>> handler)
+    {
+        _streamBodies = true;
+        Func<Nghttp2Request, ValueTask<Nghttp2Response>> buffered = request => handler(request, request.BodyReader!);
+        return RunCoreAsync(() => DispatchBuffered(buffered));
+    }
 
     // The one serving loop. Each entry point hands it the dispatch for its response mode, run once
     // per read pass.
@@ -24,6 +41,8 @@ public sealed partial class Nghttp2Connection
     {
         try
         {
+            Setup();
+
             // SETTINGS go out before anything is read: a peer that opens with the preface and a
             // request immediately expects ours to be on the way.
             await FlushEgressAsync();

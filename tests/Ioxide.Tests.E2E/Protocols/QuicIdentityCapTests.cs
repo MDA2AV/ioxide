@@ -245,7 +245,7 @@ internal static class QuicIdentityCapTests
                 quicFactory: engine.CreateFactory(),
                 // Read inside the REQUEST handler, not at accept: the connection callback fires
                 // before the handshake finishes, so the identity does not exist yet there.
-                quicHandle: static (_, conn) => new Nghttp3Connection(conn).RunBufferedAsync(
+                quicHandle: static (_, conn) => new Nghttp3Connection(conn).RunAsync(
                     _ => new Nghttp3Response
                     {
                         Body = Encoding.UTF8.GetBytes(
@@ -284,7 +284,7 @@ internal static class QuicIdentityCapTests
             (_, int udpPort) = TestServer.StartDatagram(
                 onDatagram: null,
                 quicFactory: engine.CreateFactory(),
-                quicHandle: static (_, conn) => new Nghttp3Connection(conn).RunBufferedAsync(
+                quicHandle: static (_, conn) => new Nghttp3Connection(conn).RunAsync(
                     static _ => new Nghttp3Response { Body = "ok"u8.ToArray() }));
 
             using var client = new H3TestClient("127.0.0.1", udpPort) { RecordServerCertificate = true };

@@ -11,7 +11,8 @@ using Playground.Shared;
 //      head -c 50000000 /dev/zero | curl --http2-prior-knowledge --data-binary @- \
 //        http://127.0.0.1:8080/upload
 //
-//  The knob is one line - StreamRequestBodies - and what it changes is what bounds memory.
+//  The switch is one parameter - the handler takes an Http2BodyReader - and what it changes is
+//  what bounds memory.
 //  BUFFERED holds the whole body before your handler starts, so MaxRequestBytes is the only thing
 //  between a hostile peer and the arena. STREAMED holds one flow-control window, because a chunk
 //  credits the peer's window only as this handler READS it: fall behind and the peer runs out of
@@ -61,8 +62,7 @@ var config = new ServerConfig
 
 var http2 = new Http2Options
 {
-    StreamRequestBodies = true,          // the whole point: dispatch at the headers, body follows
-    InitialWindowSize   = streamWindow,  // how far ahead of the handler the peer may run
+    InitialWindowSize = streamWindow,    // how far ahead of the handler the peer may run
 };
 
 var threads = new Thread[config.ReactorCount];
@@ -75,26 +75,23 @@ for (int i = 0; i < threads.Length; i++)
     {
         try
         {
-            await new Http2Connection(conn, http2).RunBufferedAsync(async request =>
+            // Taking the body reader is the whole point: the handler runs at the headers and the body
+            // follows through it. A handler without one would find the body whole in request.Body.
+            await new Http2Connection(conn, http2).RunAsync(async (_, body) =>
             {
-                // BodyReader is set because StreamRequestBodies is on; with it off the body would
-                // be in request.Body instead and this would be null.
                 long total = 0;
-                if (request.BodyReader is { } body)
+                while (true)
                 {
-                    while (true)
+                    // Empty means end of body. Each read hands back the peer's credit for the
+                    // chunk it returns, which is what lets the next one arrive - and the
+                    // memory it points at is recycled by the NEXT read, so anything worth
+                    // keeping has to be copied out here.
+                    ReadOnlyMemory<byte> chunk = await body.ReadAsync();
+                    if (chunk.IsEmpty)
                     {
-                        // Empty means end of body. Each read hands back the peer's credit for the
-                        // chunk it returns, which is what lets the next one arrive - and the
-                        // memory it points at is recycled by the NEXT read, so anything worth
-                        // keeping has to be copied out here.
-                        ReadOnlyMemory<byte> chunk = await body.ReadAsync();
-                        if (chunk.IsEmpty)
-                        {
-                            break;
-                        }
-                        total += chunk.Length;
+                        break;
                     }
+                    total += chunk.Length;
                 }
 
                 return new Http2Response

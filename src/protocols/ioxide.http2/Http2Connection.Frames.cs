@@ -257,7 +257,7 @@ public sealed partial class Http2Connection
     /// </summary>
     private void BeginStreamedBody(PendingRequest pending, bool ended)
     {
-        if (!_options.StreamRequestBodies || pending.BodyReader is not null)
+        if (!_streamBodies || pending.BodyReader is not null)
         {
             return;
         }
@@ -379,7 +379,7 @@ public sealed partial class Http2Connection
         // and ours agree. Replenished immediately here because this server buffers the request
         // anyway, so holding the window back would only stall the peer for nothing.
         //
-        // A STREAMED body is the exception, and the reason the option exists: its credit is
+        // A STREAMED body is the exception, and the reason to stream one at all: its credit is
         // returned as the handler reads (Http2BodyReader.ReadAsync), so a consumer that falls
         // behind stops replenishing and the peer stops sending. Crediting here as well would hand
         // the window back before the bytes were consumed and put the bound back on memory. Its

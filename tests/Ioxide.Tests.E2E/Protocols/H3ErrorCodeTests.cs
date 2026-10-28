@@ -212,7 +212,7 @@ internal static class H3ErrorCodeTests
                 var quic = new RecordingQuic();
                 Assert.True(quic.EnqueueStreamData(0, bytes, true), "the recv ring rejected the item");
 
-                Task run = new Nghttp3Connection(quic).RunBufferedAsync(static _ => Nghttp3Response.Text("ok"));
+                Task run = new Nghttp3Connection(quic).RunAsync(static _ => Nghttp3Response.Text("ok"));
 
                 Assert.True(run.IsCompleted,
                     $"nghttp3 kept serving after a {bytes.Length}-byte request stream ended: it is left owed");
@@ -233,7 +233,7 @@ internal static class H3ErrorCodeTests
             (_, int udpPort) = TestServer.StartDatagram(
                 onDatagram: null,
                 quicFactory: engine.CreateFactory(),
-                quicHandle: static (_, conn) => new Http3Connection(conn).RunBufferedAsync(
+                quicHandle: static (_, conn) => new Http3Connection(conn).RunAsync(
                     static _ => Http3Response.Text("raw served")));
 
             using var peer = new RawH3Peer("127.0.0.1", udpPort);
@@ -264,7 +264,7 @@ internal static class H3ErrorCodeTests
             (_, int udpPort) = TestServer.StartDatagram(
                 onDatagram: null,
                 quicFactory: engine.CreateFactory(),
-                quicHandle: static (_, conn) => new Http3Connection(conn).RunBufferedAsync(
+                quicHandle: static (_, conn) => new Http3Connection(conn).RunAsync(
                     static _ => Http3Response.Text("unreached")));
 
             using var peer = new RawH3Peer("127.0.0.1", udpPort);
@@ -292,7 +292,7 @@ internal static class H3ErrorCodeTests
             Assert.True(quic.EnqueueStreamData(0, SettingsOnRequestStream, false), "the recv ring rejected the item");
 
             int served = 0;
-            Task run = new Nghttp3Connection(quic).RunBufferedAsync(req =>
+            Task run = new Nghttp3Connection(quic).RunAsync(req =>
             {
                 served++;
                 return Nghttp3Response.Text("ok");
@@ -307,7 +307,7 @@ internal static class H3ErrorCodeTests
             var quic = new RecordingQuic();
             Assert.True(quic.EnqueueStreamData(0, SettingsOnRequestStream, false), "the recv ring rejected the item");
 
-            Task run = new Nghttp3Connection(quic).RunBufferedAsync(static _ => Nghttp3Response.Text("ok"));
+            Task run = new Nghttp3Connection(quic).RunAsync(static _ => Nghttp3Response.Text("ok"));
             Assert.True(run.IsCompleted, "premise: nghttp3 rejected the stream and the run ended");
 
             Assert.True(quic.ClosedWith is ulong code && code != H3NoError,
@@ -326,22 +326,22 @@ internal static class H3ErrorCodeTests
 
             var loops = new (string Name, Func<RecordingQuic, Served, Task> Start)[]
             {
-                ("buffered", (q, s) => new Nghttp3Connection(q).RunBufferedAsync(_ =>
+                ("buffered", (q, s) => new Nghttp3Connection(q).RunAsync(_ =>
                 {
                     s.Count++;
                     return Nghttp3Response.Text("ok");
                 })),
-                ("buffered async", (q, s) => new Nghttp3Connection(q).RunBufferedAsync(_ =>
+                ("buffered async", (q, s) => new Nghttp3Connection(q).RunAsync(_ =>
                 {
                     s.Count++;
                     return ValueTask.FromResult(Nghttp3Response.Text("ok"));
                 })),
-                ("streaming", (q, s) => new Nghttp3Connection(q, new Nghttp3Options { StreamRequestBodies = true }).RunBufferedAsync(_ =>
+                ("streaming", (q, s) => new Nghttp3Connection(q).RunAsync((_, _) =>
                 {
                     s.Count++;
                     return ValueTask.FromResult(Nghttp3Response.Text("ok"));
                 })),
-                ("streamed", (q, s) => new Nghttp3Connection(q, new Nghttp3Options { StreamRequestBodies = true }).RunStreamedResponseAsync((_, writer) =>
+                ("streamed", (q, s) => new Nghttp3Connection(q).RunAsync((_, _, writer) =>
                 {
                     s.Count++;
                     writer.WriteHeaders(new Nghttp3Response { Status = 200 });
@@ -366,7 +366,7 @@ internal static class H3ErrorCodeTests
             // transport already ended it, and the idle sweep means that to stay silent.
             var evicted = new RecordingQuic(alpn: null);
             evicted.MarkClosed();
-            Task drained = new Nghttp3Connection(evicted).RunBufferedAsync(static _ => Nghttp3Response.Text("ok"));
+            Task drained = new Nghttp3Connection(evicted).RunAsync(static _ => Nghttp3Response.Text("ok"));
             Assert.True(drained.IsCompleted, "the closed wake must end the run loop");
             Assert.True(evicted.CloseCalls == 0, $"an evicted connection was closed with 0x{evicted.ClosedWith:x}");
         });
@@ -396,7 +396,7 @@ internal static class H3ErrorCodeTests
 
         Served count = new();
         served = count;
-        return new Http3Connection(quic).RunBufferedAsync(req =>
+        return new Http3Connection(quic).RunAsync(req =>
         {
             count.Count++;
             return Http3Response.Text("ok");

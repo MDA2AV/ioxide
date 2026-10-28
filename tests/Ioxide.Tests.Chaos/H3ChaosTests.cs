@@ -21,7 +21,7 @@ internal static class H3ChaosTests
         {
             (string certPath, string keyPath) = TestCert.Ensure();
             var engine = TestServer.Own(new QuicEngine(certPath, keyPath, cidLength: 8, alpn: ["h3"]));
-            int udpPort = Start(engine, static (_, conn) => new Nghttp3Connection(conn).RunBufferedAsync(
+            int udpPort = Start(engine, static (_, conn) => new Nghttp3Connection(conn).RunAsync(
                 static req => Nghttp3Response.Text($"len {req.Path.Length}")));
 
             using var client = new H3TestClient("127.0.0.1", udpPort);
@@ -38,7 +38,7 @@ internal static class H3ChaosTests
         {
             (string certPath, string keyPath) = TestCert.Ensure();
             var engine = TestServer.Own(new QuicEngine(certPath, keyPath, cidLength: 8, alpn: ["h3"]));
-            int udpPort = Start(engine, static (_, conn) => new Nghttp3Connection(conn).RunBufferedAsync(
+            int udpPort = Start(engine, static (_, conn) => new Nghttp3Connection(conn).RunAsync(
                 static _ => Nghttp3Response.Text("ok")));
 
             using var client = new H3TestClient("127.0.0.1", udpPort);
@@ -64,13 +64,13 @@ internal static class H3ChaosTests
 
             // Streaming handler: drains the body, crediting the window mid-flight, so a body larger
             // than the 256 KB stream window completes rather than deadlocking.
-            int udpPort = Start(engine, static (_, conn) => new Nghttp3Connection(conn, new Nghttp3Options { StreamRequestBodies = true }).RunBufferedAsync(
-                static async req =>
+            int udpPort = Start(engine, static (_, conn) => new Nghttp3Connection(conn).RunAsync(
+                static async (_, body) =>
                 {
                     long total = 0;
                     while (true)
                     {
-                        ReadOnlyMemory<byte> chunk = await req.BodyReader!.ReadAsync();
+                        ReadOnlyMemory<byte> chunk = await body.ReadAsync();
                         if (chunk.IsEmpty)
                         {
                             break;
@@ -96,7 +96,7 @@ internal static class H3ChaosTests
         {
             (string certPath, string keyPath) = TestCert.Ensure();
             var engine = TestServer.Own(new QuicEngine(certPath, keyPath, cidLength: 8, alpn: ["h3"]));
-            int udpPort = Start(engine, static (_, conn) => new Nghttp3Connection(conn).RunBufferedAsync(
+            int udpPort = Start(engine, static (_, conn) => new Nghttp3Connection(conn).RunAsync(
                 static req => Nghttp3Response.Text($"got {req.Body.Length}")));
 
             using var client = new H3TestClient("127.0.0.1", udpPort);

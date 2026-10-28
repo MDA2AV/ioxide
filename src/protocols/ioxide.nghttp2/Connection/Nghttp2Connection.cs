@@ -10,8 +10,13 @@ namespace ioxide.nghttp2;
 ///
 /// <code>
 /// reactor.TcpHandle = (r, conn) =>
-///     new Nghttp2Connection(conn).RunBufferedAsync(request => Nghttp2Response.Text("hello"));
+///     new Nghttp2Connection(conn).RunAsync(request => Nghttp2Response.Text("hello"));
 /// </code>
+///
+/// <c>RunAsync</c> serves it, and the handler's parameters choose both directions: one that
+/// returns a response answers whole, one given an <see cref="Nghttp2ResponseWriter"/> streams it;
+/// one given an <see cref="Nghttp2BodyReader"/> runs at the HEADERS and pulls the body as it
+/// arrives, one without gets it whole in <see cref="Nghttp2Request.Body"/>.
 ///
 /// This is the mirror of the HTTP/3 side's <c>Nghttp3Connection</c> and takes the same shape, but
 /// the insides differ for a reason worth knowing: nghttp3 gets streams, multiplexing and flow
@@ -50,6 +55,10 @@ public sealed partial class Nghttp2Connection : IDisposable
     private bool _disposed;
     private bool _failed;
 
+    // The handler takes a body reader: a request is dispatched at its headers, its body to follow,
+    // and the session returns no WINDOW_UPDATE of its own.
+    private bool _streamBodies;
+
     // The first exception a native callback raised, kept for the log line; _failed carries the
     // decision out to the loops, since teardown cannot happen inside a callback.
     private Exception? _callbackFault;
@@ -70,7 +79,6 @@ public sealed partial class Nghttp2Connection : IDisposable
     {
         _pipe = pipe;
         _options = options ?? new Nghttp2Options();
-        Setup();
     }
 
     /// <summary>Convenience for cleartext h2c: wraps the connection in its own duplex pipe.</summary>
@@ -82,6 +90,8 @@ public sealed partial class Nghttp2Connection : IDisposable
     /// <summary>True once the session can serve no more - protocol error, or the peer is gone.</summary>
     public bool IsBroken => _failed || _disposed;
 
+    // Run from the loop, not the constructor: whether nghttp2 credits DATA itself depends on whether
+    // the handler takes a body reader, which only the RunAsync overload says.
     private unsafe void Setup()
     {
         _self = GCHandle.Alloc(this);
@@ -97,7 +107,7 @@ public sealed partial class Nghttp2Connection : IDisposable
         };
 
         _handle = Nghttp2.ih2_server_new(callbacks, (void*)GCHandle.ToIntPtr(_self),
-            _options.StreamRequestBodies ? 1 : 0);
+            _streamBodies ? 1 : 0);
         if (_handle == 0)
         {
             _failed = true;

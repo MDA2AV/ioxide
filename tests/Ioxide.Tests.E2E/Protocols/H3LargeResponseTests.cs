@@ -27,9 +27,9 @@ internal static class H3LargeResponseTests
 
     private static Func<Reactor, QuicConnection, Task> ServeBuffered(string stack, byte[] body) => stack switch
     {
-        "ioxide.http3" => (_, conn) => new Http3Connection(conn).RunBufferedAsync(_ => new Http3Response { Body = body }),
-        "ioxide.http3 async" => (_, conn) => new Http3Connection(conn, new Http3Options { StreamRequestBodies = true }).RunBufferedAsync(_ => ValueTask.FromResult(new Http3Response { Body = body })),
-        _ => (_, conn) => new Nghttp3Connection(conn).RunBufferedAsync(_ => new Nghttp3Response { Body = body }),
+        "ioxide.http3" => (_, conn) => new Http3Connection(conn).RunAsync(_ => new Http3Response { Body = body }),
+        "ioxide.http3 async" => (_, conn) => new Http3Connection(conn).RunAsync((_, _) => ValueTask.FromResult(new Http3Response { Body = body })),
+        _ => (_, conn) => new Nghttp3Connection(conn).RunAsync(_ => new Nghttp3Response { Body = body }),
     };
 
     public static void Register(Runner runner)
@@ -72,7 +72,7 @@ internal static class H3LargeResponseTests
             (_, int udpPort) = TestServer.StartDatagram(
                 onDatagram: null,
                 quicFactory: engine.CreateFactory(),
-                quicHandle: static (_, conn) => new Http3Connection(conn).RunStreamedResponseAsync(
+                quicHandle: static (_, conn) => new Http3Connection(conn).RunAsync(
                     static async (_, writer) =>
                     {
                         writer.WriteHeaders(new Http3Response { Status = 200 });

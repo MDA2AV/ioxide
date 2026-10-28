@@ -90,7 +90,7 @@ for (int i = 0; i < threads.Length; i++)
     {
         try
         {
-            await new Http2Connection(conn).RunStreamedResponseAsync(async (request, writer) =>
+            await new Http2Connection(conn).RunAsync(async (request, writer) =>
             {
                 bool endless = request.Path.Span.SequenceEqual("/feed"u8);
 

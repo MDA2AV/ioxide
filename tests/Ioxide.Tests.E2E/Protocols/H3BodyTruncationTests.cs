@@ -79,7 +79,7 @@ internal static class H3BodyTruncationTests
             (_, int udpPort) = TestServer.StartDatagram(
                 onDatagram: null,
                 quicFactory: engine.CreateFactory(),
-                quicHandle: (_, conn) => new Http3Connection(conn).RunBufferedAsync(
+                quicHandle: (_, conn) => new Http3Connection(conn).RunAsync(
                     req =>
                     {
                         Volatile.Write(ref served, req.Body.Length);
@@ -111,7 +111,7 @@ internal static class H3BodyTruncationTests
             (_, int udpPort) = TestServer.StartDatagram(
                 onDatagram: null,
                 quicFactory: engine.CreateFactory(),
-                quicHandle: (_, conn) => new Http3Connection(conn).RunBufferedAsync(
+                quicHandle: (_, conn) => new Http3Connection(conn).RunAsync(
                     req =>
                     {
                         Volatile.Write(ref served, req.Body.Length);
@@ -164,7 +164,7 @@ internal static class H3BodyTruncationTests
 
         runner.Test("http3: a streamed response refused before it runs finds its stream gone on the first flush", () =>
         {
-            // StreamRequestBodies dispatches a streamed response at its HEADERS, so a body that runs
+            // Taking a body reader dispatches a streamed response at its HEADERS, so a body that runs
             // past its content-length in the same datagram is refused after the request was made
             // ready and before its handler starts. The reset drops whatever is sent on the stream
             // without filling the connection, so a writer nobody told never parks: every flush
@@ -197,8 +197,8 @@ internal static class H3BodyTruncationTests
         (_, int udpPort) = TestServer.StartDatagram(
             onDatagram: null,
             quicFactory: engine.CreateFactory(),
-            quicHandle: (_, conn) => new Http3Connection(conn, new Http3Options { StreamRequestBodies = true }).RunStreamedResponseAsync(
-                async (req, writer) =>
+            quicHandle: (_, conn) => new Http3Connection(conn).RunAsync(
+                async (_, reader, writer) =>
                 {
                     writer.WriteHeaders(new Http3Response { Status = 200 });
                     started.TrySetResult();
@@ -206,7 +206,7 @@ internal static class H3BodyTruncationTests
                     string body;
                     try
                     {
-                        while (!(await req.BodyReader!.ReadAsync()).IsEmpty)
+                        while (!(await reader.ReadAsync()).IsEmpty)
                         {
                         }
                         body = "ended";
@@ -270,8 +270,8 @@ internal static class H3BodyTruncationTests
         (_, int udpPort) = TestServer.StartDatagram(
             onDatagram: null,
             quicFactory: engine.CreateFactory(),
-            quicHandle: (_, conn) => new Http3Connection(conn, new Http3Options { StreamRequestBodies = true }).RunBufferedAsync(
-                async req =>
+            quicHandle: (_, conn) => new Http3Connection(conn).RunAsync(
+                async (_, body) =>
                 {
                     started.TrySetResult();
 
@@ -280,7 +280,7 @@ internal static class H3BodyTruncationTests
                     {
                         while (true)
                         {
-                            ReadOnlyMemory<byte> chunk = await req.BodyReader!.ReadAsync();
+                            ReadOnlyMemory<byte> chunk = await body.ReadAsync();
                             if (chunk.IsEmpty)
                             {
                                 ended.TrySetResult($"ended after {total}");
@@ -339,7 +339,7 @@ internal static class H3BodyTruncationTests
             (_, int udpPort) = TestServer.StartDatagram(
                 onDatagram: null,
                 quicFactory: engine.CreateFactory(),
-                quicHandle: (_, conn) => new Http3Connection(conn).RunBufferedAsync(
+                quicHandle: (_, conn) => new Http3Connection(conn).RunAsync(
                     req =>
                     {
                         Interlocked.Increment(ref served);

@@ -128,7 +128,7 @@ for (int i = 0; i < threads.Length; i++)
                 // achieved, not by anything chosen here.
                 await using var pipe = new TlsConnectionDualPipe(conn, tls, ownsSession: false);
 
-                await new Http2Connection(pipe).RunBufferedAsync(_ => new Http2Response
+                await new Http2Connection(pipe).RunAsync(_ => new Http2Response
                 {
                     Status = 200,
                     Body = body,

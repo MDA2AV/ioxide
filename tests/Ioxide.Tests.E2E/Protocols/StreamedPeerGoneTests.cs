@@ -146,7 +146,7 @@ internal static class StreamedPeerGoneTests
             {
                 if (native)
                 {
-                    await new Nghttp2Connection(conn).RunStreamedResponseAsync((request, writer) => serve(Path(request.Path),
+                    await new Nghttp2Connection(conn).RunAsync((request, writer) => serve(Path(request.Path),
                         body =>
                         {
                             writer.Write(body.Span);
@@ -156,7 +156,7 @@ internal static class StreamedPeerGoneTests
                 }
                 else
                 {
-                    await new Http2Connection(conn).RunStreamedResponseAsync((request, writer) => serve(Path(request.Path),
+                    await new Http2Connection(conn).RunAsync((request, writer) => serve(Path(request.Path),
                         body =>
                         {
                             writer.Write(body.Span);
@@ -180,14 +180,14 @@ internal static class StreamedPeerGoneTests
             {
                 var serve = server.For(reactor);
                 return native
-                    ? new Nghttp3Connection(conn, new Nghttp3Options { StreamRequestBodies = true }).RunStreamedResponseAsync((request, writer) => serve(Path(request.Path),
+                    ? new Nghttp3Connection(conn).RunAsync((request, _, writer) => serve(Path(request.Path),
                         body =>
                         {
                             writer.Write(body.Span);
                             return writer.FlushAsync();
                         },
                         status => writer.WriteHeaders(new Nghttp3Response { Status = status })))
-                    : new Http3Connection(conn).RunStreamedResponseAsync((request, writer) => serve(Path(request.Path),
+                    : new Http3Connection(conn).RunAsync((request, writer) => serve(Path(request.Path),
                         body =>
                         {
                             writer.Write(body.Span);

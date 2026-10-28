@@ -24,14 +24,24 @@ public sealed partial class Http3Connection
 
     /// <summary>
     /// Serve this connection with each response body produced through a writer rather than
-    /// returned whole. The handler owns its stream until it completes the writer. With
-    /// <see cref="Http3Options.StreamRequestBodies"/> it starts at END-OF-HEADERS and pulls the
-    /// request body through <see cref="Http3Request.BodyReader"/> while it writes; without it, at
-    /// end-of-stream with the whole body in <see cref="Http3Request.Body"/>.
+    /// returned whole, dispatched at end-of-stream with the whole request body in
+    /// <see cref="Http3Request.Body"/>. The handler owns its stream until it completes the writer.
     /// </summary>
-    public async Task RunStreamedResponseAsync(Func<Http3Request, Http3ResponseWriter, ValueTask> handler)
+    public Task RunAsync(Func<Http3Request, Http3ResponseWriter, ValueTask> handler)
+        => RunStreamedAsync(handler);
+
+    /// <summary>
+    /// Both directions streamed: each request is dispatched at END-OF-HEADERS, and the handler
+    /// pulls the body through its <see cref="Http3BodyReader"/> while it writes the response.
+    /// </summary>
+    public Task RunAsync(Func<Http3Request, Http3BodyReader, Http3ResponseWriter, ValueTask> handler)
     {
-        _streamBodies = _options.StreamRequestBodies;
+        _streamBodies = true;
+        return RunStreamedAsync((request, writer) => handler(request, request.BodyReader!, writer));
+    }
+
+    private async Task RunStreamedAsync(Func<Http3Request, Http3ResponseWriter, ValueTask> handler)
+    {
         _quicConnection.OnSendCapacityAvailable = ReleaseCapacityWaiters;
 
         try

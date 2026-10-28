@@ -22,8 +22,19 @@ public sealed partial class Nghttp2Connection
     /// Serve this connection with each response body produced through a writer rather than
     /// returned whole. The handler owns its stream until it returns.
     /// </summary>
-    public Task RunStreamedResponseAsync(Func<Nghttp2Request, Nghttp2ResponseWriter, ValueTask> handler)
+    public Task RunAsync(Func<Nghttp2Request, Nghttp2ResponseWriter, ValueTask> handler)
         => RunCoreAsync(() => DispatchStreamed(handler));
+
+    /// <summary>
+    /// Both directions streamed: each request is dispatched as soon as its HEADERS are in, and the
+    /// handler pulls the body through its <see cref="Nghttp2BodyReader"/> while it writes the response.
+    /// </summary>
+    public Task RunAsync(Func<Nghttp2Request, Nghttp2BodyReader, Nghttp2ResponseWriter, ValueTask> handler)
+    {
+        _streamBodies = true;
+        Func<Nghttp2Request, Nghttp2ResponseWriter, ValueTask> streamed = (request, writer) => handler(request, request.BodyReader!, writer);
+        return RunCoreAsync(() => DispatchStreamed(streamed));
+    }
 
     /// <summary>
     /// Hand each ready request to a writer. Called from the pass that made it ready, so the

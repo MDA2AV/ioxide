@@ -49,10 +49,6 @@ public sealed class Http2Request
     /// <summary>Request body, empty when there was none - or when it is being streamed.</summary>
     public ReadOnlyMemory<byte> Body { get; internal set; }
 
-    /// <summary>
-    /// The body as it arrives, set only when <see cref="Http2Options.StreamRequestBodies"/> is on;
-    /// null otherwise, when <see cref="Body"/> already holds it whole. The handler runs while the
-    /// body is still coming in, so reading it is what lets the peer send more.
-    /// </summary>
-    public Http2BodyReader? BodyReader { get; internal set; }
+    // The body as it arrives, for a handler that takes a body reader - which is how it is handed one.
+    internal Http2BodyReader? BodyReader { get; set; }
 }
