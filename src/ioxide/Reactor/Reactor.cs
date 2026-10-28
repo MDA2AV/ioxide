@@ -79,6 +79,9 @@ public sealed unsafe partial class Reactor
     private readonly int _poolMax;
     private readonly Stack<TcpConnection> _pool;
 
+    // Every TcpConnection life on this reactor takes the next value, so two lives never share a generation (#416).
+    private int _tcpGeneration;
+
     // Incremental-mode sizing (see Reactor.Incremental.cs).
     private readonly int  _maxConnections;       // one bgid per active connection
     private readonly int  _connBufRingEntries;
@@ -161,6 +164,9 @@ public sealed unsafe partial class Reactor
         TcpConnection? conn = (uint)fd < (uint)conns.Length ? conns[fd] : null;
         return conn != null && (ushort)conn.Generation == gen ? conn : null;
     }
+
+    // Reactor thread: a connection is constructed at accept and cleared at recycle.
+    internal int NextTcpGeneration() => ++_tcpGeneration;
 
     private void Track(int fd, TcpConnection conn)
     {

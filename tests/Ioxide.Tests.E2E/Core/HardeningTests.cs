@@ -10,7 +10,8 @@ namespace Ioxide.Tests;
 /// <summary>
 /// Regression tests for the hardening issues: #92 (gid-exhaustion reactor crash), #93 (-ENOBUFS
 /// teardown of healthy connections, both loop modes), #94 (faulted handlers leaking connections),
-/// #242 (a handler released twice, so teardown closed a number it had given back).
+/// #242 (a handler released twice, so teardown closed a number it had given back), #416 (a recycled
+/// connection's stale recv completion closed the next connection on its number).
 /// Each of these failed (or killed the process) before its fix.
 /// </summary>
 internal static class HardeningTests
@@ -247,6 +248,22 @@ internal static class HardeningTests
             Assert.True(closed.Length == 0, $"the server's teardown closed {string.Join(", ", closed)}");
         });
 
+        runner.Test("core: a recycled connection's stale recv completion does not close the next connection on its number (#416)", () =>
+        {
+            // PoolMax 0: every connection is a new object, so both lives start from the same generation.
+            (string got, int a, int b) = NextConnectionOnTheSameNumber(poolMax: 0);
+            Assert.True(b == a, $"precondition: B was accepted on {b}, not on A's {a}");
+            Assert.True(got == "BBBB", $"B, accepted on the number A gave back, was closed before it was served: '{got}'");
+        });
+
+        runner.Test("core: control: the same stale completion misses a connection taken from the pool", () =>
+        {
+            // B reuses A's object, whose generation its recycle moved.
+            (string got, int a, int b) = NextConnectionOnTheSameNumber(poolMax: 64);
+            Assert.True(b == a, $"precondition: B was accepted on {b}, not on A's {a}");
+            Assert.True(got == "BBBB", $"B was closed before it was served: '{got}'");
+        });
+
         runner.Test("core: incremental accept past MaxConnections sheds, reactor survives (#92)", () =>
         {
             (int port, _, _) = TestServer.StartConfigured(Handlers.Raw,
@@ -407,6 +424,129 @@ internal static class HardeningTests
     private const int FGetFd = 1;
 
     private static bool IsOpen(int fd) => fcntl(fd, FGetFd) != -1;
+
+    /// <summary>
+    /// Connection A is recycled with its multishot recv still armed: its send fails after its own FIN, which
+    /// wakes nothing on the read side, so the recv's cancel is only queued when its number is closed. The
+    /// reactor is held until B has connected, so the next enter accepts B onto that number ahead of A's
+    /// -ECANCELED. Returns what B got back for its "BBBB", and the numbers A and B were accepted on.
+    /// </summary>
+    private static (string Got, int A, int B) NextConnectionOnTheSameNumber(int poolMax)
+    {
+        using var aStalled = new ManualResetEventSlim();
+        using var bConnected = new ManualResetEventSlim();
+        int[] numbers = [-1, -1];
+
+        (int port, _, _) = TestServer.StartConfigured(async (_, conn) =>
+        {
+            try
+            {
+                bool isB = aStalled.IsSet;   // the harness's probe and A come first
+                if (isB)
+                {
+                    Volatile.Write(ref numbers[1], conn.ClientFd);
+                }
+
+                RecvSnapshot first = await conn.ReadAsync();
+                var head = new List<byte>();
+                while (conn.TryGetItem(first, out SpscRecvRing.Item item))
+                {
+                    if (item.HasBuffer)
+                    {
+                        head.AddRange(item.AsSpan().ToArray());
+                        conn.ReturnBuffer(in item);
+                    }
+                }
+
+                if (!isB && head.Count >= 4 && head[0] == (byte)'A')
+                {
+                    Volatile.Write(ref numbers[0], conn.ClientFd);
+                    conn.ShutdownWrite();
+                    conn.Write(new byte[16]);
+                    await conn.FlushAsync();   // EPIPE: the reactor tears A down, its recv still armed
+
+                    // Resumed inline by the failed send, so this holds the reactor thread on purpose.
+                    aStalled.Set();
+                    bConnected.Wait(5_000);
+                    Thread.Sleep(50);   // B's handshake reaches the listener
+                    return;
+                }
+
+                conn.Write(head.ToArray());
+                await conn.FlushAsync();
+            }
+            finally
+            {
+                conn.DecRef();
+            }
+        }, new ServerConfig
+        {
+            RecvBufferSize = 4096,
+            RecvSlots = 256,
+            Tcp = new TcpOptions { WriteSlabSize = 16 * 1024, PoolMax = poolMax, RecvQueueEntries = 64 },
+        });
+
+        using var a = new TcpClient();
+        a.Connect("127.0.0.1", port);
+        a.GetStream().Write("AAAA"u8);
+        Assert.True(aStalled.Wait(5_000), "A's failed flush never returned");
+
+        // Every free number below A's taken, so the one A gives back is the lowest free when B is accepted.
+        int aNumber = Volatile.Read(ref numbers[0]);
+        var filler = new List<int>();
+        while (true)
+        {
+            int fd = ioxide.Native.open("/dev/null", 0, 0);
+            if (fd < 0 || fd > aNumber)
+            {
+                if (fd >= 0)
+                {
+                    ioxide.Native.close(fd);
+                }
+                break;
+            }
+            filler.Add(fd);
+        }
+
+        try
+        {
+            using var b = new TcpClient();
+            b.Connect("127.0.0.1", port);
+            bConnected.Set();
+            b.Client.ReceiveTimeout = 5_000;
+            b.GetStream().Write("BBBB"u8);
+
+            var got = new byte[4];
+            int n = 0;
+            string end = "";
+            try
+            {
+                while (n < got.Length)
+                {
+                    int r = b.Client.Receive(got, n, got.Length - n, SocketFlags.None);
+                    if (r == 0)
+                    {
+                        end = "<EOF>";
+                        break;
+                    }
+                    n += r;
+                }
+            }
+            catch (SocketException e)
+            {
+                end = $"<{e.SocketErrorCode}>";
+            }
+            return (Encoding.ASCII.GetString(got, 0, n) + end, Volatile.Read(ref numbers[0]), Volatile.Read(ref numbers[1]));
+        }
+        finally
+        {
+            bConnected.Set();
+            foreach (int fd in filler)
+            {
+                ioxide.Native.close(fd);
+            }
+        }
+    }
 
     /// <summary>
     /// Serve one connection with a handler that lets go (and then throws, or not), wait for the server
