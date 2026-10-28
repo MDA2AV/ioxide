@@ -79,7 +79,7 @@ for (int i = 0; i < threads.Length; i++)
     {
         try
         {
-            await new Http2Connection(conn, http2).RunAsync(async (request, writer) =>
+            await new Http2Connection(conn, http2).RunStreamedResponseAsync(async (request, writer) =>
             {
                 bool echo = request.Path.Span.SequenceEqual("/echo"u8);
 

@@ -270,7 +270,7 @@ internal static class QuicMigrationTests
                  {
                      ("nghttp3", static (_, conn) => new Nghttp3Connection(conn).RunBufferedAsync(
                          _ => Nghttp3Response.Text($"conn-{conn.GetHashCode():x8}"))),
-                     ("pure-c#", static (_, conn) => new Http3Connection(conn).RunAsync(
+                     ("pure-c#", static (_, conn) => new Http3Connection(conn).RunBufferedAsync(
                          _ => Http3Response.Text($"conn-{conn.GetHashCode():x8}"))),
                  })
         {

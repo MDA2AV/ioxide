@@ -1,79 +1,15 @@
 namespace ioxide.nghttp3;
 
 /// <summary>
-/// The STREAMING flavor: dispatch at end-of-headers, body pulled through
-/// <see cref="Nghttp3Request.BodyReader"/> under flow-control pacing, plus all the machinery only
-/// this flavor uses - the body-wake deferral and window crediting. Requests recycle when the
-/// handler's task has completed AND the stream has left the tables (whichever happens last owns
-/// the release; the Pooled flag makes it race-free).
+/// The STREAMED request body (<see cref="Nghttp3Options.StreamRequestBodies"/>): dispatch at
+/// end-of-headers, body pulled through <see cref="Nghttp3Request.BodyReader"/> under flow-control
+/// pacing, plus all the machinery only this mode uses - the body-wake deferral and window crediting.
+/// The dispatch here answers with a buffered response; a streamed one dispatches in Streamed.
+/// Requests recycle when the handler's task has completed AND the stream has left the tables
+/// (whichever happens last owns the release; the Pooled flag makes it race-free).
 /// </summary>
 public sealed partial class Nghttp3Connection
 {
-    /// <summary>Streaming: dispatch at END-OF-HEADERS, body pulled through
-    /// <see cref="Nghttp3Request.BodyReader"/> while the request stream is flow-control paced - a slow
-    /// consumer freezes the peer's window instead of buffering (memory bound = one window, not the
-    /// body size). The handler must resume on the reactor (every ioxide await does). Owns the
-    /// handler's connection ref.</summary>
-    public async Task RunStreamingAsync(Func<Nghttp3Request, ValueTask<Nghttp3Response>> handler)
-    {
-        _streaming = true;
-        try
-        {
-            while (true)
-            {
-                QuicRecvSnapshot snapshot = await _quicConnection.ReadAsync();
-
-                if (_nghttp3Handle == 0 && !_protocolFailed && !TrySetup())
-                {
-                    FailInternal();
-                }
-
-                while (_quicConnection.TryGetDelivery(in snapshot, out QuicRecvRing.Delivery item))
-                {
-                    if (!_protocolFailed)
-                    {
-                        PushToEngine(in item);
-                    }
-                    _quicConnection.ReturnBuffer(in item);
-                }
-
-                if (!_protocolFailed)
-                {
-                    // Deferred body wakes first: a resumed body-await may complete its request and
-                    // its Submit/Drain rides this same pass. nghttp3 has fully unwound here.
-                    FireBodyWakes();
-                    DispatchStreaming(handler);
-                    PumpEgress();
-                    CloseIfShutdownComplete();
-                }
-
-                if (snapshot.IsClosed || _protocolFailed)
-                {
-                    break;
-                }
-                _quicConnection.ResetRead();
-            }
-        }
-        finally
-        {
-            // Unpark any handler still awaiting a body: reads return empty, its response submit
-            // no-ops against the disposed engine. In-flight requests die with the connection.
-            foreach (Nghttp3BodyReader sink in _sinks.Values)
-            {
-                sink.Drop();
-            }
-            FireBodyWakes();
-            _sinks.Clear();
-
-            // Before letting go, because letting go is all the transport sees: DecRef neither
-            // closes nor unregisters.
-            CloseWithPeerCode();
-
-            _quicConnection.DecRef();
-            Dispose();
-        }
-    }
-
     private void DispatchStreaming(Func<Nghttp3Request, ValueTask<Nghttp3Response>> handler)
     {
         for (int i = 0; i < _readyStreamIds.Count && !_protocolFailed; i++)

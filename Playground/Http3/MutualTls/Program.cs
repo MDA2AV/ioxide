@@ -98,7 +98,7 @@ for (int i = 0; i < threads.Length; i++)
     var reactor = new Reactor(i, config);
 
     reactor.QuicHandle = (_, connection) =>
-        new Http3Connection(connection).RunAsync(_ =>
+        new Http3Connection(connection).RunBufferedAsync(_ =>
         {
             // Read HERE, per request - not where the connection is accepted. That callback runs
             // before the handshake finishes, so there is no identity yet at that point.

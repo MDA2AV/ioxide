@@ -49,14 +49,13 @@ public sealed class Nghttp3Request
         return false;
     }
 
-    /// <summary>Whole body - buffered flavor only (empty under the streaming overload).</summary>
+    /// <summary>Whole body, assembled before dispatch (empty with <see cref="Nghttp3Options.StreamRequestBodies"/>).</summary>
     public ReadOnlyMemory<byte> Body { get; internal set; }
 
     /// <summary>
-    /// Streaming body pull surface - non-null only under the async
-    /// <see cref="Nghttp3Connection.RunStreamingAsync"/> overload, where
-    /// dispatch happens at end-of-headers and the body arrives while the handler runs. Under the
-    /// sync overload the body is pre-buffered into <see cref="Body"/> instead.
+    /// Streaming body pull surface - non-null only with <see cref="Nghttp3Options.StreamRequestBodies"/>,
+    /// where dispatch happens at end-of-headers and the body arrives while the handler runs.
+    /// Otherwise the body is pre-buffered into <see cref="Body"/> instead.
     /// </summary>
     public Nghttp3BodyReader? BodyReader { get; internal set; }
 
@@ -71,7 +70,7 @@ public sealed class Nghttp3Request
     internal (int Off, int Len) MethodR = (0, -1), PathR = (0, -1), SchemeR = (0, -1), AuthorityR = (0, -1);
     internal readonly List<(int NOff, int NLen, int VOff, int VLen)> HeaderRanges = [];
 
-    // Body accumulation (buffered flavor): a pooled growable array, returned on recycle.
+    // Body accumulation (an assembled body): a pooled growable array, returned on recycle.
     internal byte[]? BodyArr;
     internal int BodyLen;
 
@@ -80,6 +79,7 @@ public sealed class Nghttp3Request
     internal bool Dispatched;     // handler invoked (streaming: request may outlive the dict entry)
     internal bool HandlerDone;    // streaming: the handler's ValueTask completed
     internal bool Detached;       // streaming: the stream closed while the handler was still running
+    internal bool Overflowed;     // the assembled body passed MaxRequestBytes: reset, never dispatched
     internal bool Pooled;         // recycled - guards double-release
 
     internal unsafe (int Off, int Len) Append(byte* source, int length)
@@ -108,7 +108,8 @@ public sealed class Nghttp3Request
         }
         else if (BodyArr.Length - BodyLen < data.Length)
         {
-            byte[] grown = ArrayPool<byte>.Shared.Rent(Math.Max(BodyLen + data.Length, BodyArr.Length * 2));
+            // In long arithmetic: doubling an array past 1 GiB overflows an int.
+            byte[] grown = ArrayPool<byte>.Shared.Rent((int)Math.Min(Math.Max((long)BodyLen + data.Length, (long)BodyArr.Length * 2), Array.MaxLength));
             BodyArr.AsSpan(0, BodyLen).CopyTo(grown);
             ArrayPool<byte>.Shared.Return(BodyArr);
             BodyArr = grown;
@@ -155,19 +156,26 @@ public sealed class Nghttp3Request
         MethodR = PathR = SchemeR = AuthorityR = (0, -1);
         HeaderRanges.Clear();
 
-        if (BodyArr is not null)
-        {
-            ArrayPool<byte>.Shared.Return(BodyArr);
-            BodyArr = null;
-        }
-        BodyLen = 0;
+        DropBody();
 
         HeadersDone = false;
         Complete = false;
         Dispatched = false;
         HandlerDone = false;
         Detached = false;
+        Overflowed = false;
         Pooled = false;
+    }
+
+    // Return the assembled body's buffer to the pool.
+    internal void DropBody()
+    {
+        if (BodyArr is not null)
+        {
+            ArrayPool<byte>.Shared.Return(BodyArr);
+            BodyArr = null;
+        }
+        BodyLen = 0;
     }
 
     private ReadOnlyMemory<byte> Slice((int Off, int Len) range) => range.Len < 0 ? default : Arena.AsMemory(range.Off, range.Len);

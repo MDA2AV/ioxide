@@ -127,7 +127,7 @@ internal static class Http3BodyTests
         (_, int udpPort) = TestServer.StartDatagram(
             onDatagram: null,
             quicFactory: engine.CreateFactory(),
-            quicHandle: (_, conn) => new Nghttp3Connection(conn).RunStreamedResponseAsync(
+            quicHandle: (_, conn) => new Nghttp3Connection(conn, new Nghttp3Options { StreamRequestBodies = true }).RunStreamedResponseAsync(
                 async (_, writer) =>
                 {
                     writer.WriteHeaders(new Nghttp3Response { Status = 200 });
@@ -145,7 +145,7 @@ internal static class Http3BodyTests
         (_, int udpPort) = TestServer.StartDatagram(
             onDatagram: null,
             quicFactory: engine.CreateFactory(),
-            quicHandle: (_, conn) => new Nghttp3Connection(conn).RunStreamedResponseAsync(
+            quicHandle: (_, conn) => new Nghttp3Connection(conn, new Nghttp3Options { StreamRequestBodies = true }).RunStreamedResponseAsync(
                 async (_, writer) =>
                 {
                     writer.WriteHeaders(new Nghttp3Response { Status = 200 });

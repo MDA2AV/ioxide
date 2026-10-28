@@ -15,7 +15,12 @@ public sealed partial class Nghttp2Connection
         => RunBufferedAsync(request => new ValueTask<Nghttp2Response>(handler(request)));
 
     /// <summary>Serve until the peer goes away, with an asynchronous handler.</summary>
-    public async Task RunBufferedAsync(Func<Nghttp2Request, ValueTask<Nghttp2Response>> handler)
+    public Task RunBufferedAsync(Func<Nghttp2Request, ValueTask<Nghttp2Response>> handler)
+        => RunCoreAsync(() => DispatchBuffered(handler));
+
+    // The one serving loop. Each entry point hands it the dispatch for its response mode, run once
+    // per read pass.
+    private async Task RunCoreAsync(Action dispatch)
     {
         try
         {
@@ -32,7 +37,7 @@ public sealed partial class Nghttp2Connection
                 _pipe.Input.AdvanceTo(read.Buffer.End);
 
                 // Handlers run HERE, after ih2_read has unwound - see the callbacks file.
-                await DispatchReadyAsync(handler);
+                dispatch();
 
                 // Body chunks reach parked readers inside the pass, so the credit they return rides
                 // this pass's drain rather than a write of its own.
@@ -83,29 +88,44 @@ public sealed partial class Nghttp2Connection
         }
     }
 
-    private async ValueTask DispatchReadyAsync(Func<Nghttp2Request, ValueTask<Nghttp2Response>> handler)
+    // Snapshot and clear first: a handler that awaits can let another read pass land more
+    // requests here, and the list must not be mutated while it is walked.
+    private PendingRequest[] TakeReady()
     {
         if (_readyThisPass.Count == 0)
         {
-            return;
+            return [];
         }
 
-        // Snapshot and clear first: a handler that awaits can let another read pass land more
-        // requests here, and the list must not be mutated while it is walked.
         PendingRequest[] ready = _readyThisPass.ToArray();
         _readyThisPass.Clear();
+        return ready;
+    }
 
-        foreach (PendingRequest pending in ready)
+    // A request that outgrew MaxRequestBytes is reset instead of dispatched, whichever the response mode.
+    private bool RefuseOverflowed(PendingRequest pending)
+    {
+        if (!pending.Overflowed)
         {
-            if (pending.Overflowed)
+            return false;
+        }
+
+        // A queued reset closes the stream inside nghttp2, so none of its later frames call back.
+        if (Nghttp2.ih2_submit_rst_stream(_handle, pending.StreamId, EnhanceYourCalm) != 0)
+        {
+            _failed = true;
+        }
+        _pending.Remove(pending.StreamId);
+        pending.Dispose();
+        return true;
+    }
+
+    private void DispatchBuffered(Func<Nghttp2Request, ValueTask<Nghttp2Response>> handler)
+    {
+        foreach (PendingRequest pending in TakeReady())
+        {
+            if (RefuseOverflowed(pending))
             {
-                // A queued reset closes the stream inside nghttp2, so none of its later frames call back.
-                if (Nghttp2.ih2_submit_rst_stream(_handle, pending.StreamId, EnhanceYourCalm) != 0)
-                {
-                    _failed = true;
-                }
-                _pending.Remove(pending.StreamId);
-                pending.Dispose();
                 continue;
             }
 
@@ -114,12 +134,6 @@ public sealed partial class Nghttp2Connection
             try
             {
                 Nghttp2Request request = pending.Freeze();
-
-                if (TryDispatchStreamed(request, pending))
-                {
-                    continue;   // the writer owns this stream, and retires it when done
-                }
-
                 inFlight = handler(request);
             }
             catch

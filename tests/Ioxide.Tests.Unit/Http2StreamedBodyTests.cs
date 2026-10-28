@@ -26,7 +26,7 @@ internal static class Http2StreamedBodyTests
             byte[] file = Pattern(202);
 
             using var client = new StrictClient();
-            Task run = client.Connection.RunAsync(async (_, writer) =>
+            Task run = client.Connection.RunStreamedResponseAsync(async (_, writer) =>
             {
                 writer.WriteHeaders(new Http2Response { Status = 200 });
                 writer.Write(file);
@@ -47,7 +47,7 @@ internal static class Http2StreamedBodyTests
             byte[] file = Pattern(202);
 
             using var client = new StrictClient();
-            Task run = client.Connection.RunAsync(async (_, writer) =>
+            Task run = client.Connection.RunStreamedResponseAsync(async (_, writer) =>
             {
                 writer.WriteHeaders(new Http2Response { Status = 200 });
                 writer.Write(file);
@@ -72,7 +72,7 @@ internal static class Http2StreamedBodyTests
             var read = new TaskCompletionSource();
 
             using var client = new StrictClient();
-            Task run = client.Connection.RunAsync(async (_, writer) =>
+            Task run = client.Connection.RunStreamedResponseAsync(async (_, writer) =>
             {
                 writer.WriteHeaders(new Http2Response { Status = 200 });
                 await read.Task;                         // the file read, off the ring
@@ -100,7 +100,7 @@ internal static class Http2StreamedBodyTests
             var read = new TaskCompletionSource();
 
             using var client = new StrictClient();
-            Task run = client.Connection.RunAsync(async (_, writer) =>
+            Task run = client.Connection.RunStreamedResponseAsync(async (_, writer) =>
             {
                 writer.WriteHeaders(new Http2Response { Status = 200 });
                 await read.Task;
@@ -129,7 +129,7 @@ internal static class Http2StreamedBodyTests
             var read = new TaskCompletionSource();
 
             using var client = new StrictClient();
-            Task run = client.Connection.RunAsync(async (_, writer) =>
+            Task run = client.Connection.RunStreamedResponseAsync(async (_, writer) =>
             {
                 writer.WriteHeaders(new Http2Response { Status = 200 });
                 await read.Task;
@@ -156,7 +156,7 @@ internal static class Http2StreamedBodyTests
             byte[] file = Pattern(4 * 1024);
 
             using var client = new StrictClient();
-            Task run = client.Connection.RunAsync(async (_, writer) =>
+            Task run = client.Connection.RunStreamedResponseAsync(async (_, writer) =>
             {
                 writer.WriteHeaders(new Http2Response { Status = 200 });
                 for (int at = 0; at < file.Length; at += 512)
@@ -185,7 +185,7 @@ internal static class Http2StreamedBodyTests
             byte[] file = Pattern(64 * 1024);
 
             using var client = new StrictClient();
-            Task run = client.Connection.RunAsync(async (_, writer) =>
+            Task run = client.Connection.RunStreamedResponseAsync(async (_, writer) =>
             {
                 writer.WriteHeaders(new Http2Response { Status = 200 });
                 for (int at = 0; at < file.Length; at += 4 * 1024)
@@ -219,7 +219,7 @@ internal static class Http2StreamedBodyTests
             byte[] file = Pattern(200_000);   // past the 65535-byte initial window, so it must park
 
             using var client = new StrictClient();
-            Task run = client.Connection.RunAsync(async (_, writer) =>
+            Task run = client.Connection.RunStreamedResponseAsync(async (_, writer) =>
             {
                 writer.WriteHeaders(new Http2Response { Status = 200 });
                 await WriteChunked(writer, file);

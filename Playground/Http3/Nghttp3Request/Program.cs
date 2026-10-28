@@ -109,6 +109,7 @@ var h3Options = new Nghttp3Options
 {
     QpackDynamicTableCapacity = qpackCapacity,                // 0 (default) = headers stay literal
     QpackBlockedStreams       = qpackCapacity > 0 ? 100 : 0,  // raise both together for the dynamic table
+    StreamRequestBodies       = true,                         // dispatch at end-of-headers, body through BodyReader
 };
 
 // THE allocation-free pattern: build the response ONCE and reuse the instance for every request.
@@ -147,7 +148,7 @@ for (int i = 0; i < threads.Length; i++)
             live.Add((r, h3));
         }
 
-        return h3.RunStreamingAsync(async request =>
+        return h3.RunBufferedAsync(async request =>
         {
             // Streamed dispatch, so we are running while the body is still on the wire. Read it to
             // the end: every read credits the peer's flow-control window, which is what throttles a

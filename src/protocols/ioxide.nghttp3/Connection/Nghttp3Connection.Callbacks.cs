@@ -106,7 +106,7 @@ public sealed partial class Nghttp3Connection
             }
             request.HeadersDone = true;
 
-            if (!connection._streaming)
+            if (!connection._streamBodies)
             {
                 return;   // buffered: body (if any) follows via CallbackData; dispatch at CallbackEndStream
             }
@@ -140,7 +140,7 @@ public sealed partial class Nghttp3Connection
         try
         {
             Nghttp3Connection connection = From(user);
-            if (connection._streaming)
+            if (connection._streamBodies)
             {
                 if (connection._sinks.TryGetValue(streamId, out Nghttp3BodyReader? sink))
                 {
@@ -149,8 +149,13 @@ public sealed partial class Nghttp3Connection
                 return;
             }
 
-            if (connection._requests.TryGetValue(streamId, out Nghttp3Request? request))
+            if (connection._requests.TryGetValue(streamId, out Nghttp3Request? request) && !request.Overflowed)
             {
+                if (request.BodyLen + (long)dataLen > connection._options.MaxRequestBytes)
+                {
+                    connection.RefuseOverflowed(request);
+                    return;
+                }
                 request.AppendBody(new ReadOnlySpan<byte>(data, (int)dataLen));
             }
         }
@@ -166,7 +171,7 @@ public sealed partial class Nghttp3Connection
         try
         {
             Nghttp3Connection connection = From(user);
-            if (connection._streaming)
+            if (connection._streamBodies)
             {
                 if (connection._sinks.Remove(streamId, out Nghttp3BodyReader? sink))
                 {
@@ -175,7 +180,7 @@ public sealed partial class Nghttp3Connection
                 return;
             }
 
-            if (connection._requests.TryGetValue(streamId, out Nghttp3Request? request) && !request.Complete)
+            if (connection._requests.TryGetValue(streamId, out Nghttp3Request? request) && !request.Complete && !request.Overflowed)
             {
                 request.Complete = true;
                 connection._readyStreamIds.Add(streamId);

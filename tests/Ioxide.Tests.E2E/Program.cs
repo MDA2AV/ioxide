@@ -55,6 +55,8 @@ internal static class Program
         StreamedPeerGoneTests.Register(runner);
         QuicStreamingCreditTests.Register(runner);
         Http3BodyTests.Register(runner);
+        H3BodyModeTests.Register(runner);
+        H3BodyLimitTests.Register(runner);
         H3LargeResponseTests.Register(runner);
 
         return runner.Summary();

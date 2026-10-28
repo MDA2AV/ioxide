@@ -68,7 +68,7 @@ internal static class Nghttp2ChaosTests
             var connection = new Nghttp2Connection(conn, new Nghttp2Options { MaxRequestBytes = cap });
             if (streamed)
             {
-                await connection.RunAsync((request, writer) =>
+                await connection.RunStreamedResponseAsync((request, writer) =>
                 {
                     seen.Enqueue((request.StreamId, request.Body.Length));
                     writer.WriteHeaders(new Nghttp2Response { Status = 200 });
@@ -338,7 +338,7 @@ internal static class Nghttp2ChaosTests
             {
                 try
                 {
-                    await new Nghttp2Connection(conn).RunAsync(static async (_, writer) =>
+                    await new Nghttp2Connection(conn).RunStreamedResponseAsync(static async (_, writer) =>
                     {
                         writer.WriteHeaders(new Nghttp2Response { Status = 200 });
                         for (int i = 0; i < Chunks; i++)

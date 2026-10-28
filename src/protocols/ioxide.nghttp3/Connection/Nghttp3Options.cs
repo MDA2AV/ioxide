@@ -26,4 +26,28 @@ public sealed record Nghttp3Options
     /// 100 is a conventional value when the table is on.
     /// </summary>
     public long QpackBlockedStreams { get; init; }
+
+    /// <summary>
+    /// Ceiling on one request's body when it is assembled whole. An upload arrives as DATA frames
+    /// with no length known up front, so this is what bounds the buffer a single stream can grow: a
+    /// body past it is reset with H3_EXCESSIVE_LOAD and never dispatched. It does not apply with
+    /// <see cref="StreamRequestBodies"/>, where one flow-control window bounds the memory instead.
+    /// </summary>
+    public int MaxRequestBytes { get; init; } = 8 * 1024 * 1024;
+
+    /// <summary>
+    /// Dispatch each request as soon as its HEADERS are in, with the body arriving through
+    /// <see cref="Nghttp3Request.BodyReader"/> instead of assembled into
+    /// <see cref="Nghttp3Request.Body"/>.
+    ///
+    /// The trade is what memory is bound by. Buffered holds the whole body, which suits ordinary
+    /// requests and not hostile uploads; streamed holds one flow-control window, because the request
+    /// stream is paced and credit is only returned to the peer as the handler reads.
+    ///
+    /// It applies to the handlers that can await a body: the asynchronous
+    /// <see cref="Nghttp3Connection.RunBufferedAsync(Func{Nghttp3Request, ValueTask{Nghttp3Response}})"/> and
+    /// <see cref="Nghttp3Connection.RunStreamedResponseAsync"/>. A synchronous handler always gets the
+    /// whole body.
+    /// </summary>
+    public bool StreamRequestBodies { get; init; }
 }

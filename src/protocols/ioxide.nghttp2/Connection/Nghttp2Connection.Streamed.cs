@@ -17,38 +17,40 @@ public sealed partial class Nghttp2Connection
 
     // Streamed responses in flight, so a RST_STREAM from the peer can reach the one it ends.
     private readonly Dictionary<int, Nghttp2ResponseWriter> _writers = new();
-    private Func<Nghttp2Request, Nghttp2ResponseWriter, ValueTask>? _streamedHandler;
 
     /// <summary>
     /// Serve this connection with each response body produced through a writer rather than
     /// returned whole. The handler owns its stream until it returns.
     /// </summary>
-    public Task RunAsync(Func<Nghttp2Request, Nghttp2ResponseWriter, ValueTask> handler)
-    {
-        _streamedHandler = handler;
-        return RunBufferedAsync(NoBufferedHandler);
-    }
-
-    // Never invoked: a streamed connection hands every ready request to a writer before the
-    // buffered path would reach this. It exists only because RunBufferedAsync needs a handler.
-    private static Nghttp2Response NoBufferedHandler(Nghttp2Request _)
-        => throw new InvalidOperationException("A streamed connection dispatches through its writer.");
+    public Task RunStreamedResponseAsync(Func<Nghttp2Request, Nghttp2ResponseWriter, ValueTask> handler)
+        => RunCoreAsync(() => DispatchStreamed(handler));
 
     /// <summary>
-    /// Hand a ready request to the streamed path, if this connection has one. Called from the
-    /// dispatch that made it ready, so the writer's first frames ride that same drain.
+    /// Hand each ready request to a writer. Called from the pass that made it ready, so the
+    /// writer's first frames ride that same drain.
     /// </summary>
-    private bool TryDispatchStreamed(Nghttp2Request request, PendingRequest pending)
+    private void DispatchStreamed(Func<Nghttp2Request, Nghttp2ResponseWriter, ValueTask> handler)
     {
-        if (_streamedHandler is null)
+        foreach (PendingRequest pending in TakeReady())
         {
-            return false;
-        }
+            if (RefuseOverflowed(pending))
+            {
+                continue;
+            }
 
-        Nghttp2ResponseWriter writer = RentWriter(request.StreamId);
-        _writers[request.StreamId] = writer;
-        _ = ServeStreamedAsync(_streamedHandler, request, writer, pending);
-        return true;
+            try
+            {
+                Nghttp2Request request = pending.Freeze();
+                Nghttp2ResponseWriter writer = RentWriter(request.StreamId);
+                _writers[request.StreamId] = writer;
+                _ = ServeStreamedAsync(handler, request, writer, pending);   // the writer owns this stream, and retires it when done
+            }
+            catch
+            {
+                pending.Dispose();
+                throw;
+            }
+        }
     }
 
     private async Task ServeStreamedAsync(Func<Nghttp2Request, Nghttp2ResponseWriter, ValueTask> handler,

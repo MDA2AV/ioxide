@@ -136,7 +136,12 @@ public sealed partial class Http2Connection : IDisposable
         => RunBufferedAsync(request => new ValueTask<Http2Response>(handler(request)));
 
     /// <summary>Serve until the peer goes away, with an asynchronous handler.</summary>
-    public async Task RunBufferedAsync(Func<Http2Request, ValueTask<Http2Response>> handler)
+    public Task RunBufferedAsync(Func<Http2Request, ValueTask<Http2Response>> handler)
+        => RunCoreAsync(() => DispatchBuffered(handler));
+
+    // The one serving loop. Each entry point hands it the dispatch for its response mode, run once
+    // per read pass.
+    private async Task RunCoreAsync(Action dispatch)
     {
         try
         {
@@ -159,7 +164,7 @@ public sealed partial class Http2Connection : IDisposable
                     // produced.
                     _passFlushPending = true;
                     ParseAvailable();
-                    await DispatchReadyAsync(handler);
+                    dispatch();
 
                     // Body chunks reach their handlers here, inside the pass: the WINDOW_UPDATEs a
                     // read stages then ride the same flush as everything else, so credit gets back
@@ -234,29 +239,28 @@ public sealed partial class Http2Connection : IDisposable
         _inboundUsed += data.Length;
     }
 
-    private async ValueTask DispatchReadyAsync(Func<Http2Request, ValueTask<Http2Response>> handler)
+    // Snapshot and clear first: the list must not be mutated while it is walked.
+    private PendingRequest[] TakeReady()
     {
         if (_ready.Count == 0)
         {
-            return;
+            return [];
         }
 
         PendingRequest[] ready = _ready.ToArray();
         _ready.Clear();
+        return ready;
+    }
 
-        foreach (PendingRequest pending in ready)
+    private void DispatchBuffered(Func<Http2Request, ValueTask<Http2Response>> handler)
+    {
+        foreach (PendingRequest pending in TakeReady())
         {
             ValueTask<Http2Response> inFlight;
 
             try
             {
                 Http2Request request = pending.Freeze();
-
-                if (TryDispatchStreamed(request, pending))
-                {
-                    continue;   // the writer owns this stream, and retires it when done
-                }
-
                 inFlight = handler(request);
             }
             catch

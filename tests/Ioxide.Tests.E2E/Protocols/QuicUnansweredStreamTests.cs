@@ -125,7 +125,7 @@ internal static class QuicUnansweredStreamTests
                 quicFactory: engine.CreateFactory(),
                 quicReadMs: ReadTimeoutMs,
                 quicHandle: native
-                    ? (_, conn) => new Nghttp3Connection(conn).RunStreamedResponseAsync(async (_, writer) =>
+                    ? (_, conn) => new Nghttp3Connection(conn, new Nghttp3Options { StreamRequestBodies = true }).RunStreamedResponseAsync(async (_, writer) =>
                     {
                         writer.WriteHeaders(new Nghttp3Response { Status = 200 });
                         writer.Write("partial"u8);
@@ -228,7 +228,7 @@ internal static class QuicUnansweredStreamTests
                 {
                     try
                     {
-                        await new Http3Connection(conn).RunAsync(static _ => Http3Response.Text("ok"));
+                        await new Http3Connection(conn).RunBufferedAsync(static _ => Http3Response.Text("ok"));
                     }
                     finally
                     {

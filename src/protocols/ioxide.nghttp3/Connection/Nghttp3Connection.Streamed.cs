@@ -1,4 +1,5 @@
 using System.Buffers;
+using System.Diagnostics.CodeAnalysis;
 using System.Runtime.InteropServices;
 
 namespace ioxide.nghttp3;
@@ -46,84 +47,45 @@ public sealed partial class Nghttp3Connection
     /// <summary>
     /// Serve this connection with the body of each response produced through a writer rather than
     /// returned whole. The handler owns the stream until it completes the writer: write headers,
-    /// push body, complete.
+    /// push body, complete. With <see cref="Nghttp3Options.StreamRequestBodies"/> it starts at
+    /// END-OF-HEADERS and pulls the request body through <see cref="Nghttp3Request.BodyReader"/>
+    /// while it writes; without it, at end-of-stream with the whole body in
+    /// <see cref="Nghttp3Request.Body"/>. Owns the handler's connection ref.
     /// </summary>
-    public async Task RunStreamedResponseAsync(Func<Nghttp3Request, Nghttp3ResponseWriter, ValueTask> handler)
+    public Task RunStreamedResponseAsync(Func<Nghttp3Request, Nghttp3ResponseWriter, ValueTask> handler)
     {
-        _streaming = true;
+        _streamBodies = _options.StreamRequestBodies;
 
         // Writers parked at the retention high-water resume when acks drain it: the drain pumps and
         // releases them, where a bare PumpEgress would leave them parked.
         _quicConnection.OnSendCapacityAvailable = DrainStreamed;
 
-        try
+        return RunCoreAsync(() =>
         {
-            while (true)
-            {
-                QuicRecvSnapshot snapshot = await _quicConnection.ReadAsync();
+            DispatchStreamedResponse(handler);
+            DrainStreamed();
+        }, TearDownStreamed);
+    }
 
-                if (_nghttp3Handle == 0 && !_protocolFailed && !TrySetup())
-                {
-                    FailInternal();
-                }
+    // The writers' share of the teardown, ahead of the close.
+    private void TearDownStreamed()
+    {
+        // Unpark anything still waiting on a pass; IsBroken makes them return rather than loop.
+        // Deliberately the bare flag and NOT FailInternal(): this runs on a response that
+        // completed perfectly well, and giving it a peer code would close every successful
+        // streamed connection with an error.
+        _protocolFailed = true;
+        ReleasePassWaiters();
 
-                while (_quicConnection.TryGetDelivery(in snapshot, out QuicRecvRing.Delivery item))
-                {
-                    if (!_protocolFailed)
-                    {
-                        PushToEngine(in item);
-                    }
-                    _quicConnection.ReturnBuffer(in item);
-                }
-
-                if (!_protocolFailed)
-                {
-                    FireBodyWakes();
-                    DispatchStreamedResponse(handler);
-                    DrainStreamed();
-                    CloseIfShutdownComplete();
-                }
-
-                if (snapshot.IsClosed || _protocolFailed)
-                {
-                    break;
-                }
-                _quicConnection.ResetRead();
-            }
+        foreach (Nghttp3ResponseWriter writer in _writers.Values)
+        {
+            writer.Release();
         }
-        finally
+        _writers.Clear();
+
+        while (_writerPool.TryPop(out Nghttp3ResponseWriter? pooled))
         {
-            foreach (Nghttp3BodyReader sink in _sinks.Values)
-            {
-                sink.Drop();
-            }
-            FireBodyWakes();
-            _sinks.Clear();
-
-            // Unpark anything still waiting on a pass; IsBroken makes them return rather than loop.
-            // Deliberately the bare flag and NOT FailInternal(): this runs on a response that
-            // completed perfectly well, and giving it a peer code would close every successful
-            // streamed connection with an error.
-            _protocolFailed = true;
-            ReleasePassWaiters();
-
-            foreach (Nghttp3ResponseWriter writer in _writers.Values)
-            {
-                writer.Release();
-            }
-            _writers.Clear();
-
-            while (_writerPool.TryPop(out Nghttp3ResponseWriter? pooled))
-            {
-                pooled.Release();   // the native blocks die with the connection, not the stream
-            }
-
-            // Before letting go, because letting go is all the transport sees: DecRef neither
-            // closes nor unregisters.
-            CloseWithPeerCode();
-
-            _quicConnection.DecRef();
-            Dispose();
+            pooled.Release();   // the native blocks die with the connection, not the stream
         }
     }
 
@@ -205,13 +167,19 @@ public sealed partial class Nghttp3Connection
         }
     }
 
+    // A streamed body is still arriving after dispatch, so its request STAYS in _requests until the
+    // stream closes: trailers and lifecycle events for the stream must keep resolving to it. An
+    // assembled one is complete, so it leaves the table here, as a buffered dispatch does.
+    private bool TakeReady(long streamId, [NotNullWhen(true)] out Nghttp3Request? request)
+        => _streamBodies ? _requests.TryGetValue(streamId, out request) : _requests.Remove(streamId, out request);
+
     private void DispatchStreamedResponse(Func<Nghttp3Request, Nghttp3ResponseWriter, ValueTask> handler)
     {
         for (int i = 0; i < _readyStreamIds.Count && !_protocolFailed; i++)
         {
             long streamId = _readyStreamIds[i];
 
-            if (!_requests.TryGetValue(streamId, out Nghttp3Request? request))
+            if (!TakeReady(streamId, out Nghttp3Request? request))
             {
                 continue;
             }
@@ -234,6 +202,7 @@ public sealed partial class Nghttp3Connection
                 RetireBody(request);
                 FailStreamed(streamId, writer, request);
                 HandlerExited(writer);
+                RequestHandled(request);
                 continue;
             }
 
@@ -258,11 +227,24 @@ public sealed partial class Nghttp3Connection
             RetireBody(request);
             FailStreamed(writer.StreamId, writer, request);
             HandlerExited(writer);
+            RequestHandled(request);
             return;
         }
 
-        request.HandlerDone = true;
         HandlerExited(writer);
+        RequestHandled(request);
+    }
+
+    // The request's contract ended with its handler. It goes back to the pool unless its stream is
+    // still open and in _requests, whose close releases it instead: an assembled request left the
+    // table at dispatch, and a streamed one whose stream closed while the handler ran was detached.
+    private void RequestHandled(Nghttp3Request request)
+    {
+        request.HandlerDone = true;
+        if (!_streamBodies || request.Detached)
+        {
+            ReleaseRequest(request);
+        }
     }
 
     // A writer has two owners - its handler and its stream, since nghttp3 may point into the chunk

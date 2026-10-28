@@ -78,6 +78,9 @@ var config = new ServerConfig
 
 byte[] chunk = Encoding.ASCII.GetBytes(new string('x', chunkBytes - 1) + "\n");
 
+// The read half: each request's body streams in through BodyReader rather than arriving whole.
+var h3Options = new Http3Options { StreamRequestBodies = true };
+
 var threads = new Thread[config.ReactorCount];
 
 for (int i = 0; i < threads.Length; i++)
@@ -85,7 +88,7 @@ for (int i = 0; i < threads.Length; i++)
     var reactor = new Reactor(i, config);
 
     reactor.QuicHandle = (r, conn) =>
-        new Http3Connection(conn).RunStreamedResponseAsync(async (request, writer) =>
+        new Http3Connection(conn, h3Options).RunStreamedResponseAsync(async (request, writer) =>
         {
             bool endless = request.Path.Span.SequenceEqual("/feed"u8);
             bool upload  = request.Path.Span.SequenceEqual("/upload"u8);

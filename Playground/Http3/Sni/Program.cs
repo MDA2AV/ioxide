@@ -103,7 +103,7 @@ for (int i = 0; i < threads.Length; i++)
     var reactor = new Reactor(i, config);
 
     reactor.QuicHandle = (_, connection) =>
-        new Http3Connection(connection).RunAsync(_ =>
+        new Http3Connection(connection).RunBufferedAsync(_ =>
         {
             // The certificate was chosen during the handshake, before this ever runs. Routing a
             // request to the right site is a separate job, and the :authority header is where you

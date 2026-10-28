@@ -248,8 +248,9 @@ PANES = {
          "curl --http3-only -k --data-binary @big.bin https://127.0.0.1:8443/echo"],
         "The fourth corner the other three nghttp3 samples leave empty: the request pulled through "
         "<code>BodyReader</code> while the response is pushed through the writer, both in one "
-        "handler. One call arranges it - <code>RunStreamedResponseAsync</code> dispatches at "
-        "end-of-headers, so the handler is running while the upload is still on the wire. "
+        "handler. Two switches arrange it - <code>StreamRequestBodies</code> dispatches at "
+        "end-of-headers, so the handler is running while the upload is still on the wire, and "
+        "<code>RunStreamedResponseAsync</code> hands it the writer. "
         "<code>/echo</code> is the shape a proxy needs: read a chunk, write a chunk, never hold "
         "more than one, and neither side can outrun the other because <code>ReadAsync</code> waits "
         "on the peer and <code>FlushAsync</code> waits on nghttp3. Measured here on a 64 MiB echo: "
@@ -265,7 +266,7 @@ PANES = {
         "Http3/Nghttp3Buffered", "HTTP/3 &middot; buffered (nghttp3)", "ioxide + ioxide.ngtcp2 + ioxide.nghttp3",
         ["curl --http3-only -k https://127.0.0.1:8443/"],
         "The same server as <label for=\"tab-h3\" class=\"ex-jump\">nghttp3</label> with the other "
-        "dispatch mode - one method call is the whole difference. <b>Buffered</b> waits for "
+        "dispatch mode - <code>StreamRequestBodies</code> left off is the whole difference. <b>Buffered</b> waits for "
         "end-of-stream, so the body is already in <code>request.Body</code> when your handler runs; "
         "the trade is that memory holds the whole body, which suits normal requests and not hostile "
         "uploads. <b>Streamed</b> runs you while the body is still arriving and credits the peer's "
@@ -376,7 +377,7 @@ PANES = {
         "Both at once, which is the shape a proxy needs: <code>/echo</code> reads a chunk and "
         "writes a chunk, so neither the upload nor the download is ever held whole. The two "
         "directions are separate switches - <code>StreamRequestBodies</code> for the read side, "
-        "<code>RunAsync</code> with a writer for the write side - because they solve different "
+        "<code>RunStreamedResponseAsync</code> for the write side - because they solve different "
         "problems and most servers want exactly one of them. Mirrors "
         "<label for=\"tab-h3csstream\" class=\"ex-jump\">h3 &middot; request + response "
         "streamed</label>; the difference is HTTP/2's shared connection window, which a handler "
@@ -430,7 +431,7 @@ PANES = {
         ["curl --http3-only -k https://127.0.0.1:8443/"],
         "HTTP/3 over QUIC, dispatched as the body streams. Compare "
         "<label for=\"tab-h3buf\" class=\"ex-jump\">buffered</label>, which waits for end-of-stream "
-        "instead - one method call is the whole difference."),
+        "instead - one option is the whole difference."),
     "qpipe": (
         "Quic/Pipe", "QUIC &middot; pipes", "ioxide + ioxide.ngtcp2",
         ["dotnet run -c Release --project Playground/Quic/Pipe"],

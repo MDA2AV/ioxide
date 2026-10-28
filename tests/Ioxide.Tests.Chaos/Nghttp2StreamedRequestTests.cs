@@ -214,7 +214,7 @@ internal static class Nghttp2StreamedRequestTests
                 try
                 {
                     await new Nghttp2Connection(conn, new Nghttp2Options { StreamRequestBodies = true })
-                        .RunAsync(async (request, writer) =>
+                        .RunStreamedResponseAsync(async (request, writer) =>
                         {
                             ReadOnlyMemory<byte> chunk = await request.BodyReader!.ReadAsync();
                             writer.WriteHeaders(new Nghttp2Response { Status = 200 });
@@ -391,7 +391,7 @@ internal static class Nghttp2StreamedRequestTests
 
             if (streamedResponse)
             {
-                await connection.RunAsync(async (request, writer) =>
+                await connection.RunStreamedResponseAsync(async (request, writer) =>
                 {
                     if (request.Path.Span.SequenceEqual("/fail"u8))
                     {

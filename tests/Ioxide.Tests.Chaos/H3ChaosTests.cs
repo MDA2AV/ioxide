@@ -64,7 +64,7 @@ internal static class H3ChaosTests
 
             // Streaming handler: drains the body, crediting the window mid-flight, so a body larger
             // than the 256 KB stream window completes rather than deadlocking.
-            int udpPort = Start(engine, static (_, conn) => new Nghttp3Connection(conn).RunStreamingAsync(
+            int udpPort = Start(engine, static (_, conn) => new Nghttp3Connection(conn, new Nghttp3Options { StreamRequestBodies = true }).RunBufferedAsync(
                 static async req =>
                 {
                     long total = 0;

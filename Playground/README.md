@@ -99,7 +99,7 @@ reference implementation. QUIC itself is always ngtcp2 + picotls, bundled as one
 | [`Http3.ManagedBuffered`](Http3/ManagedBuffered/Program.cs) | 89 | HTTP/3 in **pure C#** - frames, QPACK and Huffman all managed. Nothing native ships but the transport. | `ioxide.ngtcp2`, `ioxide.http3` |
 | [`Http3.ManagedStreamedBoth`](Http3/ManagedStreamedBoth/Program.cs) | 166 | The same, with the request pulled and the response pushed a chunk at a time under flow control. | `ioxide.ngtcp2`, `ioxide.http3` |
 | [`Http3.Nghttp3Request`](Http3/Nghttp3Request/Program.cs) | 220 | HTTP/3 on nghttp3 with **streamed** dispatch, and a `SIGTERM` GOAWAY drain. | `ioxide.ngtcp2`, `ioxide.nghttp3` |
-| [`Http3.Nghttp3Buffered`](Http3/Nghttp3Buffered/Program.cs) | 205 | The same server with **buffered** dispatch - one method call is the whole difference. | `ioxide.ngtcp2`, `ioxide.nghttp3` |
+| [`Http3.Nghttp3Buffered`](Http3/Nghttp3Buffered/Program.cs) | 205 | The same server with **buffered** dispatch - one option is the whole difference. | `ioxide.ngtcp2`, `ioxide.nghttp3` |
 | [`Http3.Nghttp3Response`](Http3/Nghttp3Response/Program.cs) | 120 | The other direction: a response body produced over time. | `ioxide.ngtcp2`, `ioxide.nghttp3` |
 | [`Http3.Nghttp3StreamedBoth`](Http3/Nghttp3StreamedBoth/Program.cs) | 190 | Both directions at once on nghttp3 - `/echo` reads a chunk and writes a chunk. The fourth corner the other three leave empty. | `ioxide.ngtcp2`, `ioxide.nghttp3` |
 | [`Http3.Sni`](Http3/Sni/Program.cs) | 118 | A certificate per host name on QUIC, registered before the engine starts serving. | `ioxide.ngtcp2`, `ioxide.http3` |

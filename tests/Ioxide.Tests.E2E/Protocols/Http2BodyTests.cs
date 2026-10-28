@@ -105,7 +105,7 @@ internal static class Http2BodyTests
             {
                 try
                 {
-                    await new Http2Connection(conn).RunAsync(async (_, writer) =>
+                    await new Http2Connection(conn).RunStreamedResponseAsync(async (_, writer) =>
                     {
                         writer.WriteHeaders(new Http2Response { Status = 200 });
                         await Task.Yield();
@@ -150,7 +150,7 @@ internal static class Http2BodyTests
             {
                 try
                 {
-                    await new Http2Connection(conn).RunAsync(async (_, writer) =>
+                    await new Http2Connection(conn).RunStreamedResponseAsync(async (_, writer) =>
                     {
                         var head = new Http2Response { Status = 200 };
                         head.Headers.Add("Content-Type"u8.ToArray(), "text/css"u8.ToArray());
@@ -223,7 +223,7 @@ internal static class Http2BodyTests
     {
         try
         {
-            await new Http2Connection(conn, options).RunAsync(async (_, writer) =>
+            await new Http2Connection(conn, options).RunStreamedResponseAsync(async (_, writer) =>
             {
                 writer.WriteHeaders(new Http2Response { Status = 200 });
 

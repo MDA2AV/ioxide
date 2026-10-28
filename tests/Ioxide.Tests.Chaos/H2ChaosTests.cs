@@ -213,7 +213,7 @@ internal static class H2ChaosTests
             {
                 try
                 {
-                    await new Http2Connection(conn, new Http2Options { StreamRequestBodies = true }).RunAsync(
+                    await new Http2Connection(conn, new Http2Options { StreamRequestBodies = true }).RunStreamedResponseAsync(
                         static async (request, writer) =>
                         {
                             writer.WriteHeaders(new Http2Response { Status = 200 });

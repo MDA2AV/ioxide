@@ -109,7 +109,7 @@ internal static class QuicReadTimeoutTests
                             await Task.Delay(3 * H3ReadTimeoutMs);
                             return Nghttp3Response.Text("slow-but-here");
                         })
-                        : static (_, conn) => new Http3Connection(conn).RunAsync(static async _ =>
+                        : static (_, conn) => new Http3Connection(conn, new Http3Options { StreamRequestBodies = true }).RunBufferedAsync(static async _ =>
                         {
                             await Task.Delay(3 * H3ReadTimeoutMs);
                             return Http3Response.Text("slow-but-here");
