@@ -202,7 +202,7 @@ if (tls.NegotiatedAlpn == "h2")
     // The pipe decrypts as it is read, so the HTTP/2 code below is
     // byte-for-byte the h2c version.
     await using var pipe = new TlsConnectionDualPipe(conn, tls, ownsSession: false);
-    await new Nghttp2Connection(pipe).RunBufferedAsync(request =&gt; new Nghttp2Response
+    await new Nghttp2Connection(pipe).RunAsync(request =&gt; new Nghttp2Response
     {
         Status = 200,
         Body   = body,

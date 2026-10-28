@@ -156,7 +156,7 @@ for (int i = 0; i < threads.Length; i++)
             // Buffered + async: each stream dispatches with its body assembled, and the handler
             // may await - the upstream round trip resumes inline on this reactor. Concurrent
             // streams interleave here, which is exactly why the h1 pool has to be deep.
-            await new Http2Connection(pipe).RunBufferedAsync(async request =>
+            await new Http2Connection(pipe).RunAsync(async request =>
             {
                 // The method and path are h2 field values, written back out below as an HTTP/1.1
                 // request line, so one holding a CR, LF, NUL or space could add lines to the request

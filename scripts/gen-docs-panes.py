@@ -231,7 +231,7 @@ PANES = {
          "curl --http3-only -kN https://127.0.0.1:8443/feed        # never ends",
          "curl --http3-only -k --data-binary @big.bin https://127.0.0.1:8443/echo"],
         "Both directions streamed, in pure C#. The request body is PULLED a chunk at a time through "
-        "<code>Http3Request.BodyReader</code>, so a large upload is never held whole; the response is "
+        "the handler's <code>Http3BodyReader</code>, so a large upload is never held whole; the response is "
         "PUSHED through <code>Http3ResponseWriter</code>, one DATA frame per flush, so a large "
         "download is never built whole. <code>/echo</code> runs both at once - read a chunk, write a "
         "chunk - which is what a proxy does. "
@@ -247,9 +247,10 @@ PANES = {
         ["curl --http3-only -k https://127.0.0.1:8443/",
          "curl --http3-only -k --data-binary @big.bin https://127.0.0.1:8443/echo"],
         "The fourth corner the other three nghttp3 samples leave empty: the request pulled through "
-        "<code>BodyReader</code> while the response is pushed through the writer, both in one "
-        "handler. One call arranges it - <code>RunStreamedResponseAsync</code> dispatches at "
-        "end-of-headers, so the handler is running while the upload is still on the wire. "
+        "an <code>Nghttp3BodyReader</code> while the response is pushed through the writer, both in "
+        "one handler. Its parameters arrange it - taking the reader dispatches at end-of-headers, "
+        "so the handler is running while the upload is still on the wire, and taking the writer "
+        "streams the response. "
         "<code>/echo</code> is the shape a proxy needs: read a chunk, write a chunk, never hold "
         "more than one, and neither side can outrun the other because <code>ReadAsync</code> waits "
         "on the peer and <code>FlushAsync</code> waits on nghttp3. Measured here on a 64 MiB echo: "
@@ -265,7 +266,7 @@ PANES = {
         "Http3/Nghttp3Buffered", "HTTP/3 &middot; buffered (nghttp3)", "ioxide + ioxide.ngtcp2 + ioxide.nghttp3",
         ["curl --http3-only -k https://127.0.0.1:8443/"],
         "The same server as <label for=\"tab-h3\" class=\"ex-jump\">nghttp3</label> with the other "
-        "dispatch mode - one method call is the whole difference. <b>Buffered</b> waits for "
+        "dispatch mode - one handler parameter is the whole difference. <b>Buffered</b> waits for "
         "end-of-stream, so the body is already in <code>request.Body</code> when your handler runs; "
         "the trade is that memory holds the whole body, which suits normal requests and not hostile "
         "uploads. <b>Streamed</b> runs you while the body is still arriving and credits the peer's "
@@ -360,9 +361,9 @@ PANES = {
         "Http2/ManagedStreamedRequest", "HTTP/2 &middot; request streamed", "ioxide + ioxide.http2",
         ["head -c 50000000 /dev/zero | curl --http2-prior-knowledge --data-binary @- \\",
          "  http://127.0.0.1:8080/upload"],
-        "The other direction, and a different problem. <code>StreamRequestBodies</code> dispatches "
-        "at the HEADERS and hands the handler an <code>Http2BodyReader</code>, so it runs while "
-        "the upload is still arriving. What changes is what bounds memory: buffered holds the "
+        "The other direction, and a different problem. A handler that takes an "
+        "<code>Http2BodyReader</code> is dispatched at the HEADERS, so it runs while the upload "
+        "is still arriving. What changes is what bounds memory: buffered holds the "
         "whole body, so <code>MaxRequestBytes</code> is all that stands between a hostile peer and "
         "the arena; streamed holds ONE flow-control window, because a chunk credits the peer's "
         "window only as the handler <em>reads</em> it. Fall behind and the peer runs out of credit "
@@ -375,8 +376,8 @@ PANES = {
          "  http://127.0.0.1:8080/echo"],
         "Both at once, which is the shape a proxy needs: <code>/echo</code> reads a chunk and "
         "writes a chunk, so neither the upload nor the download is ever held whole. The two "
-        "directions are separate switches - <code>StreamRequestBodies</code> for the read side, "
-        "<code>RunAsync</code> with a writer for the write side - because they solve different "
+        "directions are separate parameters - a body reader for the read side, a writer for the "
+        "write side - because they solve different "
         "problems and most servers want exactly one of them. Mirrors "
         "<label for=\"tab-h3csstream\" class=\"ex-jump\">h3 &middot; request + response "
         "streamed</label>; the difference is HTTP/2's shared connection window, which a handler "
@@ -416,8 +417,8 @@ PANES = {
          "  http://127.0.0.1:8080/upload"],
         "The same streamed request body as "
         "<label for=\"tab-h2sreq\" class=\"ex-jump\">the managed one</label>, and nearly the same "
-        "sample: <code>StreamRequestBodies</code> dispatches at the HEADERS and hands the handler an "
-        "<code>Nghttp2BodyReader</code>. What makes it hold is underneath. nghttp2 "
+        "sample: a handler that takes an <code>Nghttp2BodyReader</code> is dispatched at the "
+        "HEADERS. What makes it hold is underneath. nghttp2 "
         "credits DATA the moment it arrives unless told otherwise, which would put the bound back on "
         "the whole body, so a streaming session runs with its automatic WINDOW_UPDATE off and the "
         "reader hands credit back only as the handler <em>reads</em>. Every byte nghttp2 delivers is "
@@ -430,7 +431,7 @@ PANES = {
         ["curl --http3-only -k https://127.0.0.1:8443/"],
         "HTTP/3 over QUIC, dispatched as the body streams. Compare "
         "<label for=\"tab-h3buf\" class=\"ex-jump\">buffered</label>, which waits for end-of-stream "
-        "instead - one method call is the whole difference."),
+        "instead - one handler parameter is the whole difference."),
     "qpipe": (
         "Quic/Pipe", "QUIC &middot; pipes", "ioxide + ioxide.ngtcp2",
         ["dotnet run -c Release --project Playground/Quic/Pipe"],

@@ -318,6 +318,12 @@ public sealed unsafe class H3TestClient : IDisposable
     // Pump the client H3 engine's egress (prefaces, the request) into the QUIC engine per stream.
     private readonly byte[] _h3Buf = new byte[16 * 1024];
 
+    // Stream bytes handed to ngtcp2, kept for the client's lifetime. ngtcp2 points into them until
+    // the peer acknowledges them and reads them again for a retransmission (on_acked_stream_data in
+    // the shim). Written straight out of _h3Buf, a lost packet was resent with whatever the next
+    // drain had put there: a 600 KB upload reached the server corrupted about one run in three.
+    private readonly List<byte[]> _streamBytes = [];
+
     private void DrainH3Out()
     {
         fixed (byte* p = _h3Buf)
@@ -332,7 +338,11 @@ public sealed unsafe class H3TestClient : IDisposable
                 {
                     return;
                 }
-                WriteStream(sid, _h3Buf.AsSpan(0, (int)n), fin != 0);
+
+                byte[] kept = GC.AllocateUninitializedArray<byte>((int)n, pinned: true);
+                _h3Buf.AsSpan(0, (int)n).CopyTo(kept);
+                _streamBytes.Add(kept);
+                WriteStream(sid, kept, fin != 0);
             }
         }
     }

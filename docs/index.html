@@ -853,7 +853,7 @@ for (int i = 0; i &lt; threads.Length; i++)
 
             await using var pipe = new TlsConnectionDualPipe(conn, tls, ownsSession: false);
 
-            await new Http2Connection(pipe).RunBufferedAsync(request =&gt;
+            await new Http2Connection(pipe).RunAsync(request =&gt;
             {
                 // :authority is HTTP/2&#x27;s Host header, and this is where site routing belongs -
                 // per request, not per connection. It is NOT proof of which certificate was
@@ -1049,7 +1049,7 @@ for (int i = 0; i &lt; threads.Length; i++)
 
             await using var pipe = new TlsConnectionDualPipe(conn, tls, ownsSession: false);
 
-            await new Http2Connection(pipe).RunBufferedAsync(_ =&gt;
+            await new Http2Connection(pipe).RunAsync(_ =&gt;
             {
                 // What the SERVER believes it published. The client&#x27;s view is the certificate it
                 // just validated, and only pinning with --cacert can tell you that.
@@ -2175,7 +2175,7 @@ for (int i = 0; i &lt; threads.Length; i++)
                 // achieved, not by anything chosen here.
                 await using var pipe = new TlsConnectionDualPipe(conn, tls, ownsSession: false);
 
-                await new Http2Connection(pipe).RunBufferedAsync(_ =&gt; new Http2Response
+                await new Http2Connection(pipe).RunAsync(_ =&gt; new Http2Response
                 {
                     Status = 200,
                     Body = body,
@@ -2365,7 +2365,7 @@ for (int i = 0; i &lt; threads.Length; i++)
                 return;   // this sample only serves h2; see Playground/Http2/Tls for the fallback
             }
 
-            await new Http2Connection(new StreamDuplexPipe(ssl)).RunBufferedAsync(
+            await new Http2Connection(new StreamDuplexPipe(ssl)).RunAsync(
                 _ =&gt; new Http2Response { Status = 200, Body = body });
         }
         catch (Exception e)
@@ -2559,7 +2559,7 @@ for (int i = 0; i &lt; threads.Length; i++)
     var reactor = new Reactor(i, config);
 
     reactor.QuicHandle = (r, conn) =&gt;
-        new Nghttp3Connection(conn).RunStreamedResponseAsync(async (request, writer) =&gt;
+        new Nghttp3Connection(conn).RunAsync(async (request, writer) =&gt;
         {
             bool endless = request.Path.Span.SequenceEqual(&quot;/feed&quot;u8);
 
@@ -2679,7 +2679,7 @@ for (int i = 0; i &lt; threads.Length; i++)
     var reactor = new Reactor(i, config);
 
     reactor.QuicHandle = (r, conn) =&gt;
-        new Nghttp3Connection(conn, h3Options).RunStreamedResponseAsync(async (request, writer) =&gt;
+        new Nghttp3Connection(conn, h3Options).RunAsync(async (request, body, writer) =&gt;
         {
             bool upload = request.Path.Span.SequenceEqual(&quot;/upload&quot;u8);
             bool echo   = request.Path.Span.SequenceEqual(&quot;/echo&quot;u8);
@@ -2694,7 +2694,7 @@ for (int i = 0; i &lt; threads.Length; i++)
 
                 while (true)
                 {
-                    ReadOnlyMemory&lt;byte&gt; part = await request.BodyReader!.ReadAsync();
+                    ReadOnlyMemory&lt;byte&gt; part = await body.ReadAsync();
                     if (part.IsEmpty)
                     {
                         break;   // end of the request body
@@ -2722,7 +2722,7 @@ for (int i = 0; i &lt; threads.Length; i++)
                 long total = 0;
                 while (true)
                 {
-                    ReadOnlyMemory&lt;byte&gt; part = await request.BodyReader!.ReadAsync();
+                    ReadOnlyMemory&lt;byte&gt; part = await body.ReadAsync();
                     if (part.IsEmpty) break;
                     total += part.Length;   // a real app would parse or store the chunk here
                 }
@@ -2776,7 +2776,7 @@ static Nghttp3Response Plain()
     response.Headers.Add(&quot;content-type&quot;u8.ToArray(), &quot;text/plain&quot;u8.ToArray());
     return response;
 }</code></pre>
-    <p class="ex-foot">The fourth corner the other three nghttp3 samples leave empty: the request pulled through <code>BodyReader</code> while the response is pushed through the writer, both in one handler. One call arranges it - <code>RunStreamedResponseAsync</code> dispatches at end-of-headers, so the handler is running while the upload is still on the wire. <code>/echo</code> is the shape a proxy needs: read a chunk, write a chunk, never hold more than one, and neither side can outrun the other because <code>ReadAsync</code> waits on the peer and <code>FlushAsync</code> waits on nghttp3. Measured here on a 64 MiB echo: byte-identical out, and the server's RSS moved 51&rarr;57 MB - flat, in the sense that matters. Diff it against <label for="tab-h3csstream" class="ex-jump">the pure-C# twin</label>: same routes, opposite mechanism underneath. nghttp3 owns the framing and <b>pulls</b> body bytes when it has room to emit DATA, so a flush here means <em>nghttp3 has taken the chunk</em>, where the managed writer stages a DATA frame the moment you flush. That twin also serves an endless <code>/feed</code>; this one deliberately does not, because on this stack an endless response never reaches the wire.</p>
+    <p class="ex-foot">The fourth corner the other three nghttp3 samples leave empty: the request pulled through an <code>Nghttp3BodyReader</code> while the response is pushed through the writer, both in one handler. Its parameters arrange it - taking the reader dispatches at end-of-headers, so the handler is running while the upload is still on the wire, and taking the writer streams the response. <code>/echo</code> is the shape a proxy needs: read a chunk, write a chunk, never hold more than one, and neither side can outrun the other because <code>ReadAsync</code> waits on the peer and <code>FlushAsync</code> waits on nghttp3. Measured here on a 64 MiB echo: byte-identical out, and the server's RSS moved 51&rarr;57 MB - flat, in the sense that matters. Diff it against <label for="tab-h3csstream" class="ex-jump">the pure-C# twin</label>: same routes, opposite mechanism underneath. nghttp3 owns the framing and <b>pulls</b> body bytes when it has room to emit DATA, so a flush here means <em>nghttp3 has taken the chunk</em>, where the managed writer stages a DATA frame the moment you flush. That twin also serves an endless <code>/feed</code>; this one deliberately does not, because on this stack an endless response never reaches the wire.</p>
   </div>
   <div class="pane pane-h3csstream">
     <div class="pane-head">
@@ -2845,8 +2845,9 @@ for (int i = 0; i &lt; threads.Length; i++)
 {
     var reactor = new Reactor(i, config);
 
+    // The handler takes both halves: the body reader to read the request, the writer to answer it.
     reactor.QuicHandle = (r, conn) =&gt;
-        new Http3Connection(conn).RunStreamedResponseAsync(async (request, writer) =&gt;
+        new Http3Connection(conn).RunAsync(async (request, body, writer) =&gt;
         {
             bool endless = request.Path.Span.SequenceEqual(&quot;/feed&quot;u8);
             bool upload  = request.Path.Span.SequenceEqual(&quot;/upload&quot;u8);
@@ -2860,24 +2861,21 @@ for (int i = 0; i &lt; threads.Length; i++)
                 // connection to have room - so memory stays flat however large the exchange is.
                 writer.WriteHeaders(Plain());
 
-                if (request.BodyReader is { } duplex)
+                while (true)
                 {
-                    while (true)
+                    ReadOnlyMemory&lt;byte&gt; part = await body.ReadAsync();
+                    if (part.IsEmpty)
                     {
-                        ReadOnlyMemory&lt;byte&gt; part = await duplex.ReadAsync();
-                        if (part.IsEmpty)
-                        {
-                            break;   // end of the request body
-                        }
+                        break;   // end of the request body
+                    }
 
-                        part.Span.CopyTo(writer.GetSpan(part.Length));
-                        writer.Advance(part.Length);
-                        // IsCompleted: the peer is gone. Nothing written from here reaches anyone, and every flush
-                        // returns at once - a loop that ignored it would never give this reactor back.
-                        if ((await writer.FlushAsync()).IsCompleted)
-                        {
-                            return;
-                        }
+                    part.Span.CopyTo(writer.GetSpan(part.Length));
+                    writer.Advance(part.Length);
+                    // IsCompleted: the peer is gone. Nothing written from here reaches anyone, and every flush
+                    // returns at once - a loop that ignored it would never give this reactor back.
+                    if ((await writer.FlushAsync()).IsCompleted)
+                    {
+                        return;
                     }
                 }
 
@@ -2889,14 +2887,11 @@ for (int i = 0; i &lt; threads.Length; i++)
                 // The other direction: pull the body a chunk at a time rather than waiting for
                 // all of it, so memory is bound by one chunk however large the upload is.
                 long total = 0;
-                if (request.BodyReader is { } body)
+                while (true)
                 {
-                    while (true)
-                    {
-                        ReadOnlyMemory&lt;byte&gt; part = await body.ReadAsync();
-                        if (part.IsEmpty) break;
-                        total += part.Length;
-                    }
+                    ReadOnlyMemory&lt;byte&gt; part = await body.ReadAsync();
+                    if (part.IsEmpty) break;
+                    total += part.Length;
                 }
 
                 writer.WriteHeaders(Plain());
@@ -2941,7 +2936,7 @@ static Http3Response Plain(bool eventStream = false)
         eventStream ? &quot;text/event-stream&quot;u8.ToArray() : &quot;text/plain&quot;u8.ToArray()));
     return response;
 }</code></pre>
-    <p class="ex-foot">Both directions streamed, in pure C#. The request body is PULLED a chunk at a time through <code>Http3Request.BodyReader</code>, so a large upload is never held whole; the response is PUSHED through <code>Http3ResponseWriter</code>, one DATA frame per flush, so a large download is never built whole. <code>/echo</code> runs both at once - read a chunk, write a chunk - which is what a proxy does. Owning the framing is what makes the push side simple: a chunk is just <code>[0x00][varint length][payload]</code> handed to the QUIC stream, with no data-reader callback to answer and nothing to defer. <label for="tab-h3stream" class="ex-jump">nghttp3 &middot; streamed</label> carries a resume and a drain because nghttp3 pulls instead; this measures <b>1.32&times;</b> its throughput on the same 8&times;1&nbsp;KiB response.</p>
+    <p class="ex-foot">Both directions streamed, in pure C#. The request body is PULLED a chunk at a time through the handler's <code>Http3BodyReader</code>, so a large upload is never held whole; the response is PUSHED through <code>Http3ResponseWriter</code>, one DATA frame per flush, so a large download is never built whole. <code>/echo</code> runs both at once - read a chunk, write a chunk - which is what a proxy does. Owning the framing is what makes the push side simple: a chunk is just <code>[0x00][varint length][payload]</code> handed to the QUIC stream, with no data-reader callback to answer and nothing to defer. <label for="tab-h3stream" class="ex-jump">nghttp3 &middot; streamed</label> carries a resume and a drain because nghttp3 pulls instead; this measures <b>1.32&times;</b> its throughput on the same 8&times;1&nbsp;KiB response.</p>
   </div>
   <div class="pane pane-h3mtls">
     <div class="pane-head">
@@ -3187,11 +3182,11 @@ for (int i = 0; i &lt; threads.Length; i++)
             live.Add((r, h3));
         }
 
-        // RunBufferedAsync, not RunStreamingAsync - that one call is the whole difference.
-        return h3.RunBufferedAsync(request =&gt;
+        // No body reader in the handler, unlike Nghttp3Request - that one parameter is the whole difference.
+        return h3.RunAsync(request =&gt;
         {
             // Dispatch waited for end-of-stream, so the body is ALREADY here: request.Body is
-            // complete and request.Body.Length is just a property read. No BodyReader, no pacing.
+            // complete and request.Body.Length is just a property read. No body reader, no pacing.
             // This overload is synchronous, but the awaiting one exists too - a PgPool query
             // resumes inline on this reactor, so you can await it right here.
             _ = request.Body.Length;
@@ -3258,7 +3253,7 @@ foreach (Thread thread in threads)
 {
     thread.Join();
 }</code></pre>
-    <p class="ex-foot">The same server as <label for="tab-h3" class="ex-jump">nghttp3</label> with the other dispatch mode - one method call is the whole difference. <b>Buffered</b> waits for end-of-stream, so the body is already in <code>request.Body</code> when your handler runs; the trade is that memory holds the whole body, which suits normal requests and not hostile uploads. <b>Streamed</b> runs you while the body is still arriving and credits the peer's flow-control window as you read, so memory is bound by one window instead.</p>
+    <p class="ex-foot">The same server as <label for="tab-h3" class="ex-jump">nghttp3</label> with the other dispatch mode - one handler parameter is the whole difference. <b>Buffered</b> waits for end-of-stream, so the body is already in <code>request.Body</code> when your handler runs; the trade is that memory holds the whole body, which suits normal requests and not hostile uploads. <b>Streamed</b> runs you while the body is still arriving and credits the peer's flow-control window as you read, so memory is bound by one window instead.</p>
   </div>
   <div class="pane pane-quicalpn">
     <div class="pane-head">
@@ -3343,7 +3338,7 @@ for (int i = 0; i &lt; threads.Length; i++)
         {
             // Owns the handler ref (DecRef on exit). Routes by byte compare - no per-request
             // strings on the hot path.
-            await new Nghttp3Connection(conn).RunBufferedAsync(
+            await new Nghttp3Connection(conn).RunAsync(
                 static request =&gt; request.Path.Span.SequenceEqual(&quot;/plaintext&quot;u8)
                     ? Nghttp3Response.Text(&quot;Hello, World!&quot;)
                     : Nghttp3Response.Text(
@@ -5302,7 +5297,7 @@ for (int i = 0; i &lt; threads.Length; i++)
         {
             // The connection owns the read loop from here: it parses frames, dispatches each
             // request once its stream ends, and flushes the batch in one write.
-            await new Http2Connection(conn).RunBufferedAsync(_ =&gt; new Http2Response
+            await new Http2Connection(conn).RunAsync(_ =&gt; new Http2Response
             {
                 Status = 200,
                 Body = body,
@@ -5494,8 +5489,7 @@ var config = new ServerConfig
 
 var http2 = new Http2Options
 {
-    StreamRequestBodies = true,          // the whole point: dispatch at the headers, body follows
-    InitialWindowSize   = streamWindow,  // how far ahead of the handler the peer may run
+    InitialWindowSize = streamWindow,    // how far ahead of the handler the peer may run
 };
 
 var threads = new Thread[config.ReactorCount];
@@ -5508,26 +5502,23 @@ for (int i = 0; i &lt; threads.Length; i++)
     {
         try
         {
-            await new Http2Connection(conn, http2).RunBufferedAsync(async request =&gt;
+            // Taking the body reader is the whole point: the handler runs at the headers and the body
+            // follows through it. A handler without one would find the body whole in request.Body.
+            await new Http2Connection(conn, http2).RunAsync(async (_, body) =&gt;
             {
-                // BodyReader is set because StreamRequestBodies is on; with it off the body would
-                // be in request.Body instead and this would be null.
                 long total = 0;
-                if (request.BodyReader is { } body)
+                while (true)
                 {
-                    while (true)
+                    // Empty means end of body. Each read hands back the peer&#x27;s credit for the
+                    // chunk it returns, which is what lets the next one arrive - and the
+                    // memory it points at is recycled by the NEXT read, so anything worth
+                    // keeping has to be copied out here.
+                    ReadOnlyMemory&lt;byte&gt; chunk = await body.ReadAsync();
+                    if (chunk.IsEmpty)
                     {
-                        // Empty means end of body. Each read hands back the peer&#x27;s credit for the
-                        // chunk it returns, which is what lets the next one arrive - and the
-                        // memory it points at is recycled by the NEXT read, so anything worth
-                        // keeping has to be copied out here.
-                        ReadOnlyMemory&lt;byte&gt; chunk = await body.ReadAsync();
-                        if (chunk.IsEmpty)
-                        {
-                            break;
-                        }
-                        total += chunk.Length;
+                        break;
                     }
+                    total += chunk.Length;
                 }
 
                 return new Http2Response
@@ -5554,7 +5545,7 @@ foreach (Thread thread in threads)
 {
     thread.Join();
 }</code></pre>
-    <p class="ex-foot">The other direction, and a different problem. <code>StreamRequestBodies</code> dispatches at the HEADERS and hands the handler an <code>Http2BodyReader</code>, so it runs while the upload is still arriving. What changes is what bounds memory: buffered holds the whole body, so <code>MaxRequestBytes</code> is all that stands between a hostile peer and the arena; streamed holds ONE flow-control window, because a chunk credits the peer's window only as the handler <em>reads</em> it. Fall behind and the peer runs out of credit and stops sending - backpressure the peer takes part in, rather than a buffer you hope is big enough.</p>
+    <p class="ex-foot">The other direction, and a different problem. A handler that takes an <code>Http2BodyReader</code> is dispatched at the HEADERS, so it runs while the upload is still arriving. What changes is what bounds memory: buffered holds the whole body, so <code>MaxRequestBytes</code> is all that stands between a hostile peer and the arena; streamed holds ONE flow-control window, because a chunk credits the peer's window only as the handler <em>reads</em> it. Fall behind and the peer runs out of credit and stops sending - backpressure the peer takes part in, rather than a buffer you hope is big enough.</p>
   </div>
   <div class="pane pane-h2sboth">
     <div class="pane-head">
@@ -5600,10 +5591,6 @@ var config = new ServerConfig
     },
 };
 
-// Both halves are opt-in and independent: this one turns the REQUEST direction on, RunAsync below
-// is what turns the RESPONSE direction on.
-var http2 = new Http2Options { StreamRequestBodies = true };
-
 byte[] chunk = [.. Enumerable.Repeat((byte)&#x27;x&#x27;, chunkBytes)];
 
 var threads = new Thread[config.ReactorCount];
@@ -5616,7 +5603,9 @@ for (int i = 0; i &lt; threads.Length; i++)
     {
         try
         {
-            await new Http2Connection(conn, http2).RunAsync(async (request, writer) =&gt;
+            // Both halves are opt-in and independent: the body reader turns the REQUEST direction on,
+            // the writer the RESPONSE direction.
+            await new Http2Connection(conn).RunAsync(async (request, body, writer) =&gt;
             {
                 bool echo = request.Path.Span.SequenceEqual(&quot;/echo&quot;u8);
 
@@ -5633,7 +5622,7 @@ for (int i = 0; i &lt; threads.Length; i++)
                     // way out - so a fast uploader is paced by the slower of the two, not buffered.
                     while (true)
                     {
-                        ReadOnlyMemory&lt;byte&gt; incoming = await request.BodyReader!.ReadAsync();
+                        ReadOnlyMemory&lt;byte&gt; incoming = await body.ReadAsync();
                         if (incoming.IsEmpty)
                         {
                             break;
@@ -5681,7 +5670,7 @@ foreach (Thread thread in threads)
 {
     thread.Join();
 }</code></pre>
-    <p class="ex-foot">Both at once, which is the shape a proxy needs: <code>/echo</code> reads a chunk and writes a chunk, so neither the upload nor the download is ever held whole. The two directions are separate switches - <code>StreamRequestBodies</code> for the read side, <code>RunAsync</code> with a writer for the write side - because they solve different problems and most servers want exactly one of them. Mirrors <label for="tab-h3csstream" class="ex-jump">h3 &middot; request + response streamed</label>; the difference is HTTP/2's shared connection window, which a handler that stops reading holds down for every other stream on the connection.</p>
+    <p class="ex-foot">Both at once, which is the shape a proxy needs: <code>/echo</code> reads a chunk and writes a chunk, so neither the upload nor the download is ever held whole. The two directions are separate parameters - a body reader for the read side, a writer for the write side - because they solve different problems and most servers want exactly one of them. Mirrors <label for="tab-h3csstream" class="ex-jump">h3 &middot; request + response streamed</label>; the difference is HTTP/2's shared connection window, which a handler that stops reading holds down for every other stream on the connection.</p>
   </div>
   <div class="pane pane-h2ng">
     <div class="pane-head">
@@ -5749,7 +5738,7 @@ for (int i = 0; i &lt; threads.Length; i++)
         {
             // The connection owns the read loop from here: it feeds nghttp2, dispatches each
             // request once its stream ends, and drains the egress once per batch.
-            await new Nghttp2Connection(conn).RunBufferedAsync(_ =&gt; new Nghttp2Response
+            await new Nghttp2Connection(conn).RunAsync(_ =&gt; new Nghttp2Response
             {
                 Status = 200,
                 Body = body,
@@ -5916,11 +5905,6 @@ var config = new ServerConfig
     },
 };
 
-var http2 = new Nghttp2Options
-{
-    StreamRequestBodies = true,          // the whole point: dispatch at the headers, body follows
-};
-
 var threads = new Thread[config.ReactorCount];
 
 for (int i = 0; i &lt; threads.Length; i++)
@@ -5931,26 +5915,23 @@ for (int i = 0; i &lt; threads.Length; i++)
     {
         try
         {
-            await new Nghttp2Connection(conn, http2).RunBufferedAsync(async request =&gt;
+            // Taking the body reader is the whole point: the handler runs at the headers and the body
+            // follows through it. A handler without one would find the body whole in request.Body.
+            await new Nghttp2Connection(conn).RunAsync(async (_, body) =&gt;
             {
-                // BodyReader is set because StreamRequestBodies is on; with it off the body would
-                // be in request.Body instead and this would be null.
                 long total = 0;
-                if (request.BodyReader is { } body)
+                while (true)
                 {
-                    while (true)
+                    // Empty means end of body. Each read hands back the peer&#x27;s credit for the
+                    // chunk it returns, which is what lets the next one arrive - and the
+                    // memory it points at is recycled by the NEXT read, so anything worth
+                    // keeping has to be copied out here.
+                    ReadOnlyMemory&lt;byte&gt; chunk = await body.ReadAsync();
+                    if (chunk.IsEmpty)
                     {
-                        // Empty means end of body. Each read hands back the peer&#x27;s credit for the
-                        // chunk it returns, which is what lets the next one arrive - and the
-                        // memory it points at is recycled by the NEXT read, so anything worth
-                        // keeping has to be copied out here.
-                        ReadOnlyMemory&lt;byte&gt; chunk = await body.ReadAsync();
-                        if (chunk.IsEmpty)
-                        {
-                            break;
-                        }
-                        total += chunk.Length;
+                        break;
                     }
+                    total += chunk.Length;
                 }
 
                 return new Nghttp2Response
@@ -5977,7 +5958,7 @@ foreach (Thread thread in threads)
 {
     thread.Join();
 }</code></pre>
-    <p class="ex-foot">The same streamed request body as <label for="tab-h2sreq" class="ex-jump">the managed one</label>, and nearly the same sample: <code>StreamRequestBodies</code> dispatches at the HEADERS and hands the handler an <code>Nghttp2BodyReader</code>. What makes it hold is underneath. nghttp2 credits DATA the moment it arrives unless told otherwise, which would put the bound back on the whole body, so a streaming session runs with its automatic WINDOW_UPDATE off and the reader hands credit back only as the handler <em>reads</em>. Every byte nghttp2 delivers is then credited exactly once - read, left unread by a handler that returned, or on a stream that was reset - because one that never is shrinks the connection window for every stream on it. That took one native entry point (<code>ih2_consume</code>) and a flag on <code>ih2_server_new</code>.</p>
+    <p class="ex-foot">The same streamed request body as <label for="tab-h2sreq" class="ex-jump">the managed one</label>, and nearly the same sample: a handler that takes an <code>Nghttp2BodyReader</code> is dispatched at the HEADERS. What makes it hold is underneath. nghttp2 credits DATA the moment it arrives unless told otherwise, which would put the bound back on the whole body, so a streaming session runs with its automatic WINDOW_UPDATE off and the reader hands credit back only as the handler <em>reads</em>. Every byte nghttp2 delivers is then credited exactly once - read, left unread by a handler that returned, or on a stream that was reset - because one that never is shrinks the connection window for every stream on it. That took one native entry point (<code>ih2_consume</code>) and a flag on <code>ih2_server_new</code>.</p>
   </div>
 
 
@@ -6342,16 +6323,16 @@ for (int i = 0; i &lt; threads.Length; i++)
             live.Add((r, h3));
         }
 
-        return h3.RunStreamingAsync(async request =&gt;
+        return h3.RunAsync(async (request, body) =&gt;
         {
-            // Streamed dispatch, so we are running while the body is still on the wire. Read it to
-            // the end: every read credits the peer&#x27;s flow-control window, which is what throttles a
-            // fast sender instead of buffering it. Chunks are valid until the next ReadAsync, and a
-            // request with no body simply finds it empty on the first read.
+            // Taking the body reader dispatches at end-of-headers, so we are running while the body
+            // is still on the wire. Read it to the end: every read credits the peer&#x27;s flow-control
+            // window, which is what throttles a fast sender instead of buffering it. Chunks are valid
+            // until the next ReadAsync, and a request with no body simply finds it empty on the first read.
             long total = 0;
             while (true)
             {
-                ReadOnlyMemory&lt;byte&gt; chunk = await request.BodyReader!.ReadAsync();
+                ReadOnlyMemory&lt;byte&gt; chunk = await body.ReadAsync();
                 if (chunk.IsEmpty) break;
                 total += chunk.Length;   // a real app would parse or store the chunk here
             }
@@ -6422,7 +6403,7 @@ foreach (Thread thread in threads)
 {
     thread.Join();
 }</code></pre>
-    <p class="ex-foot">HTTP/3 over QUIC, dispatched as the body streams. Compare <label for="tab-h3buf" class="ex-jump">buffered</label>, which waits for end-of-stream instead - one method call is the whole difference.</p>
+    <p class="ex-foot">HTTP/3 over QUIC, dispatched as the body streams. Compare <label for="tab-h3buf" class="ex-jump">buffered</label>, which waits for end-of-stream instead - one handler parameter is the whole difference.</p>
   </div>
   
   <div class="pane pane-pxmatrix">
@@ -6832,7 +6813,7 @@ for (int i = 0; i &lt; threads.Length; i++)
             // Buffered + async: each stream dispatches with its body assembled, and the handler
             // may await - the upstream round trip resumes inline on this reactor. Concurrent
             // streams interleave here, which is exactly why the h1 pool has to be deep.
-            await new Http2Connection(pipe).RunBufferedAsync(async request =&gt;
+            await new Http2Connection(pipe).RunAsync(async request =&gt;
             {
                 // The method and path are h2 field values, written back out below as an HTTP/1.1
                 // request line, so one holding a CR, LF, NUL or space could add lines to the request
@@ -7019,7 +7000,7 @@ for (int i = 0; i &lt; threads.Length; i++)
 
         // Buffered + async: each request dispatches with its body assembled, and the handler may
         // await - the upstream round trip resumes inline on this reactor.
-        return new Nghttp3Connection(conn).RunBufferedAsync(async request =&gt;
+        return new Nghttp3Connection(conn).RunAsync(async request =&gt;
         {
             // The method and path are h3 field values, written back out below as an HTTP/1.1
             // request line, so one holding a CR, LF, NUL or space could add lines to the request

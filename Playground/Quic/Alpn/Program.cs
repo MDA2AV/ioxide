@@ -96,7 +96,7 @@ for (int i = 0; i < threads.Length; i++)
         {
             // Owns the handler ref (DecRef on exit). Routes by byte compare - no per-request
             // strings on the hot path.
-            await new Nghttp3Connection(conn).RunBufferedAsync(
+            await new Nghttp3Connection(conn).RunAsync(
                 static request => request.Path.Span.SequenceEqual("/plaintext"u8)
                     ? Nghttp3Response.Text("Hello, World!")
                     : Nghttp3Response.Text(

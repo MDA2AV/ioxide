@@ -4,8 +4,8 @@ using System.Threading.Tasks.Sources;
 namespace ioxide.nghttp3;
 
 /// <summary>
-/// Pull surface for a streaming request body (the <see cref="Nghttp3Connection.RunStreamingAsync"/>
-/// overload): the connection loop pushes body chunks in as nghttp3 delivers them, the handler
+/// Pull surface for a streaming request body, handed to a handler that takes one: the connection
+/// loop pushes body chunks in as nghttp3 delivers them, the handler
 /// pulls with <see cref="ReadAsync"/>. An empty chunk means end of body (fin or stream reset).
 ///
 /// Backpressure is real, not buffered-and-prayed: the request stream is flow-control paced, and

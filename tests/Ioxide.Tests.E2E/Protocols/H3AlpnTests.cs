@@ -42,7 +42,7 @@ internal static class H3AlpnTests
             (_, int udpPort) = TestServer.StartDatagram(
                 onDatagram: null,
                 quicFactory: engine.CreateFactory(),
-                quicHandle: (_, conn) => new Nghttp3Connection(conn).RunBufferedAsync(
+                quicHandle: (_, conn) => new Nghttp3Connection(conn).RunAsync(
                     _ => Nghttp3Response.Text($"alpn={conn.NegotiatedProtocol ?? "(none)"}")));
 
             using var client = new H3TestClient("127.0.0.1", udpPort);
@@ -70,7 +70,7 @@ internal static class H3AlpnTests
             (_, int udpPort) = TestServer.StartDatagram(
                 onDatagram: null,
                 quicFactory: engine.CreateFactory(),
-                quicHandle: static (_, conn) => new Nghttp3Connection(conn).RunBufferedAsync(
+                quicHandle: static (_, conn) => new Nghttp3Connection(conn).RunAsync(
                     static _ => Nghttp3Response.Text("must never serve")));
 
             using var client = new H3TestClient("127.0.0.1", udpPort) { Alpn = "echo" };
@@ -94,7 +94,7 @@ internal static class H3AlpnTests
             (_, int udpPort) = TestServer.StartDatagram(
                 onDatagram: null,
                 quicFactory: engine.CreateFactory(),
-                quicHandle: static (_, conn) => new Nghttp3Connection(conn).RunBufferedAsync(
+                quicHandle: static (_, conn) => new Nghttp3Connection(conn).RunAsync(
                     static _ => Nghttp3Response.Text("must never serve")));
 
             using var client = new H3TestClient("127.0.0.1", udpPort) { Alpn = "" };
@@ -129,7 +129,7 @@ internal static class H3AlpnTests
                 {
                     ((QuicEngineConnection)conn).HandshakeCompleted =
                         () => recorded.TrySetResult(conn.NegotiatedProtocol);
-                    return new Nghttp3Connection(conn).RunBufferedAsync(
+                    return new Nghttp3Connection(conn).RunAsync(
                         static _ => Nghttp3Response.Text("ok"));
                 });
 
@@ -150,7 +150,7 @@ internal static class H3AlpnTests
             (_, int udpPort) = TestServer.StartDatagram(
                 onDatagram: null,
                 quicFactory: engine.CreateFactory(),
-                quicHandle: static (_, conn) => new Nghttp3Connection(conn).RunBufferedAsync(
+                quicHandle: static (_, conn) => new Nghttp3Connection(conn).RunAsync(
                     static _ => Nghttp3Response.Text("served-by-nghttp3")));
 
             using var client = new H3TestClient("127.0.0.1", udpPort);   // offers "h3"
@@ -174,7 +174,7 @@ internal static class H3AlpnTests
             (_, int udpPort) = TestServer.StartDatagram(
                 onDatagram: null,
                 quicFactory: engine.CreateFactory(),
-                quicHandle: static (_, conn) => new Nghttp3Connection(conn).RunBufferedAsync(
+                quicHandle: static (_, conn) => new Nghttp3Connection(conn).RunAsync(
                     static _ => Nghttp3Response.Text("served-by-nghttp3")));
 
             using var client = new H3TestClient("127.0.0.1", udpPort) { Alpn = "echo" };
@@ -212,7 +212,7 @@ internal static class H3AlpnTests
             (_, int udpPort) = TestServer.StartDatagram(
                 onDatagram: null,
                 quicFactory: engine.CreateFactory(),
-                quicHandle: static (_, conn) => new Nghttp3Connection(conn).RunBufferedAsync(
+                quicHandle: static (_, conn) => new Nghttp3Connection(conn).RunAsync(
                     static _ => Nghttp3Response.Text("must never serve")));
 
             using var client = new H3TestClient("127.0.0.1", udpPort) { Alpn = "?2" };

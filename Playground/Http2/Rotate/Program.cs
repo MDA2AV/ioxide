@@ -205,7 +205,7 @@ for (int i = 0; i < threads.Length; i++)
 
             await using var pipe = new TlsConnectionDualPipe(conn, tls, ownsSession: false);
 
-            await new Http2Connection(pipe).RunBufferedAsync(_ =>
+            await new Http2Connection(pipe).RunAsync(_ =>
             {
                 // What the SERVER believes it published. The client's view is the certificate it
                 // just validated, and only pinning with --cacert can tell you that.

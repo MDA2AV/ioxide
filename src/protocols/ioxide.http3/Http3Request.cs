@@ -19,12 +19,11 @@ public sealed class Http3Request
     /// <summary>Non-pseudo headers; names lowercase (h3 wire requirement), values raw octets.</summary>
     public List<(ReadOnlyMemory<byte> Name, ReadOnlyMemory<byte> Value)> Headers { get; } = [];
 
-    /// <summary>Whole body - buffered flavor only (empty under the streaming overload).</summary>
+    /// <summary>Whole body, assembled before dispatch - empty when the handler takes a body reader.</summary>
     public ReadOnlyMemory<byte> Body { get; internal set; }
 
-    /// <summary>Streaming body pull surface - non-null only under the streaming overload, where
-    /// dispatch happens at end-of-headers and the body arrives while the handler runs.</summary>
-    public Http3BodyReader? BodyReader { get; internal set; }
+    // The body as it arrives, for a handler that takes a body reader - which is how it is handed one.
+    internal Http3BodyReader? BodyReader { get; set; }
 
     // --- assembly (reactor thread; same arena/ranges design as the nghttp3 layer: only offsets
     //     are recorded while the arena can still grow, memories materialize at Freeze) ---

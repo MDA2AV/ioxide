@@ -15,11 +15,11 @@ using Playground.Shared;
 //  the download is ever held whole. That is what a proxy does, and it is why the two directions
 //  are separate features rather than one "streaming" switch - they solve different problems.
 //
-//      REQUEST streamed  (Http2Request.BodyReader, StreamRequestBodies on)
+//      REQUEST streamed  (the handler takes an Http2BodyReader)
 //          bounds what an upload can make the server hold. A read returns the peer's credit, so a
 //          slow handler makes the PEER slow down.
 //
-//      RESPONSE streamed (Http2ResponseWriter, RunAsync)
+//      RESPONSE streamed (the handler takes an Http2ResponseWriter)
 //          lets a body exist that has no length and no end - /feed has no final byte, so a
 //          buffered API cannot express it at all. A flush waits when either window is exhausted
 //          and resumes on the WINDOW_UPDATE.
@@ -63,10 +63,6 @@ var config = new ServerConfig
     },
 };
 
-// Both halves are opt-in and independent: this one turns the REQUEST direction on, RunAsync below
-// is what turns the RESPONSE direction on.
-var http2 = new Http2Options { StreamRequestBodies = true };
-
 byte[] chunk = [.. Enumerable.Repeat((byte)'x', chunkBytes)];
 
 var threads = new Thread[config.ReactorCount];
@@ -79,7 +75,9 @@ for (int i = 0; i < threads.Length; i++)
     {
         try
         {
-            await new Http2Connection(conn, http2).RunAsync(async (request, writer) =>
+            // Both halves are opt-in and independent: the body reader turns the REQUEST direction on,
+            // the writer the RESPONSE direction.
+            await new Http2Connection(conn).RunAsync(async (request, body, writer) =>
             {
                 bool echo = request.Path.Span.SequenceEqual("/echo"u8);
 
@@ -96,7 +94,7 @@ for (int i = 0; i < threads.Length; i++)
                     // way out - so a fast uploader is paced by the slower of the two, not buffered.
                     while (true)
                     {
-                        ReadOnlyMemory<byte> incoming = await request.BodyReader!.ReadAsync();
+                        ReadOnlyMemory<byte> incoming = await body.ReadAsync();
                         if (incoming.IsEmpty)
                         {
                             break;

@@ -19,7 +19,7 @@ internal static class Nghttp2ChaosTests
     {
         try
         {
-            await new Nghttp2Connection(conn).RunBufferedAsync(
+            await new Nghttp2Connection(conn).RunAsync(
                 static _ => new Nghttp2Response { Status = 200, Body = "ok"u8.ToArray() });
         }
         finally
@@ -33,7 +33,7 @@ internal static class Nghttp2ChaosTests
     {
         try
         {
-            await new Nghttp2Connection(conn).RunBufferedAsync(static async request =>
+            await new Nghttp2Connection(conn).RunAsync(static async request =>
             {
                 if (request.Path.Span.SequenceEqual("/slow"u8))
                 {
@@ -77,7 +77,7 @@ internal static class Nghttp2ChaosTests
             }
             else
             {
-                await connection.RunBufferedAsync(request =>
+                await connection.RunAsync(request =>
                 {
                     seen.Enqueue((request.StreamId, request.Body.Length));
                     return new Nghttp2Response { Status = 200 };

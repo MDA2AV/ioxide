@@ -18,8 +18,6 @@ namespace Ioxide.Tests;
 /// </summary>
 internal static class Http2TrailerTests
 {
-    private static readonly Http2Options Streamed = new() { StreamRequestBodies = true };
-
     private const byte RstStream = 0x3, GoAway = 0x7;
 
     public static void Register(Runner runner)
@@ -28,11 +26,11 @@ internal static class Http2TrailerTests
         {
             var served = new List<string>();
 
-            using var peer = new Peer(Streamed);
-            Task run = peer.Connection.RunBufferedAsync(request =>
+            using var peer = new Peer(new Http2Options());
+            Task run = peer.Connection.RunAsync((request, _) =>
             {
                 served.Add($"{request.StreamId} '{Ascii(request.Path)}'");
-                return Http2Response.Text("done");   // without reading, so stream 1 retires before its body ends
+                return ValueTask.FromResult(Http2Response.Text("done"));   // without reading, so stream 1 retires before its body ends
             });
 
             peer.Open();
@@ -56,8 +54,8 @@ internal static class Http2TrailerTests
             string verdict = "never checked: the handler did not resume";
             long body = -1;
 
-            using var peer = new Peer(Streamed);
-            Task run = peer.Connection.RunBufferedAsync(async request =>
+            using var peer = new Peer(new Http2Options());
+            Task run = peer.Connection.RunAsync(async (request, reader) =>
             {
                 ReadOnlyMemory<byte> held = request.Path;   // valid for the whole handler call
                 path = Ascii(held);
@@ -65,7 +63,7 @@ internal static class Http2TrailerTests
 
                 verdict = !MemoryMarshal.TryGetArray(held, out ArraySegment<byte> segment) ? "not an array"
                     : InPool(segment.Array!) ? "back in the pool" : "still the request's";
-                body = await ReadToEnd(request.BodyReader!);
+                body = await ReadToEnd(reader);
                 return Http2Response.Text("done");
             });
 
@@ -92,8 +90,8 @@ internal static class Http2TrailerTests
             var gate = new TaskCompletionSource();
             string? seen = null;
 
-            using var peer = new Peer(Streamed);
-            Task run = peer.Connection.RunBufferedAsync(async request =>
+            using var peer = new Peer(new Http2Options());
+            Task run = peer.Connection.RunAsync(async (request, _) =>
             {
                 string target = Ascii(request.Path);
                 if (target == "/held")
@@ -129,8 +127,8 @@ internal static class Http2TrailerTests
         {
             var served = new List<string>();
 
-            using var peer = new Peer(new Http2Options());   // streaming OFF - the default
-            Task run = peer.Connection.RunBufferedAsync(request =>
+            using var peer = new Peer(new Http2Options());
+            Task run = peer.Connection.RunAsync(request =>     // no body reader: the body comes whole
             {
                 request.TryGetHeader("x-checksum"u8, out ReadOnlyMemory<byte> checksum);
                 served.Add($"{request.StreamId} '{Ascii(request.Path)}' {request.Body.Length} x-checksum '{Ascii(checksum)}'");
@@ -155,7 +153,7 @@ internal static class Http2TrailerTests
             var served = new List<string>();
 
             using var peer = new Peer(new Http2Options { MaxConcurrentStreams = 1 });
-            Task run = peer.Connection.RunBufferedAsync(request =>
+            Task run = peer.Connection.RunAsync(request =>
             {
                 served.Add($"{request.StreamId} '{Ascii(request.Path)}'");
                 return Http2Response.Text("done");
@@ -179,8 +177,8 @@ internal static class Http2TrailerTests
         {
             var gate = new TaskCompletionSource();
 
-            using var peer = new Peer(Streamed);
-            Task run = peer.Connection.RunBufferedAsync(async _ =>
+            using var peer = new Peer(new Http2Options());
+            Task run = peer.Connection.RunAsync(async (_, _) =>
             {
                 await gate.Task;
                 return Http2Response.Text("done");

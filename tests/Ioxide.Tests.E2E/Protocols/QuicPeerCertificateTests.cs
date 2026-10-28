@@ -103,7 +103,7 @@ internal static class QuicPeerCertificateTests
 
                 // Read inside the REQUEST handler, not at accept: the connection callback fires
                 // before the handshake finishes, so the certificate is not there yet.
-                return new Nghttp3Connection(conn).RunBufferedAsync(
+                return new Nghttp3Connection(conn).RunAsync(
                     _ => new Nghttp3Response { Body = Encoding.ASCII.GetBytes(Describe(quic.PeerCertificateDer)) });
             });
 

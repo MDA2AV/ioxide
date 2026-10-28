@@ -134,7 +134,7 @@ for (int i = 0; i < threads.Length; i++)
 
             await using var pipe = new TlsConnectionDualPipe(conn, tls, ownsSession: false);
 
-            await new Http2Connection(pipe).RunBufferedAsync(request =>
+            await new Http2Connection(pipe).RunAsync(request =>
             {
                 // :authority is HTTP/2's Host header, and this is where site routing belongs -
                 // per request, not per connection. It is NOT proof of which certificate was

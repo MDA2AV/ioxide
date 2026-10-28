@@ -104,12 +104,12 @@ internal static class QuicReadTimeoutTests
                     quicFactory: engine.CreateFactory(),
                     quicReadMs: H3ReadTimeoutMs,
                     quicHandle: ng
-                        ? static (_, conn) => new Nghttp3Connection(conn).RunBufferedAsync(static async _ =>
+                        ? static (_, conn) => new Nghttp3Connection(conn).RunAsync(static async _ =>
                         {
                             await Task.Delay(3 * H3ReadTimeoutMs);
                             return Nghttp3Response.Text("slow-but-here");
                         })
-                        : static (_, conn) => new Http3Connection(conn).RunAsync(static async _ =>
+                        : static (_, conn) => new Http3Connection(conn).RunAsync(static async (_, _) =>
                         {
                             await Task.Delay(3 * H3ReadTimeoutMs);
                             return Http3Response.Text("slow-but-here");

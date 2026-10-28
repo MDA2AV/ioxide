@@ -20,7 +20,7 @@ internal static class Http2OutputQueueTests
         runner.Test("h2 queue: a pass's responses still leave on one flush", () =>
         {
             using var client = new StrictClient();
-            Task run = client.Connection.RunBufferedAsync(_ => Http2Response.Text("hi"));
+            Task run = client.Connection.RunAsync(_ => Http2Response.Text("hi"));
 
             client.ReleaseFlush();                       // server SETTINGS
             client.SendRequests(1, 3);
@@ -42,7 +42,7 @@ internal static class Http2OutputQueueTests
             using var client = new StrictClient();
 
             var parked = new Dictionary<int, TaskCompletionSource<Http2Response>>();
-            Task run = client.Connection.RunBufferedAsync(request =>
+            Task run = client.Connection.RunAsync(request =>
             {
                 var tcs = new TaskCompletionSource<Http2Response>();
                 parked[request.StreamId] = tcs;
@@ -111,7 +111,7 @@ internal static class Http2OutputQueueTests
             using var client = new StrictClient();
 
             var parked = new Dictionary<int, TaskCompletionSource<Http2Response>>();
-            Task run = client.Connection.RunBufferedAsync(request =>
+            Task run = client.Connection.RunAsync(request =>
             {
                 var tcs = new TaskCompletionSource<Http2Response>();
                 parked[request.StreamId] = tcs;

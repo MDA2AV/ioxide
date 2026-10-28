@@ -17,7 +17,7 @@ internal static class H2ChaosTests
     {
         try
         {
-            await new Http2Connection(conn, options).RunBufferedAsync(request =>
+            await new Http2Connection(conn, options).RunAsync(request =>
             {
                 seen?.Enqueue(request.StreamId);
                 return Http2Response.Text("ok");
@@ -213,12 +213,12 @@ internal static class H2ChaosTests
             {
                 try
                 {
-                    await new Http2Connection(conn, new Http2Options { StreamRequestBodies = true }).RunAsync(
-                        static async (request, writer) =>
+                    await new Http2Connection(conn).RunAsync(
+                        static async (_, body, writer) =>
                         {
                             writer.WriteHeaders(new Http2Response { Status = 200 });
                             await writer.FlushAsync();
-                            while (!(await request.BodyReader!.ReadAsync()).IsEmpty)
+                            while (!(await body.ReadAsync()).IsEmpty)
                             {
                             }
                             "ok"u8.CopyTo(writer.GetSpan(2));

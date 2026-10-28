@@ -25,14 +25,14 @@ internal static class Http2StreamedRequestTests
             var gate = new TaskCompletionSource();
             var chunks = new List<int>();
 
-            using var peer = new Peer(new Http2Options { StreamRequestBodies = true });
-            Task run = peer.Connection.RunBufferedAsync(async request =>
+            using var peer = new Peer(new Http2Options());
+            Task run = peer.Connection.RunAsync(async (_, body) =>
             {
                 await gate.Task;                       // hold the body unread, like a slow consumer
 
                 while (true)
                 {
-                    ReadOnlyMemory<byte> chunk = await request.BodyReader!.ReadAsync();
+                    ReadOnlyMemory<byte> chunk = await body.ReadAsync();
                     if (chunk.IsEmpty)
                     {
                         break;
@@ -70,10 +70,10 @@ internal static class Http2StreamedRequestTests
         {
             bool sawEmpty = false;
 
-            using var peer = new Peer(new Http2Options { StreamRequestBodies = true });
-            Task run = peer.Connection.RunBufferedAsync(async request =>
+            using var peer = new Peer(new Http2Options());
+            Task run = peer.Connection.RunAsync(async (_, body) =>
             {
-                sawEmpty = (await request.BodyReader!.ReadAsync()).IsEmpty;
+                sawEmpty = (await body.ReadAsync()).IsEmpty;
                 return Http2Response.Text("done");
             });
 
@@ -90,11 +90,10 @@ internal static class Http2StreamedRequestTests
         {
             int seen = -1;
 
-            using var peer = new Peer(new Http2Options());   // streaming OFF - the default
-            Task run = peer.Connection.RunBufferedAsync(request =>
+            using var peer = new Peer(new Http2Options());
+            Task run = peer.Connection.RunAsync(request =>     // no body reader: the body comes whole
             {
                 seen = request.Body.Length;
-                Assert.True(request.BodyReader is null, "buffered dispatch hands over no reader");
                 return Http2Response.Text("done");
             });
 
@@ -115,8 +114,8 @@ internal static class Http2StreamedRequestTests
         {
             var holder = new Holder();
 
-            using var peer = new Peer(new Http2Options { StreamRequestBodies = true });
-            Task run = peer.Connection.RunBufferedAsync(holder.Handle);
+            using var peer = new Peer(new Http2Options());
+            Task run = peer.Connection.RunAsync(holder.Handle);
 
             peer.OpenRequest(streamId: 1, endStream: false);
             peer.SendData(streamId: 1, bytes: 400, endStream: false);
@@ -133,8 +132,8 @@ internal static class Http2StreamedRequestTests
         {
             var holder = new Holder();
 
-            using var peer = new Peer(new Http2Options { StreamRequestBodies = true });
-            Task run = peer.Connection.RunBufferedAsync(holder.Handle);
+            using var peer = new Peer(new Http2Options());
+            Task run = peer.Connection.RunAsync(holder.Handle);
 
             peer.OpenRequest(streamId: 1, endStream: false);
             peer.SendData(streamId: 1, bytes: 400, endStream: false);
@@ -151,8 +150,8 @@ internal static class Http2StreamedRequestTests
         {
             var holder = new Holder();
 
-            using var peer = new Peer(new Http2Options { StreamRequestBodies = true });
-            Task run = peer.Connection.RunBufferedAsync(holder.Handle);
+            using var peer = new Peer(new Http2Options());
+            Task run = peer.Connection.RunAsync(holder.Handle);
 
             peer.OpenRequest(streamId: 1, endStream: false);
             peer.SendData(streamId: 1, bytes: 400, endStream: false);
@@ -168,8 +167,8 @@ internal static class Http2StreamedRequestTests
         {
             var drainer = new Drainer();
 
-            using var peer = new Peer(new Http2Options { StreamRequestBodies = true });
-            Task run = peer.Connection.RunBufferedAsync(drainer.Handle);
+            using var peer = new Peer(new Http2Options());
+            Task run = peer.Connection.RunAsync(drainer.Handle);
 
             peer.OpenRequest(streamId: 1, endStream: false);
             peer.SendData(streamId: 1, bytes: 400, endStream: false);
@@ -184,8 +183,8 @@ internal static class Http2StreamedRequestTests
         {
             var drainer = new Drainer();
 
-            using var peer = new Peer(new Http2Options { StreamRequestBodies = true });
-            Task run = peer.Connection.RunBufferedAsync(drainer.Handle);
+            using var peer = new Peer(new Http2Options());
+            Task run = peer.Connection.RunAsync(drainer.Handle);
 
             peer.OpenRequest(streamId: 1, endStream: false);
             peer.SendData(streamId: 1, bytes: 400, endStream: false);
@@ -199,8 +198,8 @@ internal static class Http2StreamedRequestTests
         {
             var drainer = new Drainer();
 
-            using var peer = new Peer(new Http2Options { StreamRequestBodies = true });
-            Task run = peer.Connection.RunBufferedAsync(drainer.Handle);
+            using var peer = new Peer(new Http2Options());
+            Task run = peer.Connection.RunAsync(drainer.Handle);
 
             // Reset before its dispatch: the request is still waiting for its handler when the reset lands.
             peer.OpenRequest(streamId: 1, endStream: false, resetWith: Cancel);
@@ -383,14 +382,14 @@ internal static class Http2StreamedRequestTests
 
         public bool Ended { get; private set; }
 
-        public async ValueTask<Http2Response> Handle(Http2Request request)
+        public async ValueTask<Http2Response> Handle(Http2Request request, Http2BodyReader body)
         {
             ReadOnlyMemory<byte> path = request.Path;
-            ReadOnlyMemory<byte> chunk = await request.BodyReader!.ReadAsync();
+            ReadOnlyMemory<byte> chunk = await body.ReadAsync();
             await _release.Task;
 
             Verdict = $"its request was {Fate(path)} and its chunk {Fate(chunk)}";
-            Ended = (await request.BodyReader.ReadAsync()).IsEmpty;
+            Ended = (await body.ReadAsync()).IsEmpty;
             return Http2Response.Text("done");
         }
 
@@ -437,10 +436,10 @@ internal static class Http2StreamedRequestTests
 
         public bool Ended { get; private set; }
 
-        public async ValueTask<Http2Response> Handle(Http2Request request)
+        public async ValueTask<Http2Response> Handle(Http2Request request, Http2BodyReader body)
         {
             ReadOnlyMemory<byte> chunk;
-            while (!(chunk = await request.BodyReader!.ReadAsync()).IsEmpty)
+            while (!(chunk = await body.ReadAsync()).IsEmpty)
             {
                 Read += chunk.Length;
             }

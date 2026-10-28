@@ -132,7 +132,7 @@ internal static class CrossStackParityTests
                 (_, int udpPort) = TestServer.StartDatagram(
                     onDatagram: null,
                     quicFactory: engine.CreateFactory(),
-                    quicHandle: static (_, conn) => new Nghttp3Connection(conn).RunBufferedAsync(
+                    quicHandle: static (_, conn) => new Nghttp3Connection(conn).RunAsync(
                         static _ => Nghttp3Response.Text("ok")));
 
                 // Both admit the client while its issuer is anchored, or "both refuse" below could

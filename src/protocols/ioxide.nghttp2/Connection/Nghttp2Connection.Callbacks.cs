@@ -106,7 +106,7 @@ public sealed partial class Nghttp2Connection
             // A buffered request is not dispatchable until the stream ends, because a body may still
             // follow. A streamed one is dispatched here, once: trailers end a header block too.
             Nghttp2Connection connection = From(user);
-            if (connection._options.StreamRequestBodies &&
+            if (connection._streamBodies &&
                 connection._pending.TryGetValue(streamId, out PendingRequest? pending) && pending.BodyReader is null)
             {
                 pending.BodyReader = new Nghttp2BodyReader(connection, streamId);
@@ -125,7 +125,7 @@ public sealed partial class Nghttp2Connection
         try
         {
             Nghttp2Connection connection = From(user);
-            if (connection._options.StreamRequestBodies)
+            if (connection._streamBodies)
             {
                 // Each byte handed out here is credited exactly once: by the reader as its handler
                 // takes it, or right now when no handler ever will.

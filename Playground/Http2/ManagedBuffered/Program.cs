@@ -75,7 +75,7 @@ for (int i = 0; i < threads.Length; i++)
         {
             // The connection owns the read loop from here: it parses frames, dispatches each
             // request once its stream ends, and flushes the batch in one write.
-            await new Http2Connection(conn).RunBufferedAsync(_ => new Http2Response
+            await new Http2Connection(conn).RunAsync(_ => new Http2Response
             {
                 Status = 200,
                 Body = body,

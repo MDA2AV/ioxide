@@ -1,3 +1,4 @@
+using System.Buffers;
 using System.Net;
 using System.Net.Sockets;
 using System.Runtime.InteropServices;
@@ -160,6 +161,88 @@ internal static class H3BodyTruncationTests
                     $"content-length {string.Join(" + ", fields.Select(f => $"'{f}'"))}: expected reset 0x10e, got {outcome}");
             }
         });
+
+        runner.Test("http3: a streamed response refused before it runs finds its stream gone on the first flush", () =>
+        {
+            // Taking a body reader dispatches a streamed response at its HEADERS, so a body that runs
+            // past its content-length in the same datagram is refused after the request was made
+            // ready and before its handler starts. The reset drops whatever is sent on the stream
+            // without filling the connection, so a writer nobody told never parks: every flush
+            // returns at once and not completed, and a handler that writes until told to stop spins
+            // the reactor for good.
+            Assert.Equal("body raised, flush completed", StreamedResponseOutcome(samePass: true));
+        });
+
+        runner.Test("http3: a streamed response refused while it runs finds its stream gone on the next flush", () =>
+        {
+            // The same refusal reaching a handler already writing: the reset ends its response as
+            // a STOP_SENDING would, so its writer has to hear about it the same way.
+            Assert.Equal("body raised, flush completed", StreamedResponseOutcome(samePass: false));
+        });
+    }
+
+    /// <summary>
+    /// A streamed response whose request body runs past its content-length, refused in the pass
+    /// that dispatched it or once its handler is running, and what that handler saw: how its body
+    /// read ended, and whether the flush after it said the stream was gone.
+    /// </summary>
+    private static string StreamedResponseOutcome(bool samePass)
+    {
+        (string certPath, string keyPath) = TestCert.Ensure();
+        var engine = TestServer.Own(new QuicEngine(certPath, keyPath, cidLength: 8, alpn: ["h3"]));
+
+        var started = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var outcome = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        (_, int udpPort) = TestServer.StartDatagram(
+            onDatagram: null,
+            quicFactory: engine.CreateFactory(),
+            quicHandle: (_, conn) => new Http3Connection(conn).RunAsync(
+                async (_, reader, writer) =>
+                {
+                    writer.WriteHeaders(new Http3Response { Status = 200 });
+                    started.TrySetResult();
+
+                    string body;
+                    try
+                    {
+                        while (!(await reader.ReadAsync()).IsEmpty)
+                        {
+                        }
+                        body = "ended";
+                    }
+                    catch (IOException)
+                    {
+                        body = "raised";
+                    }
+
+                    writer.Write("after"u8);
+                    bool gone = (await writer.FlushAsync()).IsCompleted;
+                    outcome.TrySetResult($"body {body}, flush {(gone ? "completed" : "not completed")}");
+                }));
+
+        using var client = new RawH3Client("127.0.0.1", udpPort);
+        client.Connect();
+        Assert.True(client.CompleteHandshake(timeoutMs: 5000), "handshake did not complete");
+        client.OpenRequestStream();
+
+        byte[] headers = RawH3Client.RequestHeaders("POST", "10");
+        byte[] overrun = [.. RawH3Client.DataFrameHeader(100), .. new byte[100]];
+        if (samePass)
+        {
+            client.Write([.. headers, .. overrun], fin: true);
+        }
+        else
+        {
+            client.Write(headers, fin: false);
+            Assert.True(client.WaitFor(started.Task, timeoutMs: 5000), "the streamed handler never started");
+            client.Write(overrun, fin: true);
+        }
+
+        ulong? code = client.WaitForReset(timeoutMs: 5000);
+        Assert.True(code == 0x10e, $"the overrun should reset the stream with H3_MESSAGE_ERROR, got {(code is ulong c ? $"0x{c:x}" : "no reset")}");
+        Assert.True(client.WaitFor(outcome.Task, timeoutMs: 5000), "the streamed handler never got past its body");
+        return outcome.Task.Result;
     }
 
     /// <summary>
@@ -188,7 +271,7 @@ internal static class H3BodyTruncationTests
             onDatagram: null,
             quicFactory: engine.CreateFactory(),
             quicHandle: (_, conn) => new Http3Connection(conn).RunAsync(
-                async req =>
+                async (_, body) =>
                 {
                     started.TrySetResult();
 
@@ -197,7 +280,7 @@ internal static class H3BodyTruncationTests
                     {
                         while (true)
                         {
-                            ReadOnlyMemory<byte> chunk = await req.BodyReader!.ReadAsync();
+                            ReadOnlyMemory<byte> chunk = await body.ReadAsync();
                             if (chunk.IsEmpty)
                             {
                                 ended.TrySetResult($"ended after {total}");
@@ -431,12 +514,20 @@ internal sealed unsafe class RawH3Client : IDisposable
         into.Add((byte)value);
     }
 
+    // Stream bytes handed to ngtcp2, kept for the client's lifetime: it points into them until the
+    // peer acknowledges them, and a retransmission reads them again, so they may not move or go.
+    private readonly List<byte[]> _streamBytes = [];
+
     /// <summary>
     /// Write raw bytes, and/or a bare fin, on the request stream. Never drops a tail: while the
     /// engine is blocked it pumps the wire, since the server's credits arrive as datagrams.
     /// </summary>
-    public void Write(ReadOnlySpan<byte> data, bool fin)
+    public void Write(ReadOnlySpan<byte> bytes, bool fin)
     {
+        byte[] data = GC.AllocateUninitializedArray<byte>(bytes.Length, pinned: true);
+        bytes.CopyTo(data);
+        _streamBytes.Add(data);
+
         long deadline = Environment.TickCount64 + 10_000;
         int off = 0;
         bool finPending = fin;

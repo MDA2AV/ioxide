@@ -142,7 +142,7 @@ internal static class H3CriticalStreamTests
                     Assert.True(quic.EnqueueStreamData(2, Array.Empty<byte>(), true), "the recv ring rejected the item");
                 }
 
-                Task run = new Nghttp3Connection(quic).RunBufferedAsync(static _ => Nghttp3Response.Text("ok"));
+                Task run = new Nghttp3Connection(quic).RunAsync(static _ => Nghttp3Response.Text("ok"));
 
                 Assert.True(run.IsCompleted,
                     $"nghttp3 kept serving after its peer's control stream was {(reset ? "reset" : "closed")}");

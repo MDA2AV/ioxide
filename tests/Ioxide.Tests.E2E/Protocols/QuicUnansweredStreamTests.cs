@@ -81,7 +81,7 @@ internal static class QuicUnansweredStreamTests
                     try
                     {
                         // The first request starts a graceful shutdown: its answer goes out with a GOAWAY.
-                        await h3.RunBufferedAsync(_ =>
+                        await h3.RunAsync(_ =>
                         {
                             h3.Shutdown();
                             return Nghttp3Response.Text("bye");
@@ -125,7 +125,7 @@ internal static class QuicUnansweredStreamTests
                 quicFactory: engine.CreateFactory(),
                 quicReadMs: ReadTimeoutMs,
                 quicHandle: native
-                    ? (_, conn) => new Nghttp3Connection(conn).RunStreamedResponseAsync(async (_, writer) =>
+                    ? (_, conn) => new Nghttp3Connection(conn).RunAsync(async (_, _, writer) =>
                     {
                         writer.WriteHeaders(new Nghttp3Response { Status = 200 });
                         writer.Write("partial"u8);
@@ -135,7 +135,7 @@ internal static class QuicUnansweredStreamTests
                             throw new InvalidOperationException("the body failed");
                         }
                     })
-                    : (_, conn) => new Http3Connection(conn).RunStreamedResponseAsync(async (_, writer) =>
+                    : (_, conn) => new Http3Connection(conn).RunAsync(async (_, writer) =>
                     {
                         writer.WriteHeaders(new Http3Response { Status = 200 });
                         writer.Write("partial"u8);

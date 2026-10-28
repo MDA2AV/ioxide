@@ -227,7 +227,7 @@ internal static class QuicSniHostileTests
         (_, int udpPort) = TestServer.StartDatagram(
             onDatagram: null,
             quicFactory: engine.CreateFactory(),
-            quicHandle: static (_, conn) => new Nghttp3Connection(conn).RunBufferedAsync(
+            quicHandle: static (_, conn) => new Nghttp3Connection(conn).RunAsync(
                 static _ => new Nghttp3Response { Body = "ok"u8.ToArray() }));
 
         return udpPort;

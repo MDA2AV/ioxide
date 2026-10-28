@@ -29,37 +29,45 @@ public sealed partial class Http2Connection
     /// </summary>
     private readonly Dictionary<int, int> _responseWindows = new();
     private readonly Dictionary<int, List<TaskCompletionSource>> _creditWaiters = new();
-    private Func<Http2Request, Http2ResponseWriter, ValueTask>? _streamedHandler;
 
     /// <summary>
     /// Serve this connection with each response body produced through a writer rather than
     /// returned whole. The handler owns its stream until it completes the writer.
     /// </summary>
     public Task RunAsync(Func<Http2Request, Http2ResponseWriter, ValueTask> handler)
-    {
-        _streamedHandler = handler;
-        return RunBufferedAsync(NoBufferedHandler);
-    }
-
-    // Never invoked: a streamed connection hands every ready request to a writer before the
-    // buffered path would reach this. It exists only because RunBufferedAsync needs a handler.
-    private static Http2Response NoBufferedHandler(Http2Request _)
-        => throw new InvalidOperationException("A streamed connection dispatches through its writer.");
+        => RunCoreAsync(() => DispatchStreamed(handler));
 
     /// <summary>
-    /// Hand a ready request to the streamed path, if this connection has one. Called from the
-    /// dispatch that made it ready, so the writer's first frames ride that same pass.
+    /// Both directions streamed: each request is dispatched as soon as its HEADERS are in, and the
+    /// handler pulls the body through its <see cref="Http2BodyReader"/> while it writes the response.
     /// </summary>
-    private bool TryDispatchStreamed(Http2Request request, PendingRequest pending)
+    public Task RunAsync(Func<Http2Request, Http2BodyReader, Http2ResponseWriter, ValueTask> handler)
     {
-        if (_streamedHandler is null)
-        {
-            return false;
-        }
+        _streamBodies = true;
+        Func<Http2Request, Http2ResponseWriter, ValueTask> streamed = (request, writer) => handler(request, request.BodyReader!, writer);
+        return RunCoreAsync(() => DispatchStreamed(streamed));
+    }
 
-        Http2ResponseWriter writer = RentWriter(request.StreamId);
-        _ = ServeStreamedAsync(_streamedHandler, request, writer, pending);
-        return true;
+    /// <summary>
+    /// Hand each ready request to a writer. Called from the pass that made it ready, so the
+    /// writer's first frames ride that same pass.
+    /// </summary>
+    private void DispatchStreamed(Func<Http2Request, Http2ResponseWriter, ValueTask> handler)
+    {
+        foreach (PendingRequest pending in TakeReady())
+        {
+            try
+            {
+                Http2Request request = pending.Freeze();
+                Http2ResponseWriter writer = RentWriter(request.StreamId);
+                _ = ServeStreamedAsync(handler, request, writer, pending);   // the writer owns this stream, and retires it when done
+            }
+            catch
+            {
+                pending.Dispose();
+                throw;
+            }
+        }
     }
 
     private async Task ServeStreamedAsync(Func<Http2Request, Http2ResponseWriter, ValueTask> handler,

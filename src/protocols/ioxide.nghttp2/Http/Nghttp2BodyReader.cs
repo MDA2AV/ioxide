@@ -4,8 +4,8 @@ using System.Threading.Tasks.Sources;
 namespace ioxide.nghttp2;
 
 /// <summary>
-/// Pull surface for a streaming request body, handed to the handler as
-/// <see cref="Nghttp2Request.BodyReader"/> when <see cref="Nghttp2Options.StreamRequestBodies"/> is on.
+/// Pull surface for a streaming request body, handed to a handler that takes one - the
+/// <c>RunAsync</c> overloads with an <see cref="Nghttp2BodyReader"/> parameter.
 /// The connection pushes chunks in as nghttp2 delivers DATA; the handler pulls with
 /// <see cref="ReadAsync"/>. An empty chunk means end of body (END_STREAM or a reset stream).
 ///
