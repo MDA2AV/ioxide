@@ -431,12 +431,20 @@ internal sealed unsafe class RawH3Client : IDisposable
         into.Add((byte)value);
     }
 
+    // Stream bytes handed to ngtcp2, kept for the client's lifetime: it points into them until the
+    // peer acknowledges them, and a retransmission reads them again, so they may not move or go.
+    private readonly List<byte[]> _streamBytes = [];
+
     /// <summary>
     /// Write raw bytes, and/or a bare fin, on the request stream. Never drops a tail: while the
     /// engine is blocked it pumps the wire, since the server's credits arrive as datagrams.
     /// </summary>
-    public void Write(ReadOnlySpan<byte> data, bool fin)
+    public void Write(ReadOnlySpan<byte> bytes, bool fin)
     {
+        byte[] data = GC.AllocateUninitializedArray<byte>(bytes.Length, pinned: true);
+        bytes.CopyTo(data);
+        _streamBytes.Add(data);
+
         long deadline = Environment.TickCount64 + 10_000;
         int off = 0;
         bool finPending = fin;
