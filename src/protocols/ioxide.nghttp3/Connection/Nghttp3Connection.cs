@@ -1,3 +1,4 @@
+using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using ioxide;
 
@@ -175,24 +176,32 @@ public sealed partial class Nghttp3Connection : IDisposable
         }
         finally
         {
-            // Unpark any handler still awaiting a body: reads return empty, its response submit
-            // no-ops against the disposed engine. In-flight requests die with the connection.
-            foreach (Nghttp3BodyReader sink in _sinks.Values)
-            {
-                sink.Drop();
-            }
-            FireBodyWakes();
-            _sinks.Clear();
-
-            tearDown?.Invoke();
-
-            // Before letting go, because letting go is all the transport sees: DecRef neither
-            // closes nor unregisters.
-            CloseWithPeerCode();
-
-            _quicConnection.DecRef();
-            Dispose();
+            TearDown(tearDown);
         }
+    }
+
+    // Not inline in RunCoreAsync's finally: a loop in a handler stops the JIT tiering the run loop
+    // up, so it never gets PGO, and every buffered request cost 9% more.
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private void TearDown(Action? tearDown)
+    {
+        // Unpark any handler still awaiting a body: reads return empty, its response submit
+        // no-ops against the disposed engine. In-flight requests die with the connection.
+        foreach (Nghttp3BodyReader sink in _sinks.Values)
+        {
+            sink.Drop();
+        }
+        FireBodyWakes();
+        _sinks.Clear();
+
+        tearDown?.Invoke();
+
+        // Before letting go, because letting go is all the transport sees: DecRef neither
+        // closes nor unregisters.
+        CloseWithPeerCode();
+
+        _quicConnection.DecRef();
+        Dispose();
     }
 
     /// <summary>
