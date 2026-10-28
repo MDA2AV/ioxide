@@ -189,7 +189,7 @@ public sealed partial class Nghttp3Connection : IDisposable
         // no-ops against the disposed engine. In-flight requests die with the connection.
         foreach (Nghttp3BodyReader sink in _sinks.Values)
         {
-            sink.Drop();
+            sink.Abort();   // its handler may still be running, on a chunk it was handed
         }
         FireBodyWakes();
         _sinks.Clear();

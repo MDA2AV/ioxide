@@ -199,7 +199,7 @@ public sealed partial class Http3Connection
         {
             foreach (ReqStream rs in _requests.Values)
             {
-                rs.Sink?.Drop();
+                rs.Sink?.Abort();   // its handler may still be running, on a chunk it was handed
                 ReleaseParseBuffers(rs);
             }
             FireBodyWakes();
