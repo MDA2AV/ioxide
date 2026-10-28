@@ -7,7 +7,8 @@ namespace ioxide.http2;
 /// Pull surface for a streaming request body, handed to a handler that takes one - the
 /// <c>RunAsync</c> overloads with an <see cref="Http2BodyReader"/> parameter.
 /// The connection loop pushes chunks in as DATA frames arrive; the handler pulls with
-/// <see cref="ReadAsync"/>. An empty chunk means end of body (END_STREAM or a reset stream).
+/// <see cref="ReadAsync"/>. An empty chunk means the body ended whole, at END_STREAM. A body cut off
+/// by a reset stream or a lost connection ends with an <see cref="IOException"/> instead.
 ///
 /// Backpressure is real rather than buffered-and-hoped-for: a chunk is credited back to the peer's
 /// window only as it is handed over, so a slow consumer stops replenishing, the peer runs out of
@@ -32,6 +33,7 @@ public sealed class Http2BodyReader : IValueTaskSource<ReadOnlyMemory<byte>>
     private readonly Queue<(byte[] Buffer, int Length)> _chunks = new();
     private (byte[]? Buffer, int Length) _handedOut;
     private bool _ended;
+    private Exception? _fault;   // what the end is reported as, when the body was cut off
     private bool _armed;
 
     private ManualResetValueTaskSourceCore<ReadOnlyMemory<byte>> _core = new()
@@ -47,7 +49,8 @@ public sealed class Http2BodyReader : IValueTaskSource<ReadOnlyMemory<byte>>
     }
 
     /// <summary>
-    /// The next body chunk; empty means end of body. The memory is valid until the next
+    /// The next body chunk; empty means the body ended whole. Throws <see cref="IOException"/> in
+    /// place of the end when it was cut off. The memory is valid until the next
     /// <see cref="ReadAsync"/> call, or until the handler returns, whichever comes first.
     /// </summary>
     public ValueTask<ReadOnlyMemory<byte>> ReadAsync()
@@ -63,7 +66,7 @@ public sealed class Http2BodyReader : IValueTaskSource<ReadOnlyMemory<byte>>
 
         if (_ended)
         {
-            return default;
+            return _fault is null ? default : ValueTask.FromException<ReadOnlyMemory<byte>>(_fault);
         }
 
         _core.Reset();
@@ -91,7 +94,7 @@ public sealed class Http2BodyReader : IValueTaskSource<ReadOnlyMemory<byte>>
         }
     }
 
-    /// <summary>End of body: END_STREAM, a reset stream, or the connection going away. Idempotent.</summary>
+    /// <summary>End of body: END_STREAM, or a cut one once <see cref="Abort"/> has said so. Idempotent.</summary>
     internal void End()
     {
         if (_ended)
@@ -124,15 +127,27 @@ public sealed class Http2BodyReader : IValueTaskSource<ReadOnlyMemory<byte>>
         else if (_ended)
         {
             _armed = false;
-            _core.SetResult(default);
+            if (_fault is null)
+            {
+                _core.SetResult(default);
+            }
+            else
+            {
+                _core.SetException(_fault);
+            }
         }
     }
 
     // The stream was reset, or the connection went away, under a running handler: what is queued
     // will never be read, so it goes back now. The chunk the handler holds stays its own until its
-    // next read or its return, and a parked read wakes through the deferred list.
+    // next read or its return, and a parked read wakes through the deferred list. A body that had
+    // not ended, or loses bytes here, was cut off, and its end has to say so.
     internal void Abort()
     {
+        if (!_ended || _chunks.Count > 0)
+        {
+            _fault = new IOException("the request body was cut off: its stream was reset or its connection closed");
+        }
         DropQueued();
         End();
     }

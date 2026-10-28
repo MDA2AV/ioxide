@@ -25,7 +25,8 @@ public sealed partial class Nghttp3Connection
             }
             if (_sinks.Remove(item.StreamId, out Nghttp3BodyReader? deadSink))
             {
-                deadSink.End();   // parked body reads resume empty on this pass's FireBodyWakes
+                // Still a sink, so its fin never came: a parked read learns on this pass's FireBodyWakes.
+                deadSink.Fail("the request stream went away before its body ended");
             }
 
             // The stream is going away, so its streamed-response writer is done: hand it back to

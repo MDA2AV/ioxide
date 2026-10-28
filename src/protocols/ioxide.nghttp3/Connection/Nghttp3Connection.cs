@@ -185,8 +185,8 @@ public sealed partial class Nghttp3Connection : IDisposable
     [MethodImpl(MethodImplOptions.NoInlining)]
     private void TearDown(Action? tearDown)
     {
-        // Unpark any handler still awaiting a body: reads return empty, its response submit
-        // no-ops against the disposed engine. In-flight requests die with the connection.
+        // Unpark any handler still awaiting a body: its reads say the body was cut off, and its
+        // response submit no-ops against the disposed engine. In-flight requests die with the connection.
         foreach (Nghttp3BodyReader sink in _sinks.Values)
         {
             sink.Abort();   // its handler may still be running, on a chunk it was handed
