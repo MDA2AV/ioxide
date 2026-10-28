@@ -39,8 +39,9 @@ class TcpConnection internal constructor(
     var listenerPort: Int = 0
         internal set
 
-    // Bumped by clear(); the low 16 bits ride in every user_data, so a CQE from a previous life is told apart.
-    internal var generation = 0
+    // A new value per life from the reactor; the low 16 bits ride in every user_data, so a CQE from any other
+    // life is told apart, this object's or another's (#416).
+    internal var generation = tcp.nextGeneration()
         private set
 
     internal fun setFd(fd: Int): TcpConnection {
@@ -464,7 +465,7 @@ class TcpConnection internal constructor(
 
     // Recycle: every flag and counter back to a fresh connection's.
     internal fun clear() {
-        generation++   // first, so CQEs and continuations from this life resolve as stale
+        generation = tcp.nextGeneration()   // first, so CQEs and continuations from this life resolve as stale
 
         readCont = null
         pending = false

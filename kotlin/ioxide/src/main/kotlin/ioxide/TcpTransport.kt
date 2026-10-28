@@ -95,6 +95,11 @@ internal class TcpTransport(val reactor: Reactor, private val config: ServerConf
     private var connections = arrayOfNulls<TcpConnection>(4096)
     private val pool = ArrayDeque<TcpConnection>()
 
+    // Every connection life on this reactor takes the next value, so two lives never share a generation (#416).
+    private var generations = 0
+
+    fun nextGeneration(): Int = ++generations
+
     fun connAt(fd: Int, gen: Int): TcpConnection? {
         val conns = connections
         val conn = if (fd >= 0 && fd < conns.size) conns[fd] else null
