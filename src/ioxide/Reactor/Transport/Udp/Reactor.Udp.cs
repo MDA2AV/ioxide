@@ -194,7 +194,7 @@ public sealed unsafe partial class Reactor
         _udpRingDepth   = depth;
         _udpBufRingMask = (uint)(depth - 1);
 
-        _udpBufRing = (byte*)NativeMemory.AlignedAlloc((nuint)depth * 16, 4096);
+        _udpBufRing = (byte*)NativeMemory.AlignedAlloc((nuint)depth * 16, (nuint)Environment.SystemPageSize);   // as the TCP ring
         NativeMemory.Clear(_udpBufRing, (nuint)depth * 16);
         _udpBufSlab = (byte*)NativeMemory.AlignedAlloc((nuint)depth * UdpRecvBufSize, 64);
 

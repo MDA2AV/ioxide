@@ -44,7 +44,7 @@ public sealed unsafe partial class Reactor
         // Allocations are reused across pool lives; only the kernel registration is per-life.
         if (conn.BufRing == null)
         {
-            conn.BufRing = (byte*)NativeMemory.AlignedAlloc((nuint)entries * 16, 4096);
+            conn.BufRing = (byte*)NativeMemory.AlignedAlloc((nuint)entries * 16, (nuint)Environment.SystemPageSize);   // as the shared ring
         }
         NativeMemory.Clear(conn.BufRing, (nuint)entries * 16);
 
