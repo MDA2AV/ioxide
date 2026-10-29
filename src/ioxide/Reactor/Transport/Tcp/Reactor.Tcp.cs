@@ -397,6 +397,9 @@ public sealed unsafe partial class Reactor
         {
             if (listenFd >= 0)
             {
+                // Shut down first: the armed multishot accept holds the socket until the ring's deferred
+                // cancel, about 50 ms after the ring goes, and the port stays bound and accepting until then.
+                shutdown(listenFd, SHUT_RDWR);
                 close(listenFd);
             }
         }

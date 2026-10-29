@@ -12,6 +12,7 @@ internal static class Program
         var runner = new Runner();
 
         CoreTests.Register(runner);
+        ListenerReleaseTests.Register(runner);
         TimerTests.Register(runner);
         AffinityTests.Register(runner);
         HardeningTests.Register(runner);
