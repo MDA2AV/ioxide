@@ -5,17 +5,18 @@ using System.Runtime.InteropServices;
 using System.Text;
 using ioxide;
 using ioxide.http3;
+using ioxide.nghttp3;
 using ioxide.ngtcp2;
 
 namespace Ioxide.Tests;
 
 /// <summary>
-/// A request body that stops early, on the pure-C# HTTP/3 stack: a stream that ends inside a DATA
-/// frame it already sized, and a body shorter than the content-length that announced it. Both ask
-/// the same question - can the handler that receives the bytes tell a body that ENDED from one
-/// that was CUT. For the first the answer is no, as pinned below. For the second it is yes, on
-/// either overload: the request is refused with H3_MESSAGE_ERROR, and a handler already reading
-/// the body is told by its next read.
+/// A request body that stops early: a stream that ends inside a DATA frame it already sized, a body
+/// shorter than the content-length that announced it, and on both stacks a stream the client resets
+/// or a connection that closes mid-upload. Each asks the same question - can the handler that
+/// receives the bytes tell a body that ENDED from one that was CUT - and the answer is yes: its next
+/// read raises instead of ending. A body short of its content-length is also refused with
+/// H3_MESSAGE_ERROR, on either overload.
 /// </summary>
 internal static class H3BodyTruncationTests
 {
@@ -23,40 +24,24 @@ internal static class H3BodyTruncationTests
     {
         runner.Test("control: a body that ends where its DATA frame said reads as a clean end", () =>
         {
-            // The half that is correct, and what makes the PEND below a finding rather than a
-            // guess: the same client, the same frames, the same handler, ten bytes promised and ten
-            // delivered. Its read ends cleanly, and it must - a body that finished is exactly what
-            // an empty chunk is for. The point is that the next test produces this same string.
+            // The half that has to stay as it is: the same client, the same frames, the same handler,
+            // ten bytes promised and ten delivered. Its read ends cleanly - a body that finished is
+            // exactly what an empty chunk is for.
             Assert.Equal("ended after 10", StreamedBodyOutcome(promised: 10));
         });
 
-        runner.Test("http3: a body cut mid-frame kills the connection, and the reader signals an ordinary end", () =>
+        runner.Test("http3: a body cut mid-frame kills the connection, and the reader raises instead of ending", () =>
         {
             // The same ten bytes, under a DATA frame header that promised a hundred: the stream
             // ends 90 bytes inside a frame the client itself sized. No h3 client library will send
             // that, so it is driven with hand-written frames over a raw QUIC client.
             //
-            // The parser DOES see it: FeedRequest's fin branch finds the walk mid-payload and calls
-            // Fatal("stream ended mid-frame"), which closes the connection with H3_FRAME_ERROR. But
-            // the handler has been running since end-of-headers, has already been handed the ten
-            // bytes, and is parked in ReadAsync - and the teardown ends its sink through the same
-            // Drop/End the run loop uses for a clean fin. The next read returns an empty chunk,
-            // which Http3BodyReader documents as "end of body". A handler that commits what it
-            // received commits ten bytes as though they were the whole request.
-            string outcome = StreamedBodyOutcome(promised: 100);
-
-            // Reviewed as a defect and kept. The protocol obligation is already met one layer up:
-            // a stream that ends mid-frame is a CONNECTION error of type H3_FRAME_ERROR (RFC 9114
-            // 7.1), which Http3Connection raises, and the response is never sent - so no client is
-            // served partial data, which is what the rule is for. H3_REQUEST_INCOMPLETE covers a
-            // different case. And "an empty chunk means end of body" is not an ioxide.http3
-            // shortcoming: all three body readers document it identically for a stream that stops,
-            // the nghttp3 one included, so a truncation flag would have to land in all three or the
-            // two stacks would disagree about what a read returning nothing means. What is pinned
-            // is the contract as written. A body that contradicts its content-length is the one case
-            // this reader does flag, below: the request itself said how long the body was.
-            Assert.True(outcome.StartsWith("ended", StringComparison.Ordinal),
-                $"the reader should signal an ordinary end, as all three body readers document, got: {outcome}");
+            // FeedRequest's fin branch finds the walk mid-payload and calls Fatal("stream ended
+            // mid-frame"), which closes the connection with H3_FRAME_ERROR. The handler has been
+            // running since end-of-headers, has been handed the ten bytes, and is parked in ReadAsync
+            // when the teardown cuts its body off - so its next read has to say so, or a handler that
+            // commits what it received commits ten bytes as though they were the whole request.
+            Assert.Equal("raised IOException after 10", StreamedBodyOutcome(promised: 100));
         });
 
         runner.Test("http3: a body shorter than its content-length is refused, not served whole", () =>
@@ -162,6 +147,23 @@ internal static class H3BodyTruncationTests
             }
         });
 
+        foreach (bool native in new[] { false, true })
+        {
+            bool ng = native;
+            string stack = ng ? "nghttp3" : "ioxide.http3";
+
+            runner.Test($"control ({stack}): a body that ends at its fin reads as a clean end", () =>
+                Assert.Equal("ended after 10", CutBodyOutcome(ng, client => client.Write(default, fin: true))));
+
+            runner.Test($"h3 ({stack}): a body whose stream the client resets mid-upload raises on read instead of ending", () =>
+                Assert.Equal("raised IOException after 10", CutBodyOutcome(ng, client => client.ResetStream(H3RequestCancelled))));
+
+            // SETTINGS has no place on a request stream: a connection error, so the connection is
+            // torn down under the handler parked on its body.
+            runner.Test($"h3 ({stack}): a body whose connection closes mid-upload raises on read instead of ending", () =>
+                Assert.Equal("raised IOException after 10", CutBodyOutcome(ng, client => client.Write([0x04, 0x00], fin: false))));
+        }
+
         runner.Test("http3: a streamed response refused before it runs finds its stream gone on the first flush", () =>
         {
             // Taking a body reader dispatches a streamed response at its HEADERS, so a body that runs
@@ -243,6 +245,68 @@ internal static class H3BodyTruncationTests
         Assert.True(code == 0x10e, $"the overrun should reset the stream with H3_MESSAGE_ERROR, got {(code is ulong c ? $"0x{c:x}" : "no reset")}");
         Assert.True(client.WaitFor(outcome.Task, timeoutMs: 5000), "the streamed handler never got past its body");
         return outcome.Task.Result;
+    }
+
+    private const ulong H3RequestCancelled = 0x010c;
+
+    /// <summary>
+    /// Ten body bytes in a whole DATA frame to a streaming handler on either stack, then
+    /// <paramref name="cut"/>, and what the handler's read said after them: "ended after N" for the
+    /// empty chunk, "raised X after N" when it says the body was cut off.
+    /// </summary>
+    private static string CutBodyOutcome(bool native, Action<RawH3Client> cut)
+    {
+        (string certPath, string keyPath) = TestCert.Ensure();
+        var engine = TestServer.Own(new QuicEngine(certPath, keyPath, cidLength: 8, alpn: ["h3"]));
+
+        var readTen = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var ended = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        (_, int udpPort) = TestServer.StartDatagram(
+            onDatagram: null,
+            quicFactory: engine.CreateFactory(),
+            quicHandle: (_, conn) => native
+                ? new Nghttp3Connection(conn).RunAsync(async (_, body) =>
+                    Nghttp3Response.Text(await ReadToEnd(body.ReadAsync, readTen, ended)))
+                : new Http3Connection(conn).RunAsync(async (_, body) =>
+                    Http3Response.Text(await ReadToEnd(body.ReadAsync, readTen, ended))));
+
+        using var client = new RawH3Client("127.0.0.1", udpPort);
+        client.Connect();
+        Assert.True(client.CompleteHandshake(timeoutMs: 5000), "handshake did not complete");
+        client.OpenRequestStream();
+
+        client.Write([.. RawH3Client.RequestHeaders("POST"), .. RawH3Client.DataFrameHeader(10), .. "0123456789"u8.ToArray()],
+            fin: false);
+        Assert.True(client.WaitFor(readTen.Task, timeoutMs: 5000), "the handler never received the ten body bytes");
+
+        cut(client);
+        Assert.True(client.WaitFor(ended.Task, timeoutMs: 5000), "the handler's body read never completed");
+        return ended.Task.Result;
+    }
+
+    private static async ValueTask<string> ReadToEnd(Func<ValueTask<ReadOnlyMemory<byte>>> read,
+        TaskCompletionSource readTen, TaskCompletionSource<string> ended)
+    {
+        long total = 0;
+        try
+        {
+            ReadOnlyMemory<byte> chunk;
+            while (!(chunk = await read()).IsEmpty)
+            {
+                total += chunk.Length;
+                if (total >= 10)
+                {
+                    readTen.TrySetResult();
+                }
+            }
+            ended.TrySetResult($"ended after {total}");
+        }
+        catch (Exception e)
+        {
+            ended.TrySetResult($"raised {e.GetType().Name} after {total}");
+        }
+        return $"got {total}";
     }
 
     /// <summary>
@@ -561,9 +625,9 @@ internal sealed unsafe class RawH3Client : IDisposable
                     finPending = false;   // the fin rode out with the final bytes
                 }
             }
-            else if (finPending && off >= data.Length && n > 0)
+            else if (finPending && off >= data.Length && consumed == 0)
             {
-                finPending = false;       // bare-fin frame went out
+                finPending = false;       // bare-fin frame went out; -1 is a packet without it, an ACK owed
             }
 
             if (n > 0)
@@ -576,6 +640,13 @@ internal sealed unsafe class RawH3Client : IDisposable
                 PumpIn();
             }
         }
+    }
+
+    /// <summary>Abandon the request stream mid-upload, as a client cancelling it: RESET_STREAM and STOP_SENDING.</summary>
+    public void ResetStream(ulong appErrorCode)
+    {
+        Assert.True(iq_conn_shutdown_stream(_conn, _streamId, appErrorCode) == 0, "shutdown_stream failed");
+        FlushOut();
     }
 
     /// <summary>
@@ -706,5 +777,6 @@ internal sealed unsafe class RawH3Client : IDisposable
     [DllImport(Lib)] private static extern nint iq_conn_write(nint conn, byte* dest, nuint destLen, long streamId, byte* data, nuint dataLen, int fin, long* pConsumed, ulong ts);
     [DllImport(Lib)] private static extern int  iq_conn_read(nint conn, void* remoteSa, nuint remoteLen, byte* pkt, nuint pktLen, byte ecn, ulong ts);
     [DllImport(Lib)] private static extern int  iq_conn_is_established(nint conn);
+    [DllImport(Lib)] private static extern int  iq_conn_shutdown_stream(nint conn, long streamId, ulong appErrorCode);
     [DllImport(Lib)] private static extern void iq_conn_free(nint conn);
 }

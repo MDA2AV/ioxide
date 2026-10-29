@@ -250,7 +250,7 @@ public sealed partial class Http3Connection
         {
             if (_requests.Remove(item.StreamId, out ReqStream? dead))
             {
-                dead.Sink?.End();
+                dead.Sink?.Fail("the request stream went away before its body ended");
                 ReleaseParseBuffers(dead);
             }
             if (_unis.Remove(item.StreamId, out UniStream? uni) && uni.IsCritical)
@@ -914,7 +914,7 @@ public sealed partial class Http3Connection
     {
         rs.State = ParseState.Refused;
         rs.Finished = true;
-        rs.Sink?.Fail(new IOException(reason));
+        rs.Sink?.Fail(reason);
         rs.Request.BodyBuffer = null;
         _quicConnection.ResetStream(sid, code);
 

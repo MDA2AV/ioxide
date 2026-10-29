@@ -28,8 +28,9 @@ internal static class Nghttp2StreamedRequestTests
     private const int Frame = 16384;
     private const uint NoError = 0x0, InternalError = 0x2, Cancel = 0x8;
 
-    /// <summary>What one handler saw of its body. Broken is the first offset off the pattern, -1 for none.</summary>
-    private readonly record struct Seen(int Stream, string Path, long Bytes, int Chunks, long Broken, bool Streamed);
+    /// <summary>What one handler saw of its body. Broken is the first offset off the pattern, -1 for none;
+    /// Cut, that its read said the body was cut off rather than ending.</summary>
+    private readonly record struct Seen(int Stream, string Path, long Bytes, int Chunks, long Broken, bool Streamed, bool Cut = false);
 
     public static void Register(Runner runner)
     {
@@ -87,7 +88,7 @@ internal static class Nghttp2StreamedRequestTests
         foreach ((uint code, string name) in new[] { (Cancel, "CANCEL"), (NoError, "NO_ERROR") })
         {
             uint resetCode = code;
-            runner.Test($"nghttp2 streamed request: a peer RST_STREAM ({name}) mid-body ends the handler's read, and the connection serves on", () =>
+            runner.Test($"nghttp2 streamed request: a peer RST_STREAM ({name}) mid-body cuts the handler's read off, and the connection serves on", () =>
             {
                 var seen = new ConcurrentQueue<Seen>();
                 using var client = new H2cClient(Start(seen, streamedResponse: false), timeoutMs: 30_000);
@@ -109,8 +110,8 @@ internal static class Nghttp2StreamedRequestTests
 
                 // Ended by the reset, so it was recorded before the upload after it could be answered.
                 Seen reset = Single(seen, 1);
-                Assert.True(reset.Bytes == 2 * Frame && reset.Broken < 0,
-                    $"the reset stream's handler saw {Describe(seen)}, not its {2 * Frame} bytes and then the end");
+                Assert.True(reset.Bytes == 2 * Frame && reset.Broken < 0 && reset.Cut,
+                    $"the reset stream's handler saw {Describe(seen)}, not its {2 * Frame} bytes and then the cut");
             });
         }
 
@@ -155,7 +156,8 @@ internal static class Nghttp2StreamedRequestTests
                 + $"(error 0x{error:x}) after {sent} of {After} bytes: their credit never came back");
 
             Seen held = Single(seen, 1);
-            Assert.True(held.Bytes == 0, $"the reset stream's handler still read a body its peer abandoned: {Describe(seen)}");
+            Assert.True(held.Bytes == 0 && held.Cut,
+                $"the reset stream's handler should read none of a body its peer abandoned, and that it was cut: {Describe(seen)}");
         });
 
         runner.Test("nghttp2 streamed request: a handler that fails mid-upload has its stream reset, and the connection keeps its credit", () =>
@@ -178,7 +180,7 @@ internal static class Nghttp2StreamedRequestTests
                 + $"after {sent} of {After} bytes");
         });
 
-        runner.Test("nghttp2 streamed request: a body nghttp2 resets for overrunning its content-length ends the handler's read", () =>
+        runner.Test("nghttp2 streamed request: a body nghttp2 resets for overrunning its content-length cuts the handler's read off", () =>
         {
             var seen = new ConcurrentQueue<Seen>();
             using var client = new H2cClient(Start(seen, streamedResponse: false), timeoutMs: 30_000);
@@ -200,7 +202,7 @@ internal static class Nghttp2StreamedRequestTests
             Assert.True(client.AwaitAnyOf([H2cClient.RstStream], streamId: 3) == H2cClient.RstStream,
                 "nghttp2 did not reset a body longer than its content-length");
             Assert.True(WaitFor(() => seen.Any(s => s.Stream == 3)), $"the handler's read never ended: {Describe(seen)}");
-            Assert.True(Single(seen, 3).Bytes == 0, $"the handler read bytes nghttp2 refused: {Describe(seen)}");
+            Assert.True(Single(seen, 3) is { Bytes: 0, Cut: true }, $"the handler read bytes nghttp2 refused, or read the refusal as an end: {Describe(seen)}");
         });
 
         runner.Test("nghttp2 streamed request: the chunk a handler holds stays its own when the connection goes away under it", () =>
@@ -244,9 +246,9 @@ internal static class Nghttp2StreamedRequestTests
                 $"the connection went away under a handler holding a chunk, and {verdict.Task.Result}");
         });
 
-        runner.Test("nghttp2 streamed request: a handler parked on its body when the connection goes away reads the end of it", () =>
+        runner.Test("nghttp2 streamed request: a handler parked on its body when the connection goes away reads that it was cut off", () =>
         {
-            var verdict = new TaskCompletionSource<long>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var verdict = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
             int port = TestServer.Start(async (reactor, conn) =>
             {
                 try
@@ -255,12 +257,19 @@ internal static class Nghttp2StreamedRequestTests
                         .RunAsync(async (_, body) =>
                         {
                             long bytes = 0;
-                            ReadOnlyMemory<byte> chunk;
-                            while (!(chunk = await body.ReadAsync()).IsEmpty)
+                            try
                             {
-                                bytes += chunk.Length;
+                                ReadOnlyMemory<byte> chunk;
+                                while (!(chunk = await body.ReadAsync()).IsEmpty)
+                                {
+                                    bytes += chunk.Length;
+                                }
+                                verdict.TrySetResult($"ended after {bytes}");
                             }
-                            verdict.TrySetResult(bytes);
+                            catch (IOException)
+                            {
+                                verdict.TrySetResult($"cut after {bytes}");
+                            }
                             return new Nghttp2Response { Status = 200 };
                         });
                 }
@@ -283,7 +292,7 @@ internal static class Nghttp2StreamedRequestTests
             }
 
             Assert.True(verdict.Task.Wait(10_000), "the handler parked on its body never woke when its connection went away");
-            Assert.True(verdict.Task.Result == 2 * Frame, $"the handler read {verdict.Task.Result} bytes, not {2 * Frame} and then the end");
+            Assert.True(verdict.Task.Result == $"cut after {2 * Frame}", $"the handler's body read {verdict.Task.Result}, not {2 * Frame} bytes and then the cut");
         });
 
         runner.Test("nghttp2 streamed request: a padded upload reaches the handler without its padding, and the padding's credit comes back", () =>
@@ -449,18 +458,26 @@ internal static class Nghttp2StreamedRequestTests
 
         long bytes = 0, broken = -1;
         int chunks = 0;
-        ReadOnlyMemory<byte> chunk;
-        while (!(chunk = await reader.ReadAsync()).IsEmpty)
+        bool cut = false;
+        try
         {
-            if (broken < 0)
+            ReadOnlyMemory<byte> chunk;
+            while (!(chunk = await reader.ReadAsync()).IsEmpty)
             {
-                broken = FirstBreak(chunk.Span, bytes);
+                if (broken < 0)
+                {
+                    broken = FirstBreak(chunk.Span, bytes);
+                }
+                bytes += chunk.Length;
+                chunks++;
             }
-            bytes += chunk.Length;
-            chunks++;
+        }
+        catch (IOException)
+        {
+            cut = true;
         }
 
-        seen.Enqueue(new Seen(request.StreamId, path, bytes, chunks, broken, Streamed: true));
+        seen.Enqueue(new Seen(request.StreamId, path, bytes, chunks, broken, Streamed: true, cut));
         return 200;
     }
 
@@ -524,5 +541,6 @@ internal static class Nghttp2StreamedRequestTests
     private static string Describe(ConcurrentQueue<Seen> seen) => seen.IsEmpty
         ? "nothing"
         : string.Join(", ", seen.Select(s => $"{s.Path} on stream {s.Stream}: {s.Bytes} bytes in {s.Chunks} chunks"
-                                           + (s.Broken >= 0 ? $", off the pattern at {s.Broken}" : "")));
+                                           + (s.Broken >= 0 ? $", off the pattern at {s.Broken}" : "")
+                                           + (s.Cut ? ", then cut off" : "")));
 }

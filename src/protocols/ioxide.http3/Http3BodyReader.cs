@@ -6,9 +6,9 @@ namespace ioxide.http3;
 /// <summary>
 /// Pull surface for a streaming request body, handed to a handler that takes one: the connection
 /// loop pushes body chunks in, the handler pulls with
-/// <see cref="ReadAsync"/>. An empty chunk means end of body (fin or stream reset). A body that
-/// contradicts the request's content-length ends with an <see cref="IOException"/> instead, so a
-/// short body cannot pass for a whole one (RFC 9114 4.1.2).
+/// <see cref="ReadAsync"/>. An empty chunk means the body ended whole, at its fin. A body cut off -
+/// its stream reset or its connection closed first, or short of the request's content-length
+/// (RFC 9114 4.1.2) - ends with an <see cref="IOException"/> instead, so it cannot pass for a whole one.
 ///
 /// Backpressure is real, not buffered-and-prayed: the request stream is flow-control paced, and
 /// each chunk is credited back to the peer's window only as it is handed to the handler - a slow
@@ -26,7 +26,7 @@ public sealed class Http3BodyReader : IValueTaskSource<ReadOnlyMemory<byte>>
     private readonly Queue<(byte[] Buf, int Len)> _chunks = new();
     private (byte[]? Buf, int Len) _handedOut;
     private bool _ended;
-    private Exception? _fault;   // what the end is reported as, when the body broke its content-length
+    private Exception? _fault;   // what the end is reported as, when the body was cut off
     private bool _armed;
 
     private ManualResetValueTaskSourceCore<ReadOnlyMemory<byte>> _core = new()
@@ -42,9 +42,9 @@ public sealed class Http3BodyReader : IValueTaskSource<ReadOnlyMemory<byte>>
     }
 
     /// <summary>
-    /// Next body chunk; empty = end of body. Throws <see cref="IOException"/> in place of the end
-    /// when the body did not match the request's content-length. The returned memory is valid
-    /// until the next ReadAsync call (or handler return), whichever comes first.
+    /// Next body chunk; empty = the body ended whole. Throws <see cref="IOException"/> in place of
+    /// the end when it was cut off. The returned memory is valid until the next ReadAsync call (or
+    /// handler return), whichever comes first.
     /// </summary>
     public ValueTask<ReadOnlyMemory<byte>> ReadAsync()
     {
@@ -85,14 +85,19 @@ public sealed class Http3BodyReader : IValueTaskSource<ReadOnlyMemory<byte>>
         }
     }
 
-    // A malformed body: the chunks already queued still read, then the end throws.
-    internal void Fail(Exception fault)
+    // A body that will not arrive whole - malformed, or its stream gone before the fin: the chunks
+    // already queued still read, then the end throws. One that already ended whole stays whole.
+    internal void Fail(string reason)
     {
-        _fault = fault;
+        if (_ended)
+        {
+            return;
+        }
+        _fault = new IOException(reason);
         End();
     }
 
-    // End of body: fin, stream reset, or connection teardown. Idempotent.
+    // End of body: the fin, or a cut one once Fail or Abort has said so. Idempotent.
     internal void End()
     {
         if (_ended)
@@ -143,9 +148,14 @@ public sealed class Http3BodyReader : IValueTaskSource<ReadOnlyMemory<byte>>
     }
 
     // The connection went away under a running handler: the chunk it holds stays its own until its
-    // next read or its return, so only what it was never handed goes back now.
+    // next read or its return, so only what it was never handed goes back now. A body that had not
+    // ended, or loses bytes here, was cut off, and its end has to say so.
     internal void Abort()
     {
+        if (!_ended || _chunks.Count > 0)
+        {
+            _fault ??= new IOException("the request body was cut off: its connection closed");
+        }
         End();
         DropQueued();
     }
