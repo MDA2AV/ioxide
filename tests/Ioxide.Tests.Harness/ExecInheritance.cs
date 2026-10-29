@@ -28,16 +28,29 @@ public static class ExecInheritance
     /// <summary>This process's IPv4 UDP socket bound to <paramref name="port"/>, or "".</summary>
     public static string Udp(int port) => Own("/proc/self/net/udp", port, listening: false);
 
+    /// <summary>This process's descriptors that refer to <paramref name="target"/>, such as "anon_inode:[eventfd]".</summary>
+    public static HashSet<int> Referring(string target)
+        => Directory.EnumerateFileSystemEntries("/proc/self/fd")
+            .Select(fd => int.Parse(Path.GetFileName(fd), CultureInfo.InvariantCulture))
+            .Where(fd => Target(fd) == target)
+            .ToHashSet();
+
     /// <summary>Starts a child process, returns what its descriptors refer to, and ends it.</summary>
-    public static HashSet<string> HeldByChild()
+    public static HashSet<string> HeldByChild() => HeldByChildByNumber().Values.ToHashSet();
+
+    /// <summary>
+    /// <see cref="HeldByChild"/> by descriptor number. Every eventfd and every ring links to the same
+    /// "anon_inode:[...]" target, so only the number, which an inherited descriptor keeps across the
+    /// exec, tells one of them from another.
+    /// </summary>
+    public static Dictionary<int, string> HeldByChildByNumber()
     {
         // Start returns once the exec has happened, so close-on-exec has already been applied.
         using Process child = Process.Start(new ProcessStartInfo("sleep", "30") { UseShellExecute = false })!;
         try
         {
             return Directory.EnumerateFileSystemEntries($"/proc/{child.Id}/fd")
-                .Select(fd => new FileInfo(fd).LinkTarget ?? "")
-                .ToHashSet();
+                .ToDictionary(fd => int.Parse(Path.GetFileName(fd), CultureInfo.InvariantCulture), fd => new FileInfo(fd).LinkTarget ?? "");
         }
         finally
         {

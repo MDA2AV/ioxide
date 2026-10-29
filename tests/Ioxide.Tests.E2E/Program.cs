@@ -23,6 +23,9 @@ internal static class Program
         AcceptExhaustionTests.Register(runner);
         ExecInheritanceTests.Register(runner);
         ReactorSetupTeardownTests.Register(runner);
+        PostTests.Register(runner);
+        GcTests.Register(runner);
+        RingTimerTests.Register(runner);
         UdpTests.Register(runner);
         QuicTests.Register(runner);
         QuicEngineTests.Register(runner);

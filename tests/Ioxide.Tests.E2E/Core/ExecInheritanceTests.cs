@@ -8,7 +8,8 @@ namespace Ioxide.Tests;
 
 /// <summary>
 /// Descriptors a host's child processes must not inherit: a child holding a server's socket keeps it
-/// open after the server closes it, and a held listener keeps the port.
+/// open after the server closes it, a held listener keeps the port, and a held ring keeps everything
+/// armed in it.
 /// </summary>
 internal static class ExecInheritanceTests
 {
@@ -17,6 +18,12 @@ internal static class ExecInheritanceTests
 
     [DllImport("libc")]
     private static extern int close(int fd);
+
+    [DllImport("libc")]
+    private static extern int eventfd(uint initval, int flags);
+
+    private const string Ring = "anon_inode:[io_uring]";
+    private const string EventFd = "anon_inode:[eventfd]";
 
     public static void Register(Runner runner)
     {
@@ -71,6 +78,48 @@ internal static class ExecInheritanceTests
 
             string[] leaked = sockets.Where(s => held.Contains(s.Target)).Select(s => s.Kind).ToArray();
             Assert.True(leaked.Length == 0, $"inherited by the child: {string.Join(", ", leaked)}");
+        });
+
+        runner.Test("exec: a child process inherits neither the reactor's ring nor its wake eventfd", () =>
+        {
+            // The server's own are the ones that appeared while it started: a ring and an eventfd are
+            // anonymous, so nothing else names them.
+            HashSet<int> ringsBefore = ExecInheritance.Referring(Ring);
+            HashSet<int> eventFdsBefore = ExecInheritance.Referring(EventFd);
+
+            (_, Reactor reactor, Thread thread) = TestServer.StartConfigured(Handlers.Raw, new ServerConfig
+            {
+                RecvBufferSize = 4096, RecvSlots = 64,
+                Tcp = new TcpOptions { WriteSlabSize = 4096, PoolMax = 8, RecvQueueEntries = 64 },
+            });
+
+            int[] rings = ExecInheritance.Referring(Ring).Except(ringsBefore).ToArray();
+            int[] wakes = ExecInheritance.Referring(EventFd).Except(eventFdsBefore).ToArray();
+            Assert.True(rings.Length == 1, $"{rings.Length} rings opened while the server started, so its own is not known");
+            Assert.True(wakes.Length == 1, $"{wakes.Length} eventfds opened while the server started, so its own is not known");
+
+            // The control: an eventfd opened without close-on-exec is inherited, at its number.
+            int plain = eventfd(0, 0);
+            Dictionary<int, string> held;
+            try
+            {
+                held = ExecInheritance.HeldByChildByNumber();
+            }
+            finally
+            {
+                close(plain);
+            }
+            Assert.True(held.GetValueOrDefault(plain) == EventFd, "control: the child did not inherit a plain eventfd, so a leak would go unseen");
+
+            (string Kind, int Fd, string Target)[] opened = [("ring", rings[0], Ring), ("wake eventfd", wakes[0], EventFd)];
+            string[] leaked = opened.Where(o => held.GetValueOrDefault(o.Fd) == o.Target).Select(o => o.Kind).ToArray();
+            Assert.True(leaked.Length == 0, $"inherited by the child: {string.Join(", ", leaked)}");
+
+            // And they were the reactor's: its teardown closes both.
+            reactor.Stop();
+            Assert.True(thread.Join(TimeSpan.FromSeconds(10)), "the reactor did not stop");
+            string[] outlived = opened.Where(o => ExecInheritance.Target(o.Fd) == o.Target).Select(o => o.Kind).ToArray();
+            Assert.True(outlived.Length == 0, $"still open after the reactor stopped, so not its own: {string.Join(", ", outlived)}");
         });
     }
 
