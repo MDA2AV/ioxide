@@ -77,12 +77,23 @@ public sealed unsafe partial class TcpConnection : IBufferWriter<byte>
             throw new InvalidOperationException("Cannot write while flush is in progress.");
         }
 
+        // Never past what GetSpan or GetMemory handed out - the rest of the segment or slab - or the next flush
+        // would send whatever lies beyond it.
         if (_inOverflow)
         {
-            _ov![_ovCount - 1].Used += count;
+            ref OvSeg seg = ref _ov![_ovCount - 1];
+            if ((uint)count > (uint)(seg.Cap - seg.Used))
+            {
+                throw new ArgumentOutOfRangeException(nameof(count), count, $"Only {seg.Cap - seg.Used} bytes were handed out.");
+            }
+            seg.Used += count;
         }
         else
         {
+            if ((uint)count > (uint)(_writeSlabSize - WriteTail))
+            {
+                throw new ArgumentOutOfRangeException(nameof(count), count, $"Only {_writeSlabSize - WriteTail} bytes were handed out.");
+            }
             WriteTail += count;
         }
     }
