@@ -6,7 +6,9 @@ namespace ioxide.nghttp3;
 /// <summary>
 /// Pull surface for a streaming request body, handed to a handler that takes one: the connection
 /// loop pushes body chunks in as nghttp3 delivers them, the handler
-/// pulls with <see cref="ReadAsync"/>. An empty chunk means end of body (fin or stream reset).
+/// pulls with <see cref="ReadAsync"/>. An empty chunk means the body ended whole, at its fin. A body
+/// cut off - its stream reset or its connection closed first - ends with an
+/// <see cref="IOException"/> instead, so it cannot pass for a whole one.
 ///
 /// Backpressure is real, not buffered-and-prayed: the request stream is flow-control paced, and
 /// each chunk is credited back to the peer's window only as it is handed to the handler - a slow
@@ -30,6 +32,7 @@ public sealed class Nghttp3BodyReader : IValueTaskSource<ReadOnlyMemory<byte>>
     private readonly Queue<(byte[] Buf, int Len)> _chunks = new();
     private (byte[]? Buf, int Len) _handedOut;
     private bool _ended;
+    private Exception? _fault;   // what the end is reported as, when the body was cut off
     private bool _armed;
 
     private ManualResetValueTaskSourceCore<ReadOnlyMemory<byte>> _core = new()
@@ -45,8 +48,9 @@ public sealed class Nghttp3BodyReader : IValueTaskSource<ReadOnlyMemory<byte>>
     }
 
     /// <summary>
-    /// Next body chunk; empty = end of body. The returned memory is valid until the next
-    /// ReadAsync call (or handler return), whichever comes first.
+    /// Next body chunk; empty = the body ended whole. Throws <see cref="IOException"/> in place of
+    /// the end when it was cut off. The returned memory is valid until the next ReadAsync call (or
+    /// handler return), whichever comes first.
     /// </summary>
     public ValueTask<ReadOnlyMemory<byte>> ReadAsync()
     {
@@ -61,7 +65,7 @@ public sealed class Nghttp3BodyReader : IValueTaskSource<ReadOnlyMemory<byte>>
 
         if (_ended)
         {
-            return default;
+            return _fault is null ? default : ValueTask.FromException<ReadOnlyMemory<byte>>(_fault);
         }
 
         _core.Reset();
@@ -87,7 +91,19 @@ public sealed class Nghttp3BodyReader : IValueTaskSource<ReadOnlyMemory<byte>>
         }
     }
 
-    // End of body: fin, stream reset, or connection teardown. Idempotent.
+    // Its stream went away before the fin: the chunks already queued still read, then the end
+    // throws. A body that already ended whole stays whole.
+    internal void Fail(string reason)
+    {
+        if (_ended)
+        {
+            return;
+        }
+        _fault = new IOException(reason);
+        End();
+    }
+
+    // End of body: the fin, or a cut one once Fail or Abort has said so. Idempotent.
     internal void End()
     {
         if (_ended)
@@ -118,7 +134,14 @@ public sealed class Nghttp3BodyReader : IValueTaskSource<ReadOnlyMemory<byte>>
         else if (_ended)
         {
             _armed = false;
-            _core.SetResult(default);
+            if (_fault is null)
+            {
+                _core.SetResult(default);
+            }
+            else
+            {
+                _core.SetException(_fault);
+            }
         }
     }
 
@@ -131,9 +154,14 @@ public sealed class Nghttp3BodyReader : IValueTaskSource<ReadOnlyMemory<byte>>
     }
 
     // The connection went away under a running handler: the chunk it holds stays its own until its
-    // next read or its return, so only what it was never handed goes back now.
+    // next read or its return, so only what it was never handed goes back now. A body that had not
+    // ended, or loses bytes here, was cut off, and its end has to say so.
     internal void Abort()
     {
+        if (!_ended || _chunks.Count > 0)
+        {
+            _fault ??= new IOException("the request body was cut off: its connection closed");
+        }
         End();
         DropQueued();
     }

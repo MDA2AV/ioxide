@@ -122,7 +122,7 @@ internal static class Http2StreamedRequestTests
             peer.SendRst(streamId: 1, Cancel);                     // an aborted upload
             holder.Release();
 
-            Assert.True(holder.Ended, "the reset never reached the handler's body");
+            Assert.True(holder.End == Cut, $"the peer reset the stream mid-upload, and the handler's read {holder.End}");
             Assert.True(holder.Verdict == Holder.Kept,
                 $"the peer reset the stream under a running handler, and {holder.Verdict}");
             peer.Close(run);
@@ -140,7 +140,7 @@ internal static class Http2StreamedRequestTests
             peer.SendWindowUpdate(streamId: 1, int.MaxValue);      // past 2^31-1: the stream is reset (RFC 9113 6.9.1)
             holder.Release();
 
-            Assert.True(holder.Ended, "the reset never reached the handler's body");
+            Assert.True(holder.End == Cut, $"the server reset the stream mid-upload, and the handler's read {holder.End}");
             Assert.True(holder.Verdict == Holder.Kept,
                 $"the server reset the stream under a running handler, and {holder.Verdict}");
             peer.Close(run);
@@ -158,12 +158,12 @@ internal static class Http2StreamedRequestTests
             peer.Close(run);                                       // the client drops mid-upload
             holder.Release();
 
-            Assert.True(holder.Ended, "the teardown never reached the handler's body");
+            Assert.True(holder.End == Cut, $"the connection went away mid-upload, and the handler's read {holder.End}");
             Assert.True(holder.Verdict == Holder.Kept,
                 $"the connection went away under a running handler, and {holder.Verdict}");
         });
 
-        runner.Test("h2 streamed request: a handler parked on its body when the peer resets the stream reads the end of it", () =>
+        runner.Test("h2 streamed request: a handler parked on its body when the peer resets the stream reads that it was cut off", () =>
         {
             var drainer = new Drainer();
 
@@ -175,11 +175,11 @@ internal static class Http2StreamedRequestTests
             Assert.Equal(400L, drainer.Read);                      // all of it: parked on the next read
             peer.SendRst(streamId: 1, Cancel);
 
-            Assert.True(drainer.Ended, "the handler stayed parked on a body the peer had reset");
+            Assert.True(drainer.End == Cut, $"the peer reset the stream under a parked read, and the read {drainer.End}");
             peer.Close(run);
         });
 
-        runner.Test("h2 streamed request: a handler parked on its body when the connection goes away reads the end of it", () =>
+        runner.Test("h2 streamed request: a handler parked on its body when the connection goes away reads that it was cut off", () =>
         {
             var drainer = new Drainer();
 
@@ -191,10 +191,10 @@ internal static class Http2StreamedRequestTests
             Assert.Equal(400L, drainer.Read);                      // all of it: parked on the next read
             peer.Close(run);
 
-            Assert.True(drainer.Ended, "the handler stayed parked on a body that stopped arriving");
+            Assert.True(drainer.End == Cut, $"the connection went away under a parked read, and the read {drainer.End}");
         });
 
-        runner.Test("h2 streamed request: a stream the peer resets in the same read as its headers reads an ended body, and the connection serves on", () =>
+        runner.Test("h2 streamed request: a stream the peer resets in the same read as its headers reads a cut-off body, and the connection serves on", () =>
         {
             var drainer = new Drainer();
 
@@ -205,7 +205,7 @@ internal static class Http2StreamedRequestTests
             peer.OpenRequest(streamId: 1, endStream: false, resetWith: Cancel);
 
             Assert.True(!run.IsCompleted, "the connection went down over one stream the peer reset");
-            Assert.True(drainer.Ended, "the handler never read the end of a body the peer had reset");
+            Assert.True(drainer.End == Cut, $"the peer reset the stream before its body began, and the handler's read {drainer.End}");
             peer.Close(run);
         });
     }
@@ -380,7 +380,7 @@ internal static class Http2StreamedRequestTests
 
         public string? Verdict { get; private set; }
 
-        public bool Ended { get; private set; }
+        public string End { get; private set; } = NeverEnded;
 
         public async ValueTask<Http2Response> Handle(Http2Request request, Http2BodyReader body)
         {
@@ -389,7 +389,7 @@ internal static class Http2StreamedRequestTests
             await _release.Task;
 
             Verdict = $"its request was {Fate(path)} and its chunk {Fate(chunk)}";
-            Ended = (await body.ReadAsync()).IsEmpty;
+            End = await EndOf(body);
             return Http2Response.Text("done");
         }
 
@@ -434,18 +434,33 @@ internal static class Http2StreamedRequestTests
     {
         public long Read { get; private set; }
 
-        public bool Ended { get; private set; }
+        public string End { get; private set; } = NeverEnded;
 
         public async ValueTask<Http2Response> Handle(Http2Request request, Http2BodyReader body)
+        {
+            End = await EndOf(body, chunk => Read += chunk.Length);
+            return Http2Response.Text("done");
+        }
+    }
+
+    private const string Cut = "said the body was cut off";
+    private const string NeverEnded = "never ended";
+
+    // How a body read ends: the empty chunk of a whole body, or the IOException of a cut one.
+    private static async ValueTask<string> EndOf(Http2BodyReader body, Action<ReadOnlyMemory<byte>>? onChunk = null)
+    {
+        try
         {
             ReadOnlyMemory<byte> chunk;
             while (!(chunk = await body.ReadAsync()).IsEmpty)
             {
-                Read += chunk.Length;
+                onChunk?.Invoke(chunk);
             }
-
-            Ended = true;
-            return Http2Response.Text("done");
+            return "ended as if whole";
+        }
+        catch (IOException)
+        {
+            return Cut;
         }
     }
 }
