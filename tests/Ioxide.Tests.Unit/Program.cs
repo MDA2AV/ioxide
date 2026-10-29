@@ -13,9 +13,15 @@ internal static class Program
 
         VersionTests.Register(runner);
         SyscallErrnoTests.Register(runner);
+        IoUringAbiTests.Register(runner);
+        RingTests.Register(runner);
         RegisteredRingTests.Register(runner);
+        BufferRingPageTests.Register(runner);
         ClockTests.Register(runner);
         RingSetupMessageTests.Register(runner);
+        RingSetupSeccompTests.Register(runner);
+        SpscRecvRingTests.Register(runner);
+        MpscTests.Register(runner);
         ZeroCopySendTests.Register(runner);
         DemuxParseTests.Register(runner);
         MessageTests.Register(runner);
@@ -28,6 +34,7 @@ internal static class Program
         Http2BufferedCreditTests.Register(runner);
         HpackEncodeTests.Register(runner);
         QpackStaticEncodeTests.Register(runner);
+        AlpnSelectTests.Register(runner);
         SendWaitAllTests.Register(runner);
         AdapterParkTests.Register(runner);
         WaiterSlotTests.Register(runner);
