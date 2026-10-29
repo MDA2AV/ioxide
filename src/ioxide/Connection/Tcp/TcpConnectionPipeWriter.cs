@@ -37,8 +37,8 @@ public sealed class TcpConnectionPipeWriter : PipeWriter, IValueTaskSource<Flush
 
     public override void Advance(int bytes)
     {
+        _conn.Advance(bytes);   // first: a count it refuses is not counted
         _unflushed += bytes;
-        _conn.Advance(bytes);
     }
 
     public override ValueTask<FlushResult> FlushAsync(CancellationToken cancellationToken = default)
