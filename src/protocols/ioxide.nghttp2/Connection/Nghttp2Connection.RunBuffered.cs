@@ -155,10 +155,11 @@ public sealed partial class Nghttp2Connection
                 Nghttp2Request request = pending.Freeze();
                 inFlight = handler(request);
             }
-            catch
+            catch (Exception exception)
             {
-                pending.Dispose();
-                throw;
+                // A synchronous handler throws before there is a task. It gets what a faulted task
+                // gets, a 500 on its own stream, rather than taking the connection down.
+                inFlight = ValueTask.FromException<Nghttp2Response>(exception);
             }
 
             // Answered synchronously, which nearly every handler does. Stay inline: the response is
