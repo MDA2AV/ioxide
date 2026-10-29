@@ -36,6 +36,9 @@ public sealed class Http2ResponseWriter : IBufferWriter<byte>
     private bool _headersSent;
     private bool _completed;
 
+    // Behind Aborted, created only when a handler asks for it.
+    private CancellationTokenSource? _aborted;
+
     internal Http2ResponseWriter(Http2Connection connection, int streamId)
     {
         _connection = connection;
@@ -47,6 +50,34 @@ public sealed class Http2ResponseWriter : IBufferWriter<byte>
 
     /// <summary>True once the body has been finished and END_STREAM sent.</summary>
     public bool IsCompleted => _completed;
+
+    /// <summary>
+    /// True once the stream has gone before this response completed: the peer reset it, or the
+    /// connection is gone. A streamed request body that came back empty was cut off, not ended,
+    /// when this is set.
+    /// </summary>
+    public bool IsAborted => !_completed && !_connection.IsResponseLive(_streamId);
+
+    /// <summary>
+    /// Cancelled, on the reactor thread, when the stream is aborted before this response completes
+    /// (see <see cref="IsAborted"/>) - so a handler waiting on something else hears it too.
+    /// </summary>
+    public CancellationToken Aborted
+    {
+        get
+        {
+            if (IsAborted)
+            {
+                return new CancellationToken(canceled: true);
+            }
+            if (_aborted is null)
+            {
+                _aborted = new CancellationTokenSource();
+                _connection.WatchAbort(this);
+            }
+            return _aborted.Token;
+        }
+    }
 
     /// <summary>
     /// Send the response headers. Exactly once, before any body byte - HTTP/2 puts HEADERS ahead
@@ -118,7 +149,20 @@ public sealed class Http2ResponseWriter : IBufferWriter<byte>
     /// Send what is left and mark END_STREAM. A handler that returns without calling this gets it
     /// called for it - the peer is owed an end either way.
     /// </summary>
-    public async ValueTask CompleteAsync()
+    public ValueTask CompleteAsync() => CompleteCore(trailers: null);
+
+    /// <summary>
+    /// Send what is left, then <paramref name="trailers"/> as the trailer section that ends the
+    /// stream (RFC 9113 8.1) - where gRPC carries its status. Field lines only, no pseudo-headers;
+    /// the memories must stay valid until the returned task completes.
+    /// </summary>
+    public ValueTask CompleteAsync(KeyValueList trailers)
+    {
+        ArgumentNullException.ThrowIfNull(trailers);
+        return CompleteCore(trailers.Count > 0 ? trailers : null);
+    }
+
+    private async ValueTask CompleteCore(KeyValueList? trailers)
     {
         if (_completed)
         {
@@ -130,7 +174,7 @@ public sealed class Http2ResponseWriter : IBufferWriter<byte>
             WriteHeaders(new Http2Response { Status = 500 });
         }
 
-        await FlushCore(endStream: true);
+        await FlushCore(endStream: true, trailers);
         _completed = true;
 
         if (_staging.Length > 0)
@@ -169,7 +213,7 @@ public sealed class Http2ResponseWriter : IBufferWriter<byte>
 
     private static readonly FlushResult PeerGone = new(isCanceled: false, isCompleted: true);
 
-    private async ValueTask<FlushResult> FlushCore(bool endStream)
+    private async ValueTask<FlushResult> FlushCore(bool endStream, KeyValueList? trailers = null)
     {
         if (!_headersSent)
         {
@@ -211,7 +255,7 @@ public sealed class Http2ResponseWriter : IBufferWriter<byte>
             }
 
             int chunk = Math.Min(credit, _staged - sent);
-            bool last = endStream && sent + chunk == _staged;
+            bool last = endStream && trailers is null && sent + chunk == _staged;
 
             _connection.SendStreamedData(_streamId, _staging.AsSpan(sent, chunk), last);
             sent += chunk;
@@ -226,7 +270,11 @@ public sealed class Http2ResponseWriter : IBufferWriter<byte>
             return PeerGone;
         }
 
-        if (endStream && sent == 0)
+        if (endStream && trailers is not null)
+        {
+            _connection.SendTrailers(_streamId, trailers);   // END_STREAM rides the trailers, not the last DATA
+        }
+        else if (endStream && sent == 0)
         {
             // Nothing left to send, but the stream still needs its end.
             _connection.SendStreamedData(_streamId, ReadOnlySpan<byte>.Empty, endStream: true);
@@ -268,6 +316,22 @@ public sealed class Http2ResponseWriter : IBufferWriter<byte>
     /// <summary>Carry on a buffered response whose headers are already out, for the body its windows could not take.</summary>
     internal void ContinueBody() => _headersSent = true;
 
+    /// <summary>The connection's report that this stream is gone. A response that completed was not aborted.</summary>
+    internal void SignalAborted()
+    {
+        if (_aborted is { } aborted && !_completed)
+        {
+            try
+            {
+                aborted.Cancel();
+            }
+            catch
+            {
+                // A callback that throws is its own fault; it must not fail every stream on the connection.
+            }
+        }
+    }
+
     /// <summary>Take this writer for another stream, keeping its buffer.</summary>
     internal void Reset(int streamId)
     {
@@ -276,5 +340,6 @@ public sealed class Http2ResponseWriter : IBufferWriter<byte>
         _sinceRealFlush = 0;
         _headersSent = false;
         _completed = false;
+        _aborted = null;
     }
 }

@@ -40,9 +40,13 @@ public sealed partial class Nghttp2Connection
     // [u16 namelen][name][u16 valuelen][value]... with :status first, which is the order HTTP/2
     // requires and the same packing the request side and the nghttp3 shim use.
     private static byte[] PackHeaders(Nghttp2Response response, out int written)
+        => PackFields(response.Status, response.Headers, out written);
+
+    // A null status packs a trailer section, which carries none.
+    private static byte[] PackFields(int? status, KeyValueList fields, out int written)
     {
         int capacity = 16 + StatusName.Length + 8;
-        foreach (KeyValuePair<ReadOnlyMemory<byte>, ReadOnlyMemory<byte>> field in response.Headers.AsSpan())
+        foreach (KeyValuePair<ReadOnlyMemory<byte>, ReadOnlyMemory<byte>> field in fields.AsSpan())
         {
             capacity += 4 + field.Key.Length + field.Value.Length;
         }
@@ -50,11 +54,14 @@ public sealed partial class Nghttp2Connection
         byte[] buffer = ArrayPool<byte>.Shared.Rent(capacity);
         int cursor = 0;
 
-        Span<byte> status = stackalloc byte[3];
-        int statusLength = WriteStatus(response.Status, status);
-        Write(buffer, ref cursor, StatusName, status[..statusLength]);
+        if (status is int code)
+        {
+            Span<byte> digits = stackalloc byte[3];
+            int statusLength = WriteStatus(code, digits);
+            Write(buffer, ref cursor, StatusName, digits[..statusLength]);
+        }
 
-        foreach (KeyValuePair<ReadOnlyMemory<byte>, ReadOnlyMemory<byte>> field in response.Headers.AsSpan())
+        foreach (KeyValuePair<ReadOnlyMemory<byte>, ReadOnlyMemory<byte>> field in fields.AsSpan())
         {
             Write(buffer, ref cursor, field.Key.Span, field.Value.Span);
         }

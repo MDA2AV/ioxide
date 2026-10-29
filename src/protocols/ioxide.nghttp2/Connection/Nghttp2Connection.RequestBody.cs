@@ -62,8 +62,27 @@ public sealed partial class Nghttp2Connection
         }
     }
 
+    // Writers whose Aborted token a native callback could not cancel in place; the stream id catches
+    // a writer that went back to the pool and out to another stream before the wake fired.
+    private List<(Nghttp2ResponseWriter Writer, int StreamId)>? _abortWakes;
+
+    internal void NoteAbortWake(Nghttp2ResponseWriter writer) => (_abortWakes ??= []).Add((writer, writer.StreamId));
+
     private void FireBodyWakes()
     {
+        if (_abortWakes is { Count: > 0 })
+        {
+            (Nghttp2ResponseWriter Writer, int StreamId)[] aborted = [.. _abortWakes];
+            _abortWakes.Clear();
+            foreach ((Nghttp2ResponseWriter writer, int streamId) in aborted)
+            {
+                if (writer.StreamId == streamId)
+                {
+                    writer.SignalAborted();
+                }
+            }
+        }
+
         if (_bodyWakes.Count == 0)
         {
             return;
