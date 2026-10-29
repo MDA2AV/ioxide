@@ -207,17 +207,21 @@ public sealed unsafe partial class Reactor
         // to this bid until the buffer is full (F_BUF_MORE clear).
         byte* ptr = conn.BufSlab + (nuint)bid * (nuint)_incRecvBufferSize + (nuint)conn.CumOffset![bid];
         conn.CumOffset[bid] += res;
-        conn.RefCount![bid]++;
         // F_BUF_MORE alone decides: a recv ended by a full CQ still has its buffer at the ring head, part filled.
         if (!bufMore)
         {
             conn.KernelDone![bid] = true;
         }
 
-        if (!conn.Complete(res, bid, hasBuffer: true, ptr))
+        // Grown into the last item, the slice is handed back with it: the buffer's count stays.
+        if (!conn.TryExtendRecv(res, bid, ptr))
         {
-            CloseFromRecvOverflow(conn, fd, gen);
-            return;
+            conn.RefCount![bid]++;
+            if (!conn.Complete(res, bid, hasBuffer: true, ptr))
+            {
+                CloseFromRecvOverflow(conn, fd, gen);
+                return;
+            }
         }
 
         if (!more)

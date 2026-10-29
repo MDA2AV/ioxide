@@ -94,6 +94,60 @@ public sealed unsafe class SpscRecvRing
         return true;
     }
 
+    // The length a consumer leaves in the last item as it takes it, so an extension racing the take fails.
+    private const int Taken = -1;
+
+    /// <summary>
+    /// Producer: grows the last item by a slice that continues it in the same buffer, instead of queueing
+    /// the slice as an item of its own. False when there is no such item, or the consumer has taken it.
+    /// </summary>
+    public bool TryExtendLast(byte* ptr, int len, ushort bid, ushort gen)
+    {
+        long tail = _tail;
+        if (tail <= Volatile.Read(ref _head))
+        {
+            return false;
+        }
+
+        ref Item last = ref _items[(int)((tail - 1) & _mask)];
+        int had = Volatile.Read(ref last.Len);
+        if (had < 0 || last.Bid != bid || last.Gen != gen || last.Ptr + had != ptr)
+        {
+            return false;
+        }
+
+        // Against TryTakeUntil's claim: one of the two has the length.
+        return Interlocked.CompareExchange(ref last.Len, had + len, had) == had;
+    }
+
+    /// <summary>
+    /// <see cref="TryDequeueUntil"/> for a ring whose producer extends its last item: that item's length
+    /// is claimed as it is taken, so an extension lands before the take or not at all.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public bool TryTakeUntil(long tailSnapshot, out Item item)
+    {
+        long head = _head;
+
+        if (head >= tailSnapshot)
+        {
+            item = default;
+            return false;
+        }
+
+        // The tail before the item: one the producer has moved past is final.
+        bool last = head == Volatile.Read(ref _tail) - 1;
+        ref Item slot = ref _items[(int)(head & _mask)];
+        item = slot;
+        if (last)
+        {
+            item.Len = Interlocked.Exchange(ref slot.Len, Taken);
+        }
+        Volatile.Write(ref _head, head + 1);
+
+        return true;
+    }
+
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public bool IsEmpty() => Volatile.Read(ref _head) >= Volatile.Read(ref _tail);
 
