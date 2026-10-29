@@ -205,7 +205,7 @@ public sealed unsafe partial class TcpConnection : IValueTaskSource<RecvSnapshot
     /// the id is yours.
     /// </remarks>
     public bool TryGetItem(in RecvSnapshot snap, out SpscRecvRing.Item item)
-        => _recv.TryDequeueUntil(snap.Tail, out item);
+        => IncrementalMode ? _recv.TryTakeUntil(snap.Tail, out item) : _recv.TryDequeueUntil(snap.Tail, out item);
 
     /// <summary>
     /// Drain the snapshot into one array of memory views - the multi-item way to reconstruct a
@@ -223,7 +223,7 @@ public sealed unsafe partial class TcpConnection : IValueTaskSource<RecvSnapshot
 
         var memories = new UnmanagedMemoryManager[count];
         int n = 0;
-        while (n < count && _recv.TryDequeueUntil(snap.Tail, out SpscRecvRing.Item item))
+        while (n < count && TryGetItem(snap, out SpscRecvRing.Item item))
         {
             if (item.HasBuffer)
             {
@@ -268,6 +268,12 @@ public sealed unsafe partial class TcpConnection : IValueTaskSource<RecvSnapshot
     /// recv completion does. Reactor thread only.
     /// </summary>
     internal void WakeRead() => DeliverRead();
+
+    // Incremental mode: a slice that continues the last item queued, in its buffer, grows that item
+    // rather than taking an entry of its own, so a peer sending small segments to a handler that is not
+    // reading fills the connection's ring, not its queue. Reactor thread.
+    internal bool TryExtendRecv(int res, ushort bid, byte* ptr)
+        => _recv.TryExtendLast(ptr, res, bid, (ushort)Volatile.Read(ref _generation));
 
     // Returns false on recv-queue overflow; the reactor then tears the connection down.
     public bool Complete(int res, ushort bid, bool hasBuffer, byte* ptr)
