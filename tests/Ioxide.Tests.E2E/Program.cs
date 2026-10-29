@@ -47,6 +47,7 @@ internal static class Program
         QuicFleetJoinTests.Register(runner);
         QuicClientCertTimingTests.Register(runner);
         H3BodyTruncationTests.Register(runner);
+        H3HeldChunkTests.Register(runner);
         H3ErrorCodeTests.Register(runner);
         H3CriticalStreamTests.Register(runner);
         H3AlpnTests.Register(runner);

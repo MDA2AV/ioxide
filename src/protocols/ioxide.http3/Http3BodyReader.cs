@@ -134,11 +134,24 @@ public sealed class Http3BodyReader : IValueTaskSource<ReadOnlyMemory<byte>>
         }
     }
 
-    // Handler finished or connection teardown while chunks may still be queued: recycle everything.
+    // Handler finished: recycle everything, the chunk it held included.
     internal void Drop()
     {
         End();
         ReleaseHandedOut();
+        DropQueued();
+    }
+
+    // The connection went away under a running handler: the chunk it holds stays its own until its
+    // next read or its return, so only what it was never handed goes back now.
+    internal void Abort()
+    {
+        End();
+        DropQueued();
+    }
+
+    private void DropQueued()
+    {
         int unread = 0;
         while (_chunks.TryDequeue(out (byte[] Buf, int Len) chunk))
         {
