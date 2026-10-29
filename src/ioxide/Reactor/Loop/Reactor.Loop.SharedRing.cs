@@ -9,7 +9,8 @@ public sealed unsafe partial class Reactor
     private void InitSharedRingBuffer()
     {
         nuint ringBytes = (nuint)_bufferRingEntries * 16;
-        _bufRing = (byte*)NativeMemory.AlignedAlloc(ringBytes, 4096);
+        // On the kernel's page, which it requires of a ring and which is 16 or 64 KiB on some arm64 kernels.
+        _bufRing = (byte*)NativeMemory.AlignedAlloc(ringBytes, (nuint)Environment.SystemPageSize);
         NativeMemory.Clear(_bufRing, ringBytes);
 
         nuint slabBytes = _bufferRingEntries * (nuint)_recvBufferSize;
