@@ -63,6 +63,12 @@ public sealed partial class Nghttp2Connection : IDisposable
     // decision out to the loops, since teardown cannot happen inside a callback.
     private Exception? _callbackFault;
 
+    // The reactor this connection is served on; null when it runs without one, as over a test pipe.
+    private Reactor? _reactor;
+
+    /// <summary>The connection's reactor, when the caller is on another thread (#441).</summary>
+    internal Reactor? OffReactor => _reactor is { OnReactorThread: false } reactor ? reactor : null;
+
     // Requests still being assembled, keyed by stream. A request only leaves here when its stream
     // ends, which is when it becomes dispatchable.
     private readonly Dictionary<int, PendingRequest> _pending = new();

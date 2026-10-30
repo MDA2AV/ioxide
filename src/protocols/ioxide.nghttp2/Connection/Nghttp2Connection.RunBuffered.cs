@@ -39,6 +39,8 @@ public sealed partial class Nghttp2Connection
     // per read pass.
     private async Task RunCoreAsync(Action dispatch)
     {
+        _reactor = (SynchronizationContext.Current as ReactorSynchronizationContext)?.Reactor;
+
         try
         {
             Setup();

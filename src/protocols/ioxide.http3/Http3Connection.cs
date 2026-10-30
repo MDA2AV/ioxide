@@ -886,6 +886,9 @@ public sealed partial class Http3Connection
 
     internal void CreditBody(long streamId, int bytes) => _quicConnection.ConsumeStreamData(streamId, bytes);
 
+    /// <summary>The connection's reactor, when the caller is on another thread (#441).</summary>
+    internal Reactor? OffReactor => _quicConnection.Reactor is { OnReactorThread: false } reactor ? reactor : null;
+
     internal void NoteBodyWake(Http3BodyReader sink)
     {
         if (!_bodyWakes.Contains(sink))

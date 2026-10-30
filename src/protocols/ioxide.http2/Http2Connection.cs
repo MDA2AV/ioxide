@@ -74,6 +74,12 @@ public sealed partial class Http2Connection : IDisposable
     private int _peerInitialStreamWindow = 65535;
     private int _peerMaxFrameSize = 16384;
 
+    // The reactor this connection is served on; null when it runs without one, as over a test pipe.
+    private Reactor? _reactor;
+
+    /// <summary>The connection's reactor, when the caller is on another thread (#441).</summary>
+    internal Reactor? OffReactor => _reactor is { OnReactorThread: false } reactor ? reactor : null;
+
     /// <summary>
     /// Serve over an already-chosen transport. The pipe is the caller's to dispose.
     /// </summary>
@@ -168,6 +174,8 @@ public sealed partial class Http2Connection : IDisposable
     // per read pass.
     private async Task RunCoreAsync(Action dispatch)
     {
+        _reactor = (SynchronizationContext.Current as ReactorSynchronizationContext)?.Reactor;
+
         try
         {
             // Our SETTINGS go out first; a peer that opened with the preface and a request is

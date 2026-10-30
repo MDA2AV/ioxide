@@ -1,4 +1,5 @@
 using System.Buffers;
+using System.Runtime.CompilerServices;
 using System.Threading.Tasks.Sources;
 
 namespace ioxide.http2;
@@ -20,10 +21,11 @@ namespace ioxide.http2;
 /// connection window for every other stream on it, not only its own.
 /// </summary>
 /// <remarks>
-/// Single consumer, reactor thread only. Each <see cref="ReadAsync"/> invalidates the previous
-/// chunk's memory - its pooled buffer goes back - so a handler that needs to keep bytes past the
-/// next read must copy them. Wakes are deferred by the connection loop until the parser has
-/// unwound, so a resumed handler cannot re-enter it mid-frame.
+/// Single consumer, on any thread: a read made off the reactor is served on it. Each
+/// <see cref="ReadAsync"/> invalidates the previous chunk's memory - its pooled buffer goes back -
+/// so a handler that needs to keep bytes past the next read must copy them. Wakes are deferred by
+/// the connection loop until the parser has unwound, so a resumed handler cannot re-enter it
+/// mid-frame.
 /// </remarks>
 public sealed class Http2BodyReader : IValueTaskSource<ReadOnlyMemory<byte>>
 {
@@ -55,6 +57,11 @@ public sealed class Http2BodyReader : IValueTaskSource<ReadOnlyMemory<byte>>
     /// </summary>
     public ValueTask<ReadOnlyMemory<byte>> ReadAsync()
     {
+        if (_owner.OffReactor is Reactor reactor)
+        {
+            return ReadOffReactor(reactor);
+        }
+
         ReleaseHandedOut();
 
         if (_chunks.TryDequeue(out (byte[] Buffer, int Length) chunk))
@@ -107,6 +114,24 @@ public sealed class Http2BodyReader : IValueTaskSource<ReadOnlyMemory<byte>>
         {
             _owner.NoteBodyWake(this);
         }
+    }
+
+    // The queue and the window credit belong to the reactor, so a read from another thread is served
+    // there. Out of line, so the on-reactor read compiles as it did before the check.
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private ValueTask<ReadOnlyMemory<byte>> ReadOffReactor(Reactor reactor)
+    {
+        _core.Reset();
+        reactor.ScheduleOnReactor(static state => ((Http2BodyReader)state!).ReadOnReactor(), this);
+        return new ValueTask<ReadOnlyMemory<byte>>(this, _core.Version);
+    }
+
+    // Parked here, and completed at once when there is something to hand over.
+    private void ReadOnReactor()
+    {
+        ReleaseHandedOut();
+        _armed = true;
+        FireIfReady();
     }
 
     // The deferred wake: complete a parked ReadAsync now that the parser is off the stack.

@@ -89,7 +89,11 @@ public sealed partial class Nghttp3Connection
 
         foreach (Nghttp3ResponseWriter writer in _writers.Values)
         {
-            writer.Release();
+            // A running handler may be writing into its block from another thread: HandlerExited frees it.
+            if (!writer.HandlerRunning)
+            {
+                writer.Release();
+            }
         }
         _writers.Clear();
 

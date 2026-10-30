@@ -1,4 +1,5 @@
 using System.Buffers;
+using System.Runtime.CompilerServices;
 using System.Threading.Tasks.Sources;
 
 namespace ioxide.nghttp3;
@@ -15,9 +16,10 @@ namespace ioxide.nghttp3;
 /// consumer freezes the window and the PEER stops sending, so the sink never holds more than a
 /// window's worth (256 KB by engine default).
 ///
-/// Contract: single consumer, reactor thread only, and each ReadAsync invalidates the previous
-/// chunk's memory (its pooled buffer is recycled). Wakes are deferred by the connection loop to
-/// after nghttp3 unwinds - same discipline as the engine's once-per-read fire.
+/// Contract: single consumer, on any thread (a read made off the reactor is served on it), and each
+/// ReadAsync invalidates the previous chunk's memory (its pooled buffer is recycled). Wakes are
+/// deferred by the connection loop to after nghttp3 unwinds - same discipline as the engine's
+/// once-per-read fire.
 /// </summary>
 public sealed class Nghttp3BodyReader : IValueTaskSource<ReadOnlyMemory<byte>>
 {
@@ -54,6 +56,11 @@ public sealed class Nghttp3BodyReader : IValueTaskSource<ReadOnlyMemory<byte>>
     /// </summary>
     public ValueTask<ReadOnlyMemory<byte>> ReadAsync()
     {
+        if (_owner?.OffReactor is Reactor reactor)
+        {
+            return ReadOffReactor(reactor);
+        }
+
         ReleaseHandedOut();
 
         if (_chunks.TryDequeue(out (byte[] Buf, int Len) chunk))
@@ -115,6 +122,24 @@ public sealed class Nghttp3BodyReader : IValueTaskSource<ReadOnlyMemory<byte>>
         {
             _owner?.NoteBodyWake(this);
         }
+    }
+
+    // The queue and the window credit belong to the reactor, so a read from another thread is served
+    // there. Out of line, so the on-reactor read compiles as it did before the check.
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private ValueTask<ReadOnlyMemory<byte>> ReadOffReactor(Reactor reactor)
+    {
+        _core.Reset();
+        reactor.ScheduleOnReactor(static state => ((Nghttp3BodyReader)state!).ReadOnReactor(), this);
+        return new ValueTask<ReadOnlyMemory<byte>>(this, _core.Version);
+    }
+
+    // Parked here, and completed at once when there is something to hand over.
+    private void ReadOnReactor()
+    {
+        ReleaseHandedOut();
+        _armed = true;
+        FireIfReady();
     }
 
     // The deferred wake: complete a parked ReadAsync now that the engine layers have unwound.

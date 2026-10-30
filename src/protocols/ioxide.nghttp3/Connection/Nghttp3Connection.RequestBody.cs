@@ -87,6 +87,9 @@ public sealed partial class Nghttp3Connection
     // Credit consumed bytes of a paced request stream back to the peer's flow-control window.
     internal void CreditBody(long streamId, int bytes) => _quicConnection.ConsumeStreamData(streamId, bytes);
 
+    /// <summary>The connection's reactor, when the caller is on another thread (#441).</summary>
+    internal Reactor? OffReactor => _quicConnection.Reactor is { OnReactorThread: false } reactor ? reactor : null;
+
     // The handler is done with the body: credit what it left unread and let the engine credit the rest.
     private void RetireBody(Nghttp3Request request)
     {

@@ -20,7 +20,7 @@ namespace ioxide.http3;
 /// chunk is queued, and waits when the connection is at its high-water, so a producer cannot
 /// outrun a peer that has stopped reading.
 /// </summary>
-/// <remarks>Reactor thread only, like everything else on the connection.</remarks>
+/// <remarks>One caller at a time, on any thread: what reaches the connection runs on its reactor.</remarks>
 public sealed class Http3ResponseWriter : IBufferWriter<byte>
 {
     private const int DefaultChunk = 16 * 1024;
@@ -37,6 +37,9 @@ public sealed class Http3ResponseWriter : IBufferWriter<byte>
     private bool _headersSent;
     private bool _completed;
     private bool _gone;   // the peer stopped reading, or the stream closed under the handler
+
+    // Headers written off the reactor, sent by the next flush or the completion, which run on it.
+    private Http3Response? _unsent;
 
     internal Http3ResponseWriter(Http3Connection connection, QuicConnection quic, long streamId)
     {
@@ -74,6 +77,16 @@ public sealed class Http3ResponseWriter : IBufferWriter<byte>
         }
 
         _headersSent = true;
+        if (_connection.OffReactor is not null)
+        {
+            _unsent = response;
+            return;
+        }
+        SendHeaders(response);
+    }
+
+    private void SendHeaders(Http3Response response)
+    {
         if (!_gone)
         {
             _connection.SendStreamedHeaders(_streamId, response);
@@ -133,6 +146,11 @@ public sealed class Http3ResponseWriter : IBufferWriter<byte>
             return;
         }
 
+        if (_connection.OffReactor is Reactor reactor)
+        {
+            await new ReactorSwitch(reactor);
+        }
+
         if (!_headersSent)
         {
             WriteHeaders(new Http3Response { Status = 500 });
@@ -179,6 +197,17 @@ public sealed class Http3ResponseWriter : IBufferWriter<byte>
         if (!_headersSent)
         {
             throw new InvalidOperationException("Write the response headers before flushing a body chunk.");
+        }
+
+        if (_connection.OffReactor is Reactor reactor)
+        {
+            await new ReactorSwitch(reactor);
+        }
+
+        if (_unsent is Http3Response unsent)
+        {
+            _unsent = null;
+            SendHeaders(unsent);
         }
 
         if (_staged == 0 && !fin)
@@ -254,5 +283,6 @@ public sealed class Http3ResponseWriter : IBufferWriter<byte>
         _headersSent = false;
         _completed = false;
         _gone = false;
+        _unsent = null;
     }
 }
