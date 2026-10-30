@@ -113,6 +113,16 @@ internal static class OffReactorStreamTests
             AssertH3Accepted((conn, calls) => new Http3Connection(conn).RunAsync((Http3Request _, Http3BodyReader body) =>
                 DrainThenAccept(calls, body.ReadAsync, new Http3Response { Status = 202 })), Upload));
 
+        // Many streams flushing at once park on the same turn of the connection's write pump, and each
+        // has to be woken on the reactor: a task awaited by several resumes all but one on the pool.
+        runner.Test("h2 off-reactor (http2): many streams flushing from the thread pool at once all resume on the reactor", () =>
+            AssertH2Many((pipe, calls) => new Http2Connection(pipe).RunAsync((_, writer) =>
+                ChunksFromPool(calls, () => writer.WriteHeaders(new Http2Response { Status = 200 }), writer, writer.FlushAsync))));
+
+        runner.Test("h2 off-reactor (nghttp2): many streams flushing from the thread pool at once all resume on the reactor", () =>
+            AssertH2Many((pipe, calls) => new Nghttp2Connection(pipe).RunAsync((_, writer) =>
+                ChunksFromPool(calls, () => writer.WriteHeaders(new Nghttp2Response { Status = 200 }), writer, writer.FlushAsync))));
+
         // The stack catches what the handler throws and resets the stream: that is connection work,
         // and the handler threw from the pool.
         runner.Test("h2 off-reactor (http2): a handler that throws from the thread pool is reset from the reactor, and the connection serves on", () =>
@@ -185,6 +195,29 @@ internal static class OffReactorStreamTests
         return await AcceptFromPool(calls, accepted);
     }
 
+    private const int ManyStreams = 64;
+    private const int ManyChunks = 64;
+    private const int ManyChunkBytes = 4096;
+
+    // Headers, then ManyChunks chunks with a flush each, every call made from the pool.
+    private static async ValueTask ChunksFromPool(Calls calls, Action writeHeaders, IBufferWriter<byte> writer,
+        Func<ValueTask<FlushResult>> flush)
+    {
+        await LeaveReactor();
+        calls.Note();
+        writeHeaders();
+        for (int n = 0; n < ManyChunks; n++)
+        {
+            await LeaveReactor();
+            calls.Note();
+            writer.Write(Upload.AsSpan(n * ManyChunkBytes, ManyChunkBytes));
+            if ((await flush()).IsCompleted)
+            {
+                return;
+            }
+        }
+    }
+
     // The first request throws from the pool, after its headers; the next is answered normally.
     private static async ValueTask ThrowFirst(Calls calls, Action<int> writeHeaders)
     {
@@ -253,6 +286,22 @@ internal static class OffReactorStreamTests
         Assert.True(response.Wait(30_000), "the response completed");
 
         Assert.Equal(0, response.Result.Length);
+        calls.AssertAllOff();
+        writes.AssertNone();
+    }
+
+    private static void AssertH2Many(Func<IDuplexPipe, Calls, Task> serve)
+    {
+        (int port, Calls calls, OffReactorWrites writes) = StartH2(serve);
+
+        using HttpClient client = H2Client();   // one connection: the streams share its write pump
+        Task<byte[]>[] responses = [.. Enumerable.Range(0, ManyStreams).Select(_ => SendAsync(client, port, body: null, HttpStatusCode.OK))];
+        Assert.True(Task.WaitAll(responses, 60_000), "every response completed");
+
+        foreach (Task<byte[]> response in responses)
+        {
+            Assert.True(response.Result.AsSpan().SequenceEqual(Upload.AsSpan(0, ManyChunks * ManyChunkBytes)), "each body came back whole");
+        }
         calls.AssertAllOff();
         writes.AssertNone();
     }

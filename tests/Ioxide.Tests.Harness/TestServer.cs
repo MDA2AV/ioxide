@@ -128,12 +128,7 @@ public static class TestServer
     private static readonly List<IDisposable> Owned = [];
 
     /// <summary>Continues on the calling reactor in a later pass, outside the dispatch running now.</summary>
-    public static async Task LaterPass()
-    {
-        Reactor? reactor = Reactor.Current;
-        await Task.Yield();
-        await new ReactorSwitch(reactor);
-    }
+    public static ReactorYield LaterPass() => ReactorSwitch.Yield(Reactor.Current!);
 
     /// <summary>
     /// Disposes <paramref name="disposable"/> in <see cref="StopAll"/>, after the reactors have come

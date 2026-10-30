@@ -137,8 +137,10 @@ public sealed partial class Http2Connection : IDisposable
 
         // A writer parked on its turn of the write pump has to wake into IsBroken, not hang: the
         // flush that would have completed its turn is never coming.
-        _turnWaiter?.TrySetResult();
-        _turnWaiter = null;
+        foreach (TaskCompletionSource waiter in TakeTurn())
+        {
+            waiter.TrySetResult();
+        }
 
         // Last: a handler parked on its body resumes into its end once everything above is released.
         FireBodyWakes();

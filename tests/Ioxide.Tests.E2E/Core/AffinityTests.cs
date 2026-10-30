@@ -109,6 +109,30 @@ internal static class AffinityTests
             Assert.Equal("inline", body);
         });
 
+        runner.Test("affinity: ReactorSwitch.Yield continues on the reactor, after the code running now", () =>
+        {
+            int port = TestServer.Start(async (r, conn) =>
+            {
+                try
+                {
+                    await conn.ReadAsync();
+                    var steps = new List<string>();
+                    Task later = YieldThenNote(r, steps);
+                    steps.Add("caller");
+                    await later;
+                    Wire.Write(conn, 200, string.Join(",", steps));
+                    await conn.FlushAsync();
+                }
+                finally
+                {
+                    conn.DecRef();
+                }
+            });
+
+            (_, string body) = Client.Get(port, "/");
+            Assert.Equal("caller,yielded on the reactor", body);
+        });
+
         runner.Test("affinity: a posted callback that throws does not kill the reactor", () =>
         {
             // DrainPostQ wraps each callback: an unguarded throw would unwind Run() and take the
@@ -367,6 +391,12 @@ internal static class AffinityTests
         (int status, string body) = Client.Get(port, "/", timeoutMs: 20_000);
         Assert.Equal(200, status);
         Assert.Equal("on-reactor", body);
+    }
+
+    private static async Task YieldThenNote(Reactor reactor, List<string> steps)
+    {
+        await ReactorSwitch.Yield(reactor);
+        steps.Add(reactor.OnReactorThread ? "yielded on the reactor" : "yielded elsewhere");
     }
 
     // Set immediately before the throw, so the test can tell "the guard handled it" from "the

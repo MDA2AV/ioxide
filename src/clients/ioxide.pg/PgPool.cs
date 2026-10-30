@@ -164,13 +164,14 @@ public sealed class PgPool
                     $"pg pool: no connection to {_options.Host}:{_options.Port} after {MaxConnectAttempts} attempts");
             }
 
-            _opened ??= new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+            _opened ??= new TaskCompletionSource<bool>();
             Task wait = _opened.Task;
             if (_opening == 0)
             {
                 StartOpen();   // nothing live and nothing opening - kick one off
             }
             await wait;
+            await ReactorSwitch.Yield(_host);   // out of the open's completion, still on the reactor
         }
     }
 

@@ -8,11 +8,17 @@ namespace ioxide;
 /// </summary>
 public readonly struct ReactorSwitch : ICriticalNotifyCompletion
 {
-    private static readonly Action<object?> Resume = static continuation => ((Action)continuation!)();
+    internal static readonly Action<object?> Resume = static continuation => ((Action)continuation!)();
 
     private readonly IRingHost? _reactor;
 
     public ReactorSwitch(IRingHost? reactor) => _reactor = reactor;
+
+    /// <summary>
+    /// Continues on the reactor's thread from its post queue, even when the caller is already there:
+    /// after whatever is running now has returned.
+    /// </summary>
+    public static ReactorYield Yield(IRingHost reactor) => new(reactor);
 
     public ReactorSwitch GetAwaiter() => this;
 
@@ -21,6 +27,26 @@ public readonly struct ReactorSwitch : ICriticalNotifyCompletion
     public void OnCompleted(Action continuation) => _reactor!.ScheduleOnReactor(Resume, continuation);
 
     public void UnsafeOnCompleted(Action continuation) => _reactor!.ScheduleOnReactor(Resume, continuation);
+
+    public void GetResult()
+    {
+    }
+}
+
+/// <summary>The awaitable behind <see cref="ReactorSwitch.Yield"/>: always posts.</summary>
+public readonly struct ReactorYield : ICriticalNotifyCompletion
+{
+    private readonly IRingHost _reactor;
+
+    internal ReactorYield(IRingHost reactor) => _reactor = reactor;
+
+    public ReactorYield GetAwaiter() => this;
+
+    public bool IsCompleted => false;
+
+    public void OnCompleted(Action continuation) => _reactor.ScheduleOnReactor(ReactorSwitch.Resume, continuation);
+
+    public void UnsafeOnCompleted(Action continuation) => _reactor.ScheduleOnReactor(ReactorSwitch.Resume, continuation);
 
     public void GetResult()
     {
