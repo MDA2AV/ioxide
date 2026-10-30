@@ -63,14 +63,12 @@ internal sealed class IoxideConnectionListener : IConnectionListener
             {
                 TcpHandle = HandleConnectionAsync,
             };
-            // Per-reactor startup, on the reactor's own thread: bind the current-reactor seam (so Kestrel
-            // endpoints can resolve ring-native services), start the TLS service if configured, then run
-            // the user's hook (PgPool.Start, AssetReader.CreatePool, ...).
+            // Per-reactor startup, on the reactor's own thread: start the TLS service if configured, then
+            // run the user's hook (PgPool.Start, AssetReader.CreatePool, ...).
             var tls = _tlsOptions;
             var onReactorStart = options.OnReactorStart;
             reactor.OnStart = r =>
             {
-                IoxideReactor.Bind(r);
                 if (tls is not null)
                 {
                     TlsService.Start(r, tls);

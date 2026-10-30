@@ -177,9 +177,9 @@ PANES = {
         "Tcp/TaskRun", "TCP &middot; ordinary async", "ioxide",
         ["curl http://127.0.0.1:8080/"],
         "Proof that normal .NET async works inside a handler - <code>Task.Run</code>, "
-        "<code>Task.Delay</code>, the thread pool - and that you come back to your reactor "
-        "afterwards. The per-reactor <code>SynchronizationContext</code> is what makes that true, so "
-        "connection and pool state stay single-threaded without a lock even when a handler wanders."),
+        "<code>Task.Delay</code>, the thread pool - and how you come back to your reactor "
+        "afterwards: <code>await new ReactorSwitch(reactor)</code>. Back there, connection and pool "
+        "state stay single-threaded without a lock even when a handler wanders."),
 
     # ── protocols ────────────────────────────────────────────────────────────────────────────
     "h2cstls": (

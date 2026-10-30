@@ -108,7 +108,7 @@ internal static class Http2BodyTests
                     await new Http2Connection(conn).RunAsync(async (_, writer) =>
                     {
                         writer.WriteHeaders(new Http2Response { Status = 200 });
-                        await Task.Yield();
+                        await TestServer.LaterPass();
 
                         using var source = new MemoryStream(file, writable: false);
 
@@ -158,7 +158,7 @@ internal static class Http2BodyTests
                         head.Headers.Add("X-Custom-Header"u8.ToArray(), "AbC"u8.ToArray());
                         writer.WriteHeaders(head);
 
-                        await Task.Yield();
+                        await TestServer.LaterPass();
                         writer.Write(file);
                         await writer.CompleteAsync();
                     });
@@ -241,7 +241,7 @@ internal static class Http2BodyTests
             if (park)
             {
                 // Resumes on the reactor, after the pass that dispatched this request has gone.
-                await Task.Yield();
+                await TestServer.LaterPass();
             }
 
             if (chunk <= 0)

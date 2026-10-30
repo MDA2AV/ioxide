@@ -77,7 +77,7 @@ public sealed class Http3ResponseWriter : IBufferWriter<byte>
         }
 
         _headersSent = true;
-        if (_connection.OffReactor is not null)
+        if (_connection.Reactor is { OnReactorThread: false })
         {
             _unsent = response;
             return;
@@ -146,10 +146,7 @@ public sealed class Http3ResponseWriter : IBufferWriter<byte>
             return;
         }
 
-        if (_connection.OffReactor is Reactor reactor)
-        {
-            await new ReactorSwitch(reactor);
-        }
+        await new ReactorSwitch(_connection.Reactor);
 
         if (!_headersSent)
         {
@@ -199,10 +196,7 @@ public sealed class Http3ResponseWriter : IBufferWriter<byte>
             throw new InvalidOperationException("Write the response headers before flushing a body chunk.");
         }
 
-        if (_connection.OffReactor is Reactor reactor)
-        {
-            await new ReactorSwitch(reactor);
-        }
+        await new ReactorSwitch(_connection.Reactor);
 
         if (_unsent is Http3Response unsent)
         {

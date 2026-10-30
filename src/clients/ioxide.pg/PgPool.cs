@@ -97,8 +97,8 @@ public sealed class PgPool
     public ValueTask<PgResult> QueryAsync(string sql, ReadOnlySpan<PgParam> args)
     {
         PgConnection? c = Pick();
-        // Slow path is startup-only (no connection open yet); copying the params to the heap there is
-        // fine, and keeps the span off the async state machine.
+        // Slow path is startup (no connection open yet) or a call from off the reactor; copying the
+        // params to the heap there is fine, and keeps the span off the async state machine.
         return c != null ? c.QueryAsync(sql, args) : QuerySlowAsync(sql, args.ToArray());
     }
 
@@ -121,9 +121,15 @@ public sealed class PgPool
     private async ValueTask<PgResult> QueryRowsSlowAsync(string sql, PgParam[] args, PgRowHandler onRow)
         => await (await WaitForConnectionAsync()).QueryAsync(sql, args, onRow);
 
-    // Round-robin over healthy connections; evict and replace any found broken.
+    // Round-robin over healthy connections; evict and replace any found broken. Off the reactor there is
+    // none to give: the pool is the reactor's, and the slow path starts by moving there.
     private PgConnection? Pick()
     {
+        if (!_host.OnReactorThread)
+        {
+            return null;
+        }
+
         while (_connections.Count > 0)
         {
             int index = (_next++ & 0x7fffffff) % _connections.Count;
@@ -143,6 +149,7 @@ public sealed class PgPool
     // and wait for one to finish; fail fast after MaxConnectAttempts so queries never hang.
     private async ValueTask<PgConnection> WaitForConnectionAsync()
     {
+        await new ReactorSwitch(_host);
         for (int attempt = 1; ; attempt++)
         {
             PgConnection? c = Pick();

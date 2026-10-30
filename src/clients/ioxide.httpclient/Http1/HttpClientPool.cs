@@ -108,6 +108,7 @@ public sealed class HttpClientPool : IDisposable
     public async ValueTask<HttpClientResponse> SendAsync(HttpClientRequest request)
     {
         HttpClientConnection.ValidateHead(request);   // before acquiring: a refused request must not cost a connection
+        await new ReactorSwitch(_host);   // the pool is the reactor's
         _requests++;
         try
         {

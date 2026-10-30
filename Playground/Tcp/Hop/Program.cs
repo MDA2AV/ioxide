@@ -4,8 +4,8 @@ using Playground.Shared;
 
 // ─────────────────────────────────────────────────────────────────────────────────────────────
 //  hop - Playground/Tcp/Raw, except every request deliberately bounces off the reactor and back.
-//  Task.Yield() sends the continuation to the thread pool; the reactor's SynchronizationContext
-//  then posts it home, which wakes the reactor through its eventfd.
+//  Task.Yield() sends the continuation to the thread pool; ReactorSwitch then posts it home,
+//  which wakes the reactor through its eventfd.
 //
 //  This is the sample to read if you need to call something that ISN'T ring-native - a blocking
 //  library, a CPU-bound step - and want to see what leaving the reactor costs. Run it against Raw.
@@ -68,10 +68,9 @@ for (int i = 0; i < threads.Length; i++)
             {
                 RecvSnapshot snapshot = await conn.ReadAsync();
 
-                // Off to the thread pool and back. Everything after this line runs on the reactor
-                // again, because the per-reactor SynchronizationContext posts it home - which is
-                // what makes it safe to touch the connection below.
+                // Off to the thread pool and back: everything after the switch runs on the reactor.
                 await Task.Yield();
+                await new ReactorSwitch(r);
 
                 while (conn.TryGetItem(snapshot, out SpscRecvRing.Item item))
                 {

@@ -76,10 +76,12 @@ public sealed partial class Http2Connection
         try
         {
             await handler(request, writer);
+            await new ReactorSwitch(_reactor);   // back on the reactor, wherever the handler finished
             await writer.CompleteAsync();
         }
         catch (Exception exception)
         {
+            await new ReactorSwitch(_reactor);
             Console.Error.WriteLine($"[ioxide.http2] request handler faulted: {exception.GetBaseException().Message}");
             try
             {

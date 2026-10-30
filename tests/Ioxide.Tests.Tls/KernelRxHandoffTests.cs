@@ -313,7 +313,7 @@ internal static class KernelRxHandoffTests
             {
                 if (lateHandshake)
                 {
-                    await Task.Yield();   // resumes on the reactor, through its SynchronizationContext
+                    await TestServer.LaterPass();
                 }
 
                 try

@@ -66,7 +66,7 @@ public sealed class Nghttp2ResponseWriter : IBufferWriter<byte>, IValueTaskSourc
         }
 
         _headersSent = true;
-        if (_connection.OffReactor is not null)
+        if (_connection.Reactor is { OnReactorThread: false })
         {
             _unsent = response;
             return;
@@ -111,10 +111,7 @@ public sealed class Nghttp2ResponseWriter : IBufferWriter<byte>, IValueTaskSourc
     /// </returns>
     public async ValueTask<FlushResult> FlushAsync()
     {
-        if (_connection.OffReactor is Reactor reactor)
-        {
-            await new ReactorSwitch(reactor);
-        }
+        await new ReactorSwitch(_connection.Reactor);
 
         if (!_headersSent)
         {

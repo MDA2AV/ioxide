@@ -124,7 +124,7 @@ public sealed class Nghttp3ResponseWriter : IBufferWriter<byte>
         }
 
         _headersSent = true;
-        if (_connection.OffReactor is not null)
+        if (_connection.Reactor is { OnReactorThread: false })
         {
             _unsent = response;
             return;
@@ -226,10 +226,7 @@ public sealed class Nghttp3ResponseWriter : IBufferWriter<byte>
             throw new InvalidOperationException("Write the response headers before flushing a body chunk.");
         }
 
-        if (_connection.OffReactor is Reactor reactor)
-        {
-            await new ReactorSwitch(reactor);
-        }
+        await new ReactorSwitch(_connection.Reactor);
         SubmitUnsent();
 
         if (_staged == 0)
@@ -273,10 +270,7 @@ public sealed class Nghttp3ResponseWriter : IBufferWriter<byte>
             return;
         }
 
-        if (_connection.OffReactor is Reactor reactor)
-        {
-            await new ReactorSwitch(reactor);
-        }
+        await new ReactorSwitch(_connection.Reactor);
 
         if (!_headersSent)
         {

@@ -46,6 +46,12 @@ public interface IRingHost
     /// (-62), which is success for a timeout rather than a failure.
     /// </summary>
     void SubmitTimeout(long nanoseconds, IRingCompletion completion);
+
+    /// <summary>True when the caller is on the host's thread, where a client's own state lives.</summary>
+    bool OnReactorThread { get; }
+
+    /// <summary>Run <paramref name="callback"/> on the host's thread.</summary>
+    void ScheduleOnReactor(Action<object?> callback, object? state);
 }
 
 /// <summary>

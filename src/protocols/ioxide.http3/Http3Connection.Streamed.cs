@@ -88,11 +88,13 @@ public sealed partial class Http3Connection
         try
         {
             await handler(rs.Request, writer);
+            await new ReactorSwitch(Reactor);   // back on the reactor, wherever the handler finished
             RetireBody(rs);
             await writer.CompleteAsync();
         }
         catch (Exception exception)
         {
+            await new ReactorSwitch(Reactor);
             Console.Error.WriteLine($"[ioxide.http3] request handler faulted: {exception.GetBaseException().Message}");
             RetireBody(rs);
             await writer.FailAsync();

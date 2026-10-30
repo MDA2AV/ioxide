@@ -56,9 +56,9 @@ public sealed class Nghttp3BodyReader : IValueTaskSource<ReadOnlyMemory<byte>>
     /// </summary>
     public ValueTask<ReadOnlyMemory<byte>> ReadAsync()
     {
-        if (_owner?.OffReactor is Reactor reactor)
+        if (_owner?.Reactor is { OnReactorThread: false })
         {
-            return ReadOffReactor(reactor);
+            return ReadOnReactor();
         }
 
         ReleaseHandedOut();
@@ -124,22 +124,13 @@ public sealed class Nghttp3BodyReader : IValueTaskSource<ReadOnlyMemory<byte>>
         }
     }
 
-    // The queue and the window credit belong to the reactor, so a read from another thread is served
+    // The queue and the window credit belong to the reactor, so a read from another thread is made
     // there. Out of line, so the on-reactor read compiles as it did before the check.
     [MethodImpl(MethodImplOptions.NoInlining)]
-    private ValueTask<ReadOnlyMemory<byte>> ReadOffReactor(Reactor reactor)
+    private async ValueTask<ReadOnlyMemory<byte>> ReadOnReactor()
     {
-        _core.Reset();
-        reactor.ScheduleOnReactor(static state => ((Nghttp3BodyReader)state!).ReadOnReactor(), this);
-        return new ValueTask<ReadOnlyMemory<byte>>(this, _core.Version);
-    }
-
-    // Parked here, and completed at once when there is something to hand over.
-    private void ReadOnReactor()
-    {
-        ReleaseHandedOut();
-        _armed = true;
-        FireIfReady();
+        await new ReactorSwitch(_owner?.Reactor);
+        return await ReadAsync();
     }
 
     // The deferred wake: complete a parked ReadAsync now that the engine layers have unwound.
@@ -212,7 +203,7 @@ public sealed class Nghttp3BodyReader : IValueTaskSource<ReadOnlyMemory<byte>>
     }
 
     // IValueTaskSource<ReadOnlyMemory<byte>> - completes on the reactor thread only; strip the
-    // context-post so resumes stay inline (see ReactorSynchronizationContext).
+    // context-post so resumes stay inline.
     ReadOnlyMemory<byte> IValueTaskSource<ReadOnlyMemory<byte>>.GetResult(short token) => _core.GetResult(token);
 
     ValueTaskSourceStatus IValueTaskSource<ReadOnlyMemory<byte>>.GetStatus(short token) => _core.GetStatus(token);

@@ -102,7 +102,7 @@ internal static class Http3BodyTests
                     Memory<byte> buffer = writer.GetMemory(take);
 
                     // Hand the reactor back while holding it - a real read would park here.
-                    await Task.Yield();
+                    await TestServer.LaterPass();
 
                     body.AsSpan(at, take).CopyTo(buffer.Span);
                     writer.Advance(take);

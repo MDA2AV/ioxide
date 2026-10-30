@@ -77,8 +77,7 @@ public sealed partial class Http2Connection : IDisposable
     // The reactor this connection is served on; null when it runs without one, as over a test pipe.
     private Reactor? _reactor;
 
-    /// <summary>The connection's reactor, when the caller is on another thread (#441).</summary>
-    internal Reactor? OffReactor => _reactor is { OnReactorThread: false } reactor ? reactor : null;
+    internal Reactor? Reactor => _reactor;
 
     /// <summary>
     /// Serve over an already-chosen transport. The pipe is the caller's to dispose.
@@ -174,7 +173,7 @@ public sealed partial class Http2Connection : IDisposable
     // per read pass.
     private async Task RunCoreAsync(Action dispatch)
     {
-        _reactor = (SynchronizationContext.Current as ReactorSynchronizationContext)?.Reactor;
+        _reactor = Reactor.Current;
 
         try
         {
@@ -338,10 +337,12 @@ public sealed partial class Http2Connection : IDisposable
         try
         {
             Http2Response response = await inFlight;
+            await new ReactorSwitch(_reactor);   // back on the reactor, wherever the handler finished
             WriteResponse(pending.StreamId, response);
         }
         catch (Exception exception)
         {
+            await new ReactorSwitch(_reactor);
             // Nobody can observe this task, so an escaping exception would vanish silently and the
             // peer would wait on a stream that is never coming.
             Console.Error.WriteLine($"[ioxide.http2] request handler faulted: {exception.GetBaseException().Message}");

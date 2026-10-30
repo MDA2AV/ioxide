@@ -232,11 +232,13 @@ public sealed partial class Nghttp3Connection
         try
         {
             await pending;
+            await new ReactorSwitch(Reactor);   // back on the reactor, wherever the handler finished
             RetireBody(request);
             await writer.CompleteAsync();
         }
         catch (Exception exception)
         {
+            await new ReactorSwitch(Reactor);
             Console.Error.WriteLine($"[ioxide.nghttp3] request handler faulted: {exception.GetBaseException().Message}");
             RetireBody(request);
             FailStreamed(writer.StreamId, writer, request);

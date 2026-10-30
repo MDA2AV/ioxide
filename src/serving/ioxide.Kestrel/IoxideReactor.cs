@@ -14,16 +14,8 @@ namespace ioxide.Kestrel;
 /// </summary>
 public static class IoxideReactor
 {
-    [ThreadStatic] private static Reactor? _current;
-
     /// <summary>The reactor handling the current request. Throws when read off a reactor thread.</summary>
     public static Reactor Current =>
-        _current ?? throw new InvalidOperationException(
+        Reactor.Current ?? throw new InvalidOperationException(
             "IoxideReactor.Current is only available on an ioxide reactor thread (inside request handling).");
-
-    /// <summary>The current reactor, or null when not on a reactor thread. Used by the transport to pin work.</summary>
-    internal static Reactor? TryCurrent() => _current;
-
-    /// <summary>Bound once per reactor, on the reactor's own thread, from the transport's OnStart.</summary>
-    internal static void Bind(Reactor reactor) => _current = reactor;
 }

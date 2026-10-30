@@ -8,10 +8,9 @@ using Playground.Shared;
 //  taskrun - proof that ordinary .NET async works inside a handler. Each request awaits a
 //  Task.Run, which is the escape hatch for anything CPU-bound or not ring-native.
 //
-//  The point: with the per-reactor SynchronizationContext installed, the continuation comes HOME
-//  to the reactor, so connection state stays single-threaded and you can keep touching conn after
-//  the await. The sample logs once if it ever resumes off-reactor - if that line never prints,
-//  the guarantee held.
+//  The continuation resumes where Task.Run finished, on the thread pool; ReactorSwitch brings it
+//  HOME to the reactor, so connection state stays single-threaded. The sample logs once if it is
+//  ever off the reactor after that - if that line never prints, the switch held.
 //
 //      dotnet run -c Release --project Playground/Tcp/TaskRun
 //      curl http://127.0.0.1:8080/          # -> "hello world"
@@ -76,13 +75,14 @@ for (int i = 0; i < threads.Length; i++)
                     if (item.HasBuffer) conn.ReturnBuffer(in item);
                 }
 
-                // Ordinary thread-pool work, awaited from a reactor handler.
+                // Ordinary thread-pool work, awaited from a reactor handler, then home again.
                 string json = await Task.Run(static () => JsonSerializer.Serialize("hello world"));
+                await new ReactorSwitch(r);
 
                 // We should be back on the reactor here. If not, say so once.
                 if (!r.OnReactorThread && Interlocked.Exchange(ref offReactorSeen, 1) == 0)
                 {
-                    Console.WriteLine("[taskrun] continuation resumed OFF the reactor (no sync context)");
+                    Console.WriteLine("[taskrun] continuation resumed OFF the reactor");
                 }
 
                 conn.Write("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 13\r\n\r\n"u8);

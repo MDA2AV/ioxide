@@ -85,13 +85,12 @@ public sealed unsafe partial class Reactor
         }
     }
 
-    // Record the owning thread (off-reactor callers detect themselves and go through the handoff
-    // queues) and route awaits from reactor code (timers, HttpClient, Task.Run results) back here
-    // instead of the thread pool. Thread-lifetime; nothing to uninstall.
+    // Record the owning thread: off-reactor callers detect themselves and go through the handoff
+    // queues. Thread-lifetime; nothing to uninstall.
     private void BindReactorThread()
     {
         _reactorThreadId = Environment.CurrentManagedThreadId;
-        SynchronizationContext.SetSynchronizationContext(new ReactorSynchronizationContext(this));
+        t_current = this;
     }
 
     private void OpenWakeFd()
