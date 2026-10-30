@@ -1934,10 +1934,9 @@ for (int i = 0; i &lt; threads.Length; i++)
             {
                 RecvSnapshot snapshot = await conn.ReadAsync();
 
-                // Off to the thread pool and back. Everything after this line runs on the reactor
-                // again, because the per-reactor SynchronizationContext posts it home - which is
-                // what makes it safe to touch the connection below.
+                // Off to the thread pool and back: everything after the switch runs on the reactor.
                 await Task.Yield();
+                await new ReactorSwitch(r);
 
                 while (conn.TryGetItem(snapshot, out SpscRecvRing.Item item))
                 {
@@ -2034,13 +2033,14 @@ for (int i = 0; i &lt; threads.Length; i++)
                     if (item.HasBuffer) conn.ReturnBuffer(in item);
                 }
 
-                // Ordinary thread-pool work, awaited from a reactor handler.
+                // Ordinary thread-pool work, awaited from a reactor handler, then home again.
                 string json = await Task.Run(static () =&gt; JsonSerializer.Serialize(&quot;hello world&quot;));
+                await new ReactorSwitch(r);
 
                 // We should be back on the reactor here. If not, say so once.
                 if (!r.OnReactorThread &amp;&amp; Interlocked.Exchange(ref offReactorSeen, 1) == 0)
                 {
-                    Console.WriteLine(&quot;[taskrun] continuation resumed OFF the reactor (no sync context)&quot;);
+                    Console.WriteLine(&quot;[taskrun] continuation resumed OFF the reactor&quot;);
                 }
 
                 conn.Write(&quot;HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 13\r\n\r\n&quot;u8);
@@ -2067,7 +2067,7 @@ foreach (Thread thread in threads)
 {
     thread.Join();
 }</code></pre>
-    <p class="ex-foot">Proof that normal .NET async works inside a handler - <code>Task.Run</code>, <code>Task.Delay</code>, the thread pool - and that you come back to your reactor afterwards. The per-reactor <code>SynchronizationContext</code> is what makes that true, so connection and pool state stay single-threaded without a lock even when a handler wanders.</p>
+    <p class="ex-foot">Proof that normal .NET async works inside a handler - <code>Task.Run</code>, <code>Task.Delay</code>, the thread pool - and how you come back to your reactor afterwards: <code>await new ReactorSwitch(reactor)</code>. Back there, connection and pool state stay single-threaded without a lock even when a handler wanders.</p>
   </div>
   <div class="pane pane-h2cstls">
     <div class="pane-head">

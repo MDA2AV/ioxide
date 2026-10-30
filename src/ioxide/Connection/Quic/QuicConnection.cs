@@ -441,8 +441,7 @@ public abstract class QuicConnection : IValueTaskSource<QuicRecvSnapshot>
             return;
         }
 
-        // Completes on the reactor thread only - strip the context-post so resumes stay inline
-        // (see ReactorSynchronizationContext).
+        // Completes on the reactor thread only - strip the context-post so resumes stay inline.
         _readSignal.OnCompleted(continuation, state, _readSignal.Version,
             flags & ~ValueTaskSourceOnCompletedFlags.UseSchedulingContext);
     }

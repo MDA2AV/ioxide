@@ -7,24 +7,19 @@ using ioxide;
 namespace Ioxide.Tests;
 
 /// <summary>
-/// Continuation affinity: after any await inside a handler, execution is back on the reactor that
-/// started it.
+/// Continuation affinity: ioxide's own completions resume a handler on its reactor, an await on
+/// anything else resumes where that thing completed, and <see cref="ReactorSwitch"/> comes back.
 ///
-/// The mechanism is a <see cref="ReactorSynchronizationContext"/> installed on the reactor thread,
-/// so an await that is NOT one of ioxide's own - Task.Delay, Task.Run, a BCL HttpClient call -
-/// resumes on the reactor instead of a thread-pool thread. That matters beyond tidiness: the
-/// ring's submission queue and every connection's state are single-threaded by construction, and a
-/// handler that came back on a pool thread would be touching both from the wrong one.
-///
-/// This shipped untested. What follows is the acceptance criteria it was specified against.
+/// The reactor installs no SynchronizationContext. One would send every ConfigureAwait(false)
+/// continuation the reactor completes to the thread pool - .NET never runs such a continuation
+/// inline on a thread that has a context - which is how library code ended up leaving it.
 /// </summary>
 internal static class AffinityTests
 {
     public static void Register(Runner runner)
     {
-        runner.Test("affinity: a reactor thread carries a ReactorSynchronizationContext", () =>
+        runner.Test("affinity: a reactor thread knows its reactor and carries no SynchronizationContext", () =>
         {
-            // The install itself, which everything below depends on.
             int port = TestServer.Start(async (r, conn) =>
             {
                 try
@@ -32,9 +27,11 @@ internal static class AffinityTests
                     await conn.ReadAsync();
 
                     SynchronizationContext? context = SynchronizationContext.Current;
-                    bool ours = context is ReactorSynchronizationContext c && ReferenceEquals(c.Reactor, r);
+                    string verdict = !ReferenceEquals(Reactor.Current, r) ? "Reactor.Current is not this reactor"
+                        : context is not null ? $"context installed: {context.GetType().Name}"
+                        : "bound";
 
-                    Wire.Write(conn, 200, ours ? "installed" : $"wrong context: {context?.GetType().Name ?? "none"}");
+                    Wire.Write(conn, 200, verdict);
                     await conn.FlushAsync();
                 }
                 finally
@@ -45,52 +42,101 @@ internal static class AffinityTests
 
             (int status, string body) = Client.Get(port, "/");
             Assert.Equal(200, status);
-            Assert.Equal("installed", body);
+            Assert.Equal("bound", body);
         });
 
-        runner.Test("affinity: Task.Delay resumes on the reactor", () =>
+        runner.Test("affinity: a ConfigureAwait(false) continuation the reactor completes stays on it", () =>
         {
-            // A timer completion belongs to the BCL, so without the context this continuation
-            // lands on a thread-pool thread.
-            AssertBackOnReactorAfter(static async () => await Task.Delay(1));
+            // The shape of library code: a task completed from the reactor, awaited with
+            // ConfigureAwait(false). Under a reactor context this continuation went to the pool.
+            AssertOnReactorAfter(static async r =>
+            {
+                var done = new TaskCompletionSource();
+                r.ScheduleOnReactor(static s => ((TaskCompletionSource)s!).SetResult(), done);
+                await done.Task.ConfigureAwait(false);
+            });
         });
 
-        runner.Test("affinity: Task.Run resumes on the reactor", () =>
+        runner.Test("affinity: ReactorSwitch comes back after Task.Delay", () =>
         {
-            // The awaited work genuinely runs on the pool; only the CONTINUATION comes home.
-            AssertBackOnReactorAfter(static async () => await Task.Run(static () => Thread.Sleep(1)));
+            AssertOnReactorAfter(static async r =>
+            {
+                await Task.Delay(1);
+                await new ReactorSwitch(r);
+            });
         });
 
-        runner.Test("affinity: a BCL HttpClient call resumes on the reactor", () =>
+        runner.Test("affinity: ReactorSwitch comes back after Task.Run", () =>
         {
-            // The case the context was built for: a handler calling something that knows nothing
-            // about ioxide, whose continuation would otherwise migrate off the reactor for good.
+            AssertOnReactorAfter(static async r =>
+            {
+                await Task.Run(static () => Thread.Sleep(1));
+                await new ReactorSwitch(r);
+            });
+        });
+
+        runner.Test("affinity: ReactorSwitch comes back after a BCL HttpClient call", () =>
+        {
             int origin = TestServer.Start(Handlers.Raw);
 
-            AssertBackOnReactorAfter(async () =>
+            AssertOnReactorAfter(async r =>
             {
                 using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(10) };
                 await http.GetStringAsync($"http://127.0.0.1:{origin}/");
+                await new ReactorSwitch(r);
             });
         });
 
-        runner.Test("affinity: nested awaits all come back", () =>
+        runner.Test("affinity: ReactorSwitch on the reactor continues at once", () =>
         {
-            // Affinity has to survive the whole chain, not just the first hop - a handler that
-            // drifted off on the second await would be just as broken.
-            AssertBackOnReactorAfter(static async () =>
+            // Completed when already there, so a call site needs no check of its own.
+            int port = TestServer.Start(async (r, conn) =>
             {
-                await Task.Delay(1);
-                await Task.Run(static () => { });
-                await Task.Yield();
+                try
+                {
+                    await conn.ReadAsync();
+                    ReactorSwitch hop = new ReactorSwitch(r).GetAwaiter();
+                    Wire.Write(conn, 200, hop.IsCompleted && new ReactorSwitch(null).IsCompleted ? "inline" : "posted");
+                    await conn.FlushAsync();
+                }
+                finally
+                {
+                    conn.DecRef();
+                }
             });
+
+            (_, string body) = Client.Get(port, "/");
+            Assert.Equal("inline", body);
         });
 
-        runner.Test("affinity: an async void callback that throws does not kill the reactor", () =>
+        runner.Test("affinity: ReactorSwitch.Yield continues on the reactor, after the code running now", () =>
         {
-            // An async void continuation raises on whatever thread resumes it. Once that thread is
-            // the reactor, an unguarded throw would unwind Run() and take the whole reactor with
-            // it - the #92 failure class. DrainPostQ wraps each callback for exactly this.
+            int port = TestServer.Start(async (r, conn) =>
+            {
+                try
+                {
+                    await conn.ReadAsync();
+                    var steps = new List<string>();
+                    Task later = YieldThenNote(r, steps);
+                    steps.Add("caller");
+                    await later;
+                    Wire.Write(conn, 200, string.Join(",", steps));
+                    await conn.FlushAsync();
+                }
+                finally
+                {
+                    conn.DecRef();
+                }
+            });
+
+            (_, string body) = Client.Get(port, "/");
+            Assert.Equal("caller,yielded on the reactor", body);
+        });
+
+        runner.Test("affinity: a posted callback that throws does not kill the reactor", () =>
+        {
+            // DrainPostQ wraps each callback: an unguarded throw would unwind Run() and take the
+            // whole reactor with it - the #92 failure class.
             int port = TestServer.Start(async (r, conn) =>
             {
                 try
@@ -100,7 +146,11 @@ internal static class AffinityTests
 
                     if (path == "/boom")
                     {
-                        Explode(r);   // async void: throws from a posted continuation
+                        r.ScheduleOnReactor(static _ =>
+                        {
+                            Volatile.Write(ref _explodeReached, 1);
+                            throw new InvalidOperationException("posted callback blew up on the reactor thread");
+                        }, null);
                         Wire.Write(conn, 200, "queued");
                     }
                     else
@@ -119,13 +169,10 @@ internal static class AffinityTests
             (_, string queued) = Client.Get(port, "/boom");
             Assert.Equal("queued", queued);
 
-            // Wait for proof the continuation actually RAN. Without this the test asserts only that
-            // the reactor is alive, which it would also be if the continuation had been silently
-            // dropped or never resumed - passing for the opposite of the reason intended.
+            // Proof the callback actually RAN: otherwise this passes when it was silently dropped.
             Assert.True(SpinWait.SpinUntil(() => Volatile.Read(ref _explodeReached) == 1, 5_000),
-                "the async void continuation never reached its throw");
+                "the posted callback never reached its throw");
 
-            // The reactor is still serving, which is the whole assertion.
             for (int i = 0; i < 3; i++)
             {
                 (int status, string body) = Client.Get(port, "/ping");
@@ -307,10 +354,10 @@ internal static class AffinityTests
         [FieldOffset(260)] public int Sink;
     }
 
-    // Runs `work` inside a handler and reports whether execution came back to the reactor thread
-    // afterwards. The comparison is against the reactor's own view (OnReactorThread), not a thread
-    // id the test captured, so it stays true regardless of how the harness starts reactors.
-    private static void AssertBackOnReactorAfter(Func<Task> work)
+    // Runs `work` inside a handler and reports whether execution is on the reactor thread afterwards.
+    // The comparison is against the reactor's own view (OnReactorThread), not a thread id the test
+    // captured, so it stays true regardless of how the harness starts reactors.
+    private static void AssertOnReactorAfter(Func<Reactor, Task> work)
     {
         int port = TestServer.Start(async (r, conn) =>
         {
@@ -321,7 +368,7 @@ internal static class AffinityTests
                 string verdict;
                 try
                 {
-                    await work();
+                    await work(r);
                     verdict = r.OnReactorThread
                         ? "on-reactor"
                         : $"MIGRATED to thread {Environment.CurrentManagedThreadId}";
@@ -331,6 +378,7 @@ internal static class AffinityTests
                     verdict = $"work failed: {e.Message}";
                 }
 
+                await new ReactorSwitch(r);   // the response goes out from the reactor either way
                 Wire.Write(conn, 200, verdict);
                 await conn.FlushAsync();
             }
@@ -345,16 +393,13 @@ internal static class AffinityTests
         Assert.Equal("on-reactor", body);
     }
 
-    // Set immediately before the throw, so the test can tell "the guard handled it" from "the
-    // continuation never ran at all" - which look identical from the outside.
-    private static int _explodeReached;
-
-    // async void on purpose: this is the shape whose exception has nowhere to go but the thread
-    // that resumes it.
-    private static async void Explode(Reactor reactor)
+    private static async Task YieldThenNote(Reactor reactor, List<string> steps)
     {
-        await Task.Delay(1);   // resumes on the reactor, via the context
-        Volatile.Write(ref _explodeReached, 1);
-        throw new InvalidOperationException("async void continuation blew up on the reactor thread");
+        await ReactorSwitch.Yield(reactor);
+        steps.Add(reactor.OnReactorThread ? "yielded on the reactor" : "yielded elsewhere");
     }
+
+    // Set immediately before the throw, so the test can tell "the guard handled it" from "the
+    // callback never ran at all" - which look identical from the outside.
+    private static int _explodeReached;
 }

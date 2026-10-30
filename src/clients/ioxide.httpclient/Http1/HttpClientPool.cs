@@ -108,6 +108,7 @@ public sealed class HttpClientPool : IDisposable
     public async ValueTask<HttpClientResponse> SendAsync(HttpClientRequest request)
     {
         HttpClientConnection.ValidateHead(request);   // before acquiring: a refused request must not cost a connection
+        await new ReactorSwitch(_host);   // the pool is the reactor's
         _requests++;
         try
         {
@@ -178,11 +179,12 @@ public sealed class HttpClientPool : IDisposable
             // No timer of its own: the sweep fails a waiter at its deadline. A Task.WhenAny with a
             // Task.Delay ran the hand-over through the thread pool and back for every request that
             // waited - most of them, in a pool that is the bottleneck. Completed from the reactor,
-            // this continuation is posted to the reactor's own queue.
-            var waiter = new TaskCompletionSource<HttpClientConnection?>(TaskCreationOptions.RunContinuationsAsynchronously);
+            // this continuation yields to the reactor's own queue.
+            var waiter = new TaskCompletionSource<HttpClientConnection?>();
             _waiters.Enqueue((waiter, deadlineMs));
 
             HttpClientConnection? handed = await waiter.Task;
+            await ReactorSwitch.Yield(_host);   // out of the completer's frame, still on the reactor
             if (handed is not null && !handed.IsBroken)
             {
                 return handed;

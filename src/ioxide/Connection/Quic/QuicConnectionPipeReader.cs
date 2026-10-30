@@ -374,8 +374,7 @@ public sealed class QuicConnectionPipeReader : PipeReader, IValueTaskSource<Read
         short token,
         ValueTaskSourceOnCompletedFlags flags)
     {
-        // Completes on the reactor thread only - strip the context-post so resumes stay inline
-        // (see ReactorSynchronizationContext).
+        // Completes on the reactor thread only - strip the context-post so resumes stay inline.
         _core.OnCompleted(continuation, state, token,
             flags & ~ValueTaskSourceOnCompletedFlags.UseSchedulingContext);
     }

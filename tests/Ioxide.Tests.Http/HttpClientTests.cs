@@ -32,6 +32,17 @@ internal static class HttpClientTests
             Assert.Equal("200|hello from origin", body);
         });
 
+        runner.Test("httpclient h1: requests made from the thread pool, many at once, all run on the pool's reactor", () =>
+        {
+            // The pool is the reactor's and takes no lock: a call from another thread has to move there.
+            int origin = TestServer.Start(OriginHandler);
+            int proxy = StartProxy(origin);
+
+            (int status, string body) = Client.Get(proxy, "/frompool", timeoutMs: 60_000);
+            Assert.Equal(200, status);
+            Assert.Equal($"ok={FromPoolCallers * FromPoolCalls}", body);
+        });
+
         runner.Test("httpclient h1: dead origin fails inside the acquire budget, no connect storm", () =>
         {
             // A refused connect completes in microseconds and wakes the waiter. When the acquire
@@ -294,6 +305,10 @@ internal static class HttpClientTests
                 {
                     Wire.Write(connection, 200, $"live={upstream.ConnectionCount}");
                 }
+                else if (path == "/frompool")
+                {
+                    Wire.Write(connection, 200, await CallFromPool(upstream));
+                }
                 else if (path == "/dispose")
                 {
                     upstream.Dispose();
@@ -347,6 +362,45 @@ internal static class HttpClientTests
         {
             connection.DecRef();
         }
+    }
+
+    private const int FromPoolCallers = 32;
+    private const int FromPoolCalls = 40;
+
+    // Each call starts on a thread-pool thread, with many callers sharing the pool's connections.
+    private static async Task<string> CallFromPool(HttpClientPool upstream)
+    {
+        Reactor reactor = Reactor.Current!;
+        int ok = 0;
+        var callers = new Task[FromPoolCallers];
+        for (int i = 0; i < callers.Length; i++)
+        {
+            callers[i] = Task.Run(async () =>
+            {
+                for (int n = 0; n < FromPoolCalls; n++)
+                {
+                    using HttpClientResponse response = await Task.Run(() => upstream.GetAsync("/plain").AsTask());
+                    if (response.Status == 200)
+                    {
+                        Interlocked.Increment(ref ok);
+                    }
+                }
+            });
+        }
+
+        string verdict;
+        try
+        {
+            await Task.WhenAll(callers);
+            verdict = $"ok={ok}";
+        }
+        catch (Exception e)
+        {
+            verdict = $"failed after {ok}: {e.GetBaseException().Message}";
+        }
+
+        await new ReactorSwitch(reactor);
+        return verdict;
     }
 
     // Content-length taken from the body, so the origin never promises bytes it won't send.

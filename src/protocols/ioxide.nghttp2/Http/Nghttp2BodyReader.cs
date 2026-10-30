@@ -1,4 +1,5 @@
 using System.Buffers;
+using System.Runtime.CompilerServices;
 using System.Threading.Tasks.Sources;
 
 namespace ioxide.nghttp2;
@@ -21,10 +22,10 @@ namespace ioxide.nghttp2;
 /// the connection window for every other stream on it, until it returns.
 /// </summary>
 /// <remarks>
-/// Single consumer, reactor thread only. Each <see cref="ReadAsync"/> invalidates the previous
-/// chunk's memory - its pooled buffer goes back - so a handler that needs to keep bytes past the
-/// next read must copy them. Wakes are deferred until nghttp2 has unwound, so a resumed handler
-/// cannot re-enter the session mid-call.
+/// Single consumer, on any thread: a read made off the reactor is served on it. Each
+/// <see cref="ReadAsync"/> invalidates the previous chunk's memory - its pooled buffer goes back -
+/// so a handler that needs to keep bytes past the next read must copy them. Wakes are deferred
+/// until nghttp2 has unwound, so a resumed handler cannot re-enter the session mid-call.
 /// </remarks>
 public sealed class Nghttp2BodyReader : IValueTaskSource<ReadOnlyMemory<byte>>
 {
@@ -55,6 +56,11 @@ public sealed class Nghttp2BodyReader : IValueTaskSource<ReadOnlyMemory<byte>>
     /// </summary>
     public ValueTask<ReadOnlyMemory<byte>> ReadAsync()
     {
+        if (_owner.Reactor is { OnReactorThread: false })
+        {
+            return ReadOnReactor();
+        }
+
         ReleaseHandedOut();
 
         if (_chunks.TryDequeue(out (byte[] Buffer, int Length) chunk))
@@ -113,6 +119,15 @@ public sealed class Nghttp2BodyReader : IValueTaskSource<ReadOnlyMemory<byte>>
         {
             _owner.NoteBodyWake(this);
         }
+    }
+
+    // The queue and the window credit belong to the reactor, so a read from another thread is made
+    // there. Out of line, so the on-reactor read compiles as it did before the check.
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private async ValueTask<ReadOnlyMemory<byte>> ReadOnReactor()
+    {
+        await new ReactorSwitch(_owner.Reactor);
+        return await ReadAsync();
     }
 
     // The deferred wake: complete a parked ReadAsync now that nghttp2 is off the stack.

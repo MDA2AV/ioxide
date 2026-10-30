@@ -110,9 +110,9 @@ internal static class H3Tests
 
                         for (int i = 0; i < 4; i++)
                         {
-                            // The point of the test. Task.Yield is the cheapest way to leave the
-                            // dispatch pass; a file read or a database call lands in the same place.
-                            await Task.Yield();
+                            // The point of the test: leave the dispatch pass, as a file read or a
+                            // database call would.
+                            await TestServer.LaterPass();
 
                             "chunk"u8.CopyTo(writer.GetSpan(5));
                             writer.Advance(5);

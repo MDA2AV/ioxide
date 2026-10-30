@@ -1,3 +1,4 @@
+using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Text;
 using System.Threading.Tasks.Sources;
@@ -21,6 +22,7 @@ public sealed class PgConnection : IDisposable
     // call, not cached) so a connection can't accumulate unbounded server-side prepared statements.
     private const int MaxPreparedStatements = 256;
 
+    private readonly IRingHost _host;
     private readonly RingSocket _socket;
 
     // Native wire buffers. Kept as nint (not byte*) so the async protocol flow can do address
@@ -50,8 +52,9 @@ public sealed class PgConnection : IDisposable
     /// <summary>Transport-level failure happened; the connection must be discarded, not reused.</summary>
     public bool IsBroken { get; private set; }
 
-    private unsafe PgConnection(RingSocket socket, int maxBufferSize)
+    private unsafe PgConnection(IRingHost host, RingSocket socket, int maxBufferSize)
     {
+        _host = host;
         _socket = socket;
         _maxBufferSize = maxBufferSize;
         _send = (nint)NativeMemory.Alloc(SendBufferSize);
@@ -67,7 +70,7 @@ public sealed class PgConnection : IDisposable
     public static async Task<PgConnection> ConnectAsync(IRingHost host, PgOptions options)
     {
         RingSocket socket = RingSocket.CreateTcp(host);
-        var connection = new PgConnection(socket, options.MaxReceiveBytes);
+        var connection = new PgConnection(host, socket, options.MaxReceiveBytes);
         var deadline = new OpenDeadline(socket);
         if (options.CommandTimeoutMs > 0)
         {
@@ -218,6 +221,11 @@ public sealed class PgConnection : IDisposable
     // so the span never crosses an await.
     private ValueTask<PgResult> SubmitParamAsync(string sql, ReadOnlySpan<PgParam> args, PgRowHandler? onRow)
     {
+        if (!_host.OnReactorThread)
+        {
+            return SubmitParamOnReactor(sql, args.ToArray(), onRow);
+        }
+
         if (IsBroken)
         {
             return ValueTask.FromException<PgResult>(new PgException("connection is broken"));
@@ -268,9 +276,30 @@ public sealed class PgConnection : IDisposable
         return new ValueTask<PgResult>(pending, pending.Version);
     }
 
+    // The send buffer and the waiter queue are the reactor's, so a query from another thread is made
+    // there. Out of line, so the reactor's submit compiles as it did before the check.
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private async ValueTask<PgResult> SubmitOnReactor(string sql, PgRowHandler? onRow)
+    {
+        await new ReactorSwitch(_host);
+        return await SubmitAsync(sql, onRow);
+    }
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private async ValueTask<PgResult> SubmitParamOnReactor(string sql, PgParam[] args, PgRowHandler? onRow)
+    {
+        await new ReactorSwitch(_host);
+        return await SubmitParamAsync(sql, args, onRow);
+    }
+
     // Stage the command, enqueue its waiter, and make sure the sender and reader are running.
     private ValueTask<PgResult> SubmitAsync(string sql, PgRowHandler? onRow)
     {
+        if (!_host.OnReactorThread)
+        {
+            return SubmitOnReactor(sql, onRow);
+        }
+
         if (IsBroken)
         {
             return ValueTask.FromException<PgResult>(new PgException("connection is broken"));
@@ -501,8 +530,7 @@ public sealed class PgConnection : IDisposable
 
         public PgResult GetResult(short token) => _core.GetResult(token);
         public ValueTaskSourceStatus GetStatus(short token) => _core.GetStatus(token);
-        // Completes on the reactor thread only - strip the context-post so resumes stay inline
-        // (see ReactorSynchronizationContext).
+        // Completes on the reactor thread only - strip the context-post so resumes stay inline.
         public void OnCompleted(Action<object?> continuation, object? state, short token, ValueTaskSourceOnCompletedFlags flags)
             => _core.OnCompleted(continuation, state, token, flags & ~ValueTaskSourceOnCompletedFlags.UseSchedulingContext);
     }

@@ -59,6 +59,8 @@ public sealed class RingHttpClient : IDisposable
     /// </summary>
     public async ValueTask<HttpClientResponse> SendAsync(string url, HttpClientRequest request)
     {
+        await new ReactorSwitch(_host);   // the origins and their pools are the reactor's
+
         Uri target = Uri.TryCreate(url, UriKind.Absolute, out Uri? parsed) && parsed.Scheme is "http" or "https"
             ? parsed
             : throw new ArgumentException($"'{url}' is not an absolute http or https URL", nameof(url));

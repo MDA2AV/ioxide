@@ -1,4 +1,5 @@
 using System.Buffers;
+using System.Runtime.CompilerServices;
 using System.Threading.Tasks.Sources;
 
 namespace ioxide.nghttp3;
@@ -15,9 +16,10 @@ namespace ioxide.nghttp3;
 /// consumer freezes the window and the PEER stops sending, so the sink never holds more than a
 /// window's worth (256 KB by engine default).
 ///
-/// Contract: single consumer, reactor thread only, and each ReadAsync invalidates the previous
-/// chunk's memory (its pooled buffer is recycled). Wakes are deferred by the connection loop to
-/// after nghttp3 unwinds - same discipline as the engine's once-per-read fire.
+/// Contract: single consumer, on any thread (a read made off the reactor is served on it), and each
+/// ReadAsync invalidates the previous chunk's memory (its pooled buffer is recycled). Wakes are
+/// deferred by the connection loop to after nghttp3 unwinds - same discipline as the engine's
+/// once-per-read fire.
 /// </summary>
 public sealed class Nghttp3BodyReader : IValueTaskSource<ReadOnlyMemory<byte>>
 {
@@ -54,6 +56,11 @@ public sealed class Nghttp3BodyReader : IValueTaskSource<ReadOnlyMemory<byte>>
     /// </summary>
     public ValueTask<ReadOnlyMemory<byte>> ReadAsync()
     {
+        if (_owner?.Reactor is { OnReactorThread: false })
+        {
+            return ReadOnReactor();
+        }
+
         ReleaseHandedOut();
 
         if (_chunks.TryDequeue(out (byte[] Buf, int Len) chunk))
@@ -115,6 +122,15 @@ public sealed class Nghttp3BodyReader : IValueTaskSource<ReadOnlyMemory<byte>>
         {
             _owner?.NoteBodyWake(this);
         }
+    }
+
+    // The queue and the window credit belong to the reactor, so a read from another thread is made
+    // there. Out of line, so the on-reactor read compiles as it did before the check.
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private async ValueTask<ReadOnlyMemory<byte>> ReadOnReactor()
+    {
+        await new ReactorSwitch(_owner?.Reactor);
+        return await ReadAsync();
     }
 
     // The deferred wake: complete a parked ReadAsync now that the engine layers have unwound.
@@ -187,7 +203,7 @@ public sealed class Nghttp3BodyReader : IValueTaskSource<ReadOnlyMemory<byte>>
     }
 
     // IValueTaskSource<ReadOnlyMemory<byte>> - completes on the reactor thread only; strip the
-    // context-post so resumes stay inline (see ReactorSynchronizationContext).
+    // context-post so resumes stay inline.
     ReadOnlyMemory<byte> IValueTaskSource<ReadOnlyMemory<byte>>.GetResult(short token) => _core.GetResult(token);
 
     ValueTaskSourceStatus IValueTaskSource<ReadOnlyMemory<byte>>.GetStatus(short token) => _core.GetStatus(token);

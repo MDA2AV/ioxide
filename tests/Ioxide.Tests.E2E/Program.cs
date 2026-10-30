@@ -66,6 +66,7 @@ internal static class Program
         H3BodyModeTests.Register(runner);
         H3BodyLimitTests.Register(runner);
         H3LargeResponseTests.Register(runner);
+        OffReactorStreamTests.Register(runner);
 
         return runner.Summary();
     }

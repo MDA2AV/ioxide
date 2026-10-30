@@ -710,6 +710,7 @@ public sealed partial class Http3Connection
             resp = new Http3Response { Status = 500 };
         }
 
+        await new ReactorSwitch(Reactor);   // back on the reactor, wherever the handler finished
         RetireBody(rs);
         if (_fatal)
         {
@@ -885,6 +886,8 @@ public sealed partial class Http3Connection
     // --- streaming plumbing --------------------------------------------------------------------
 
     internal void CreditBody(long streamId, int bytes) => _quicConnection.ConsumeStreamData(streamId, bytes);
+
+    internal Reactor Reactor => _quicConnection.Reactor;
 
     internal void NoteBodyWake(Http3BodyReader sink)
     {

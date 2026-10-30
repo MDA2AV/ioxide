@@ -39,6 +39,8 @@ public sealed partial class Nghttp2Connection
     // per read pass.
     private async Task RunCoreAsync(Action dispatch)
     {
+        _reactor = Reactor.Current;
+
         try
         {
             Setup();
@@ -196,10 +198,13 @@ public sealed partial class Nghttp2Connection
     {
         try
         {
-            SubmitResponse(pending.StreamId, await inFlight);
+            Nghttp2Response response = await inFlight;
+            await new ReactorSwitch(_reactor);   // back on the reactor, wherever the handler finished
+            SubmitResponse(pending.StreamId, response);
         }
         catch (Exception exception)
         {
+            await new ReactorSwitch(_reactor);
             // Nobody can observe this task, so an escaping exception would vanish silently and the
             // peer would wait on a stream that is never coming.
             Console.Error.WriteLine(
