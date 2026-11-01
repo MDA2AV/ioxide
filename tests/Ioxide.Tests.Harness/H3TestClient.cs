@@ -21,8 +21,12 @@ public sealed unsafe class H3TestClient : IDisposable
 
     private long _requestSid = -1;
     private int _status = -1;
+    private readonly List<(string Name, string Value)> _headers = [];
     private readonly List<byte> _body = [];
     private bool _done;
+
+    /// <summary>The last request's response header lines, pseudo-headers left out, as they arrived.</summary>
+    public IReadOnlyList<(string Name, string Value)> ResponseHeaders => _headers;
 
     private static ulong NowNs() => (ulong)(System.Diagnostics.Stopwatch.GetTimestamp() *
                                             (1_000_000_000.0 / System.Diagnostics.Stopwatch.Frequency));
@@ -199,6 +203,7 @@ public sealed unsafe class H3TestClient : IDisposable
 
         // Per request: a fresh bidi stream and response state. The session is not - see above.
         _status = -1;
+        _headers.Clear();
         _body.Clear();
         _done = false;
 
@@ -547,6 +552,10 @@ public sealed unsafe class H3TestClient : IDisposable
             {
                 response.Status = self._status;
             }
+        }
+        else if (streamId == self._requestSid && !n.StartsWith(':'))
+        {
+            self._headers.Add((n, Encoding.ASCII.GetString(value, (int)valueLen)));
         }
     }
 

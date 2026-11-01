@@ -242,6 +242,7 @@ public sealed partial class Nghttp3Connection
             Console.Error.WriteLine($"[ioxide.nghttp3] request handler faulted: {exception.GetBaseException().Message}");
             RetireBody(request);
             FailStreamed(writer.StreamId, writer, request);
+            PumpIfOutsidePass();   // the 500: a handler that failed outside a pass has none coming to send it
             HandlerExited(writer);
             RequestHandled(request);
             return;

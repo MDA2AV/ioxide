@@ -1,6 +1,6 @@
 using System.Buffers;
 using System.IO.Pipelines;
-
+using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 
 namespace ioxide.nghttp3;
@@ -62,6 +62,7 @@ public sealed class Nghttp3ResponseWriter : IBufferWriter<byte>
 
     // Headers written off the reactor, submitted by the next flush or the completion, which run on it.
     private Nghttp3Response? _unsent;
+    private byte[] _unsentBytes = [];   // their names and values
 
     /// <summary>True from dispatch until the handler is done with this writer (see HandlerExited).</summary>
     internal bool HandlerRunning;
@@ -126,10 +127,41 @@ public sealed class Nghttp3ResponseWriter : IBufferWriter<byte>
         _headersSent = true;
         if (_connection.OffReactor)
         {
-            _unsent = response;
+            _unsent = Copy(response);
             return;
         }
         SubmitHeaders(response);
+    }
+
+    // The caller may reuse the response's memories once WriteHeaders returns, and these are packed later.
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private Nghttp3Response Copy(Nghttp3Response response)
+    {
+        ReadOnlySpan<KeyValuePair<ReadOnlyMemory<byte>, ReadOnlyMemory<byte>>> headers = response.Headers.AsSpan();
+        int size = 0;
+        foreach ((ReadOnlyMemory<byte> name, ReadOnlyMemory<byte> value) in headers)
+        {
+            size += name.Length + value.Length;
+        }
+        if (_unsentBytes.Length < size)
+        {
+            _unsentBytes = new byte[size];
+        }
+
+        var copy = new Nghttp3Response { Status = response.Status };
+        int at = 0;
+        foreach ((ReadOnlyMemory<byte> name, ReadOnlyMemory<byte> value) in headers)
+        {
+            copy.Headers.Add(Keep(name, ref at), Keep(value, ref at));
+        }
+        return copy;
+    }
+
+    private ReadOnlyMemory<byte> Keep(ReadOnlyMemory<byte> bytes, ref int at)
+    {
+        bytes.Span.CopyTo(_unsentBytes.AsSpan(at));
+        at += bytes.Length;
+        return _unsentBytes.AsMemory(at - bytes.Length, bytes.Length);
     }
 
     private void SubmitHeaders(Nghttp3Response response)
@@ -140,13 +172,15 @@ public sealed class Nghttp3ResponseWriter : IBufferWriter<byte>
         }
     }
 
-    private void SubmitUnsent()
+    private bool SubmitUnsent()
     {
         if (_unsent is Nghttp3Response unsent)
         {
             _unsent = null;
             SubmitHeaders(unsent);
+            return true;
         }
+        return false;
     }
 
     /// <inheritdoc />
@@ -227,10 +261,14 @@ public sealed class Nghttp3ResponseWriter : IBufferWriter<byte>
         }
 
         await new ReactorSwitch(_connection.Reactor);
-        SubmitUnsent();
+        bool submitted = SubmitUnsent();
 
         if (_staged == 0)
         {
+            if (submitted)
+            {
+                _connection.PumpIfOutsidePass();   // headers alone: outside a pass nothing else sends them
+            }
             return _gone || _connection.IsFailed ? PeerGone : default;
         }
 

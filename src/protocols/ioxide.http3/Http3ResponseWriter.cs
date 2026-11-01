@@ -1,5 +1,6 @@
 using System.Buffers;
 using System.IO.Pipelines;
+using System.Runtime.CompilerServices;
 
 namespace ioxide.http3;
 
@@ -40,6 +41,7 @@ public sealed class Http3ResponseWriter : IBufferWriter<byte>
 
     // Headers written off the reactor, sent by the next flush or the completion, which run on it.
     private Http3Response? _unsent;
+    private byte[] _unsentBytes = [];   // their names and values
 
     internal Http3ResponseWriter(Http3Connection connection, QuicConnection quic, long streamId)
     {
@@ -79,10 +81,40 @@ public sealed class Http3ResponseWriter : IBufferWriter<byte>
         _headersSent = true;
         if (_connection.OffReactor)
         {
-            _unsent = response;
+            _unsent = Copy(response);
             return;
         }
         SendHeaders(response);
+    }
+
+    // The caller may reuse the response's memories once WriteHeaders returns, and these are encoded later.
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private Http3Response Copy(Http3Response response)
+    {
+        int size = 0;
+        foreach ((ReadOnlyMemory<byte> name, ReadOnlyMemory<byte> value) in response.Headers)
+        {
+            size += name.Length + value.Length;
+        }
+        if (_unsentBytes.Length < size)
+        {
+            _unsentBytes = new byte[size];
+        }
+
+        var copy = new Http3Response { Status = response.Status };
+        int at = 0;
+        foreach ((ReadOnlyMemory<byte> name, ReadOnlyMemory<byte> value) in response.Headers)
+        {
+            copy.Headers.Add((Keep(name, ref at), Keep(value, ref at)));
+        }
+        return copy;
+    }
+
+    private ReadOnlyMemory<byte> Keep(ReadOnlyMemory<byte> bytes, ref int at)
+    {
+        bytes.Span.CopyTo(_unsentBytes.AsSpan(at));
+        at += bytes.Length;
+        return _unsentBytes.AsMemory(at - bytes.Length, bytes.Length);
     }
 
     private void SendHeaders(Http3Response response)
