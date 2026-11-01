@@ -52,6 +52,8 @@ public sealed partial class Nghttp2Connection
             while (!IsBroken)
             {
                 ReadResult read = await _pipe.Input.ReadAsync();
+                _reactor ??= Reactor.Current;        // a RunAsync begun off the reactor learns it here
+                await new ReactorSwitch(_reactor);   // a pipe may complete its read elsewhere: a default Pipe on the thread pool
 
                 _inPass = true;
                 Feed(read.Buffer);

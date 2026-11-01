@@ -88,6 +88,7 @@ public sealed partial class Http2Connection
                 TaskCompletionSource[] turn = TakeTurn();
 
                 await _pipe.Output.FlushAsync();
+                await new ReactorSwitch(_reactor);   // a pipe may complete its flush elsewhere: a default Pipe on the thread pool
 
                 // May resume writers inline; _flushing is still true, so anything they stage
                 // lands in the queue and is picked up by the check just below.

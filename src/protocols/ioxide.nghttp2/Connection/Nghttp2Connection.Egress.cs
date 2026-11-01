@@ -135,6 +135,7 @@ public sealed partial class Nghttp2Connection
                 if (staged)
                 {
                     await _pipe.Output.FlushAsync();
+                    await new ReactorSwitch(_reactor);   // a pipe may complete its flush elsewhere: a default Pipe on the thread pool
                 }
             }
             while (_drainAgain && _handle != 0);
