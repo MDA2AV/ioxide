@@ -75,7 +75,7 @@ public sealed class Http2ResponseWriter : IBufferWriter<byte>
         }
 
         _headersSent = true;
-        if (_connection.Reactor is { OnReactorThread: false })
+        if (_connection.OffReactor)
         {
             _unsent = response;
             return;
@@ -137,8 +137,6 @@ public sealed class Http2ResponseWriter : IBufferWriter<byte>
         {
             return;
         }
-
-        await new ReactorSwitch(_connection.Reactor);
 
         if (!_headersSent)
         {

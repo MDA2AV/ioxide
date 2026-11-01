@@ -49,7 +49,7 @@ public sealed class Http3BodyReader : IValueTaskSource<ReadOnlyMemory<byte>>
     /// </summary>
     public ValueTask<ReadOnlyMemory<byte>> ReadAsync()
     {
-        if (_owner.Reactor is { OnReactorThread: false })
+        if (_owner.OffReactor)
         {
             return ReadOnReactor();
         }

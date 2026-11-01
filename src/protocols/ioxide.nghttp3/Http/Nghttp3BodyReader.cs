@@ -56,7 +56,7 @@ public sealed class Nghttp3BodyReader : IValueTaskSource<ReadOnlyMemory<byte>>
     /// </summary>
     public ValueTask<ReadOnlyMemory<byte>> ReadAsync()
     {
-        if (_owner?.Reactor is { OnReactorThread: false })
+        if (_owner?.OffReactor == true)
         {
             return ReadOnReactor();
         }

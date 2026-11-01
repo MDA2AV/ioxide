@@ -66,7 +66,7 @@ public sealed class Nghttp2ResponseWriter : IBufferWriter<byte>, IValueTaskSourc
         }
 
         _headersSent = true;
-        if (_connection.Reactor is { OnReactorThread: false })
+        if (_connection.OffReactor)
         {
             _unsent = response;
             return;

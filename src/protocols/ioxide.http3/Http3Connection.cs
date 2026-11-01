@@ -888,6 +888,7 @@ public sealed partial class Http3Connection
     internal void CreditBody(long streamId, int bytes) => _quicConnection.ConsumeStreamData(streamId, bytes);
 
     internal Reactor Reactor => _quicConnection.Reactor;
+    internal bool OffReactor => !Reactor.OnReactorThread;
 
     internal void NoteBodyWake(Http3BodyReader sink)
     {

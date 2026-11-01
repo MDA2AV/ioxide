@@ -67,6 +67,7 @@ public sealed partial class Nghttp2Connection : IDisposable
     private Reactor? _reactor;
 
     internal Reactor? Reactor => _reactor;
+    internal bool OffReactor => _reactor is { OnReactorThread: false };
 
     // Requests still being assembled, keyed by stream. A request only leaves here when its stream
     // ends, which is when it becomes dispatchable.

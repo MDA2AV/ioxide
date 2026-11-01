@@ -78,6 +78,7 @@ public sealed partial class Http2Connection : IDisposable
     private Reactor? _reactor;
 
     internal Reactor? Reactor => _reactor;
+    internal bool OffReactor => _reactor is { OnReactorThread: false };
 
     /// <summary>
     /// Serve over an already-chosen transport. The pipe is the caller's to dispose.

@@ -124,7 +124,7 @@ public sealed class Nghttp3ResponseWriter : IBufferWriter<byte>
         }
 
         _headersSent = true;
-        if (_connection.Reactor is { OnReactorThread: false })
+        if (_connection.OffReactor)
         {
             _unsent = response;
             return;
