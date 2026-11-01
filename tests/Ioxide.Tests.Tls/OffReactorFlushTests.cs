@@ -1,3 +1,4 @@
+using System.Buffers;
 using System.Collections.Concurrent;
 using System.IO.Pipelines;
 using System.Net.Security;
@@ -8,8 +9,8 @@ using ioxide.tls;
 namespace Ioxide.Tests;
 
 /// <summary>
-/// A TLS handler that writes from a thread other than its reactor, while the reactor decrypts what
-/// the client sends on the same session (#249).
+/// A TLS handler working from a thread other than its reactor: writing while the reactor decrypts
+/// what the client sends on the same session (#249), reading, and tearing the connection down.
 /// </summary>
 internal static class OffReactorFlushTests
 {
@@ -169,6 +170,168 @@ internal static class OffReactorFlushTests
             Assert.True(outcome.Task.Wait(10_000), "the handler never reported");
             Assert.Equal(nameof(InvalidOperationException), outcome.Task.Result);
         });
+
+        runner.Test("tls pipe: a handler that left the reactor disposes with its staged bytes delivered", () =>
+        {
+            // The disposal commits what was staged and frees the session: off the reactor, the commit was
+            // posted and the free ran first, so the reactor encrypted on a freed session.
+            (string certPath, string keyPath) = TestCert.Ensure();
+            var options = new TlsOptions { CertificatePath = certPath, KeyPath = keyPath };
+
+            byte[] payload = "staged off the reactor, delivered by the disposal"u8.ToArray();
+            var faults = new ConcurrentQueue<string>();
+            int port = TestServer.Start(DisposeOffReactorHandler(payload, faults), r => TlsService.Start(r, options));
+
+            const int Clients = 20;
+            var received = new string?[Clients];
+            Parallel.For(0, Clients, new ParallelOptions { MaxDegreeOfParallelism = Clients }, i =>
+            {
+                try
+                {
+                    using var tcp = new TcpClient();
+                    tcp.Connect("127.0.0.1", port);
+                    tcp.ReceiveTimeout = 10_000;
+                    using var ssl = new SslStream(tcp.GetStream(), leaveInnerStreamOpen: false, (_, _, _, _) => true);
+                    ssl.AuthenticateAsClient(new SslClientAuthenticationOptions { TargetHost = "localhost" });
+                    ssl.Write("GET / HTTP/1.1\r\nHost: x\r\n\r\n"u8);
+
+                    var all = new MemoryStream();
+                    byte[] buffer = new byte[4096];
+                    int n;
+                    while ((n = ssl.Read(buffer)) > 0)
+                    {
+                        all.Write(buffer, 0, n);
+                    }
+                    received[i] = all.ToArray().AsSpan().SequenceEqual(payload) ? null : $"{all.Length} of {payload.Length} bytes";
+                }
+                catch (Exception e)
+                {
+                    received[i] = $"{e.GetType().Name}: {e.Message}";
+                }
+            });
+
+            string[] wrong = received.Where(r => r is not null).Select(r => r!).ToArray();
+            Assert.True(wrong.Length == 0 && faults.IsEmpty,
+                $"{wrong.Length} of {Clients} clients: {string.Join(" | ", wrong.Distinct())}; server: {string.Join(" | ", faults)}");
+        });
+
+        runner.Test("tls pipe: a read from another thread resumes the handler on the reactor", () =>
+        {
+            // With the request already decrypted the read completed at once, so the caller stayed on its
+            // thread and the next read decrypted there, beside the reactor's SSL_write.
+            (string certPath, string keyPath) = TestCert.Ensure();
+            var options = new TlsOptions { CertificatePath = certPath, KeyPath = keyPath };
+
+            int port = TestServer.Start(ReadOffReactorHandler, r => TlsService.Start(r, options));
+
+            (int status, string body) = Client.GetTls(port, "/");
+            Assert.Equal(200, status);
+            Assert.Equal("on-reactor", body);
+        });
+    }
+
+    private static Func<Reactor, TcpConnection, Task> DisposeOffReactorHandler(byte[] payload, ConcurrentQueue<string> faults)
+        => async (reactor, connection) =>
+        {
+            TlsSession? session = null;
+            TlsConnectionDualPipe? pipe = null;
+            try
+            {
+                try
+                {
+                    session = await reactor.GetService<TlsService>()!.AcceptAsync(connection);
+                }
+                catch
+                {
+                    return;   // the harness's readiness probe never completes a handshake
+                }
+
+                pipe = new TlsConnectionDualPipe(connection, session);
+                ReadResult request = await pipe.Input.ReadAsync();
+                pipe.Input.AdvanceTo(request.Buffer.End);
+
+                await Task.Yield();   // leaves the reactor: nothing brings it back
+                if (reactor.OnReactorThread)
+                {
+                    faults.Enqueue("the handler never left the reactor");
+                }
+
+                payload.CopyTo(pipe.Output.GetSpan(payload.Length));
+                pipe.Output.Advance(payload.Length);   // staged, never flushed: the disposal commits it
+            }
+            catch (Exception e)
+            {
+                faults.Enqueue($"{e.GetType().Name}: {e.Message}");
+            }
+            finally
+            {
+                if (pipe is not null)
+                {
+                    await pipe.DisposeAsync();
+                }
+                else
+                {
+                    session?.Dispose();
+                }
+                connection.DecRef();
+            }
+        };
+
+    private static async Task ReadOffReactorHandler(Reactor reactor, TcpConnection connection)
+    {
+        TlsSession? session = null;
+        TlsConnectionDualPipe? pipe = null;
+        try
+        {
+            try
+            {
+                session = await reactor.GetService<TlsService>()!.AcceptAsync(connection);
+            }
+            catch
+            {
+                return;   // the harness's readiness probe never completes a handshake
+            }
+
+            pipe = new TlsConnectionDualPipe(connection, session);
+
+            // The whole head, decrypted on the reactor and left unexamined, so the next read has it at once.
+            while (true)
+            {
+                ReadResult read = await pipe.Input.ReadAsync();
+                var reader = new SequenceReader<byte>(read.Buffer);
+                if (reader.TryReadTo(out ReadOnlySequence<byte> _, "\r\n\r\n"u8))
+                {
+                    pipe.Input.AdvanceTo(read.Buffer.Start);
+                    break;
+                }
+                pipe.Input.AdvanceTo(read.Buffer.Start, read.Buffer.End);
+                if (read.IsCompleted)
+                {
+                    return;
+                }
+            }
+
+            await Task.Yield();   // leaves the reactor: nothing brings it back
+            ReadResult again = await pipe.Input.ReadAsync();
+            string verdict = reactor.OnReactorThread ? "on-reactor" : "off-reactor";
+            pipe.Input.AdvanceTo(again.Buffer.End);
+
+            pipe.Output.Write(System.Text.Encoding.ASCII.GetBytes(
+                $"HTTP/1.1 200 OK\r\nContent-Length: {verdict.Length}\r\n\r\n{verdict}"));
+            await pipe.Output.FlushAsync();
+        }
+        finally
+        {
+            if (pipe is not null)
+            {
+                await pipe.DisposeAsync();
+            }
+            else
+            {
+                session?.Dispose();
+            }
+            connection.DecRef();
+        }
     }
 
     private static Func<Reactor, TcpConnection, Task> AllocationHandler(

@@ -1,10 +1,12 @@
+using System.Diagnostics.CodeAnalysis;
 using System.Runtime.CompilerServices;
 
 namespace ioxide;
 
 /// <summary>
 /// <c>await new ReactorSwitch(reactor)</c> continues the method on the reactor's thread: at once
-/// when the caller is already there or there is no reactor, else through its post queue.
+/// when the caller is already there or there is no reactor, else through its post queue. Throws
+/// <see cref="ObjectDisposedException"/> once the reactor has stopped.
 /// </summary>
 public readonly struct ReactorSwitch : ICriticalNotifyCompletion
 {
@@ -30,7 +32,14 @@ public readonly struct ReactorSwitch : ICriticalNotifyCompletion
 
     public void GetResult()
     {
+        if (_reactor is Reactor { PostsClosed: true })
+        {
+            ThrowStopped();
+        }
     }
+
+    [DoesNotReturn]
+    internal static void ThrowStopped() => throw new ObjectDisposedException(nameof(Reactor), "The reactor has stopped.");
 }
 
 /// <summary>The awaitable behind <see cref="ReactorSwitch.Yield"/>: always posts.</summary>
@@ -50,5 +59,9 @@ public readonly struct ReactorYield : ICriticalNotifyCompletion
 
     public void GetResult()
     {
+        if (_reactor is Reactor { PostsClosed: true })
+        {
+            ReactorSwitch.ThrowStopped();
+        }
     }
 }

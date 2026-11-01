@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using System.Runtime.CompilerServices;
 
 namespace ioxide;
 
@@ -19,6 +20,12 @@ public sealed unsafe partial class Reactor
     }
 
     private readonly ConcurrentQueue<PostItem> _postQ = new();
+
+    // Set at the end of Teardown: from then on nothing drains the queue.
+    private volatile bool _postsClosed;
+
+    /// <summary>True once the reactor has stopped for good: nothing posted to it runs on it any more.</summary>
+    internal bool PostsClosed => _postsClosed;
 
     /// <summary>True when the caller is executing on this reactor's loop thread.</summary>
     public bool OnReactorThread => Environment.CurrentManagedThreadId == _reactorThreadId;
@@ -45,6 +52,25 @@ public sealed unsafe partial class Reactor
         }
 
         Wake();
+
+        if (_postsClosed)
+        {
+            DrainStoppedPosts();   // the reactor is gone: nothing else will take it
+        }
+    }
+
+    // A switch waiting on a stopped reactor resumes on the thread pool, where its GetResult throws, instead of
+    // waiting forever. Any other post is dropped: it would never have run.
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private void DrainStoppedPosts()
+    {
+        while (_postQ.TryDequeue(out PostItem item))
+        {
+            if (item.Callback == ReactorSwitch.Resume)
+            {
+                ThreadPool.UnsafeQueueUserWorkItem(static continuation => continuation(), (Action)item.State!, preferLocal: false);
+            }
+        }
     }
 
     private void DrainPostQ()

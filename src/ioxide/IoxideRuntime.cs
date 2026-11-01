@@ -29,5 +29,5 @@ public static class IoxideRuntime
     //   reactor.Run();
     //
     // Roadmap: per-command timeouts · fixed files / send-zc · builder API. (SCRAM, the
-    // extended/prepared protocol, Redis, TLS, and the BCL bridge (per-reactor SyncContext) have shipped.)
+    // extended/prepared protocol, Redis and TLS have shipped.)
 }

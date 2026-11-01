@@ -256,6 +256,43 @@ internal static class AffinityTests
                 $"{stranded} of the {missed} posts the drain missed were left with the flag clear: queued, with no wake coming");
         }, skip: Environment.ProcessorCount < 2);
 
+        runner.Test("affinity: a RingPool renter woken by a return from another thread resumes on its reactor", () =>
+        {
+            // The returner runs the renter's continuation, so without a way back it carried on there.
+            AssertOnReactorAfter(static async r =>
+            {
+                var pool = new RingPool<object>();
+                pool.Return(new object());
+                object held = await pool.RentAsync();
+
+                ValueTask<object> waiting = pool.RentAsync();   // parks: the only item is held
+                ThreadPool.UnsafeQueueUserWorkItem(static s => s.Pool.Return(s.Held), (Pool: pool, Held: held), preferLocal: false);
+                await waiting;
+            });
+        });
+
+        runner.Test("affinity: a switch to a stopped reactor fails instead of waiting forever", () =>
+        {
+            (_, Reactor reactor, Thread thread) = TestServer.StartConfigured(Handlers.Raw, new ServerConfig
+            {
+                RecvBufferSize = 4096, RecvSlots = 64,
+                Tcp = new TcpOptions { WriteSlabSize = 4096, PoolMax = 8, RecvQueueEntries = 64 },
+            });
+            reactor.Stop();
+            Assert.True(thread.Join(TimeSpan.FromSeconds(10)), "the reactor did not stop");
+
+            foreach ((string name, Task attempt) in new[] { ("switch", SwitchTo(reactor)), ("yield", YieldTo(reactor)) })
+            {
+                Assert.True(((IAsyncResult)attempt).AsyncWaitHandle.WaitOne(TimeSpan.FromSeconds(5)),
+                    $"a {name} to a stopped reactor never resumed");
+                Assert.True(attempt.Exception?.InnerException is ObjectDisposedException,
+                    $"a {name} to a stopped reactor ended {attempt.Status}: {attempt.Exception?.InnerException?.GetType().Name}");
+            }
+
+            static async Task SwitchTo(Reactor r) => await new ReactorSwitch(r);
+            static async Task YieldTo(Reactor r) => await ReactorSwitch.Yield(r);
+        });
+
         runner.Test("affinity: handoffs from another thread share one eventfd write until the loop's next pass", () =>
         {
             // Only posts shared a wake: a buffer return, a flush, a recycle or a client op handed over
@@ -368,7 +405,8 @@ internal static class AffinityTests
                 string verdict;
                 try
                 {
-                    await work(r);
+                    // ConfigureAwait(false): resume where the work finished, which a reactor context would hide.
+                    await work(r).ConfigureAwait(false);
                     verdict = r.OnReactorThread
                         ? "on-reactor"
                         : $"MIGRATED to thread {Environment.CurrentManagedThreadId}";

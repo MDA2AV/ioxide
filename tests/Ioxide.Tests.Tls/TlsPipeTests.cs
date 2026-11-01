@@ -698,8 +698,12 @@ internal static class TlsPipeTests
                 await pipe.Output.FlushAsync();
 
                 // The client sends the whole body on the 100 Continue, on loopback: it is here within
-                // milliseconds, and this is the backstop for that, not a measurement.
-                await Task.Delay(500);
+                // milliseconds, and this is the backstop for that, not a measurement. Waited on the ring,
+                // so the reads below stay on the reactor.
+                var tick = new RingOpSource();
+                ValueTask<int> wait = tick.Prepare();
+                reactor.SubmitTimeout(500_000_000L, tick);
+                await wait;
 
                 long held = 0;
                 if (pipe.Input.TryRead(out ReadResult waiting))

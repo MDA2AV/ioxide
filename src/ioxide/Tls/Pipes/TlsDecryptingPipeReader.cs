@@ -18,7 +18,7 @@ namespace ioxide.tls;
 /// consumed/examined bookkeeping a PipeReader owes its caller. The caller's read IS that Pipe's
 /// read; this class only feeds it.
 /// </summary>
-/// <remarks>Reactor thread only.</remarks>
+/// <remarks>Reads and disposal from another thread run on the connection's reactor.</remarks>
 public sealed class TlsDecryptingPipeReader : PipeReader, IAsyncDisposable
 {
     private readonly TcpConnection _conn;
@@ -69,6 +69,11 @@ public sealed class TlsDecryptingPipeReader : PipeReader, IAsyncDisposable
     // thread, where disposing frees the session under a decrypt still running on the reactor.
     public override ValueTask<ReadResult> ReadAsync(CancellationToken cancellationToken = default)
     {
+        if (!_conn.Reactor.OnReactorThread)
+        {
+            return ReadOnReactor();
+        }
+
         if (_cancelRequested)
         {
             _cancelRequested = false;
@@ -86,6 +91,14 @@ public sealed class TlsDecryptingPipeReader : PipeReader, IAsyncDisposable
         }
 
         return read;
+    }
+
+    // Decrypting is the reactor's: SSL_read must not overlap its SSL_write (#249), and the parked read is its own.
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private async ValueTask<ReadResult> ReadOnReactor()
+    {
+        await new ReactorSwitch(_conn.Reactor);
+        return await ReadAsync();
     }
 
     /// <remarks>
@@ -114,7 +127,9 @@ public sealed class TlsDecryptingPipeReader : PipeReader, IAsyncDisposable
     /// peer that stays quiet nothing else ever would. With no read parked the connection is left as
     /// it is: the handler letting go of it is what ends it.
     /// </summary>
-    public ValueTask DisposeAsync()
+    public ValueTask DisposeAsync() => _conn.Reactor.OnReactorThread ? DisposeHere() : DisposeOnReactor();
+
+    private ValueTask DisposeHere()
     {
         _completed = true;
         End(null);                   // a read still waiting on the buffer sees the end of the stream
@@ -126,6 +141,20 @@ public sealed class TlsDecryptingPipeReader : PipeReader, IAsyncDisposable
         }
 
         return default;
+    }
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private async ValueTask DisposeOnReactor()
+    {
+        try
+        {
+            await new ReactorSwitch(_conn.Reactor);
+        }
+        catch (ObjectDisposedException)
+        {
+            // The reactor has stopped, so nothing races the disposal: it goes on here.
+        }
+        await DisposeHere();
     }
 
     // The caller is waiting on the buffer: decrypt what the ring has queued, and while that yields

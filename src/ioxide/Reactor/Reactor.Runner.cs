@@ -177,6 +177,10 @@ public sealed unsafe partial class Reactor
             _bufSlab = null;
         }
         FreeUdpMemory();
+
+        // Last, so what is still queued, or posted from here on, fails its switch rather than waiting forever.
+        _postsClosed = true;
+        DrainStoppedPosts();
     }
 
     // Both are no-ops unless that ring was registered: incremental mode leaves _bufRing null (one
