@@ -46,6 +46,12 @@ public static unsafe partial class Native {
     internal const int MSG_DONTWAIT = 0x40;
     [DllImport("libc", SetLastError = true)] internal static extern long sendmsg(int fd, msghdr* msg, int flags);
 
+    // Off the ring too: TLS teardown, kTLS alerts and the kTLS RX handoff.
+    internal const int MSG_NOSIGNAL = 0x4000;   // a dead peer must not SIGPIPE the process
+    [DllImport("libc")] internal static extern long send(int fd, void* buf, nuint len, int flags);
+    [DllImport("libc", SetLastError = true)] internal static extern long recv(int fd, void* buf, nuint len, int flags);
+    [DllImport("libc", SetLastError = true)] internal static extern long recvmsg(int fd, msghdr* msg, int flags);
+
     public static ushort Htons(ushort x) => (ushort)((x << 8) | (x >> 8));
 
     [StructLayout(LayoutKind.Sequential)]

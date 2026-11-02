@@ -674,16 +674,10 @@ public sealed unsafe class TlsSession : IDisposable
                 break;
             }
 
-            if (send(_fd, record, (nuint)n, MSG_NOSIGNAL | MSG_DONTWAIT) != n)
+            if (Native.send(_fd, record, (nuint)n, Native.MSG_NOSIGNAL | Native.MSG_DONTWAIT) != n)
             {
                 break;   // best effort: this is teardown and nothing here awaits a retry
             }
         }
     }
-
-    private const int MSG_NOSIGNAL = 0x4000;   // a dead peer must not SIGPIPE the process
-    private const int MSG_DONTWAIT = 0x40;     // teardown must never park the reactor thread
-
-    [DllImport("libc")]
-    private static extern nint send(int sockfd, byte* buf, nuint len, int flags);
 }
