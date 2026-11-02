@@ -54,7 +54,6 @@ public sealed unsafe partial class Reactor
     private const int UdpSendBlockSize   = UdpSendPayloadOff + UdpPayloadCap;
 
     private const int ECANCELED = 125;
-    private const int ENOBUFS_UDP = 105;
 
     private int[]    _udpFds     = [];
 
@@ -68,7 +67,6 @@ public sealed unsafe partial class Reactor
     private byte*  _udpBufSlab;
     private ushort _udpBufRingTail;
     private uint   _udpBufRingMask;
-    private int    _udpRingDepth;
 
     // One persistent msghdr template, shared by every socket's multishot arm: it only conveys the
     // reserved namelen/controllen (identical for all), the kernel writes into the ring buffer.
@@ -78,13 +76,12 @@ public sealed unsafe partial class Reactor
     private nint[] _udpSendBlocks = [];
     private int[]  _udpSendFree   = [];
     private int    _udpSendFreeTop;
-    private int    _udpSendCount;
 
     private void OpenUdpSockets()
     {
-        // Udp == null means no RAW datagram sockets; QUIC still binds its own port below and
-        // uses the resolved _udp defaults for Gro / RecvSlots.
-        ushort[] rawPorts = _udpEnabled ? _udp.Ports : [];
+        // Udp == null resolves to the defaults, whose Ports is empty: no RAW datagram sockets. QUIC
+        // still binds its own port below and uses those defaults for Gro / RecvSlots.
+        ushort[] rawPorts = _udp.Ports;
 
         if (rawPorts.Length == 0 && _config.Quic == null)
         {
@@ -191,7 +188,6 @@ public sealed unsafe partial class Reactor
     private void InitUdpBufRing()
     {
         int depth = RoundUpPow2(_udp.RecvSlots);
-        _udpRingDepth   = depth;
         _udpBufRingMask = (uint)(depth - 1);
 
         _udpBufRing = (byte*)NativeMemory.AlignedAlloc((nuint)depth * 16, (nuint)Environment.SystemPageSize);   // as the TCP ring
@@ -418,7 +414,7 @@ public sealed unsafe partial class Reactor
             {
                 return;
             }
-            if (res != -ENOBUFS_UDP)
+            if (res != -ENOBUFS)
             {
                 Console.Error.WriteLine($"[r{_id}] udp recv error: {res}");
             }
@@ -608,17 +604,17 @@ public sealed unsafe partial class Reactor
 
     private void GrowUdpSendSlots()
     {
-        int add = _udpSendCount == 0 ? 16 : _udpSendCount;
-        int newCount = _udpSendCount + add;
+        int count = _udpSendBlocks.Length;
+        int add = count == 0 ? 16 : count;
+        int newCount = count + add;
 
         Array.Resize(ref _udpSendBlocks, newCount);
         Array.Resize(ref _udpSendFree, newCount);
-        for (int i = _udpSendCount; i < newCount; i++)
+        for (int i = count; i < newCount; i++)
         {
             _udpSendBlocks[i] = (nint)NativeMemory.AlignedAlloc(UdpSendBlockSize, 64);
             _udpSendFree[_udpSendFreeTop++] = i;
         }
-        _udpSendCount = newCount;
     }
 
     // Split teardown: fds close while the ring is still alive (in-flight RECVMSG ops surface as
@@ -653,11 +649,10 @@ public sealed unsafe partial class Reactor
             _udpRecvTemplate = null;
         }
 
-        for (int i = 0; i < _udpSendCount; i++)
+        for (int i = 0; i < _udpSendBlocks.Length; i++)
         {
             NativeMemory.AlignedFree((void*)_udpSendBlocks[i]);
         }
-        _udpSendCount = 0;
         _udpSendFreeTop = 0;
         _udpSendBlocks = [];
         _udpSendFree = [];

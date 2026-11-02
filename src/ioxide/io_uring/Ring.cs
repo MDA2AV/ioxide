@@ -30,7 +30,6 @@ public sealed unsafe class Ring : IDisposable
 
     private byte* _ringPtr;
     private nuint _ringSize;
-    private byte* _sqePtr;
     private nuint _sqeSize;
 
     private bool _hasSqArray;
@@ -171,7 +170,6 @@ public sealed unsafe class Ring : IDisposable
             throw new InvalidOperationException("mmap(SQES) failed");
         }
         ring._sqes    = (IoUringSqe*)sqeMem;
-        ring._sqePtr  = (byte*)sqeMem;
         ring._sqeSize = sqeBytes;
 
         byte* ringPointer = (byte*)ringMem;
@@ -296,28 +294,22 @@ public sealed unsafe class Ring : IDisposable
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public void CqAdvance(uint n) => Volatile.Write(ref *_cqHead, *_cqHead + n);
 
+    public void Dispose() => Dispose(true);
+
     /// <summary>
     /// Unmaps both rings and, unless <paramref name="closeFd"/> says otherwise, closes the
     /// descriptor. Keeping it is for one case only - see Reactor.Teardown.
     /// </summary>
     public void Dispose(bool closeFd)
     {
-        _closeFd = closeFd;
-        Dispose();
-    }
-
-    private bool _closeFd = true;
-
-    public void Dispose()
-    {
         if (_ringPtr != null)
         {
             munmap(_ringPtr, _ringSize); _ringPtr = null;
         }
 
-        if (_sqePtr != null)
+        if (_sqes != null)
         {
-            munmap(_sqePtr,  _sqeSize);  _sqePtr  = null;
+            munmap(_sqes,    _sqeSize);  _sqes    = null;
         }
 
         // Before the descriptor goes: the slot holds a reference to the ring, which would otherwise outlive
@@ -330,7 +322,7 @@ public sealed unsafe class Ring : IDisposable
             _enterFlags = 0;
         }
 
-        if (_fd > 0 && _closeFd)
+        if (_fd > 0 && closeFd)
         {
             close(_fd); _fd = 0;
         }

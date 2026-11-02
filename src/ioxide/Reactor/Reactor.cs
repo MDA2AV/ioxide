@@ -68,11 +68,10 @@ public sealed unsafe partial class Reactor
     private ushort _bufRingTail;
 
     // Transport settings resolved once. _tcp / _udp are always non-null so the sizing knobs stay
-    // readable; the _enabled flags record whether the config actually asked for that transport.
+    // readable; _tcpEnabled records whether the config actually asked for TCP.
     private readonly TcpOptions _tcp;
     private readonly bool _tcpEnabled;
     private readonly UdpOptions _udp;
-    private readonly bool _udpEnabled;
 
     // TcpConnection pool, reactor-thread-only. PoolMax × WriteSlabSize × ReactorCount bounds
     // the reserved native memory.
@@ -107,7 +106,6 @@ public sealed unsafe partial class Reactor
 
         _tcpEnabled = config.Tcp is not null;
         _tcp = config.Tcp ?? new TcpOptions();
-        _udpEnabled = config.Udp is not null;
         _udp = config.Udp ?? new UdpOptions();
 
         _port = _tcp.Port;
@@ -134,6 +132,12 @@ public sealed unsafe partial class Reactor
         }
 
         _opTargets = new IRingCompletion?[config.OpSlots];
+        _opFree = new int[config.OpSlots];
+        for (int i = 0; i < _opFree.Length; i++)
+        {
+            _opFree[i] = _opFree.Length - 1 - i;
+        }
+        _opFreeTop = _opFree.Length;
         _incremental = config.Incremental is not null;
         _recvBufferSize = (uint)config.RecvBufferSize;
         _bufferRingEntries = (uint)config.RecvSlots;
