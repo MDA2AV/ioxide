@@ -150,16 +150,13 @@ public sealed class HttpClientPool : IDisposable
             }
 
             // Newest first: a recently used connection is the one most likely still warm at the
-            // peer, and it keeps the idle set from cycling through every socket.
-            while (_idle.Count > 0)
+            // peer, and it keeps the idle set from cycling through every socket. No check: Release
+            // idles nothing broken, and only the sweep's ClosedWhileIdle finds one the origin closed.
+            if (_idle.Count > 0)
             {
-                HttpClientConnection candidate = _idle[^1];
+                HttpClientConnection newest = _idle[^1];
                 _idle.RemoveAt(_idle.Count - 1);
-                if (!candidate.IsBroken)
-                {
-                    return candidate;
-                }
-                Discard(candidate);   // died while idle (peer closed it)
+                return newest;
             }
 
             // Honour the same backoff gate Sweep() does. Without it, a dead origin turns this loop
@@ -185,15 +182,11 @@ public sealed class HttpClientPool : IDisposable
 
             HttpClientConnection? handed = await waiter.Task;
             await ReactorSwitch.Yield(_host);   // out of the completer's frame, still on the reactor
-            if (handed is not null && !handed.IsBroken)
-            {
-                return handed;
-            }
             if (handed is not null)
             {
-                Discard(handed);   // handed a corpse: drop it so the slot is replenished
+                return handed;   // Release hands over nothing broken
             }
-            // Woken by a failed open, handed a corpse, or failed by the sweep at the deadline: loop,
+            // Woken by a failed open, or failed by the sweep at the deadline: loop,
             // which throws once past it.
         }
     }
@@ -280,7 +273,7 @@ public sealed class HttpClientPool : IDisposable
         }
     }
 
-    // Ticker, every SweepIntervalMs: drop idle connections that are broken, closed by the origin, idle
+    // Ticker, every SweepIntervalMs: drop idle connections closed by the origin, idle
     // past IdleTimeoutMs or older than MaxLifetimeMs, and replenish behind a jittered backoff - toward
     // PoolSize when warm, for waiting requests only when on demand.
     internal void Sweep()
@@ -312,8 +305,7 @@ public sealed class HttpClientPool : IDisposable
         for (int i = _idle.Count - 1; i >= 0; i--)
         {
             HttpClientConnection connection = _idle[i];
-            if (connection.IsBroken
-                || (_options.IdleTimeoutMs > 0 && nowMs - connection.IdleSinceMs >= _options.IdleTimeoutMs)
+            if ((_options.IdleTimeoutMs > 0 && nowMs - connection.IdleSinceMs >= _options.IdleTimeoutMs)
                 || (_options.MaxLifetimeMs > 0 && nowMs - connection.OpenedAtMs >= _options.MaxLifetimeMs)
                 || connection.ClosedWhileIdle())
             {
