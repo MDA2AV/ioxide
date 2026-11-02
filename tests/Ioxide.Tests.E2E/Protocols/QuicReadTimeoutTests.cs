@@ -166,6 +166,7 @@ internal static class QuicReadTimeoutTests
                     if (complete.Count > 0)
                     {
                         await Task.Delay(delayMs);
+                        await new ReactorSwitch(conn.Reactor);   // the timer finished on the pool; QUIC is the reactor's
                         foreach ((long streamId, byte[] body) in complete)
                         {
                             conn.SendStream(streamId, body, fin: true);

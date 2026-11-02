@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using System.Runtime.CompilerServices;
 
 namespace ioxide;
 
@@ -9,11 +10,9 @@ public sealed unsafe partial class Reactor
 {
     private readonly struct PostItem
     {
-        // Action<object?> or SendOrPostCallback - same signature, distinct delegate types.
-        // Held as Delegate and type-tested at invoke so neither caller pays a conversion alloc.
-        public readonly Delegate Callback;
+        public readonly Action<object?> Callback;
         public readonly object? State;
-        public PostItem(Delegate callback, object? state)
+        public PostItem(Action<object?> callback, object? state)
         {
             Callback = callback;
             State = state;
@@ -22,21 +21,27 @@ public sealed unsafe partial class Reactor
 
     private readonly ConcurrentQueue<PostItem> _postQ = new();
 
+    // Set at the end of Teardown: from then on nothing drains the queue.
+    private volatile bool _postsClosed;
+
+    /// <summary>True once the reactor has stopped for good: nothing posted to it runs on it any more.</summary>
+    internal bool PostsClosed => _postsClosed;
+
     /// <summary>True when the caller is executing on this reactor's loop thread.</summary>
     public bool OnReactorThread => Environment.CurrentManagedThreadId == _reactorThreadId;
+
+    [ThreadStatic]
+    private static Reactor? t_current;
+
+    /// <summary>The reactor whose loop runs on the calling thread, or null on any other thread.</summary>
+    public static Reactor? Current => t_current;
 
     /// <summary>
     /// Schedule a continuation to run on the reactor thread. Always enqueues (drained each loop
     /// iteration by <see cref="DrainPostQ"/>); wakes the loop via the eventfd only when called off the
     /// reactor, coalescing concurrent producers so at most one wake is outstanding per drain.
     /// </summary>
-    public void ScheduleOnReactor(Action<object?> callback, object? state) => EnqueuePost(callback, state);
-
-    // SendOrPostCallback variant for ReactorSynchronizationContext. Distinct name (not an
-    // overload): lambdas at existing ScheduleOnReactor call sites would otherwise be ambiguous.
-    internal void SchedulePost(SendOrPostCallback callback, object? state) => EnqueuePost(callback, state);
-
-    private void EnqueuePost(Delegate callback, object? state)
+    public void ScheduleOnReactor(Action<object?> callback, object? state)
     {
         _postQ.Enqueue(new PostItem(callback, state));
 
@@ -47,24 +52,35 @@ public sealed unsafe partial class Reactor
         }
 
         Wake();
+
+        if (_postsClosed)
+        {
+            DrainStoppedPosts();   // the reactor is gone: nothing else will take it
+        }
+    }
+
+    // A switch waiting on a stopped reactor resumes on the thread pool, where its GetResult throws, instead of
+    // waiting forever. Any other post is dropped: it would never have run.
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private void DrainStoppedPosts()
+    {
+        while (_postQ.TryDequeue(out PostItem item))
+        {
+            if (item.Callback == ReactorSwitch.Resume)
+            {
+                ThreadPool.UnsafeQueueUserWorkItem(static continuation => continuation(), (Action)item.State!, preferLocal: false);
+            }
+        }
     }
 
     private void DrainPostQ()
     {
         while (_postQ.TryDequeue(out PostItem item))
         {
-            // A faulted continuation (e.g. an async-void rethrow delivered via Post) must not
-            // unwind the loop and kill the reactor.
+            // A callback that throws must not unwind the loop and kill the reactor.
             try
             {
-                if (item.Callback is Action<object?> action)
-                {
-                    action(item.State);
-                }
-                else
-                {
-                    ((SendOrPostCallback)item.Callback)(item.State);
-                }
+                item.Callback(item.State);
             }
             catch (Exception ex)
             {

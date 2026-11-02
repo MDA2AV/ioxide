@@ -301,8 +301,7 @@ public sealed unsafe partial class TcpConnection : IValueTaskSource, IFlushListe
 
             return;
         }
-        // Completes on the reactor thread only - strip the context-post so resumes stay inline
-        // (see ReactorSynchronizationContext).
+        // Completes on the reactor thread only - strip the context-post so resumes stay inline.
         _flushSignal.OnCompleted(continuation, state, _flushSignal.Version,
             flags & ~ValueTaskSourceOnCompletedFlags.UseSchedulingContext);
     }

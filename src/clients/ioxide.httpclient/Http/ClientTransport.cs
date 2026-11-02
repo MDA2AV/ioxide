@@ -75,7 +75,17 @@ internal static class ClientTransport
     {
         string name = Unbracketed(origin);
         string? serverName = ServerNameFor(tls, name);
-        return await ConnectAsync(host, await ResolveAsync(name), port, tls, serverName, connectTimeoutMs);
+        IPAddress[] addresses;
+        try
+        {
+            addresses = await ResolveAsync(name);
+        }
+        finally
+        {
+            await new ReactorSwitch(host);   // the resolver finishes on its own thread, a failed lookup too
+        }
+
+        return await ConnectAsync(host, addresses, port, tls, serverName, connectTimeoutMs);
     }
 
     // Each address in the resolver's order, the next only when a connect fails or times out. A failed TLS
@@ -138,8 +148,8 @@ internal static class ClientTransport
             return [literal];
         }
 
-        // The system resolver (hosts file, resolv.conf) runs off the reactor thread; the await comes
-        // back to the reactor through its synchronization context. Once per connection, never per request.
+        // The system resolver (hosts file, resolv.conf) runs off the reactor thread, and the caller hops
+        // back. Once per connection, never per request.
         IPAddress[] found;
         try
         {

@@ -4,7 +4,8 @@ namespace ioxide;
 /// A pool of ring-native resources for one reactor (Postgres connections, read buffers). Rent,
 /// use, return; when empty, renters queue FIFO. Waiter continuations run synchronously on the
 /// returning thread, so an inline return resumes the next handler inline - the no-thread-pool
-/// property holds under contention.
+/// property holds under contention. A return from another thread sends the renter back to the
+/// reactor it rented on.
 /// </summary>
 public sealed class RingPool<T> where T : class
 {
@@ -39,6 +40,7 @@ public sealed class RingPool<T> where T : class
     /// </summary>
     public ValueTask<T> RentAsync()
     {
+        TaskCompletionSource<T> waiter;
         lock (_gate)
         {
             if (_idle.TryPop(out T? item))
@@ -46,10 +48,18 @@ public sealed class RingPool<T> where T : class
                 return new ValueTask<T>(item);
             }
 
-            var waiter = new TaskCompletionSource<T>();   // sync continuations → inline resume
+            waiter = new TaskCompletionSource<T>();   // sync continuations → inline resume
             _waiters.Enqueue(waiter);
-            return new ValueTask<T>(waiter.Task);
         }
+        return WaitAsync(waiter.Task, Reactor.Current);
+    }
+
+    // The returner may be on any thread: the renter continues on the reactor it rented on.
+    private static async ValueTask<T> WaitAsync(Task<T> waiting, Reactor? reactor)
+    {
+        T item = await waiting;
+        await new ReactorSwitch(reactor);
+        return item;
     }
 
     /// <summary>

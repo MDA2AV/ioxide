@@ -177,9 +177,9 @@ PANES = {
         "Tcp/TaskRun", "TCP &middot; ordinary async", "ioxide",
         ["curl http://127.0.0.1:8080/"],
         "Proof that normal .NET async works inside a handler - <code>Task.Run</code>, "
-        "<code>Task.Delay</code>, the thread pool - and that you come back to your reactor "
-        "afterwards. The per-reactor <code>SynchronizationContext</code> is what makes that true, so "
-        "connection and pool state stay single-threaded without a lock even when a handler wanders."),
+        "<code>Task.Delay</code>, the thread pool - and how you come back to your reactor "
+        "afterwards: <code>await new ReactorSwitch(reactor)</code>. Back there, connection and pool "
+        "state stay single-threaded without a lock even when a handler wanders."),
 
     # ── protocols ────────────────────────────────────────────────────────────────────────────
     "h2cstls": (
@@ -510,8 +510,9 @@ PANES = {
          "PLAYGROUND_REDIS_TRANSPORT=sockets dotnet run -c Release --project Playground/Clients/RedisStackExchange"],
         "StackExchange.Redis's whole API with its connections on the reactor's ring. <code>IoxideTunnel</code> "
         "hands the multiplexer a transport whose connect, sends and receives are io_uring operations on the "
-        "reactor, and StackExchange.Redis parses the replies and completes each command on that reactor's "
-        "thread - one multiplexer per reactor, so a handler's await never leaves it. Built on "
+        "reactor, where StackExchange.Redis parses the replies - one multiplexer per reactor. It completes "
+        "commands asynchronously, so the code after an awaited command resumes on the thread pool, not the "
+        "reactor; ioxide's own APIs called from there marshal back to it. Built on "
         "StackExchange.Redis's experimental transport seam, and pinned to the version it was built "
         "against."),
     "qclient": (

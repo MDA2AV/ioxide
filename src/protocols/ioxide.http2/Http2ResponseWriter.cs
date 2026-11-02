@@ -1,5 +1,6 @@
 using System.Buffers;
 using System.IO.Pipelines;
+using System.Runtime.CompilerServices;
 
 namespace ioxide.http2;
 
@@ -18,7 +19,7 @@ namespace ioxide.http2;
 /// response longer than the peer's window possible at all. The buffered path hands whatever its
 /// windows cannot take yet to one of these, so it waits the same way.
 /// </summary>
-/// <remarks>Reactor thread only, like everything else on the connection.</remarks>
+/// <remarks>One caller at a time, on any thread: what reaches the connection runs on its reactor.</remarks>
 public sealed class Http2ResponseWriter : IBufferWriter<byte>
 {
     private const int DefaultChunk = 16 * 1024;
@@ -35,6 +36,12 @@ public sealed class Http2ResponseWriter : IBufferWriter<byte>
 
     private bool _headersSent;
     private bool _completed;
+
+    // Headers written off the reactor, staged by the next flush or the completion, which run on it.
+    private Http2Response? _unsent;
+
+    // The names and values of _unsent: the caller's memories are its own again once WriteHeaders returns.
+    private byte[] _unsentFields = [];
 
     internal Http2ResponseWriter(Http2Connection connection, int streamId)
     {
@@ -72,10 +79,51 @@ public sealed class Http2ResponseWriter : IBufferWriter<byte>
         }
 
         _headersSent = true;
+        if (_connection.OffReactor)
+        {
+            _unsent = Copy(response);
+            return;
+        }
+        SendHeaders(response);
+    }
+
+    private void SendHeaders(Http2Response response)
+    {
         if (_connection.IsResponseLive(_streamId))
         {
             _connection.SendStreamedHeaders(_streamId, response);
         }
+    }
+
+    // Sent later, so kept in memory of our own: the caller's may be pooled or static.
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private Http2Response Copy(Http2Response response)
+    {
+        int length = 0;
+        foreach (KeyValuePair<ReadOnlyMemory<byte>, ReadOnlyMemory<byte>> field in response.Headers.AsSpan())
+        {
+            length += field.Key.Length + field.Value.Length;
+        }
+        if (_unsentFields.Length < length)
+        {
+            _unsentFields = new byte[length];
+        }
+
+        var copy = new Http2Response { Status = response.Status };
+        int used = 0;
+        foreach (KeyValuePair<ReadOnlyMemory<byte>, ReadOnlyMemory<byte>> field in response.Headers.AsSpan())
+        {
+            copy.Headers.Add(Keep(field.Key.Span, ref used), Keep(field.Value.Span, ref used));
+        }
+        return copy;
+    }
+
+    private ReadOnlyMemory<byte> Keep(ReadOnlySpan<byte> bytes, ref int used)
+    {
+        ReadOnlyMemory<byte> kept = _unsentFields.AsMemory(used, bytes.Length);
+        bytes.CopyTo(_unsentFields.AsSpan(used));
+        used += bytes.Length;
+        return kept;
     }
 
     /// <inheritdoc />
@@ -174,6 +222,14 @@ public sealed class Http2ResponseWriter : IBufferWriter<byte>
         if (!_headersSent)
         {
             throw new InvalidOperationException("Write the response headers before flushing a body chunk.");
+        }
+
+        await new ReactorSwitch(_connection.Reactor);
+
+        if (_unsent is Http2Response unsent)
+        {
+            _unsent = null;
+            SendHeaders(unsent);
         }
 
         int sent = 0;
@@ -276,5 +332,6 @@ public sealed class Http2ResponseWriter : IBufferWriter<byte>
         _sinceRealFlush = 0;
         _headersSent = false;
         _completed = false;
+        _unsent = null;
     }
 }

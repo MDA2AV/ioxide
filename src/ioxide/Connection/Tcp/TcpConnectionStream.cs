@@ -274,7 +274,7 @@ public sealed class TcpConnectionStream : Stream, IValueTaskSource<int>, IValueT
     int IValueTaskSource<int>.GetResult(short token) => _readCore.GetResult(token);
     ValueTaskSourceStatus IValueTaskSource<int>.GetStatus(short token) => _readCore.GetStatus(token);
     // Both cores complete on the reactor thread only - strip the context-post so resumes stay
-    // inline (see ReactorSynchronizationContext).
+    // inline.
     void IValueTaskSource<int>.OnCompleted(Action<object?> continuation, object? state, short token, ValueTaskSourceOnCompletedFlags flags) =>
         _readCore.OnCompleted(continuation, state, token, flags & ~ValueTaskSourceOnCompletedFlags.UseSchedulingContext);
 

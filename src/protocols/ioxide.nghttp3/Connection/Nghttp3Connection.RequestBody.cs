@@ -68,6 +68,7 @@ public sealed partial class Nghttp3Connection
             response = new Nghttp3Response { Status = 500 };
         }
 
+        await new ReactorSwitch(Reactor);   // back on the reactor, wherever the handler finished
         long streamId = request.StreamId;
         request.HandlerDone = true;
         RetireBody(request);
@@ -86,6 +87,11 @@ public sealed partial class Nghttp3Connection
 
     // Credit consumed bytes of a paced request stream back to the peer's flow-control window.
     internal void CreditBody(long streamId, int bytes) => _quicConnection.ConsumeStreamData(streamId, bytes);
+
+    internal Reactor Reactor => _quicConnection.Reactor;
+
+    // No reactor owns a connection its driver runs itself, so its caller is the only thread.
+    internal bool OffReactor => Reactor is { OnReactorThread: false };
 
     // The handler is done with the body: credit what it left unread and let the engine credit the rest.
     private void RetireBody(Nghttp3Request request)

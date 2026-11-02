@@ -363,13 +363,22 @@ internal static class WriterContractTests
 
                 byte[] chunk = new byte[ParkChunkBytes];
                 Task<FlushResult>? parked = null;
+                var tick = new RingOpSource();
 
                 for (int attempt = 0; attempt < 64 && parked is null; attempt++)
                 {
                     pipe.Output.Write(chunk);
                     Task<FlushResult> flush = pipe.Output.FlushAsync().AsTask();
 
-                    if (await Task.WhenAny(flush, Task.Delay(TimeSpan.FromSeconds(2))) != flush)
+                    // Waited on the ring, so what follows - the disposal under test - runs on the reactor.
+                    for (int waitedMs = 0; waitedMs < 2_000 && !flush.IsCompleted; waitedMs += 10)
+                    {
+                        ValueTask<int> wait = tick.Prepare();
+                        reactor.SubmitTimeout(10_000_000L, tick);
+                        await wait;
+                    }
+
+                    if (!flush.IsCompleted)
                     {
                         parked = flush;
                     }

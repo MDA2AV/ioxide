@@ -1,6 +1,7 @@
 using System.Buffers;
 using System.Buffers.Binary;
 using System.IO.Pipelines;
+using System.Runtime.CompilerServices;
 
 namespace ioxide.http2;
 
@@ -30,7 +31,7 @@ public sealed partial class Http2Connection
     // Completed when the flush AFTER the current one finishes - the one that carries the queue.
     // Callers who staged into the queue await this, which keeps the two things a real flush
     // provided: backpressure, and the yield that hands the reactor back.
-    private TaskCompletionSource? _turnWaiter;
+    private readonly List<TaskCompletionSource> _turnWaiters = [];
 
     private void Stage(ReadOnlySpan<byte> bytes)
     {
@@ -85,14 +86,17 @@ public sealed partial class Http2Connection
 
                 // Waiters captured BEFORE the flush are the ones whose bytes are in it; anyone
                 // arriving during the await parks a fresh waiter for the turn after.
-                TaskCompletionSource? turn = _turnWaiter;
-                _turnWaiter = null;
+                TaskCompletionSource[] turn = TakeTurn();
 
                 await _pipe.Output.FlushAsync();
+                await new ReactorSwitch(_reactor);   // a pipe may complete its flush elsewhere: a default Pipe on the thread pool
 
                 // May resume writers inline; _flushing is still true, so anything they stage
                 // lands in the queue and is picked up by the check just below.
-                turn?.TrySetResult();
+                foreach (TaskCompletionSource waiter in turn)
+                {
+                    waiter.TrySetResult();
+                }
 
                 if (_queuedUsed == 0 || _disposed)
                 {
@@ -113,18 +117,63 @@ public sealed partial class Http2Connection
         }
         finally
         {
-            _flushing = false;
-            // Never strand a waiter: on a fault the turn it is waiting for will not come, and it
-            // has to wake to see the connection is broken rather than hang forever.
-            _turnWaiter?.TrySetResult();
-            _turnWaiter = null;
+            if (_writeDead && OffReactor)
+            {
+                _ = EndTurnOnReactorAsync();   // a faulted flush can end the pump on the thread that completed it
+            }
+            else
+            {
+                EndTurn();
+            }
         }
     }
 
+    // Never strand a waiter: on a fault the turn it is waiting for will not come, and it has to wake to see
+    // the connection is broken rather than hang forever. Out of line: a loop in a hot async method's finally
+    // costs it its optimized code.
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private void EndTurn()
+    {
+        _flushing = false;
+        foreach (TaskCompletionSource waiter in TakeTurn())
+        {
+            waiter.TrySetResult();
+        }
+    }
+
+    private async Task EndTurnOnReactorAsync()
+    {
+        try
+        {
+            await new ReactorSwitch(_reactor);
+        }
+        catch (ObjectDisposedException)
+        {
+            // The reactor has stopped, so nothing races the wake: it goes on here.
+        }
+        EndTurn();
+    }
+
+    // One completion per waiter: a task awaited by several resumes only the first inline and sends
+    // the rest to the thread pool.
     private Task TurnAsync()
     {
-        _turnWaiter ??= new TaskCompletionSource();
-        return _turnWaiter.Task;
+        var waiter = new TaskCompletionSource();
+        _turnWaiters.Add(waiter);
+        return waiter.Task;
+    }
+
+    // Taken out before any is woken: one resumed inline that parks again belongs to the next turn.
+    private TaskCompletionSource[] TakeTurn()
+    {
+        if (_turnWaiters.Count == 0)
+        {
+            return [];
+        }
+
+        TaskCompletionSource[] turn = [.. _turnWaiters];
+        _turnWaiters.Clear();
+        return turn;
     }
 
     private void Enqueue(ReadOnlySpan<byte> bytes)

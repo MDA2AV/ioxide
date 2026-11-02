@@ -8,8 +8,9 @@ using StackExchange.Redis;
 // ─────────────────────────────────────────────────────────────────────────────────────────────
 //  redis via StackExchange.Redis - the whole StackExchange.Redis API, with its connections on
 //  the reactor's ring. IoxideTunnel hands the multiplexer a transport whose connect, sends and
-//  receives are io_uring operations on this reactor; StackExchange.Redis parses the replies and
-//  completes the commands on this reactor's thread, so a handler's await never leaves it.
+//  receives are io_uring operations on this reactor, where StackExchange.Redis parses the replies.
+//  It completes commands asynchronously, so the code after an awaited command resumes on the
+//  thread pool, not the reactor; ioxide's own APIs called from there marshal back to it.
 //
 //      docker run --rm -p 6379:6379 redis            # or point PLAYGROUND_REDIS_* elsewhere
 //      dotnet run -c Release --project Playground/Clients/RedisStackExchange

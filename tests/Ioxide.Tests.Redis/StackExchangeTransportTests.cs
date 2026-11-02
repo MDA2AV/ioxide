@@ -139,7 +139,7 @@ internal static class StackExchangeTransportTests
                 // replies on the reactor, so it should be the reactor's.
                 // StackExchange.Redis completes its tasks with asynchronous continuations, so the
                 // await posts to the context it captured - from the thread that completed it.
-                var recorder = new PostRecorder(SynchronizationContext.Current!);
+                var recorder = new PostRecorder(SynchronizationContext.Current);
                 SynchronizationContext.SetSynchronizationContext(recorder);
                 RedisValue value;
                 try
@@ -229,19 +229,36 @@ internal static class StackExchangeTransportTests
         }
     }
 
-    /// <summary>Forwards to the reactor's context, noting which thread posted.</summary>
-    private sealed class PostRecorder(SynchronizationContext inner) : SynchronizationContext
+    /// <summary>Notes which thread posted, then runs the callback there - or forwards it, under a context.</summary>
+    private sealed class PostRecorder(SynchronizationContext? inner) : SynchronizationContext
     {
         public int PostedFrom = -1;
-        public SynchronizationContext Inner => inner;
+        public SynchronizationContext? Inner => inner;
 
         public override void Post(SendOrPostCallback callback, object? state)
         {
             PostedFrom = Environment.CurrentManagedThreadId;
-            inner.Post(callback, state);
+            if (inner is null)
+            {
+                callback(state);
+            }
+            else
+            {
+                inner.Post(callback, state);
+            }
         }
 
-        public override void Send(SendOrPostCallback callback, object? state) => inner.Send(callback, state);
+        public override void Send(SendOrPostCallback callback, object? state)
+        {
+            if (inner is null)
+            {
+                callback(state);
+            }
+            else
+            {
+                inner.Send(callback, state);
+            }
+        }
 
         public override SynchronizationContext CreateCopy() => this;
     }

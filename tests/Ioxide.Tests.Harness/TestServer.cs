@@ -127,6 +127,9 @@ public static class TestServer
     // What those servers were handed and must not outlive, disposed once they have stopped.
     private static readonly List<IDisposable> Owned = [];
 
+    /// <summary>Continues on the calling reactor in a later pass, outside the dispatch running now.</summary>
+    public static ReactorYield LaterPass() => ReactorSwitch.Yield(Reactor.Current!);
+
     /// <summary>
     /// Disposes <paramref name="disposable"/> in <see cref="StopAll"/>, after the reactors have come
     /// down, rather than where the test body ends. For a QuicEngine: its connections read the TLS

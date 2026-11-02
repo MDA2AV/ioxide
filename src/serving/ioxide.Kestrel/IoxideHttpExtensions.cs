@@ -27,7 +27,7 @@ public static class IoxideHttpExtensions
     {
         Reactor reactor = context.GetReactor();
 
-        if (IoxideReactor.TryCurrent() == reactor)
+        if (reactor.OnReactorThread)
         {
             return work(reactor);
         }

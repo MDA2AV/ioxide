@@ -26,7 +26,7 @@ namespace ioxide.tls;
 /// off to kTLS RX, and keeps the userspace reader. <see cref="TlsSession"/> then reports the
 /// OUTCOME, which is what this reads.
 /// </summary>
-/// <remarks>Reactor thread only, like everything else that touches a connection.</remarks>
+/// <remarks>Usable from any thread: reads, flushes and disposal from another run on the connection's reactor.</remarks>
 public sealed class TlsConnectionDualPipe : IDuplexPipe, IAsyncDisposable
 {
     private readonly TcpConnection _conn;
@@ -84,6 +84,16 @@ public sealed class TlsConnectionDualPipe : IDuplexPipe, IAsyncDisposable
 
     public async ValueTask DisposeAsync()
     {
+        // The session and the reader are the reactor's: freeing them under its SSL_write is a use after free.
+        try
+        {
+            await new ReactorSwitch(_conn.Reactor);
+        }
+        catch (ObjectDisposedException)
+        {
+            // The reactor has stopped, so nothing races the disposal: it goes on here.
+        }
+
         // Write side first, while the connection still sends: Complete() commits any advanced-but-
         // unflushed plaintext into the slab, and the flush carries it out. The read side's disposal
         // marks the connection closed when a read was left parked on a quiet peer (nothing else

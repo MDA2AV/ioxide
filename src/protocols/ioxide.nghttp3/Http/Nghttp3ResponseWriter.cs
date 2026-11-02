@@ -1,6 +1,6 @@
 using System.Buffers;
 using System.IO.Pipelines;
-
+using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 
 namespace ioxide.nghttp3;
@@ -19,7 +19,7 @@ namespace ioxide.nghttp3;
 /// blocks cannot. They are recycled as soon as nghttp3 reports them written, which is what keeps
 /// memory bounded by the flush size rather than by the response.
 /// </summary>
-/// <remarks>Reactor thread only, like everything else on the connection.</remarks>
+/// <remarks>One caller at a time, on any thread: what reaches the connection runs on its reactor.</remarks>
 public sealed class Nghttp3ResponseWriter : IBufferWriter<byte>
 {
     // One in-flight chunk is enough to keep the pump fed: nghttp3 copies a chunk out on the write
@@ -60,6 +60,10 @@ public sealed class Nghttp3ResponseWriter : IBufferWriter<byte>
     private bool _finReported; // nghttp3 has been told this is the end
     private bool _gone;        // the peer stopped reading, or the stream closed under the handler
 
+    // Headers written off the reactor, submitted by the next flush or the completion, which run on it.
+    private Nghttp3Response? _unsent;
+    private byte[] _unsentBytes = [];   // their names and values
+
     /// <summary>True from dispatch until the handler is done with this writer (see HandlerExited).</summary>
     internal bool HandlerRunning;
 
@@ -84,6 +88,7 @@ public sealed class Nghttp3ResponseWriter : IBufferWriter<byte>
         _completed = false;
         _finReported = false;
         _gone = false;
+        _unsent = null;
         HandlerRunning = false;
 
         // The scratch buffer survives - that is the point of pooling the writer - but a hand-out
@@ -120,9 +125,59 @@ public sealed class Nghttp3ResponseWriter : IBufferWriter<byte>
         }
 
         _headersSent = true;
+        if (_connection.OffReactor)
+        {
+            _unsent = Copy(response);
+            return;
+        }
+        SubmitHeaders(response);
+    }
+
+    // The caller may reuse the response's memories once WriteHeaders returns, and these are packed later.
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private Nghttp3Response Copy(Nghttp3Response response)
+    {
+        ReadOnlySpan<KeyValuePair<ReadOnlyMemory<byte>, ReadOnlyMemory<byte>>> headers = response.Headers.AsSpan();
+        int size = 0;
+        foreach ((ReadOnlyMemory<byte> name, ReadOnlyMemory<byte> value) in headers)
+        {
+            size += name.Length + value.Length;
+        }
+        if (_unsentBytes.Length < size)
+        {
+            _unsentBytes = new byte[size];
+        }
+
+        var copy = new Nghttp3Response { Status = response.Status };
+        int at = 0;
+        foreach ((ReadOnlyMemory<byte> name, ReadOnlyMemory<byte> value) in headers)
+        {
+            copy.Headers.Add(Keep(name, ref at), Keep(value, ref at));
+        }
+        return copy;
+    }
+
+    private ReadOnlyMemory<byte> Keep(ReadOnlyMemory<byte> bytes, ref int at)
+    {
+        bytes.Span.CopyTo(_unsentBytes.AsSpan(at));
+        at += bytes.Length;
+        return _unsentBytes.AsMemory(at - bytes.Length, bytes.Length);
+    }
+
+    private void SubmitHeaders(Nghttp3Response response)
+    {
         if (!_gone)
         {
             _connection.SubmitStreamedHeaders(_streamId, response, this);
+        }
+    }
+
+    private void SubmitUnsent()
+    {
+        if (_unsent is Nghttp3Response unsent)
+        {
+            _unsent = null;
+            SubmitHeaders(unsent);
         }
     }
 
@@ -202,8 +257,13 @@ public sealed class Nghttp3ResponseWriter : IBufferWriter<byte>
         {
             throw new InvalidOperationException("Write the response headers before flushing a body chunk.");
         }
+
+        await new ReactorSwitch(_connection.Reactor);
+        SubmitUnsent();
+
         if (_staged == 0)
         {
+            _connection.PumpIfOutsidePass();   // headers alone: outside a pass nothing else sends them
             return _gone || _connection.IsFailed ? PeerGone : default;
         }
 
@@ -243,11 +303,14 @@ public sealed class Nghttp3ResponseWriter : IBufferWriter<byte>
             return;
         }
 
+        await new ReactorSwitch(_connection.Reactor);
+
         if (!_headersSent)
         {
             // A handler that returned without writing anything still owes the peer a response.
             WriteHeaders(new Nghttp3Response { Status = 500 });
         }
+        SubmitUnsent();
 
         if (_staged > 0)
         {

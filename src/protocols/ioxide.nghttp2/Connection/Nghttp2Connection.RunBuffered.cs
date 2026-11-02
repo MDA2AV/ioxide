@@ -39,6 +39,8 @@ public sealed partial class Nghttp2Connection
     // per read pass.
     private async Task RunCoreAsync(Action dispatch)
     {
+        _reactor = Reactor.Current;
+
         try
         {
             Setup();
@@ -50,6 +52,8 @@ public sealed partial class Nghttp2Connection
             while (!IsBroken)
             {
                 ReadResult read = await _pipe.Input.ReadAsync();
+                _reactor ??= Reactor.Current;        // a RunAsync begun off the reactor learns it here
+                await new ReactorSwitch(_reactor);   // a pipe may complete its read elsewhere: a default Pipe on the thread pool
 
                 _inPass = true;
                 Feed(read.Buffer);
@@ -81,8 +85,23 @@ public sealed partial class Nghttp2Connection
         }
         finally
         {
-            Dispose();
+            _ = TearDownAsync();
         }
+    }
+
+    // A transport read that faults ends the loop on the thread that completed it, which over a pipe completing
+    // elsewhere is not the reactor: freeing the session there races the reactor's calls into it.
+    private async Task TearDownAsync()
+    {
+        try
+        {
+            await new ReactorSwitch(_reactor);
+        }
+        catch (ObjectDisposedException)
+        {
+            // The reactor has stopped, so nothing races the teardown: it goes on here.
+        }
+        Dispose();
     }
 
     // Feed each segment straight to nghttp2. The segments are the ring's own memory when the pipe
@@ -196,10 +215,13 @@ public sealed partial class Nghttp2Connection
     {
         try
         {
-            SubmitResponse(pending.StreamId, await inFlight);
+            Nghttp2Response response = await inFlight;
+            await new ReactorSwitch(_reactor);   // back on the reactor, wherever the handler finished
+            SubmitResponse(pending.StreamId, response);
         }
         catch (Exception exception)
         {
+            await new ReactorSwitch(_reactor);
             // Nobody can observe this task, so an escaping exception would vanish silently and the
             // peer would wait on a stream that is never coming.
             Console.Error.WriteLine(

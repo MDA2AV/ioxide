@@ -136,6 +136,7 @@ public sealed partial class Nghttp3Connection
             response = new Nghttp3Response { Status = 500 };
         }
 
+        await new ReactorSwitch(Reactor);   // back on the reactor, wherever the handler finished
         if (_nghttp3Handle != 0 && !_protocolFailed)
         {
             QueueResponse(request.StreamId, response);

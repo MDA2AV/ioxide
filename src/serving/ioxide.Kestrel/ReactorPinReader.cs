@@ -1,5 +1,4 @@
 using System.IO.Pipelines;
-using System.Runtime.CompilerServices;
 using ioxide;
 
 namespace ioxide.Kestrel;
@@ -32,10 +31,7 @@ internal sealed class ReactorPinReader : PipeReader
     {
         ReadResult result = await _inner.ReadAsync(cancellationToken).ConfigureAwait(false);
 
-        if (IoxideReactor.TryCurrent() != _reactor)
-        {
-            await new ReactorSwitch(_reactor);
-        }
+        await new ReactorSwitch(_reactor);
         _pinned = true;
         return result;
     }
@@ -56,16 +52,4 @@ internal sealed class ReactorPinReader : PipeReader
     public override void CancelPendingRead() => _inner.CancelPendingRead();
     public override void Complete(Exception? exception = null) => _inner.Complete(exception);
     public override ValueTask CompleteAsync(Exception? exception = null) => _inner.CompleteAsync(exception);
-}
-
-/// <summary>Awaiter that resumes its continuation on the given reactor's thread (via the reactor post queue).</summary>
-internal readonly struct ReactorSwitch : ICriticalNotifyCompletion
-{
-    private readonly Reactor _reactor;
-    public ReactorSwitch(Reactor reactor) => _reactor = reactor;
-    public ReactorSwitch GetAwaiter() => this;
-    public bool IsCompleted => false;
-    public void OnCompleted(Action continuation) => _reactor.ScheduleOnReactor(static s => ((Action)s!)(), continuation);
-    public void UnsafeOnCompleted(Action continuation) => _reactor.ScheduleOnReactor(static s => ((Action)s!)(), continuation);
-    public void GetResult() { }
 }

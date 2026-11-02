@@ -105,8 +105,8 @@ for (int i = 0; i < threads.Length; i++)
                 int result;
                 if (useTaskDelay)
                 {
-                    // The deadline goes to the thread-pool timer queue and the continuation is
-                    // posted back - the round trip Tcp/Hop is about.
+                    // The deadline goes to the thread-pool timer queue, and the continuation runs on
+                    // the timer's thread: the handler carries on from there, off the reactor.
                     await Task.Delay(ms);
                     result = RingTimer.ETime;
                 }
