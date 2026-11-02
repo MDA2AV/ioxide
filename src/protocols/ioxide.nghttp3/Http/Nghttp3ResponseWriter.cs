@@ -172,15 +172,13 @@ public sealed class Nghttp3ResponseWriter : IBufferWriter<byte>
         }
     }
 
-    private bool SubmitUnsent()
+    private void SubmitUnsent()
     {
         if (_unsent is Nghttp3Response unsent)
         {
             _unsent = null;
             SubmitHeaders(unsent);
-            return true;
         }
-        return false;
     }
 
     /// <inheritdoc />
@@ -261,14 +259,11 @@ public sealed class Nghttp3ResponseWriter : IBufferWriter<byte>
         }
 
         await new ReactorSwitch(_connection.Reactor);
-        bool submitted = SubmitUnsent();
+        SubmitUnsent();
 
         if (_staged == 0)
         {
-            if (submitted)
-            {
-                _connection.PumpIfOutsidePass();   // headers alone: outside a pass nothing else sends them
-            }
+            _connection.PumpIfOutsidePass();   // headers alone: outside a pass nothing else sends them
             return _gone || _connection.IsFailed ? PeerGone : default;
         }
 

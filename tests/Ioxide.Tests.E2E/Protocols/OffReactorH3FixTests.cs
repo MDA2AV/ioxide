@@ -88,6 +88,25 @@ internal static class OffReactorH3FixTests
             calls.AssertAllOff();
         });
 
+        runner.Test("h3 later pass (nghttp3): an empty flush on the reactor sends the headers written before it", () =>
+        {
+            long sentByFlush = -1;
+            using H3TestClient client = H3Connect(conn => new Nghttp3Connection(conn).RunAsync(async (Nghttp3Request _, Nghttp3ResponseWriter writer) =>
+            {
+                await TestServer.LaterPass();   // on the reactor, outside the pass that dispatched it
+                writer.WriteHeaders(new Nghttp3Response { Status = 200 });
+                await writer.FlushAsync();
+                Volatile.Write(ref sentByFlush, ((TallyQuic)conn).SentOn(writer.StreamId));
+                writer.Write("body"u8);
+            }));
+
+            (int status, string body) = client.Request("GET", "/", null, timeoutMs: 30_000);
+            Assert.Equal(200, status);
+            Assert.Equal("body", body);
+            Assert.True(Volatile.Read(ref sentByFlush) > 0,
+                $"the empty flush handed the headers to QUIC before it returned ({sentByFlush} bytes on the stream)");
+        });
+
         // The transport is a recording fake its test drives inline, with no reactor behind it.
         runner.Test("h3 no reactor (http3): a streamed handler reads its body and writes its headers", () =>
             AssertServedInline(PostAbc, Status200, "abc", quic => new Http3Connection(quic).RunAsync(
