@@ -226,13 +226,29 @@ public sealed partial class Http2Connection : IDisposable
         }
         finally
         {
-            Dispose();
-
-            // A writer parked on flow-control credit will never be woken by a dead connection. After
-            // Dispose, so it wakes into IsBroken: a clean close breaks nothing first, and a writer
-            // woken before it finds no credit and parks again for good.
-            ReleaseAllCreditWaiters();
+            _ = TearDownAsync();
         }
+    }
+
+    // A transport read that faults ends the loop on the thread that completed it, which over a pipe completing
+    // elsewhere is not the reactor: the teardown is the reactor's.
+    private async Task TearDownAsync()
+    {
+        try
+        {
+            await new ReactorSwitch(_reactor);
+        }
+        catch (ObjectDisposedException)
+        {
+            // The reactor has stopped, so nothing races the teardown: it goes on here.
+        }
+
+        Dispose();
+
+        // A writer parked on flow-control credit will never be woken by a dead connection. After
+        // Dispose, so it wakes into IsBroken: a clean close breaks nothing first, and a writer
+        // woken before it finds no credit and parks again for good.
+        ReleaseAllCreditWaiters();
     }
 
     // Copy into the accumulator, because a frame can straddle segments AND reads, and the parser

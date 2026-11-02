@@ -55,6 +55,15 @@ internal static class OffReactorH2FixTests
                 return new Nghttp2Response { Status = 200, Body = request.Body.ToArray() };
             })));
 
+        // A pipe that completes on the thread pool faults there too: the teardown that follows is the reactor's.
+        runner.Test("h2 over a pipe that completes on the thread pool (http2): a transport fault tears the connection down on the reactor", () =>
+            AssertFaultTeardown((pipe, calls, parked, verdict) => new Http2Connection(pipe).RunAsync((_, body, _) =>
+                ParkThenReport(calls, body.ReadAsync, parked, verdict))));
+
+        runner.Test("h2 over a pipe that completes on the thread pool (nghttp2): a transport fault tears the connection down on the reactor", () =>
+            AssertFaultTeardown((pipe, calls, parked, verdict) => new Nghttp2Connection(pipe).RunAsync((_, body, _) =>
+                ParkThenReport(calls, body.ReadAsync, parked, verdict))));
+
         // A connection handler that awaited something another thread completed calls RunAsync from there.
         runner.Test("h2 RunAsync begun on the thread pool (http2): an upload read and echoed from the pool arrives whole, served on the reactor", () =>
             AssertLateStart((pipe, calls) => new Http2Connection(pipe).RunAsync((_, body, writer) =>
@@ -146,6 +155,65 @@ internal static class OffReactorH2FixTests
         transport.AssertOnReactor();
     }
 
+    // Reads the first chunk, then parks for the next until the teardown wakes it: where that ran is the verdict.
+    private static async ValueTask ParkThenReport(Calls calls, Func<ValueTask<ReadOnlyMemory<byte>>> read,
+        TaskCompletionSource parked, TaskCompletionSource<string> verdict)
+    {
+        await read();
+        parked.TrySetResult();
+        try
+        {
+            while (!(await read()).IsEmpty)
+            {
+            }
+        }
+        catch (IOException)
+        {
+            // Cut off by the fault: what matters is the thread the teardown woke this on.
+        }
+        verdict.TrySetResult(calls.Reactor!.OnReactorThread ? "on-reactor" : "off-reactor");
+    }
+
+    private static void AssertFaultTeardown(Func<IDuplexPipe, Calls, TaskCompletionSource, TaskCompletionSource<string>, Task> serve)
+    {
+        var parked = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var verdict = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
+        (int port, _, Transport transport) = StartH2((pipe, calls) => serve(pipe, calls, parked, verdict), viaPool: true);
+
+        using HttpClient client = H2Client();
+        Task<HttpResponseMessage> post = client.PostAsync($"http://127.0.0.1:{port}/", new TwoPartContent(parked.Task, transport.FaultReads));
+        Assert.True(verdict.Task.Wait(30_000), "the handler parked on its body was never woken after the transport faulted");
+        Assert.Equal("on-reactor", verdict.Task.Result);
+        try
+        {
+            post.Wait(10_000);
+        }
+        catch (AggregateException)
+        {
+            // The connection is gone; how the client sees that does not matter here.
+        }
+    }
+
+    // A first chunk; then, once the handler has parked for more, the fault armed and a second chunk to trip it.
+    private sealed class TwoPartContent(Task parked, Action beforeSecond) : HttpContent
+    {
+        protected override async Task SerializeToStreamAsync(Stream stream, TransportContext? context)
+        {
+            await stream.WriteAsync(new byte[1024]);
+            await stream.FlushAsync();
+            await parked.WaitAsync(TimeSpan.FromSeconds(30));
+            beforeSecond();
+            await stream.WriteAsync(new byte[1024]);
+            await stream.FlushAsync();
+        }
+
+        protected override bool TryComputeLength(out long length)
+        {
+            length = 0;
+            return false;
+        }
+    }
+
     private static void AssertEcho(HttpClient client, int port)
     {
         Task<byte[]> echoed = PostAsync(client, port, Upload);
@@ -223,6 +291,10 @@ internal static class OffReactorH2FixTests
     private sealed class Transport(bool viaPool, bool fromReactorRead)
     {
         private int _off;
+        private int _faultReads;
+
+        // From now on a read that completes throws, on the thread pool, as a pipe whose writer failed does.
+        public void FaultReads() => Volatile.Write(ref _faultReads, 1);
 
         public IDuplexPipe Wrap(IDuplexPipe inner, Reactor reactor) => new Duplex(inner, reactor, this, viaPool, counting: !fromReactorRead);
 
@@ -268,6 +340,10 @@ internal static class OffReactorH2FixTests
                 if (_viaPool)
                 {
                     await LeaveReactor();
+                }
+                if (Volatile.Read(ref _owner._faultReads) == 1)
+                {
+                    throw new IOException("the transport faulted");
                 }
                 return read;
             }

@@ -85,8 +85,23 @@ public sealed partial class Nghttp2Connection
         }
         finally
         {
-            Dispose();
+            _ = TearDownAsync();
         }
+    }
+
+    // A transport read that faults ends the loop on the thread that completed it, which over a pipe completing
+    // elsewhere is not the reactor: freeing the session there races the reactor's calls into it.
+    private async Task TearDownAsync()
+    {
+        try
+        {
+            await new ReactorSwitch(_reactor);
+        }
+        catch (ObjectDisposedException)
+        {
+            // The reactor has stopped, so nothing races the teardown: it goes on here.
+        }
+        Dispose();
     }
 
     // Feed each segment straight to nghttp2. The segments are the ring's own memory when the pipe

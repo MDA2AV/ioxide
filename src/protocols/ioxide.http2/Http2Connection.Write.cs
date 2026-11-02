@@ -1,6 +1,7 @@
 using System.Buffers;
 using System.Buffers.Binary;
 using System.IO.Pipelines;
+using System.Runtime.CompilerServices;
 
 namespace ioxide.http2;
 
@@ -116,14 +117,41 @@ public sealed partial class Http2Connection
         }
         finally
         {
-            _flushing = false;
-            // Never strand a waiter: on a fault the turn it is waiting for will not come, and it
-            // has to wake to see the connection is broken rather than hang forever.
-            foreach (TaskCompletionSource waiter in TakeTurn())
+            if (_writeDead && OffReactor)
             {
-                waiter.TrySetResult();
+                _ = EndTurnOnReactorAsync();   // a faulted flush can end the pump on the thread that completed it
+            }
+            else
+            {
+                EndTurn();
             }
         }
+    }
+
+    // Never strand a waiter: on a fault the turn it is waiting for will not come, and it has to wake to see
+    // the connection is broken rather than hang forever. Out of line: a loop in a hot async method's finally
+    // costs it its optimized code.
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private void EndTurn()
+    {
+        _flushing = false;
+        foreach (TaskCompletionSource waiter in TakeTurn())
+        {
+            waiter.TrySetResult();
+        }
+    }
+
+    private async Task EndTurnOnReactorAsync()
+    {
+        try
+        {
+            await new ReactorSwitch(_reactor);
+        }
+        catch (ObjectDisposedException)
+        {
+            // The reactor has stopped, so nothing races the wake: it goes on here.
+        }
+        EndTurn();
     }
 
     // One completion per waiter: a task awaited by several resumes only the first inline and sends
