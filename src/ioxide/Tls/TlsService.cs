@@ -1221,14 +1221,13 @@ public sealed class TlsService
         BoringSsl.SSL_set_bio(ssl, rbio, wbio);   // ssl owns both BIOs now
         BoringSsl.SSL_set_accept_state(ssl);
 
-        var session = new TlsSession(ssl, rbio, wbio);
+        var session = new TlsSession(ssl, rbio, wbio, conn);
 
         // Associate the session with this SSL so the keylog callback writes the secret onto it
         // directly (no global map). The handle is freed in TlsSession.Dispose.
         GCHandle handle = GCHandle.Alloc(session);
         BoringSsl.SSL_set_ex_data(ssl, SslSessionIndex, GCHandle.ToIntPtr(handle));
         session.AttachHandle(handle);
-        session.AttachConnection(conn);   // the teardown close_notify goes out on it, both modes
 
         // Under the sweep from here until the handshake settles, either way.
         PendingHandshake? pending = null;
@@ -1355,7 +1354,7 @@ public sealed class TlsService
                     ?? throw new IOException("TLS handshake completed but no server traffic secret was captured");
                 Ktls.EnableTx(conn.ClientFd, secret);
                 conn.SendOpFlags = 0;
-                session.MarkTxEnabled(conn.ClientFd);
+                session.MarkTxEnabled();
             }
             else
             {

@@ -24,9 +24,8 @@ public sealed unsafe class TlsSession : IDisposable
     private bool _disposed;
 
     private GCHandle _handle;   // roots this session so the keylog callback can reach it via SSL ex_data
-    private int _fd = -1;       // the connection's fd - the teardown close_notify goes out on it
-    private TcpConnection? _conn;   // whether it can: no send in flight, no FIN yet
-    private bool _txEnabled;
+    private readonly int _fd;   // the connection's fd - the teardown close_notify goes out on it
+    private readonly TcpConnection _conn;   // whether it can: no send in flight, no FIN yet
 
     /// <summary>The captured TLS 1.3 server traffic secret (set by the keylog callback during the handshake).</summary>
     internal byte[]? ServerSecret;
@@ -43,7 +42,7 @@ public sealed unsafe class TlsSession : IDisposable
     /// <summary>True when the kernel encrypts outbound records - the opt-in, not the default.
     /// Handlers do not branch on this: <see cref="Write"/> is correct either way, and this only
     /// reports which path it takes.</summary>
-    public bool KernelTx => _txEnabled;
+    public bool KernelTx { get; private set; }
 
     internal void MarkKernelRx() => KernelRx = true;
 
@@ -61,7 +60,7 @@ public sealed unsafe class TlsSession : IDisposable
 
     private bool _closed;
     private bool _alertPeeked;
-    private int _generation;   // the connection's life this session belongs to; _fd is someone else's after it
+    private readonly int _generation;   // the connection's life this session belongs to; _fd is someone else's after it
 
     private bool PeekKernelCloseNotify()
     {
@@ -309,27 +308,19 @@ public sealed unsafe class TlsSession : IDisposable
         }
     }
 
-    internal TlsSession(nint ssl, nint rbio, nint wbio)
+    internal TlsSession(nint ssl, nint rbio, nint wbio, TcpConnection conn)
     {
         _ssl = ssl;
         _rbio = rbio;
         _wbio = wbio;
-    }
-
-    internal void AttachHandle(GCHandle handle) => _handle = handle;
-
-    internal void AttachConnection(TcpConnection conn)
-    {
         _conn = conn;
         _fd = conn.ClientFd;
         _generation = conn.Generation;
     }
 
-    internal void MarkTxEnabled(int fd)
-    {
-        _fd = fd;
-        _txEnabled = true;
-    }
+    internal void AttachHandle(GCHandle handle) => _handle = handle;
+
+    internal void MarkTxEnabled() => KernelTx = true;
 
     /// <summary>
     /// Feed one ciphertext slice and return everything that decrypts. The returned span is valid
@@ -596,9 +587,9 @@ public sealed unsafe class TlsSession : IDisposable
         // RFC 8446 6.1 asks of both sides. Skip where a raw send cannot go out cleanly: into a send
         // the ring still has, or past the FIN - which a reactor teardown marks too, once the fd may
         // be someone else's.
-        if (_fd >= 0 && (_conn is null || (!_conn.FlushOutstanding && !_conn.FinSent)))
+        if (!_conn.FlushOutstanding && !_conn.FinSent)
         {
-            if (_txEnabled)
+            if (KernelTx)
             {
                 Ktls.SendCloseNotify(_fd);
             }
