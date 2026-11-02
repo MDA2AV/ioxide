@@ -15,8 +15,8 @@ namespace ioxide.httpclient;
 /// </code>
 /// </summary>
 /// <remarks>
-/// Not thread-safe by design: every member runs on the owning reactor thread - requests come from
-/// reactor-thread handlers and every completion resumes there too.
+/// Safe to call from any thread. The pool belongs to its reactor and takes no lock: a request made on
+/// another thread moves to the reactor first, and completes there.
 /// </remarks>
 public sealed class HttpClientPool : IDisposable
 {
@@ -340,10 +340,18 @@ public sealed class HttpClientPool : IDisposable
     /// <summary>
     /// Close the idle connections and stop replenishing. Connections currently checked out by an
     /// in-flight request are not touched - the request owns them, and they are dropped by
-    /// <see cref="Release"/> when it finishes, because a disposed pool takes nothing back.
+    /// <see cref="Release"/> when it finishes, because a disposed pool takes nothing back. Called
+    /// from another thread, it is queued to the reactor and returns.
     /// </summary>
     public void Dispose()
     {
+        // The idle list and the waiters are the reactor's.
+        if (!_host.OnReactorThread)
+        {
+            _host.ScheduleOnReactor(static pool => ((HttpClientPool)pool!).Dispose(), this);
+            return;
+        }
+
         if (_disposed)
         {
             return;

@@ -75,8 +75,16 @@ internal static class ClientTransport
     {
         string name = Unbracketed(origin);
         string? serverName = ServerNameFor(tls, name);
-        IPAddress[] addresses = await ResolveAsync(name);
-        await new ReactorSwitch(host);   // the resolver finishes on its own thread
+        IPAddress[] addresses;
+        try
+        {
+            addresses = await ResolveAsync(name);
+        }
+        finally
+        {
+            await new ReactorSwitch(host);   // the resolver finishes on its own thread, a failed lookup too
+        }
+
         return await ConnectAsync(host, addresses, port, tls, serverName, connectTimeoutMs);
     }
 

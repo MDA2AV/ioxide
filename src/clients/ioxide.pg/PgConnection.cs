@@ -754,8 +754,16 @@ public sealed class PgConnection : IDisposable
         return new PgException(severity, sqlState, text);
     }
 
+    /// <summary>Close the connection. Called from another thread, it is queued to the reactor and returns.</summary>
     public unsafe void Dispose()
     {
+        // The socket, the buffers and the loops' flags are the reactor's.
+        if (!_host.OnReactorThread)
+        {
+            _host.ScheduleOnReactor(static connection => ((PgConnection)connection!).Dispose(), this);
+            return;
+        }
+
         IsBroken = true;
 
         // close() would leave an armed op holding the socket open and using the buffers freed below.

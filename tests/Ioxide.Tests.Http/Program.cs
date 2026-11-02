@@ -21,6 +21,7 @@ internal static class Program
         HttpClientConnectTests.Register(runner);
         RingHttpClientTests.Register(runner);
         HttpClientChunkedTests.Register(runner);
+        HttpClientThreadTests.Register(runner);
         TlsClientTests.Register(runner);
 
         // Areas reserved for the failing-test review pass; empty until one lands.

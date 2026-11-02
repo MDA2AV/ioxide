@@ -18,8 +18,8 @@ namespace ioxide.httpclient;
 /// </summary>
 /// <remarks>
 /// For one upstream on a hot path - a reverse proxy - start an <see cref="HttpClientPool"/> instead:
-/// its connections are opened up front and kept, and a request parses no URL. Reactor thread only,
-/// like the pool.
+/// its connections are opened up front and kept, and a request parses no URL. Safe to call from any
+/// thread, like the pool: a request made on another thread moves to the reactor first.
 /// </remarks>
 public sealed class RingHttpClient : IDisposable
 {
@@ -160,9 +160,17 @@ public sealed class RingHttpClient : IDisposable
         }
     }
 
-    /// <summary>Close every origin's idle connections; requests in flight finish first, as with the pool.</summary>
+    /// <summary>Close every origin's idle connections; requests in flight finish first, as with the pool.
+    /// Called from another thread, it is queued to the reactor and returns.</summary>
     public void Dispose()
     {
+        // The origins and their pools are the reactor's.
+        if (!_host.OnReactorThread)
+        {
+            _host.ScheduleOnReactor(static client => ((RingHttpClient)client!).Dispose(), this);
+            return;
+        }
+
         if (_disposed)
         {
             return;

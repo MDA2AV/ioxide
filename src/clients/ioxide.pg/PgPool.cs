@@ -7,9 +7,8 @@ namespace ioxide.pg;
 /// per reactor - create from <c>Reactor.OnStart</c>.
 /// </summary>
 /// <remarks>
-/// Not thread-safe by design: every member must run on the owning reactor thread - queries arrive
-/// from reactor-thread handlers and connect completions resume there too. Do not call the pool from
-/// off-reactor code.
+/// Safe to call from any thread. The pool belongs to its reactor and takes no lock: a query made on
+/// another thread moves to the reactor first, and completes there.
 /// </remarks>
 public sealed class PgPool
 {
@@ -23,7 +22,10 @@ public sealed class PgPool
     private int _next;
     private int _opening;                          // in-flight connect attempts (coalesces opens)
     private long _reopenAtMs;                       // jittered backoff gate for background replenishment
-    private TaskCompletionSource<bool>? _opened;   // completed when any open attempt finishes
+
+    // Slow-path queries waiting for an open attempt to finish, one completion each: a task awaited by several
+    // resumes only the first inline and sends the rest through the thread pool.
+    private readonly List<TaskCompletionSource> _openWaiters = [];
 
     private PgPool(IRingHost host, PgOptions options)
     {
@@ -68,11 +70,14 @@ public sealed class PgPool
         {
             _opening--;
             // Wake every slow-path waiter whether the attempt succeeded or failed, so a run of
-            // failures surfaces as a fast error instead of a permanent hang. Swap the field out
-            // before completing so a fresh waiter arms a new signal.
-            TaskCompletionSource<bool>? signal = _opened;
-            _opened = null;
-            signal?.TrySetResult(true);
+            // failures surfaces as a fast error instead of a permanent hang. All are taken out
+            // before any is woken, so one that waits again waits for the next attempt.
+            TaskCompletionSource[] waiters = [.. _openWaiters];
+            _openWaiters.Clear();
+            foreach (TaskCompletionSource waiter in waiters)
+            {
+                waiter.TrySetResult();
+            }
         }
     }
 
@@ -164,13 +169,13 @@ public sealed class PgPool
                     $"pg pool: no connection to {_options.Host}:{_options.Port} after {MaxConnectAttempts} attempts");
             }
 
-            _opened ??= new TaskCompletionSource<bool>();
-            Task wait = _opened.Task;
+            var opened = new TaskCompletionSource();
+            _openWaiters.Add(opened);
             if (_opening == 0)
             {
                 StartOpen();   // nothing live and nothing opening - kick one off
             }
-            await wait;
+            await opened.Task;
             await ReactorSwitch.Yield(_host);   // out of the open's completion, still on the reactor
         }
     }
