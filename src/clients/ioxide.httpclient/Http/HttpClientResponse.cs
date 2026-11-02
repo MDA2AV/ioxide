@@ -167,19 +167,7 @@ public sealed class HttpClientResponse : IDisposable
     }
 
     /// <summary>First value for a field name (names are lowercase), or false when absent.</summary>
-    public bool TryGetHeader(ReadOnlySpan<byte> name, out ReadOnlyMemory<byte> value)
-    {
-        foreach (KeyValuePair<ReadOnlyMemory<byte>, ReadOnlyMemory<byte>> field in Headers.AsSpan())
-        {
-            if (field.Key.Span.SequenceEqual(name))
-            {
-                value = field.Value;
-                return true;
-            }
-        }
-        value = default;
-        return false;
-    }
+    public bool TryGetHeader(ReadOnlySpan<byte> name, out ReadOnlyMemory<byte> value) => Headers.TryGetValue(name, out value);
 
     public void Dispose()
     {
