@@ -444,10 +444,23 @@ public sealed unsafe partial class Reactor
             setsockopt(fd, IPPROTO_TCP, TCP_USER_TIMEOUT, &userTimeoutMs, sizeof(int));
         }
 
+        BindAny(fd, port, dualStack);
+
+        if (listen(fd, backlog) < 0)
+        {
+            throw new InvalidOperationException("listen failed");
+        }
+
+        return fd;
+    }
+
+    // Closes fd on failure: the caller has not stored it anywhere yet.
+    private static void BindAny(int fd, ushort port, bool dualStack)
+    {
+        int rc;
         if (dualStack)
         {
-            // A single AF_INET6 listener bound to :: with IPV6_V6ONLY=0 accepts both IPv6 and
-            // IPv4-mapped clients - one socket serves both families.
+            // :: with IPV6_V6ONLY=0 also takes IPv4-mapped peers, so one socket serves both families.
             int v6only = 0;
             setsockopt(fd, IPPROTO_IPV6, IPV6_V6ONLY, &v6only, sizeof(int));
 
@@ -456,10 +469,7 @@ public sealed unsafe partial class Reactor
             addr6.sin6_port   = Htons(port);
             // sin6_addr left zero == in6addr_any (::)
 
-            if (bind(fd, &addr6, (uint)sizeof(sockaddr_in6)) < 0)
-            {
-                throw new InvalidOperationException("bind failed");
-            }
+            rc = bind(fd, &addr6, (uint)sizeof(sockaddr_in6));
         }
         else
         {
@@ -468,17 +478,13 @@ public sealed unsafe partial class Reactor
             addr.sin_port        = Htons(port);
             addr.sin_addr.s_addr = 0; // 0.0.0.0
 
-            if (bind(fd, &addr, (uint)sizeof(sockaddr_in)) < 0)
-            {
-                throw new InvalidOperationException("bind failed");
-            }
+            rc = bind(fd, &addr, (uint)sizeof(sockaddr_in));
         }
 
-        if (listen(fd, backlog) < 0)
+        if (rc < 0)
         {
-            throw new InvalidOperationException("listen failed");
+            close(fd);
+            throw new InvalidOperationException($"bind failed on port {port}");
         }
-
-        return fd;
     }
 }

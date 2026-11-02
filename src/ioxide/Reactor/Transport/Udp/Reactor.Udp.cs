@@ -138,7 +138,7 @@ public sealed unsafe partial class Reactor
     }
 
     /// <summary>
-    /// Open a UDP socket on an ephemeral port for outbound QUIC and arm it on this ring, appending
+    /// Open a UDP socket on an ephemeral port for outbound QUIC and arm it on this ring, adding
     /// it to the fd tables. Used by a reactor with no datagram transport configured at all, so it
     /// brings up the buffer ring on the way if OpenUdpSockets never ran. Returns its index.
     /// </summary>
@@ -150,15 +150,7 @@ public sealed unsafe partial class Reactor
         }
 
         int fd = OpenUdpSocket(0, _config.DualStack, _udp.Gro, _udp.SocketBufferBytes);   // port 0: the kernel picks
-
-        // Append. Indices stay stable (recv completions carry theirs in user_data), so growing the
-        // tables cannot disturb the multishot recvs already armed on the existing sockets.
-        int index = _udpFds.Length;
-        _udpFds     = [.. _udpFds, fd];
-        _udpFdPorts = [.. _udpFdPorts, BoundPort(fd, _config.DualStack)];
-
-        ArmUdpRecv(index);
-        return index;
+        return UdpAdoptSocket(fd, BoundPort(fd, _config.DualStack));
     }
 
     // The port the kernel assigned to a bind(:0) - ngtcp2 needs the real local address for its
@@ -321,37 +313,14 @@ public sealed unsafe partial class Reactor
         setsockopt(fd, SOL_SOCKET, SO_SNDBUF, &buf, sizeof(int));
         ReportBufferClamp(fd, socketBufferBytes);
 
+        // TCLASS covers native IPv6; RECVTOS covers IPv4-mapped peers on the same socket.
         if (dualStack)
         {
-            int v6only = 0;
-            setsockopt(fd, IPPROTO_IPV6, IPV6_V6ONLY, &v6only, sizeof(int));
-            // TCLASS covers native IPv6; RECVTOS covers IPv4-mapped peers on the same socket.
             setsockopt(fd, IPPROTO_IPV6, IPV6_RECVTCLASS, &one, sizeof(int));
-            setsockopt(fd, IPPROTO_IP, IP_RECVTOS, &one, sizeof(int));
-
-            sockaddr_in6 addr6 = default;
-            addr6.sin6_family = AF_INET6;
-            addr6.sin6_port   = Htons(port);
-
-            if (bind(fd, &addr6, (uint)sizeof(sockaddr_in6)) < 0)
-            {
-                throw new InvalidOperationException($"udp bind :{port} failed");
-            }
         }
-        else
-        {
-            setsockopt(fd, IPPROTO_IP, IP_RECVTOS, &one, sizeof(int));
+        setsockopt(fd, IPPROTO_IP, IP_RECVTOS, &one, sizeof(int));
 
-            sockaddr_in addr = default;
-            addr.sin_family      = AF_INET;
-            addr.sin_port        = Htons(port);
-            addr.sin_addr.s_addr = 0;
-
-            if (bind(fd, &addr, (uint)sizeof(sockaddr_in)) < 0)
-            {
-                throw new InvalidOperationException($"udp bind :{port} failed");
-            }
-        }
+        BindAny(fd, port, dualStack);
 
         // A pinned socket: same address as its siblings but naming ONE peer, so it outranks the
         // wildcard binds and the reuseport hash is never consulted for that peer. Measured: no
