@@ -7,9 +7,10 @@ namespace ioxide.redis.stackexchange;
 
 /// <summary>
 /// A StackExchange.Redis <see cref="Tunnel"/> that puts every connection of a multiplexer on one
-/// reactor's ring: connect, sends and receives are io_uring operations on that reactor, and
-/// StackExchange.Redis parses replies and completes commands on its thread. Give each reactor its own
-/// multiplexer, made in <c>OnStart</c>, and a handler's commands never leave its thread.
+/// reactor's ring: connect, sends and receives are io_uring operations on that reactor, where
+/// StackExchange.Redis parses the replies. Give each reactor its own multiplexer, made in <c>OnStart</c>.
+/// StackExchange.Redis completes commands asynchronously, so the code after an awaited command resumes on
+/// the thread pool, not the reactor; ioxide's own APIs called from there marshal back to it.
 /// </summary>
 /// <remarks>
 /// TCP without TLS: a configuration that asks for TLS is refused when the connection is made, with a

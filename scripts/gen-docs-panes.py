@@ -510,8 +510,9 @@ PANES = {
          "PLAYGROUND_REDIS_TRANSPORT=sockets dotnet run -c Release --project Playground/Clients/RedisStackExchange"],
         "StackExchange.Redis's whole API with its connections on the reactor's ring. <code>IoxideTunnel</code> "
         "hands the multiplexer a transport whose connect, sends and receives are io_uring operations on the "
-        "reactor, and StackExchange.Redis parses the replies and completes each command on that reactor's "
-        "thread - one multiplexer per reactor, so a handler's await never leaves it. Built on "
+        "reactor, where StackExchange.Redis parses the replies - one multiplexer per reactor. It completes "
+        "commands asynchronously, so the code after an awaited command resumes on the thread pool, not the "
+        "reactor; ioxide's own APIs called from there marshal back to it. Built on "
         "StackExchange.Redis's experimental transport seam, and pinned to the version it was built "
         "against."),
     "qclient": (

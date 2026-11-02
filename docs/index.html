@@ -3632,8 +3632,8 @@ for (int i = 0; i &lt; threads.Length; i++)
                 int result;
                 if (useTaskDelay)
                 {
-                    // The deadline goes to the thread-pool timer queue and the continuation is
-                    // posted back - the round trip Tcp/Hop is about.
+                    // The deadline goes to the thread-pool timer queue, and the continuation runs on
+                    // the timer&#x27;s thread: the handler carries on from there, off the reactor.
                     await Task.Delay(ms);
                     result = RingTimer.ETime;
                 }
@@ -8015,7 +8015,7 @@ static void WriteText(TcpConnection conn, string status, string body)
     conn.Write(Encoding.ASCII.GetBytes(
         $&quot;HTTP/1.1 {status}\r\nContent-Type: text/plain\r\nContent-Length: {Encoding.UTF8.GetByteCount(body)}\r\n\r\n{body}&quot;));
 }</code></pre>
-    <p class="ex-foot">StackExchange.Redis's whole API with its connections on the reactor's ring. <code>IoxideTunnel</code> hands the multiplexer a transport whose connect, sends and receives are io_uring operations on the reactor, and StackExchange.Redis parses the replies and completes each command on that reactor's thread - one multiplexer per reactor, so a handler's await never leaves it. Built on StackExchange.Redis's experimental transport seam, and pinned to the version it was built against.</p>
+    <p class="ex-foot">StackExchange.Redis's whole API with its connections on the reactor's ring. <code>IoxideTunnel</code> hands the multiplexer a transport whose connect, sends and receives are io_uring operations on the reactor, where StackExchange.Redis parses the replies - one multiplexer per reactor. It completes commands asynchronously, so the code after an awaited command resumes on the thread pool, not the reactor; ioxide's own APIs called from there marshal back to it. Built on StackExchange.Redis's experimental transport seam, and pinned to the version it was built against.</p>
   </div>
   <div class="pane pane-files">
     <div class="pane-head">

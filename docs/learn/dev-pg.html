@@ -223,8 +223,8 @@ private static bool IsStaleStatement(PgException error) =&gt;
     <h2>PgPool &middot; <span class="dim">PgPool.cs</span></h2>
     <p>N connections on one reactor (default 8), round-robin across them so each multiplexes many
     in-flight commands - the connections stay busy instead of one round-trip at a time. One pool per
-    reactor, created from <code>OnStart</code>; not thread-safe by design (every member runs on the
-    owning reactor thread).</p>
+    reactor, created from <code>OnStart</code>. It takes no lock: its state is only touched on the
+    owning reactor thread, and a query made on any other thread moves there first.</p>
     <ul>
       <li><b>Pick</b> - round-robin over healthy connections, evicting and replacing any found broken
       (which kicks a background re-open).</li>
