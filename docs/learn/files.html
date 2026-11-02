@@ -40,18 +40,18 @@
   <main class="doc">
     <h1>Files over the ring</h1>
     <p class="lead"><code>ioxide.file</code> serves static assets the way the I/O model wants:
-    small, hot files straight from immutable memory snapshots; large files as positional
-    io_uring reads - no thread pool either way.</p>
+    every file opened once into an immutable snapshot, every read a positional io_uring read -
+    no thread pool, nothing cached in memory, and no HTTP of its own.</p>
 
-    <div class="xref"><b>Serving files.</b> How baking, the zero-allocation lookup, and lease-safe
+    <div class="xref"><b>Serving files.</b> How the snapshot, the zero-allocation lookup, and lease-safe
     atomic reloads work is in <a href="dev-file.html">ioxide.file internals</a>.</div>
 
     <h2>Asset snapshots</h2>
-    <p><code>AssetCache</code> opens every file under a root once, keyed by URL path. Files up to
-    a threshold (default 256KB) get their <em>entire HTTP response</em> - status line,
-    Content-Type, Content-Length, body - baked into native memory at snapshot build. Serving one
-    is a dictionary lookup (span-based, straight from the request bytes, no allocation) and a
-    send. Larger files keep a descriptor for ring reads.</p>
+    <p><code>AssetCache</code> opens every file under a root once, keyed by URL path, and keeps
+    just its descriptor, its path and its length at snapshot time - no file bytes, and no HTTP:
+    the status line, Content-Type and Content-Length are the handler's to write. Finding a file
+    is a dictionary lookup (span-based, straight from the request bytes, no allocation); its body
+    is read off the ring on every request.</p>
 
 <pre><code class="language-csharp">// One snapshot, shared across all reactors.
 var assets = new StaticAssets("/srv/www");
@@ -60,7 +60,7 @@ reactor.OnStart = r =&gt;
 {
     r.AddService(assets);
 
-    // Per-reactor read concurrency for the large-file path.
+    // Per-reactor read concurrency for the ring reads.
     AssetReader.CreatePool(r, readers: 4, bufferBytes: 1 &lt;&lt; 20);
 };</code></pre>
 
@@ -100,9 +100,10 @@ if (assets.TryGet(pathBytes, out var asset))
 
     <h2>Atomic reloads</h2>
     <p>Snapshots are immutable; deploys swap them whole. <code>StaticAssets.Reload()</code>
-    builds a fresh <code>AssetCache</code>, swaps it in atomically, and disposes the old one
-    after a grace period - a reactor always sees a consistent snapshot, and Content-Length always
-    matches the body it ships. Wire it to SIGHUP and a deploy is
+    builds a fresh <code>AssetCache</code>, swaps it in atomically, and drops its reference to
+    the old one, whose descriptors close when the last lease on it is disposed - a request always
+    sees one whole snapshot, and a read in flight never meets a closed descriptor. If the rebuild
+    fails, the current snapshot stays. Wire it to SIGHUP and a deploy is
     <code>kill&nbsp;-HUP&nbsp;$(pidof&nbsp;server)</code>:</p>
 <pre><code class="language-csharp">PosixSignalRegistration.Create(PosixSignal.SIGHUP, ctx =&gt;
 {
@@ -110,9 +111,11 @@ if (assets.TryGet(pathBytes, out var asset))
     assets.Reload();
 });</code></pre>
 
-    <div class="note">The baked path removes per-request file I/O, header formatting, and
-    allocation entirely; the ring-read path remains for files above the bake threshold. Benchmark
-    on your own hardware with the Playground's <code>file</code> mode.</div>
+    <div class="note">Nothing is cached, so every request reads its file off the ring, from the
+    page cache once the file is warm. A rented <code>AssetReader</code> costs one copy, from its buffer
+    into the write slab; on a cleartext connection or under kTLS TX, <code>TcpConnection.ReadFileAsync</code>
+    reads straight into the slab and costs none. Benchmark on your own hardware with the Playground's
+    <code>file</code> mode.</div>
 
     <div class="next"><a href="multiport.html">Multi-port →</a></div>
   </main>

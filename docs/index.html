@@ -8188,8 +8188,8 @@ for (int i = 0; i &lt; threads.Length; i++)
 }
 
 // Reload on SIGHUP (kill -HUP &lt;pid&gt;): a fresh snapshot is opened and swapped in atomically, and the
-// old descriptors close after a grace period - so in-flight requests finish on the bytes they
-// started with.
+// old descriptors close once the last lease on them is disposed - so in-flight requests finish on
+// the bytes they started with.
 using var reload = PosixSignalRegistration.Create(PosixSignal.SIGHUP, context =&gt;
 {
     context.Cancel = true;   // handle it; don&#x27;t let the default action terminate us
