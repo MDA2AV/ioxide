@@ -125,6 +125,14 @@ internal static class UdpTests
             Assert.True(seen.Count >= count - 2, $"only {seen.Count}/{count} datagrams echoed through the ring");
         });
 
+        runner.Test("core: udp RecvSlots past what a kernel buffer ring holds is refused by name, not spun on at startup", () =>
+        {
+            // 40000 rounds up to a 65536-buffer ring, which a ushort buffer id never counts to.
+            Assert.Throws<ArgumentException>(
+                () => TestServer.StartDatagramConfigured(onDatagram: null, udpRecvSlots: 40_000),
+                "config.Udp.RecvSlots ('40000') must be less than or equal to '32768'");
+        });
+
         runner.Test("core: udp with no handler drops datagrams, reactor stays up", () =>
         {
             (int tcpPort, int udpPort) = TestServer.StartDatagram(onDatagram: null);
