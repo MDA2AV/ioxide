@@ -496,12 +496,19 @@ public sealed unsafe class TlsSession : IDisposable
             }
         }
 
+        StageRecords(connection);
+    }
+
+    /// <summary>Moves the records waiting in the write BIO into the connection's slab, and returns the bytes staged.</summary>
+    internal int StageRecords(TcpConnection connection)
+    {
+        int staged = 0;
         while (true)
         {
             int pending = (int)BoringSsl.BIO_ctrl_pending(_wbio);
             if (pending <= 0)
             {
-                return;
+                return staged;
             }
 
             int chunk = Math.Min(pending, 16 * 1024);
@@ -515,9 +522,10 @@ public sealed unsafe class TlsSession : IDisposable
 
             if (n <= 0)
             {
-                return;
+                return staged;
             }
             connection.Advance(n);
+            staged += n;
         }
     }
 

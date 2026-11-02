@@ -1251,7 +1251,10 @@ public sealed class TlsService
                 // Read before the alert's flush, during which other connections' BoringSSL calls clear this thread's queue.
                 string? failure = ret != 1 && err != BoringSsl.SSL_ERROR_WANT_READ ? BoringSsl.LastError() : null;
 
-                await FlushOutbound(conn, wbio);   // server flights stage into the slab
+                if (session.StageRecords(conn) > 0)   // server flights stage into the slab
+                {
+                    await conn.FlushAsync();
+                }
 
                 if (ret == 1)
                 {
@@ -1398,36 +1401,6 @@ public sealed class TlsService
                 pending.Conn = null;
             }
         }
-    }
-
-    private static async ValueTask FlushOutbound(TcpConnection conn, nint wbio)
-    {
-        int pending = (int)BoringSsl.BIO_ctrl_pending(wbio);
-        while (pending > 0)
-        {
-            int n = StageOutbound(conn, wbio, Math.Min(pending, 8 * 1024));
-            if (n <= 0)
-            {
-                break;
-            }
-            await conn.FlushAsync();
-            pending -= n;
-        }
-    }
-
-    private static unsafe int StageOutbound(TcpConnection conn, nint wbio, int chunk)
-    {
-        Span<byte> dst = conn.GetSpan(chunk);
-        int n;
-        fixed (byte* p = dst)
-        {
-            n = BoringSsl.BIO_read(wbio, p, chunk);
-        }
-        if (n > 0)
-        {
-            conn.Advance(n);
-        }
-        return n;
     }
 
     private static unsafe bool FeedInbound(TcpConnection conn, nint rbio, in RecvSnapshot snapshot)
