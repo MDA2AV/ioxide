@@ -458,6 +458,7 @@ public sealed unsafe partial class Reactor
 
             if (bind(fd, &addr6, (uint)sizeof(sockaddr_in6)) < 0)
             {
+                close(fd);
                 throw new InvalidOperationException("bind failed");
             }
         }
@@ -470,12 +471,14 @@ public sealed unsafe partial class Reactor
 
             if (bind(fd, &addr, (uint)sizeof(sockaddr_in)) < 0)
             {
+                close(fd);
                 throw new InvalidOperationException("bind failed");
             }
         }
 
         if (listen(fd, backlog) < 0)
         {
+            close(fd);
             throw new InvalidOperationException("listen failed");
         }
 
