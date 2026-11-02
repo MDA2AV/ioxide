@@ -68,29 +68,24 @@ reactor.OnStart = r =&gt;
 <pre><code class="language-csharp">var assets  = reactor.GetService&lt;StaticAssets&gt;();
 var readers = reactor.GetService&lt;RingPool&lt;AssetReader&gt;&gt;();
 
-if (assets.TryGet(pathBytes, out var asset))
+// The lease keeps this snapshot's descriptors open until the response is sent, even across a Reload().
+using var lease = assets.Acquire();
+
+if (lease.TryGet(pathBytes, out var asset))
 {
-    if (asset.Response != 0)
+    // Positional read off the ring through a rented reader.
+    var reader = await readers.RentAsync();
+
+    try
     {
-        // Hot path: the baked response - no file I/O, no header formatting.
-        await SendChunked(conn, asset.Response, asset.ResponseLength);
+        int read = await reader.ReadAsync(asset.Fd, offset: 0);
+
+        WriteHeader(conn, asset, read);
+        await SendChunked(conn, reader.Buffer, read);
     }
-    else
+    finally
     {
-        // Large file: positional read off the ring through a rented reader.
-        var reader = await readers.RentAsync();
-
-        try
-        {
-            int read = await reader.ReadAsync(asset.Fd, offset: 0);
-
-            WriteHeader(conn, asset, read);
-            await SendChunked(conn, reader.Buffer, read);
-        }
-        finally
-        {
-            readers.Return(reader);
-        }
+        readers.Return(reader);
     }
 }</code></pre>
     <p>The reader pool is what keeps concurrent requests from serializing: each rented
