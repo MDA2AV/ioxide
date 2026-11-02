@@ -21,11 +21,11 @@ namespace ioxide.Kestrel;
 /// </summary>
 internal sealed class IoxideTlsFeature : ITlsConnectionFeature, ITlsHandshakeFeature, ITlsApplicationProtocolFeature
 {
-    private readonly TlsSession? _session;
+    private readonly TlsSession _session;
     private X509Certificate2? _clientCertificate;
     private bool _clientCertificateRead;
 
-    public IoxideTlsFeature(ReadOnlyMemory<byte> applicationProtocol, TlsSession? session = null)
+    public IoxideTlsFeature(ReadOnlyMemory<byte> applicationProtocol, TlsSession session)
     {
         ApplicationProtocol = applicationProtocol;
         _session = session;
@@ -48,7 +48,7 @@ internal sealed class IoxideTlsFeature : ITlsConnectionFeature, ITlsHandshakeFea
             }
 
             _clientCertificateRead = true;
-            byte[]? der = _session?.PeerCertificateDer;
+            byte[]? der = _session.PeerCertificateDer;
             if (der is not null)
             {
                 _clientCertificate = X509CertificateLoader.LoadCertificate(der);
@@ -69,7 +69,7 @@ internal sealed class IoxideTlsFeature : ITlsConnectionFeature, ITlsHandshakeFea
     // ITlsHandshakeFeature. NegotiatedCipherSuite is the modern accessor; the legacy
     // CipherAlgorithm/HashAlgorithm/KeyExchangeAlgorithm (+ *Strength) properties are obsolete
     // (SYSLIB0058) but still required interface members, so implement and suppress the warning.
-    public SslProtocols Protocol => _session?.NegotiatedProtocolVersion switch
+    public SslProtocols Protocol => _session.NegotiatedProtocolVersion switch
     {
         0x0304 => SslProtocols.Tls13,
         0x0303 => SslProtocols.Tls12,
@@ -77,7 +77,7 @@ internal sealed class IoxideTlsFeature : ITlsConnectionFeature, ITlsHandshakeFea
     };
 
     // BoringSSL reports the suite by its IANA id, which is exactly how TlsCipherSuite is numbered.
-    public TlsCipherSuite NegotiatedCipherSuite => (TlsCipherSuite)(_session?.NegotiatedCipherSuiteId ?? 0);
+    public TlsCipherSuite NegotiatedCipherSuite => (TlsCipherSuite)_session.NegotiatedCipherSuiteId;
     public string HostName => string.Empty;
 #pragma warning disable SYSLIB0058 // legacy ITlsHandshakeFeature cipher properties are obsolete but required
     public CipherAlgorithmType CipherAlgorithm => CipherAlgorithmType.Aes128;
