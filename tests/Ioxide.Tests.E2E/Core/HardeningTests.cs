@@ -670,7 +670,6 @@ internal static class HardeningTests
                 {
                     return;
                 }
-                conn.ResetRead();
             }
         }
         finally
@@ -713,7 +712,6 @@ internal static class HardeningTests
                     {
                         return;
                     }
-                    conn.ResetRead();
                 }
             }
             finally

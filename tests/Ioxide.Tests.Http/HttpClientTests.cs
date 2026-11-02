@@ -355,7 +355,6 @@ internal static class HttpClientTests
                 {
                     return;
                 }
-                connection.ResetRead();
             }
         }
         finally
@@ -510,7 +509,6 @@ internal static class HttpClientTests
                 {
                     return;
                 }
-                connection.ResetRead();
             }
         }
         finally

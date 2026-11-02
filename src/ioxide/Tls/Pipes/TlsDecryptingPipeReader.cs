@@ -205,8 +205,7 @@ public sealed class TlsDecryptingPipeReader : PipeReader, IAsyncDisposable
     {
         if (_ended || _completed)
         {
-            _conn.ResetRead();   // what is still queued goes back to the ring at recycle
-            return true;
+            return true;   // what is still queued goes back to the ring at recycle
         }
 
         int produced;
@@ -216,14 +215,9 @@ public sealed class TlsDecryptingPipeReader : PipeReader, IAsyncDisposable
         }
         catch (Exception e)
         {
-            _conn.ResetRead();
             End(e);
             return true;
         }
-
-        // Before publishing: the caller resumes inline inside the flush and may read, and so arm the
-        // connection, again straight away.
-        _conn.ResetRead();
 
         bool closed = _session.Closed || snapshot.IsClosed;
         if (produced == 0 && !closed)

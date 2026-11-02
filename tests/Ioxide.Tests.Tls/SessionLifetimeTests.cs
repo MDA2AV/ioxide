@@ -124,7 +124,6 @@ internal static class SessionLifetimeTests
                 {
                     break;
                 }
-                conn.ResetRead();
             }
 
             if (_served)

@@ -75,7 +75,6 @@
 
     RecvSnapshot snapshot = await conn.ReadAsync();   // WANT_READ: pull more ciphertext
     bool fed = FeedInbound(conn, rbio, snapshot);
-    conn.ResetRead();
 
     if (snapshot.IsClosed &amp;&amp; !fed)
         throw new IOException("connection closed during TLS handshake");

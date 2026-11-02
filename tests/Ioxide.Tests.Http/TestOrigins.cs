@@ -62,7 +62,6 @@ internal static class TestOrigins
                             $"HTTP/1.1 {status} X\r\n{fields}content-length: {Encoding.Latin1.GetByteCount(body)}\r\n\r\n{body}"));
                         await connection.FlushAsync();
                     }
-                    connection.ResetRead();
                 }
             }
             finally

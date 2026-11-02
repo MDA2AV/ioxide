@@ -321,8 +321,7 @@ internal void Clear()
       <code>_pending</code> makes the next read return at once. Flushes signal the listener armed
       with them the same way (<code>IFlushListener</code>), taken before the in-progress guard is
       let go. Continuations are synchronous (<code>RunContinuationsAsynchronously = false</code>) -
-      that's what makes resume inline. <code>ResetRead</code> is a no-op kept for older callers:
-      a read readies its own value task when it parks.</li>
+      that's what makes resume inline.</li>
       <li><b>Read snapshot</b> - <code>ReadAsync</code> returns a <code>RecvSnapshot</code> (a tail
       marker + closed flag). The handler then drains slices up to that tail with
       <code>TryGetItem</code> / <code>GetSnapshotMemories</code>, and returns their buffers with

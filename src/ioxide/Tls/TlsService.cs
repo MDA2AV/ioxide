@@ -1264,7 +1264,6 @@ public sealed class TlsService
 
                 RecvSnapshot snapshot = await conn.ReadAsync();
                 bool fed = FeedInbound(conn, rbio, snapshot);
-                conn.ResetRead();
 
                 if (snapshot.IsClosed && !fed)
                 {
@@ -1296,7 +1295,6 @@ public sealed class TlsService
                     {
                         RecvSnapshot snapshot = await conn.ReadAsync();
                         FeedInbound(conn, rbio, snapshot);
-                        conn.ResetRead();
                         closed |= snapshot.IsClosed;
                     }
                     while (!turn.Ended && !closed);
@@ -1335,7 +1333,6 @@ public sealed class TlsService
                     // The rest has not arrived: wait for more, then for the end of its batch.
                     RecvSnapshot more = await conn.ReadAsync();
                     FeedInbound(conn, rbio, more);
-                    conn.ResetRead();
                     closed |= more.IsClosed;
                 }
             }

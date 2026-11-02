@@ -81,7 +81,6 @@ for (int i = 0; i < threads.Length; i++)
                 await conn.FlushAsync();
 
                 if (snapshot.IsClosed) return;
-                conn.ResetRead();
             }
         }
         finally

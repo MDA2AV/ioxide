@@ -186,7 +186,6 @@ for (int i = 0; i < threads.Length; i++)
                 await ServeAsync(conn, tls, carry, snapshot, readers, buffered);
 
                 if (recv.IsClosed || (tls?.Closed ?? false)) return;
-                conn.ResetRead();
             }
         }
         catch (Exception e)

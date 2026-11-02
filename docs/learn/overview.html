@@ -87,7 +87,6 @@ for (int i = 0; i &lt; config.ReactorCount; i++)
                 await conn.FlushAsync();                        // io_uring send
 
                 if (snapshot.IsClosed) return;
-                conn.ResetRead();
             }
         }
         finally { conn.DecRef(); }

@@ -86,8 +86,6 @@ internal static class DecryptFaultTests
                         }
                     }
 
-                    connection.ResetRead();
-
                     if (session.Closed || snapshot.IsClosed)
                     {
                         reported.TrySetResult("clean end of stream");

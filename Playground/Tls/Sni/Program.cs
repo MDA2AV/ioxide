@@ -151,7 +151,6 @@ for (int i = 0; i < threads.Length; i++)
 
                 tls.Write(conn, response);
                 await conn.FlushAsync();
-                conn.ResetRead();
             }
         }
         finally

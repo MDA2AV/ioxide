@@ -128,7 +128,6 @@ internal sealed class HopDuplexPipe : IDuplexPipe, IAsyncDisposable
                     }
                     _conn.ReturnBuffer(in item);
                 }
-                _conn.ResetRead();
 
                 // Peer close: a TCP FIN, or (TLS) a clean close_notify decoded by the session.
                 if (snap.IsClosed || (_tls is not null && _tls.Closed))

@@ -57,8 +57,6 @@ internal static class PgHandlers
                 {
                     return;
                 }
-
-                conn.ResetRead();
             }
         }
         finally
@@ -94,8 +92,6 @@ internal static class PgHandlers
                 {
                     return;
                 }
-
-                conn.ResetRead();
             }
         }
         finally

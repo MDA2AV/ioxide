@@ -202,7 +202,6 @@ internal static class ReactorSetupTeardownTests
                         {
                             return;   // the harness's readiness probe, which sends no request
                         }
-                        conn.ResetRead();
 
                         conn.Write(new byte[ResponseBytes]);   // past the slab, so a segmented write rents spare slabs
                         await conn.FlushAsync();
@@ -216,7 +215,6 @@ internal static class ReactorSetupTeardownTests
                         while (!(snapshot = await conn.ReadAsync()).IsClosed)
                         {
                             Wire.ReadPath(conn, snapshot);
-                            conn.ResetRead();
                         }
                     }
                     finally
