@@ -182,13 +182,29 @@ public sealed unsafe partial class Reactor
         _connections[fd] = conn;
     }
 
+    // Writes addr, len and bid only: bytes 14-15 of entry 0 are the ring's tail.
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static void WriteBufRingEntry(byte* ring, uint index, byte* slab, uint bufferSize, ushort bid)
+    {
+        byte* entry = ring + index * 16;
+        *(ulong*)(entry + 0)   = (ulong)(slab + bid * (nuint)bufferSize);
+        *(uint*)(entry + 8)    = bufferSize;
+        *(ushort*)(entry + 12) = bid;
+    }
+
+    private static void FillBufRing(byte* ring, uint entries, byte* slab, uint bufferSize)
+    {
+        for (ushort bid = 0; bid < entries; bid++)
+        {
+            WriteBufRingEntry(ring, bid, slab, bufferSize, bid);
+        }
+        Volatile.Write(ref *(ushort*)(ring + 14), (ushort)entries);
+    }
+
     // Stage a buffer without publishing; batch drains publish once for N buffers.
     private void ReturnBufferLocal(ushort bid)
     {
-        byte* slot = _bufRing + (_bufRingTail & _bufRingMask) * 16;
-        *(ulong*)(slot + 0)  = (ulong)(_bufSlab + bid * (nuint)_recvBufferSize);
-        *(uint*)(slot + 8)   = _recvBufferSize;
-        *(ushort*)(slot + 12) = bid;
+        WriteBufRingEntry(_bufRing, _bufRingTail & _bufRingMask, _bufSlab, _recvBufferSize, bid);
         _bufRingTail++;
         _buffersReturned = true;   // lets the loop re-arm recvs parked on -ENOBUFS (#93)
     }
