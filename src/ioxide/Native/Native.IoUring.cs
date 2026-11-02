@@ -86,8 +86,8 @@ public static unsafe partial class Native {
     // glibc's syscall() reports failure as -1 with the code in errno; it never returns -errno. So
     // all three need SetLastError, and the wrappers below normalise to liburing's convention - a
     // negative errno, which is what every caller compares against. Two were declared without it
-    // (#220), leaving three branches dead: Ring.Create's NO_SQARRAY fallback and the
-    // EINTR/EAGAIN/EBUSY tolerance in both loops, so one signal ended a reactor.
+    // (#220), leaving two branches dead: Ring.Create's NO_SQARRAY fallback and the loop's
+    // EINTR/EAGAIN/EBUSY tolerance, so one signal ended a reactor.
     [DllImport("libc", EntryPoint = "syscall", SetLastError = true)]
     private static extern long syscall3(long nr, uint a1, IoUringParams* a2);
 

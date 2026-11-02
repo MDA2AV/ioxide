@@ -36,7 +36,7 @@ internal static class SyscallErrnoTests
 
         runner.Test("syscall: io_uring_enter reports a negative errno, not -1", () =>
         {
-            // Not a ring descriptor, so the kernel answers EBADF - the value the two loops test
+            // Not a ring descriptor, so the kernel answers EBADF - the value the loop tests
             // against -EINTR/-EAGAIN/-EBUSY to decide whether to keep going.
             int rc = Native.io_uring_enter(-1, 0, 0, 0);
 
