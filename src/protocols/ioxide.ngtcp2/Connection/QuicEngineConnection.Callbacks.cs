@@ -144,7 +144,7 @@ public unsafe partial class QuicEngineConnection
             // the batch afterwards would deliver those datagrams to a different peer address than
             // ngtcp2 addressed them to. Egress.cs states the batch is single-destination "by
             // construction"; that holds only because this flush keeps it true.
-            c.FlushBatchBeforePathChange();
+            c.FlushGso();
             c.UpdatePeerAddress((nint)remoteAddr, (int)len);
         }
         catch (Exception e) { c.OnCallbackFault(e, nameof(CbPathChange)); }

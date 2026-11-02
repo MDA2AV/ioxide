@@ -37,11 +37,6 @@ public sealed partial class Nghttp3Connection : IDisposable
     private GCHandle _self;
     private bool _protocolFailed;
 
-    // The first exception a native callback raised, kept for the log line. Teardown cannot happen
-    // inside a callback (nghttp3 is on the stack below it), so the callbacks record here and
-    // _protocolFailed carries the decision out to the run loops - see Callbacks.Fault.
-    private Exception? _callbackFault;
-
     // The handler takes a body reader: a request is dispatched at end-of-headers, its stream paced.
     private bool _streamBodies;
     private bool _draining;

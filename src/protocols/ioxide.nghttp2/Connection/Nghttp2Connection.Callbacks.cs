@@ -27,7 +27,6 @@ public sealed partial class Nghttp2Connection
         try
         {
             Nghttp2Connection connection = From(user);
-            connection._callbackFault ??= e;
             connection._failed = true;
             Console.Error.WriteLine($"[ioxide.nghttp2] callback faulted, failing the connection: {e}");
         }
