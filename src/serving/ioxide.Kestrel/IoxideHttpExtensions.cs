@@ -1,3 +1,4 @@
+using System.Runtime.CompilerServices;
 using Microsoft.AspNetCore.Http;
 using ioxide;
 
@@ -17,10 +18,10 @@ public static class IoxideHttpExtensions
             .Reactor;
 
     /// <summary>
-    /// Runs <paramref name="work"/> on this connection's reactor and returns its result. When the endpoint is
-    /// already on that reactor (the common keep-alive case) it runs inline - ioxide's inline resume is
-    /// preserved. Otherwise (e.g. the first request of a connection, which Kestrel may dispatch to the
-    /// ThreadPool) the work is marshaled onto the reactor. Either way the ring I/O runs on the reactor.
+    /// Runs <paramref name="work"/> on this connection's reactor and returns its result. Kestrel's request loop
+    /// runs on the reactor from the first request, so this usually runs inline; from another thread (after an
+    /// await that resumed on the ThreadPool, say) it switches to the reactor first, and throws
+    /// <see cref="ObjectDisposedException"/> if the reactor has stopped.
     /// Materialize ring-native results (PgRow, file buffers) into your own objects inside <paramref name="work"/>.
     /// </summary>
     public static Task<T> OnReactor<T>(this HttpContext context, Func<Reactor, Task<T>> work)
@@ -32,20 +33,14 @@ public static class IoxideHttpExtensions
             return work(reactor);
         }
 
-        var tcs = new TaskCompletionSource<T>(TaskCreationOptions.RunContinuationsAsynchronously);
-        reactor.ScheduleOnReactor(_ => _ = RunAsync(reactor, work, tcs), null);
-        return tcs.Task;
+        return RunOnReactor(reactor, work);
     }
 
-    private static async Task RunAsync<T>(Reactor reactor, Func<Reactor, Task<T>> work, TaskCompletionSource<T> tcs)
+    // Out of line, so the on-reactor path stays a bare call.
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static async Task<T> RunOnReactor<T>(Reactor reactor, Func<Reactor, Task<T>> work)
     {
-        try
-        {
-            tcs.SetResult(await work(reactor));
-        }
-        catch (Exception e)
-        {
-            tcs.SetException(e);
-        }
+        await new ReactorSwitch(reactor);
+        return await work(reactor);
     }
 }

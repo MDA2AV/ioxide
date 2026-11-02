@@ -15,6 +15,7 @@ internal static class Program
         ListenerReleaseTests.Register(runner);
         TimerTests.Register(runner);
         AffinityTests.Register(runner);
+        KestrelTests.Register(runner);
         HardeningTests.Register(runner);
         IncrementalTests.Register(runner);
         RecvBufferReclaimTests.Register(runner);
