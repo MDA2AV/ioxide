@@ -47,7 +47,9 @@
     atomic reloads work is in <a href="dev-file.html">ioxide.file internals</a>.</div>
 
     <h2>Asset snapshots</h2>
-    <p><code>AssetCache</code> opens every file under a root once, keyed by URL path, and keeps
+    <p><code>AssetCache</code> opens every file under a root once (symlinks, hidden and system entries
+    are skipped: on Linux any name starting with a dot, so a <code>.well-known/</code> directory is not
+    served), keyed by URL path, and keeps
     just its descriptor, its path and its length at snapshot time - no file bytes, and no HTTP:
     the status line, Content-Type and Content-Length are the handler's to write. Finding a file
     is a dictionary lookup (span-based, straight from the request bytes, no allocation); its body

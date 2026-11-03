@@ -57,8 +57,10 @@
       <code>GetAlternateLookup&lt;ReadOnlySpan&lt;char&gt;&gt;</code> - zero per-request string
       allocation. A string overload exists for convenience.</li>
       <li><b>Symlink safety</b> - enumeration skips reparse points
-      (<code>AttributesToSkip = ReparsePoint</code>), so a symlink can't point outside the root and a
-      symlinked directory isn't descended into - traversal is blocked.</li>
+      (<code>AttributesToSkip = ReparsePoint | Hidden | System</code>), so a symlink can't point outside
+      the root and a symlinked directory isn't descended into - traversal is blocked. Hidden entries are
+      skipped too, and on Linux that is any name starting with a dot, so dot-files and a
+      <code>.well-known/</code> directory are not served.</li>
       <li><b>Refcounting</b> - the snapshot is reference-counted (<code>TryAddRef</code> /
       <code>Release</code>, starting at 1 for the live reference). It is actually freed - descriptors
       closed - only when the last reference is dropped. This is what makes reloads safe (below).</li>
