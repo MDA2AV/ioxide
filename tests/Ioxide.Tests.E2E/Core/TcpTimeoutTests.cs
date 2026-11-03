@@ -41,7 +41,6 @@ internal static class TcpTimeoutTests
 
                     // Parked here with a peer that has gone quiet. Only the sweep ends this - which
                     // is the point: nothing else was ever going to.
-                    conn.ResetRead();
                     RecvSnapshot snapshot = await conn.ReadAsync();
                     closed.TrySetResult(snapshot.IsClosed);
                 }
@@ -113,14 +112,12 @@ internal static class TcpTimeoutTests
                 {
                     conn.Write("ok"u8);
                     await conn.FlushAsync();
-                    conn.ResetRead();
                     await EchoHandler(reactor, conn);   // the busy one; releases its own ref
                     return;
                 }
 
                 try
                 {
-                    conn.ResetRead();
                     RecvSnapshot snapshot = await conn.ReadAsync();
                     quietClosed.TrySetResult(snapshot.IsClosed);
                 }
@@ -190,7 +187,6 @@ internal static class TcpTimeoutTests
                     conn.Write("done"u8);
                     await conn.FlushAsync();
 
-                    conn.ResetRead();
                     await conn.ReadAsync();    // park until the client hangs up
                 }
                 finally
@@ -221,7 +217,6 @@ internal static class TcpTimeoutTests
                         return;
                     }
 
-                    conn.ResetRead();
                     ValueTask<RecvSnapshot> parked = conn.ReadAsync();
 
                     for (int i = 0; i < 16; i++)   // 16 x 150 ms
@@ -391,7 +386,6 @@ internal static class TcpTimeoutTests
                     conn.ShutdownWrite();
 
                     var got = new List<byte>();
-                    conn.ResetRead();
                     while (got.Count < 4)
                     {
                         RecvSnapshot snapshot = await conn.ReadAsync();
@@ -407,7 +401,6 @@ internal static class TcpTimeoutTests
                         {
                             break;
                         }
-                        conn.ResetRead();
                     }
                     heard.TrySetResult(Encoding.ASCII.GetString(got.ToArray()));
                 }
@@ -453,7 +446,6 @@ internal static class TcpTimeoutTests
                     inFlight.TrySetResult(!flush.IsCompleted);
                     await flush;
 
-                    conn.ResetRead();
                     await conn.ReadAsync();   // until the client closes, having read to the FIN
                 }
                 finally
@@ -725,7 +717,6 @@ internal static class TcpTimeoutTests
             {
                 return false;   // the probe
             }
-            conn.ResetRead();
         }
     }
 
@@ -770,7 +761,6 @@ internal static class TcpTimeoutTests
                 {
                     return;
                 }
-                conn.ResetRead();
             }
         }
         finally

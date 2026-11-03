@@ -81,7 +81,6 @@ public sealed unsafe partial class Reactor
         }
 
         conn.Bgid            = gid;
-        conn.BufRingEntries  = entries;
         conn.BufRingMask     = (uint)(entries - 1);
         conn.IncrementalMode = true;
 

@@ -178,7 +178,6 @@ internal static class HttpClientIdleCloseTests
                     {
                         return;   // DecRef sends the FIN an idle timeout would
                     }
-                    connection.ResetRead();
                 }
             }
             finally

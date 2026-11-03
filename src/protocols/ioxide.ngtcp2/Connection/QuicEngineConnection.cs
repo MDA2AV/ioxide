@@ -18,11 +18,7 @@ namespace ioxide.ngtcp2;
 /// </summary>
 public unsafe partial class QuicEngineConnection : QuicConnection
 {
-    // sockaddr cap the transport uses for its peer-address blocks; large enough for sockaddr_in6.
-    private const int PeerAddrCap = 128;
-
     private readonly QuicEngine? _engine;              // server connections
-    private readonly QuicClientEngine? _clientEngine;   // client connections
     private nint _conn;                        // iq_conn*, null once closed
 
     /// <summary>
@@ -119,7 +115,6 @@ public unsafe partial class QuicEngineConnection : QuicConnection
     // Held directly (not via the base class) because the engine's get_new_connection_id callback
     // fires during iq_accept - before the transport wires the base Reactor/SocketFd/PeerAddr in.
     private Reactor _reactor = null!;
-    private int _socketFd;
 
     // One reusable send scratch datagram (max QUIC payload); the engine writes at most one per call.
     private readonly byte[] _sendBuf = new byte[1452];
@@ -153,7 +148,6 @@ public unsafe partial class QuicEngineConnection : QuicConnection
     /// <summary>Client-side connection; <see cref="QuicClientEngine.Connect"/> builds these.</summary>
     public QuicEngineConnection(QuicClientEngine clientEngine)
     {
-        _clientEngine = clientEngine;
     }
 
     /// <summary>Handshake finished; safe to open server-initiated streams and send.</summary>
@@ -222,7 +216,7 @@ public unsafe partial class QuicEngineConnection : QuicConnection
 
     // Adopt the connection: validate the client's first datagram and create the ngtcp2 conn. Runs
     // inside the factory, before the transport records the route; returns false to reject. reactor
-    // and socketFd are captured here because engine callbacks can fire during iq_accept.
+    // is captured here because engine callbacks can fire during iq_accept.
     //
     // The reactor's shard identity goes across too: it is stamped into the connection id the
     // server mints, which is what lets the kernel steer this connection's later datagrams back to
@@ -231,7 +225,6 @@ public unsafe partial class QuicEngineConnection : QuicConnection
     {
         _reactor  = reactor;
         TakeSendRetention(reactor);
-        _socketFd = datagram.SocketFd;
         _self     = GCHandle.Alloc(this);
         scidLen = 0;
 
@@ -267,11 +260,10 @@ public unsafe partial class QuicEngineConnection : QuicConnection
     /// report the connection ID we asked the peer to address us by, so the reactor can route the
     /// replies back here. The handshake itself starts on the first pump (the caller flushes).
     /// </summary>
-    internal bool TryConnect(nint clientEnginePtr, Reactor reactor, int socketFd, ushort localPort,
+    internal bool TryConnect(nint clientEnginePtr, Reactor reactor, ushort localPort,
         nint remoteAddr, int remoteAddrLen, string serverName, string alpn, int scidLen, Span<byte> scidOut)
     {
         _reactor  = reactor;
-        _socketFd = socketFd;
         _self     = GCHandle.Alloc(this);
         TakeSendRetention(reactor);
 

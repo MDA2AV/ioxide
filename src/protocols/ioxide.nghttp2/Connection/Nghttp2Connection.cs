@@ -59,10 +59,6 @@ public sealed partial class Nghttp2Connection : IDisposable
     // and the session returns no WINDOW_UPDATE of its own.
     private bool _streamBodies;
 
-    // The first exception a native callback raised, kept for the log line; _failed carries the
-    // decision out to the loops, since teardown cannot happen inside a callback.
-    private Exception? _callbackFault;
-
     // The reactor this connection is served on; null when it runs without one, as over a test pipe.
     private Reactor? _reactor;
 
@@ -119,9 +115,6 @@ public sealed partial class Nghttp2Connection : IDisposable
             _failed = true;
         }
     }
-
-    /// <summary>Send GOAWAY and stop accepting new streams. In-flight ones still finish.</summary>
-    public void Shutdown() => _failed = true;
 
     public void Dispose()
     {

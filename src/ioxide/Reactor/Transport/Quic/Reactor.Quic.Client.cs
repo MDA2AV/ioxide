@@ -60,9 +60,6 @@ public sealed unsafe partial class Reactor
         return _udpFds[_quicClientSocketIndex];
     }
 
-    /// <summary>The socket outbound connections send from, or -1 before the first connect.</summary>
-    public int QuicSocketFd => _quicClientSocketIndex >= 0 ? _udpFds[_quicClientSocketIndex] : -1;
-
     /// <summary>The local port outbound connections send from (ephemeral when standalone).</summary>
     public ushort QuicLocalPort => _quicClientSocketIndex >= 0 ? _udpFdPorts[_quicClientSocketIndex] : (ushort)0;
 

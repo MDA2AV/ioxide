@@ -30,7 +30,6 @@ public sealed unsafe class Ring : IDisposable
 
     private byte* _ringPtr;
     private nuint _ringSize;
-    private byte* _sqePtr;
     private nuint _sqeSize;
 
     private bool _hasSqArray;
@@ -171,7 +170,6 @@ public sealed unsafe class Ring : IDisposable
             throw new InvalidOperationException("mmap(SQES) failed");
         }
         ring._sqes    = (IoUringSqe*)sqeMem;
-        ring._sqePtr  = (byte*)sqeMem;
         ring._sqeSize = sqeBytes;
 
         byte* ringPointer = (byte*)ringMem;
@@ -259,27 +257,6 @@ public sealed unsafe class Ring : IDisposable
         return io_uring_enter(_enterFd, toSubmit, waitFor, flags | IORING_ENTER_EXT_ARG, &arg, (nuint)sizeof(io_uring_getevents_arg));
     }
 
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public bool TryGetCqe(out IoUringCqe cqe)
-    {
-        uint head = *_cqHead;
-        uint tail = Volatile.Read(ref *_cqTail);
-
-        if (head == tail)
-        {
-            cqe = default;
-
-            return false;
-        }
-
-        cqe = _cqes[head & _cqMask];
-
-        return true;
-    }
-
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public void CqeSeen() => Volatile.Write(ref *_cqHead, *_cqHead + 1);
-
     // Batched CQ drain (liburing io_uring_for_each_cqe + io_uring_cq_advance):
     // read the kernel-written tail once (acquire), process the whole batch,
     // then publish the consumed head once (release) instead of once per CQE.
@@ -296,28 +273,22 @@ public sealed unsafe class Ring : IDisposable
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public void CqAdvance(uint n) => Volatile.Write(ref *_cqHead, *_cqHead + n);
 
+    public void Dispose() => Dispose(true);
+
     /// <summary>
     /// Unmaps both rings and, unless <paramref name="closeFd"/> says otherwise, closes the
     /// descriptor. Keeping it is for one case only - see Reactor.Teardown.
     /// </summary>
     public void Dispose(bool closeFd)
     {
-        _closeFd = closeFd;
-        Dispose();
-    }
-
-    private bool _closeFd = true;
-
-    public void Dispose()
-    {
         if (_ringPtr != null)
         {
             munmap(_ringPtr, _ringSize); _ringPtr = null;
         }
 
-        if (_sqePtr != null)
+        if (_sqes != null)
         {
-            munmap(_sqePtr,  _sqeSize);  _sqePtr  = null;
+            munmap(_sqes,    _sqeSize);  _sqes    = null;
         }
 
         // Before the descriptor goes: the slot holds a reference to the ring, which would otherwise outlive
@@ -330,7 +301,7 @@ public sealed unsafe class Ring : IDisposable
             _enterFlags = 0;
         }
 
-        if (_fd > 0 && _closeFd)
+        if (_fd > 0 && closeFd)
         {
             close(_fd); _fd = 0;
         }

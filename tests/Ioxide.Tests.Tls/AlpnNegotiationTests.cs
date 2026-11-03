@@ -330,7 +330,6 @@ internal static class AlpnNegotiationTests
 
                 session.Write(connection, response);
                 await connection.FlushAsync();
-                connection.ResetRead();
             }
         }
         finally

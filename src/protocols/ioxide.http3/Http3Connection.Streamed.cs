@@ -51,7 +51,6 @@ public sealed partial class Http3Connection
         finally
         {
             ReleaseCapacityWaiters();
-            while (_writerPool.TryPop(out _)) { }
         }
     }
 

@@ -78,7 +78,7 @@ public sealed class TlsService
             //
             // MarkClosed is what wakes the handshake NOW, rather than one io_uring round trip
             // later, with the closed snapshot its loop already knows how to handle.
-            Sockets.Shutdown(head.Conn.ClientFd);
+            Native.shutdown(head.Conn.ClientFd, Native.SHUT_RDWR);
             head.Conn.MarkClosed();
         }
     }
@@ -1221,14 +1221,13 @@ public sealed class TlsService
         BoringSsl.SSL_set_bio(ssl, rbio, wbio);   // ssl owns both BIOs now
         BoringSsl.SSL_set_accept_state(ssl);
 
-        var session = new TlsSession(ssl, rbio, wbio);
+        var session = new TlsSession(ssl, rbio, wbio, conn);
 
         // Associate the session with this SSL so the keylog callback writes the secret onto it
         // directly (no global map). The handle is freed in TlsSession.Dispose.
         GCHandle handle = GCHandle.Alloc(session);
         BoringSsl.SSL_set_ex_data(ssl, SslSessionIndex, GCHandle.ToIntPtr(handle));
         session.AttachHandle(handle);
-        session.AttachConnection(conn);   // the teardown close_notify goes out on it, both modes
 
         // Under the sweep from here until the handshake settles, either way.
         PendingHandshake? pending = null;
@@ -1251,7 +1250,10 @@ public sealed class TlsService
                 // Read before the alert's flush, during which other connections' BoringSSL calls clear this thread's queue.
                 string? failure = ret != 1 && err != BoringSsl.SSL_ERROR_WANT_READ ? BoringSsl.LastError() : null;
 
-                await FlushOutbound(conn, wbio);   // server flights stage into the slab
+                if (session.StageRecords(conn) > 0)   // server flights stage into the slab
+                {
+                    await conn.FlushAsync();
+                }
 
                 if (ret == 1)
                 {
@@ -1264,7 +1266,6 @@ public sealed class TlsService
 
                 RecvSnapshot snapshot = await conn.ReadAsync();
                 bool fed = FeedInbound(conn, rbio, snapshot);
-                conn.ResetRead();
 
                 if (snapshot.IsClosed && !fed)
                 {
@@ -1296,7 +1297,6 @@ public sealed class TlsService
                     {
                         RecvSnapshot snapshot = await conn.ReadAsync();
                         FeedInbound(conn, rbio, snapshot);
-                        conn.ResetRead();
                         closed |= snapshot.IsClosed;
                     }
                     while (!turn.Ended && !closed);
@@ -1335,7 +1335,6 @@ public sealed class TlsService
                     // The rest has not arrived: wait for more, then for the end of its batch.
                     RecvSnapshot more = await conn.ReadAsync();
                     FeedInbound(conn, rbio, more);
-                    conn.ResetRead();
                     closed |= more.IsClosed;
                 }
             }
@@ -1355,7 +1354,7 @@ public sealed class TlsService
                     ?? throw new IOException("TLS handshake completed but no server traffic secret was captured");
                 Ktls.EnableTx(conn.ClientFd, secret);
                 conn.SendOpFlags = 0;
-                session.MarkTxEnabled(conn.ClientFd);
+                session.MarkTxEnabled();
             }
             else
             {
@@ -1400,36 +1399,6 @@ public sealed class TlsService
         }
     }
 
-    private static async ValueTask FlushOutbound(TcpConnection conn, nint wbio)
-    {
-        int pending = (int)BoringSsl.BIO_ctrl_pending(wbio);
-        while (pending > 0)
-        {
-            int n = StageOutbound(conn, wbio, Math.Min(pending, 8 * 1024));
-            if (n <= 0)
-            {
-                break;
-            }
-            await conn.FlushAsync();
-            pending -= n;
-        }
-    }
-
-    private static unsafe int StageOutbound(TcpConnection conn, nint wbio, int chunk)
-    {
-        Span<byte> dst = conn.GetSpan(chunk);
-        int n;
-        fixed (byte* p = dst)
-        {
-            n = BoringSsl.BIO_read(wbio, p, chunk);
-        }
-        if (n > 0)
-        {
-            conn.Advance(n);
-        }
-        return n;
-    }
-
     private static unsafe bool FeedInbound(TcpConnection conn, nint rbio, in RecvSnapshot snapshot)
     {
         bool any = false;
@@ -1449,12 +1418,13 @@ public sealed class TlsService
     private static unsafe int TakeWaiting(int fd, nint rbio, int count)
     {
         byte* buffer = stackalloc byte[16 * 1024];
-        int n = Sockets.ReceiveWaiting(fd, buffer, Math.Min(count, 16 * 1024));
-        if (n > 0)
+        long n = Native.recv(fd, buffer, (nuint)Math.Min(count, 16 * 1024), Native.MSG_DONTWAIT);
+        if (n <= 0)
         {
-            BoringSsl.BIO_write(rbio, buffer, n);
+            return 0;   // nothing waiting, or an error the caller's next ring recv reports
         }
-        return n;
+        BoringSsl.BIO_write(rbio, buffer, (int)n);
+        return (int)n;
     }
 
     /// <summary>

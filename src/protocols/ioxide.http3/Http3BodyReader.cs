@@ -35,11 +35,10 @@ public sealed class Http3BodyReader : IValueTaskSource<ReadOnlyMemory<byte>>
         RunContinuationsAsynchronously = false,
     };
 
-    internal Http3BodyReader(Http3Connection owner, long streamId, bool ended)
+    internal Http3BodyReader(Http3Connection owner, long streamId)
     {
         _owner = owner;
         _streamId = streamId;
-        _ended = ended;
     }
 
     /// <summary>

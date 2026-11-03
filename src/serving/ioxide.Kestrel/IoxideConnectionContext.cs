@@ -32,7 +32,7 @@ internal sealed class IoxideConnectionContext : ConnectionContext,
 
     private int _disposed;
 
-    public IoxideConnectionContext(TcpConnection connection, Reactor reactor, EndPoint localEndPoint, long id, TlsSession? session = null, string? alpn = null)
+    public IoxideConnectionContext(TcpConnection connection, Reactor reactor, EndPoint localEndPoint, long id, TlsSession? session = null)
     {
         _pipe = new HopDuplexPipe(connection, reactor, session);
         _reactor = reactor;
@@ -54,7 +54,8 @@ internal sealed class IoxideConnectionContext : ConnectionContext,
         {
             // TLS terminated in the transport (kTLS): present the connection to Kestrel as HTTPS with the
             // negotiated ALPN, in place of UseHttps()/SslStream.
-            var tlsFeature = new IoxideTlsFeature(Encoding.ASCII.GetBytes(alpn ?? "http/1.1"), session);
+            // Not the configured ALPN, which would name a protocol even when the client offered none of ours.
+            var tlsFeature = new IoxideTlsFeature(Encoding.ASCII.GetBytes(session.NegotiatedAlpn ?? "http/1.1"), session);
             _features.Set<ITlsConnectionFeature>(tlsFeature);
             _features.Set<ITlsHandshakeFeature>(tlsFeature);
             _features.Set<ITlsApplicationProtocolFeature>(tlsFeature);

@@ -142,9 +142,8 @@ public unsafe partial class QuicEngineConnection
             // Flush FIRST. Anything already coalesced in the GSO batch was built for the address
             // in force when it was queued, and this call is what changes that address - sending
             // the batch afterwards would deliver those datagrams to a different peer address than
-            // ngtcp2 addressed them to. Egress.cs states the batch is single-destination "by
-            // construction"; that holds only because this flush keeps it true.
-            c.FlushBatchBeforePathChange();
+            // ngtcp2 addressed them to. This flush is what keeps every batch single-destination.
+            c.FlushGso();
             c.UpdatePeerAddress((nint)remoteAddr, (int)len);
         }
         catch (Exception e) { c.OnCallbackFault(e, nameof(CbPathChange)); }

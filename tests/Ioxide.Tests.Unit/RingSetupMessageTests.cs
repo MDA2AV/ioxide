@@ -66,6 +66,10 @@ internal static class RingSetupMessageTests
                 new ServerConfig { Incremental = new IncrementalOptions { MaxConnections = 0 } }),
             ("Incremental.MaxConnections above 65534", "config.Incremental.MaxConnections",
                 new ServerConfig { Incremental = new IncrementalOptions { MaxConnections = 65_535 } }),
+            ("Udp.RecvSlots of 0", "config.Udp.RecvSlots",
+                new ServerConfig { Udp = new UdpOptions { RecvSlots = 0 } }),
+            ("Udp.RecvSlots above 32768", "config.Udp.RecvSlots",
+                new ServerConfig { Udp = new UdpOptions { RecvSlots = 32_769 } }),
         ];
 
         foreach ((string name, string property, ServerConfig config) in refused)
@@ -80,6 +84,7 @@ internal static class RingSetupMessageTests
             {
                 RecvSlots = 32_768,
                 Tcp = new TcpOptions { RecvQueueEntries = 1, WriteSlabSize = 1 },
+                Udp = new UdpOptions { RecvSlots = 32_768 },
             });
             _ = new Reactor(0, new ServerConfig
             {

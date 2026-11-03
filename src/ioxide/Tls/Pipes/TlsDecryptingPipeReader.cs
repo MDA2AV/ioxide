@@ -19,19 +19,14 @@ namespace ioxide.tls;
 /// read; this class only feeds it.
 /// </summary>
 /// <remarks>Reads and disposal from another thread run on the connection's reactor.</remarks>
-public sealed class TlsDecryptingPipeReader : PipeReader, IAsyncDisposable
+public sealed class TlsDecryptingPipeReader : PipeReader, IAsyncDisposable, IRecvListener
 {
     private readonly TcpConnection _conn;
     private readonly TlsSession _session;
     private readonly Pipe _plain;
 
-    // A parked connection read chains onto the connection's value-task source, as in
-    // TcpConnectionPipeReader, so a read that waits allocates nothing.
-    private ValueTaskAwaiter<RecvSnapshot> _pendingRecv;
-    private readonly Action _onRecvReady;
-
+    // A read that waits parks this reader on the connection, as TcpConnectionPipeReader does, so it allocates nothing.
     private bool _recvArmed;       // a connection read is parked with OnRecvReady behind it
-    private bool _callerWaiting;   // the caller has a read on the buffer that nothing has completed yet
     private bool _ended;           // the buffer is complete: close_notify, a closed connection or a fault
     private bool _completed;       // the caller is done with this reader
     private bool _cancelRequested; // CancelPendingRead: the next read returns canceled
@@ -40,7 +35,6 @@ public sealed class TlsDecryptingPipeReader : PipeReader, IAsyncDisposable
     {
         _conn = connection ?? throw new ArgumentNullException(nameof(connection));
         _session = session ?? throw new ArgumentNullException(nameof(session));
-        _onRecvReady = OnRecvReady;
 
         // A buffer, not a channel: no pause threshold, because nothing is decrypted beyond what a
         // read asks for, and nothing is decrypted anywhere but on the reactor. Inline schedulers so
@@ -86,7 +80,6 @@ public sealed class TlsDecryptingPipeReader : PipeReader, IAsyncDisposable
         // the flush that delivers, which may already have happened by the time this returns.
         if (!read.IsCompleted)
         {
-            _callerWaiting = true;
             Fill();
         }
 
@@ -163,30 +156,30 @@ public sealed class TlsDecryptingPipeReader : PipeReader, IAsyncDisposable
     {
         while (!_recvArmed)
         {
-            ValueTask<RecvSnapshot> recv = _conn.ReadAsync();
-
-            if (!recv.IsCompletedSuccessfully)
+            if (!_conn.TryReadOrPark(this, out RecvSnapshot snapshot))
             {
-                _recvArmed = true;
-                _pendingRecv = recv.GetAwaiter();
-                _pendingRecv.UnsafeOnCompleted(_onRecvReady);
                 return;
             }
 
-            if (Ingest(recv.Result))
+            _recvArmed = false;   // served at once - also after OnParking, when a completion came while it ran
+
+            if (Ingest(snapshot))
             {
                 return;
             }
         }
     }
 
+    // Set before the park is published: from then on the completion can run OnRecvReady before TryReadOrPark returns.
+    void IRecvListener.OnParking() => _recvArmed = true;
+
     // Completion of a parked connection read - runs inline on the reactor, inside the recv
     // completion that brought the bytes.
-    private void OnRecvReady()
+    void IRecvListener.OnRecvReady(RecvSnapshot snapshot)
     {
         _recvArmed = false;
 
-        if (!Ingest(_pendingRecv.GetResult()) && _callerWaiting)
+        if (!Ingest(snapshot))
         {
             Fill();   // half a record: wait for the rest
         }
@@ -205,8 +198,7 @@ public sealed class TlsDecryptingPipeReader : PipeReader, IAsyncDisposable
     {
         if (_ended || _completed)
         {
-            _conn.ResetRead();   // what is still queued goes back to the ring at recycle
-            return true;
+            return true;   // what is still queued goes back to the ring at recycle
         }
 
         int produced;
@@ -216,14 +208,9 @@ public sealed class TlsDecryptingPipeReader : PipeReader, IAsyncDisposable
         }
         catch (Exception e)
         {
-            _conn.ResetRead();
             End(e);
             return true;
         }
-
-        // Before publishing: the caller resumes inline inside the flush and may read, and so arm the
-        // connection, again straight away.
-        _conn.ResetRead();
 
         bool closed = _session.Closed || snapshot.IsClosed;
         if (produced == 0 && !closed)
@@ -231,7 +218,6 @@ public sealed class TlsDecryptingPipeReader : PipeReader, IAsyncDisposable
             return false;
         }
 
-        _callerWaiting = false;
         if (produced > 0)
         {
             Publish();
@@ -260,7 +246,6 @@ public sealed class TlsDecryptingPipeReader : PipeReader, IAsyncDisposable
         }
 
         _ended = true;
-        _callerWaiting = false;
         _plain.Writer.Complete(fault);
     }
 

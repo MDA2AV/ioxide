@@ -212,10 +212,6 @@ internal static class RecvBufferReclaimTests
 
                         stream.Dispose();   // returns the slice, with seven bytes still unread in it
 
-                        // A stream abandoned mid-snapshot never drains it, so the connection's read
-                        // signal is still armed from that read; the next stream needs it re-armed.
-                        conn.ResetRead();
-
                         conn.Write("."u8);
                         await conn.FlushAsync();
                         served++;

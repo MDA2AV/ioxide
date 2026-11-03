@@ -194,7 +194,6 @@ internal static class IdentitySubjectTests
                 await connection.FlushAsync();
             }
 
-            // No ResetRead above: that belongs to a read this handler actually issued.
             while (true)
             {
                 RecvSnapshot snapshot = await connection.ReadAsync();
@@ -205,7 +204,6 @@ internal static class IdentitySubjectTests
 
                 Answer(connection, session, withDotNetName);
                 await connection.FlushAsync();
-                connection.ResetRead();
             }
         }
         finally

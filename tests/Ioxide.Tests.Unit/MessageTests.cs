@@ -1,3 +1,4 @@
+using ioxide;
 using ioxide.httpclient;
 
 namespace Ioxide.Tests;

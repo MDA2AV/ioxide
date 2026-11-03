@@ -178,7 +178,6 @@ internal static class RingHttpClientTests
 
                 Wire.Write(connection, 200, result);
                 await connection.FlushAsync();
-                connection.ResetRead();
             }
         }
         finally

@@ -75,7 +75,6 @@ internal static class HttpClientChunkedTests
                 {
                     return;
                 }
-                connection.ResetRead();
             }
         }
         finally
