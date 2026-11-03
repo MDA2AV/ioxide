@@ -25,20 +25,20 @@ internal sealed class IoxideTlsFeature : ITlsConnectionFeature, ITlsHandshakeFea
     private X509Certificate2? _clientCertificate;
     private bool _clientCertificateRead;
 
-    public IoxideTlsFeature(ReadOnlyMemory<byte> applicationProtocol, TlsSession? session = null)
+    public IoxideTlsFeature(ReadOnlyMemory<byte> applicationProtocol, TlsSession session)
     {
         ApplicationProtocol = applicationProtocol;
 
         // Read now: the session is freed with the connection, and an HTTP/2 stream's handler can outlive it.
-        _peerCertificateDer = session?.PeerCertificateDer;
-        Protocol = session?.NegotiatedProtocolVersion switch
+        _peerCertificateDer = session.PeerCertificateDer;
+        Protocol = session.NegotiatedProtocolVersion switch
         {
             0x0304 => SslProtocols.Tls13,
             0x0303 => SslProtocols.Tls12,
             _ => SslProtocols.None,
         };
         // BoringSSL reports the suite by its IANA id, which is exactly how TlsCipherSuite is numbered.
-        NegotiatedCipherSuite = (TlsCipherSuite)(session?.NegotiatedCipherSuiteId ?? 0);
+        NegotiatedCipherSuite = (TlsCipherSuite)session.NegotiatedCipherSuiteId;
     }
 
     // ITlsApplicationProtocolFeature - the negotiated ALPN.

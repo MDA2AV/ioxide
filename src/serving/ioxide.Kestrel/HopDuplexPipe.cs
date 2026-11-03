@@ -24,13 +24,7 @@ internal sealed class HopDuplexPipe : IDuplexPipe, IAsyncDisposable
 
     private Task _recvPump = Task.CompletedTask;
     private Task _sendPump = Task.CompletedTask;
-    private int _started;
     private int _disposing;   // from here on the connection may be recycled, so Abort leaves it alone
-
-    [System.Runtime.InteropServices.DllImport("libc", EntryPoint = "shutdown")]
-    private static extern int Shutdown(int sockfd, int how);
-    private const int ShutWr = 1;     // SHUT_WR
-    private const int ShutRdWr = 2;   // SHUT_RDWR
 
     // Pipe backpressure thresholds (bytes). Inbound (recv -> Kestrel's parser) is given a megabyte of
     // slack so a fast peer is not throttled mid-request; outbound (Kestrel's response -> the send
@@ -73,11 +67,6 @@ internal sealed class HopDuplexPipe : IDuplexPipe, IAsyncDisposable
     /// <summary>Launches the recv and send pumps. Must be called on the reactor thread.</summary>
     public void Start()
     {
-        if (Interlocked.Exchange(ref _started, 1) == 1)
-        {
-            return;
-        }
-
         // The pump's read is always parked, and Kestrel runs its own timeouts.
         _conn.DisableReadTimeout();
 
@@ -237,7 +226,7 @@ internal sealed class HopDuplexPipe : IDuplexPipe, IAsyncDisposable
         var hop = (HopDuplexPipe)s!;
         if (Volatile.Read(ref hop._disposing) == 0 && !hop._conn.IsClosed)
         {
-            Shutdown(hop._conn.ClientFd, ShutRdWr);
+            Native.shutdown(hop._conn.ClientFd, Native.SHUT_RDWR);
         }
     }, this);
 
