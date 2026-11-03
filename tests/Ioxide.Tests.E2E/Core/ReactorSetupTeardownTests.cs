@@ -74,6 +74,32 @@ internal static class ReactorSetupTeardownTests
                 + "for the next socket the process opens");
         });
 
+        runner.Test("reactor: a start that fails keeps its ring's descriptor open, so the number is not handed out mid-run", () =>
+        {
+            // A number handed back mid-run goes to the next socket opened, and a stale close of it ends that connection.
+            int ringFd = -1;
+            Exception? reported = null;
+
+            var reactor = new Reactor(0, new ServerConfig { ReactorCount = 1, RecvBufferSize = 4096, RecvSlots = 256 })
+            {
+                OnStart = r =>
+                {
+                    ringFd = RingOf(r).Fd;
+                    throw new InvalidOperationException("fault-on-purpose");
+                },
+                OnFault = (_, e) => reported = e,
+            };
+
+            var thread = new Thread(reactor.Run) { IsBackground = true };
+            thread.Start();
+
+            Assert.True(thread.Join(TimeSpan.FromSeconds(10)), "Run should have returned after OnStart threw");
+            Assert.True(reported is InvalidOperationException { Message: "fault-on-purpose" },
+                $"the start failed somewhere other than OnStart: {reported}");
+            Assert.True(ExecInheritance.Target(ringFd) == "anon_inode:[io_uring]",
+                $"the failed start closed its ring's descriptor {ringFd}, so the number went back to the process mid-run");
+        });
+
         runner.Test("reactor: a ring the kernel refuses reaches OnFault instead of ending the process", () =>
         {
             // Every kernel refuses more than 32768 entries with EINVAL - the errno a kernel older than
@@ -277,6 +303,9 @@ internal static class ReactorSetupTeardownTests
 
     [UnsafeAccessor(UnsafeAccessorKind.Field, Name = "BufSlab")]
     private static extern unsafe ref byte* BufSlabOf(TcpConnection connection);
+
+    [UnsafeAccessor(UnsafeAccessorKind.Field, Name = "_ring")]
+    private static extern ref Ring RingOf(Reactor reactor);
 
     // A connect completes into a listener's backlog without anyone accepting, so it succeeds exactly
     // while the listening socket is open.
