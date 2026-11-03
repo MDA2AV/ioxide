@@ -8,7 +8,7 @@
     <RootNamespace>ioxide.file</RootNamespace>
 
     <PackageId>ioxide.file</PackageId>
-    <Version>0.24.444</Version>
+    <Version>0.25.482</Version>
     <Authors>MDA2AV</Authors>
     <Description>File serving for the ioxide io_uring runtime: immutable directory snapshots of pre-opened files keyed by URL path, pooled positional ring reads, lease-safe atomic reloads.</Description>
     <PackageLicenseExpression>MIT</PackageLicenseExpression>
