@@ -147,7 +147,7 @@ private static void KeylogCallback(nint ssl, nint line)
 {
     Ktls.EnableTx(conn.ClientFd, secret);
     conn.SendOpFlags = 0;                // clear MSG_WAITALL - kTLS rejects it (EOPNOTSUPP)
-    session.MarkTxEnabled(conn.ClientFd);
+    session.MarkTxEnabled();
 }</code></pre>
 
     <h2>TlsSession &middot; <span class="dim">TlsSession.cs</span></h2>
