@@ -24,8 +24,8 @@ namespace ioxide.nghttp3;
 /// valid-until-return contract ends.
 ///
 /// File layout: this file owns state, the run loop and pooling; PushToEngine (ingress into nghttp3),
-/// RunBuffered, RequestBody and Streamed (dispatch, per response and body mode), Egress
-/// (queue/pump/pack) and Callbacks (the unmanaged shim entry points) live in the sibling partials.
+/// RunBuffered and Streamed (dispatch, per response mode), RequestBody (the streamed request body),
+/// Egress (queue/pump/pack) and Callbacks (the unmanaged shim entry points) live in the sibling partials.
 /// </summary>
 public sealed partial class Nghttp3Connection : IDisposable
 {
