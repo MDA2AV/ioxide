@@ -21,17 +21,9 @@ internal static unsafe class Ktls
     private const ushort TLS_CIPHER_AES_GCM_128 = 51;
     private const byte TLS_RECORD_TYPE_ALERT = 21;
     private const int MSG_PEEK = 0x2;
-    private const int MSG_NOSIGNAL = 0x4000;
-    private const int MSG_DONTWAIT = 0x40;
 
     [DllImport("libc", SetLastError = true)]
     private static extern int setsockopt(int fd, int level, int optname, void* optval, uint optlen);
-
-    [DllImport("libc", SetLastError = true)]
-    private static extern nint sendmsg(int fd, Msghdr* msg, int flags);
-
-    [DllImport("libc", SetLastError = true)]
-    private static extern nint recvmsg(int fd, Msghdr* msg, int flags);
 
     /// <summary>tls12_crypto_info_aes_gcm_128 - the layout the kernel expects (40 bytes).</summary>
     [StructLayout(LayoutKind.Sequential, Pack = 1)]
@@ -43,27 +35,6 @@ internal static unsafe class Ktls
         public fixed byte Key[16];
         public fixed byte Salt[4];
         public fixed byte RecSeq[8];
-    }
-
-    [StructLayout(LayoutKind.Sequential)]
-    private struct Iovec
-    {
-        public nint Base;
-        public nuint Len;
-    }
-
-    // Linux x86-64 Msghdr (msg_namelen is followed by 4 bytes of padding before msg_iov).
-    [StructLayout(LayoutKind.Sequential)]
-    private struct Msghdr
-    {
-        public nint Name;
-        public uint NameLen;
-        public uint Pad;
-        public nint Iov;
-        public nuint IovLen;
-        public nint Control;
-        public nuint ControlLen;
-        public int Flags;
     }
 
     /// <summary>
@@ -103,16 +74,16 @@ internal static unsafe class Ktls
         byte* control = stackalloc byte[cmsgSpace];
         new Span<byte>(control, cmsgSpace).Clear();
 
-        var iov = new Iovec { Base = (nint)alert, Len = 2 };
-        var msg = new Msghdr
+        var iov = new Native.iovec { iov_base = alert, iov_len = 2 };
+        var msg = new Native.msghdr
         {
-            Iov = (nint)(&iov),
-            IovLen = 1,
-            Control = (nint)control,
-            ControlLen = cmsgSpace,
+            msg_iov = &iov,
+            msg_iovlen = 1,
+            msg_control = control,
+            msg_controllen = cmsgSpace,
         };
 
-        if (recvmsg(fd, &msg, MSG_PEEK | MSG_DONTWAIT) != 2)
+        if (Native.recvmsg(fd, &msg, MSG_PEEK | Native.MSG_DONTWAIT) != 2)
         {
             return false;
         }
@@ -207,16 +178,16 @@ internal static unsafe class Ktls
         *(int*)(control + 12) = TLS_SET_RECORD_TYPE;    // cmsg_type
         control[16] = TLS_RECORD_TYPE_ALERT;            // CMSG_DATA[0]: this record is an alert
 
-        var iov = new Iovec { Base = (nint)alert, Len = 2 };
-        var msg = new Msghdr
+        var iov = new Native.iovec { iov_base = alert, iov_len = 2 };
+        var msg = new Native.msghdr
         {
-            Iov = (nint)(&iov),
-            IovLen = 1,
-            Control = (nint)control,
-            ControlLen = cmsgSpace,
-            Flags = 0,
+            msg_iov = &iov,
+            msg_iovlen = 1,
+            msg_control = control,
+            msg_controllen = cmsgSpace,
+            msg_flags = 0,
         };
-        sendmsg(fd, &msg, MSG_NOSIGNAL | MSG_DONTWAIT);
+        Native.sendmsg(fd, &msg, Native.MSG_NOSIGNAL | Native.MSG_DONTWAIT);
     }
 
     /// <summary>RFC 8446 HKDF-Expand-Label with an empty context.</summary>

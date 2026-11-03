@@ -25,10 +25,10 @@ internal static class Program
         ZeroCopySendTests.Register(runner);
         DemuxParseTests.Register(runner);
         MessageTests.Register(runner);
-        ResponseCapTests.Register(runner);
         Http2OutputQueueTests.Register(runner);
         Http2StreamedRequestTests.Register(runner);
         Http2TrailerTests.Register(runner);
+        Http2RequestHeaderTests.Register(runner);
         Http2StreamedBodyTests.Register(runner);
         Http2FlowControlTests.Register(runner);
         Http2BufferedCreditTests.Register(runner);

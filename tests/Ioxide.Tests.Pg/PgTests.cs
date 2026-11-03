@@ -1,3 +1,4 @@
+using ioxide;
 using ioxide.pg;
 
 namespace Ioxide.Tests;
@@ -41,6 +42,24 @@ internal static class PgTests
             Assert.Equal("rows=5", body);
         }, skip: !pgUp);
 
+        // The handler throws no PgException, so the reader loop's catch is what turns it into one for the waiters.
+        runner.Test("pg: a row handler that throws fails its query with a PgException carrying the message, and the pool still answers", () =>
+        {
+            string outcome = OnReactor.Run(async reactor =>
+            {
+                PgPool pool = PgPool.Start(reactor, PgOpts(pg));
+                string streamed = await Outcome(pool.QueryRowsAsync(
+                    "SELECT n FROM generate_series(1, 5) AS n", _ => throw new InvalidOperationException("row handler failed")));
+
+                // Two picks, so one lands on the broken connection and moves past it.
+                string first = (await pool.QueryAsync("SELECT 1")).Value!;
+                string second = (await pool.QueryAsync("SELECT 2")).Value!;
+                return $"{streamed}; then {first} and {second}";
+            });
+
+            Assert.Equal("PgException: row handler failed; then 1 and 2", outcome);
+        }, skip: !pgUp);
+
         runner.Test("pg: server error then connection stays usable", () =>
         {
             int port = TestServer.Start(PgHandlers.Pg, r => PgPool.Start(r, PgOpts(pg)));
@@ -53,11 +72,40 @@ internal static class PgTests
             Assert.Equal("42", body);
         }, skip: !pgUp);
 
+        // Refused while it is staged, before any state changes, so the connection is not broken.
+        runner.Test("pg: a query larger than the send buffer fails with a PgException, and the connection still answers", () =>
+        {
+            const int sendBuffer = 512 * 1024;
+            string outcome = OnReactor.Run(async reactor =>
+            {
+                using PgConnection connection = await PgConnection.ConnectAsync(reactor, PgOpts(pg));
+                string text = new('x', sendBuffer);   // fills the buffer on its own, before the message around it
+                string simple = await Outcome(connection.QueryAsync($"SELECT '{text}'"));
+                string prepared = await Outcome(connection.QueryAsync("SELECT $1::text", [PgParam.Text(text)]));
+                string after = (await connection.QueryAsync("SELECT 42")).Value!;
+                return $"{simple}; {prepared}; then {after}";
+            });
+
+            string refused = $"PgException: query exceeds send buffer ({sendBuffer} bytes)";
+            Assert.Equal($"{refused}; {refused}; then 42", outcome);
+        }, skip: !pgUp);
+
         runner.Test("pg: command timeout (#2)", () =>
         {
             int port = TestServer.Start(PgHandlers.PgSlow, r => PgPool.Start(r, PgOpts(pg, commandTimeoutMs: 1000)));
             (int status, _) = Client.Get(port, "/slow", timeoutMs: 8000);
             Assert.Equal(503, status);
+        }, skip: !pgUp);
+
+        // An unstamped query reads as made at boot, so the sweep would fail it on its first pass, before the timeout.
+        runner.Test("pg: a prepared query that outlasts CommandTimeoutMs fails once that long has passed, not sooner", () =>
+        {
+            Assert.Equal("timed out", TimedOut(pg, pool => pool.QueryAsync("SELECT pg_sleep($1)", [PgParam.Int(5)])));
+        }, skip: !pgUp);
+
+        runner.Test("pg: a simple query that outlasts CommandTimeoutMs fails once that long has passed, not sooner", () =>
+        {
+            Assert.Equal("timed out", TimedOut(pg, pool => pool.QueryAsync("SELECT pg_sleep(5)")));
         }, skip: !pgUp);
 
         // A socket outliving its close() is the visible half of a recv still armed into the freed buffer.
@@ -89,6 +137,36 @@ internal static class PgTests
             Assert.Equal(200, afterStatus);
             Assert.Equal("42", afterBody);
         }, skip: !pgUp);
+    }
+
+    // Runs query on a pool whose CommandTimeoutMs is 1000, and says whether it timed out only once that long had passed.
+    private static string TimedOut((string Host, int Port) pg, Func<PgPool, ValueTask<PgResult>> query) => OnReactor.Run(async reactor =>
+    {
+        PgPool pool = PgPool.Start(reactor, PgOpts(pg, commandTimeoutMs: 1000));
+        long made = Native.MonotonicMs;   // the sweep's clock, so the bound below needs no slack
+        try
+        {
+            await query(pool);
+            return "the query returned";
+        }
+        catch (PgException e) when (e.Message.Contains("timed out"))
+        {
+            long waited = Native.MonotonicMs - made;
+            return waited > 1000 ? "timed out" : $"timed out after only {waited} ms";
+        }
+    });
+
+    // What a query returned, or the type and message of what it threw.
+    private static async Task<string> Outcome<T>(ValueTask<T> query)
+    {
+        try
+        {
+            return $"returned {await query}";
+        }
+        catch (Exception e)
+        {
+            return $"{e.GetType().Name}: {e.Message}";
+        }
     }
 
     private static PgOptions PgOpts((string Host, int Port) pg, int commandTimeoutMs = 30_000) => new()

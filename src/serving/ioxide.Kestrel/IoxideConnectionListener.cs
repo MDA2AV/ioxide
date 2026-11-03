@@ -118,10 +118,7 @@ internal sealed class IoxideConnectionListener : IConnectionListener
             }
         }
 
-        // What ALPN actually settled on, not what was advertised. Passing the configured value
-        // made ITlsApplicationProtocolFeature report a protocol even when the client offered none
-        // of ours and the handshake completed without the extension.
-        var ctx = new IoxideConnectionContext(conn, reactor, EndPoint, id, session, session?.NegotiatedAlpn);
+        var ctx = new IoxideConnectionContext(conn, reactor, EndPoint, id, session);
 
         if (!_accepted.Writer.TryWrite(ctx))
         {

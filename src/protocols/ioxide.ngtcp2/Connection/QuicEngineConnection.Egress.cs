@@ -9,7 +9,7 @@ public unsafe partial class QuicEngineConnection
     // (MTU-full) datagrams under load, which is exactly the UDP_SEGMENT shape. A shorter datagram
     // may only END a batch (GSO semantics: equal segments, the last may be short). All datagrams
     // in a batch are this connection's, and the batch is flushed whenever the peer address moves
-    // (FlushBatchBeforePathChange), so the destination is single for the life of a batch. That
+    // (CbPathChange), so the destination is single for the life of a batch. That
     // qualifier matters since migration landed: a connection can have more than one live path
     // while one is being validated, and ngtcp2 addresses a PATH_RESPONSE to the path its
     // challenge arrived on rather than to the current one.
@@ -19,32 +19,6 @@ public unsafe partial class QuicEngineConnection
     private int  _gsoSeg;      // segment size = first datagram's length; 0 = batch empty
     private bool _gsoClosed;   // a short (final) segment landed - flush before accepting more
     private bool _inEngineCycle;
-
-    /// <summary>
-    /// Run <paramref name="send"/> inside an engine cycle, so every datagram it produces is
-    /// coalesced into one UDP_SEGMENT sendmsg instead of a syscall per datagram. Server
-    /// connections get this implicitly - their sends happen while an inbound datagram is being
-    /// processed - but a CLIENT sends from its own loop, outside any cycle, and would otherwise
-    /// pay one syscall per request. Reactor thread only; nesting is safe (the outer cycle wins).
-    /// </summary>
-    public void SendBatched(Action send)
-    {
-        if (_inEngineCycle)
-        {
-            send();   // already batching (nested call from inside a cycle)
-            return;
-        }
-
-        _inEngineCycle = true;
-        try
-        {
-            send();
-        }
-        finally
-        {
-            EndEngineCycle();
-        }
-    }
 
     /// <summary>
     /// Leaves an engine cycle. ngtcp2's frames have unwound by the time this runs, which is what
@@ -94,12 +68,6 @@ public unsafe partial class QuicEngineConnection
             _gsoClosed = true;
         }
     }
-
-    /// <summary>
-    /// Send what is queued before the peer address moves. The batch is addressed at send time, not
-    /// at queue time, so a path change with datagrams still coalesced would readdress them.
-    /// </summary>
-    internal void FlushBatchBeforePathChange() => FlushGso();
 
     private void FlushGso()
     {

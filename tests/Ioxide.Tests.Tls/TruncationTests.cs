@@ -7,6 +7,7 @@ using System.Security.Authentication;
 using System.Text;
 using ioxide;
 using ioxide.tls;
+using ioxide.utils;
 
 namespace Ioxide.Tests;
 
@@ -100,6 +101,50 @@ internal static class TruncationTests
                 "the server closed without a close_notify alert, which makes its own responses "
                 + "indistinguishable from a truncation: " + Describe(types));
         });
+
+        runner.Test("tls truncation (ktls tx): the server ends its own stream with close_notify", () =>
+        {
+            // TLS 1.3 hides record types, so the server holds its FIN: a clean end before it is the alert.
+            (string certPath, string keyPath) = TestCert.Ensure();
+            var options = new TlsOptions { CertificatePath = certPath, KeyPath = keyPath, KernelTx = true };
+            var kernelTx = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+
+            int port = TestServer.Start(CloseNotifyThenHoldHandler(kernelTx), r => TlsService.Start(r, options));
+
+            using var sock = new TcpClient();
+            sock.Connect("127.0.0.1", port);
+            sock.ReceiveTimeout = 10_000;
+
+            var ssl = new SslStream(sock.GetStream(), leaveInnerStreamOpen: true, (_, _, _, _) => true);
+            ssl.AuthenticateAsClient(new SslClientAuthenticationOptions
+            {
+                TargetHost = "localhost",
+                EnabledSslProtocols = SslProtocols.Tls13,
+            });
+
+            string answer = ReadResponse(ssl);
+            Assert.True(answer.Contains(ResponseBody, StringComparison.Ordinal),
+                "this test's server never answered, so the teardown observed below is not its own. "
+                + $"Got {answer.Length} B: {answer}");
+            Assert.True(kernelTx.Task.Wait(10_000) && kernelTx.Task.Result,
+                "kTLS TX did not take this connection's write side, so its close_notify was BoringSSL's");
+
+            int n = -1;
+            string? error = null;
+            try
+            {
+                n = ssl.Read(new byte[64]);
+            }
+            catch (IOException e)
+            {
+                error = e.Message;
+            }
+
+            Assert.True(n == 0, "the server ended its stream without a close_notify alert: "
+                + (error ?? $"{n} bytes of application data arrived where the alert belongs"));
+            Assert.True(!sock.Client.Poll(0, SelectMode.SelectRead),
+                "the server's FIN had arrived too, so the clean end may have been the FIN's, not the alert's");
+        }, skip: !ktls);
 
         runner.Test("tls truncation: a client's close_notify is answered with the server's own", () =>
         {
@@ -535,6 +580,49 @@ internal static class TruncationTests
             connection.DecRef();
         }
     }
+
+    // Answers, sends close_notify, then holds its FIN until the client hangs up.
+    // Raw, not TlsConnectionDualPipe: disposing that pipe's reader closes the connection.
+    private static Func<Reactor, TcpConnection, Task> CloseNotifyThenHoldHandler(TaskCompletionSource<bool> kernelTx)
+        => async (reactor, connection) =>
+        {
+            TlsSession? session = null;
+            try
+            {
+                session = await reactor.GetService<TlsService>()!.AcceptAsync(connection);
+                kernelTx.TrySetResult(session.KernelTx);
+
+                session.Write(connection, Encoding.ASCII.GetBytes(Response));
+                await connection.FlushAsync();
+                session.Dispose();   // this is the teardown whose close_notify is asserted
+
+                while (true)
+                {
+                    RecvSnapshot snapshot = await connection.ReadAsync();
+                    while (connection.TryGetItem(snapshot, out SpscRecvRing.Item item))
+                    {
+                        if (item.HasBuffer)
+                        {
+                            connection.ReturnBuffer(in item);
+                        }
+                    }
+
+                    if (snapshot.IsClosed)
+                    {
+                        break;
+                    }
+                }
+            }
+            catch
+            {
+                // The harness probes the port with a raw TCP connection, which fails the handshake.
+            }
+            finally
+            {
+                session?.Dispose();
+                connection.DecRef();
+            }
+        };
 
     private const byte Alert = 21;
     private const byte ApplicationData = 23;

@@ -31,13 +31,12 @@ internal static unsafe class RingTests
 
             Assert.Equal(1, ring.SubmitAndWait(1));
             Assert.Equal(1u, ring.CqReady());
-            Assert.True(ring.TryGetCqe(out Native.IoUringCqe cqe), "CqReady counted a completion TryGetCqe did not find");
+            Native.IoUringCqe cqe = ring.CqeAt(0);
             Assert.Equal(0x1234_5678_9ABCul, cqe.user_data);
             Assert.Equal(0, cqe.res);
 
-            ring.CqeSeen();
+            ring.CqAdvance(1);
             Assert.Equal(0u, ring.CqReady());
-            Assert.True(!ring.TryGetCqe(out _), "a completion already seen was handed out again");
         }, timeoutMs: 10_000);
 
         runner.Test("ring: the SQ hands out no more SQEs than it has until an enter consumes them", () =>
@@ -101,9 +100,9 @@ internal static unsafe class RingTests
                 {
                     for (uint i = 0; i < batch; i++)
                     {
-                        Assert.True(ring.TryGetCqe(out Native.IoUringCqe cqe), $"completion {next + i} was missing");
-                        Assert.Equal(next + i, cqe.user_data);
-                        ring.CqeSeen();
+                        Assert.True(ring.CqReady() > 0, $"completion {next + i} was missing");
+                        Assert.Equal(next + i, ring.CqeAt(0).user_data);
+                        ring.CqAdvance(1);
                     }
                 }
 

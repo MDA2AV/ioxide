@@ -186,7 +186,6 @@ for (int i = 0; i < threads.Length; i++)
                 await ServeAsync(conn, tls, carry, snapshot, readers, buffered);
 
                 if (recv.IsClosed || (tls?.Closed ?? false)) return;
-                conn.ResetRead();
             }
         }
         catch (Exception e)
@@ -205,8 +204,8 @@ for (int i = 0; i < threads.Length; i++)
 }
 
 // Reload on SIGHUP (kill -HUP <pid>): a fresh snapshot is opened and swapped in atomically, and the
-// old descriptors close after a grace period - so in-flight requests finish on the bytes they
-// started with.
+// old descriptors close once the last lease on them is disposed - so in-flight requests finish on
+// the bytes they started with.
 using var reload = PosixSignalRegistration.Create(PosixSignal.SIGHUP, context =>
 {
     context.Cancel = true;   // handle it; don't let the default action terminate us

@@ -131,6 +131,10 @@ public sealed unsafe partial class Reactor
             ArgumentOutOfRangeException.ThrowIfNegativeOrZero(config.RecvBufferSize, "config.RecvBufferSize");
         }
 
+        // The UDP ring rounds this up to a power of two, which past 32768 is more than the kernel takes.
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(_udp.RecvSlots, "config.Udp.RecvSlots");
+        ArgumentOutOfRangeException.ThrowIfGreaterThan(_udp.RecvSlots, MaxBufRingEntries, "config.Udp.RecvSlots");
+
         _opTargets = new IRingCompletion?[config.OpSlots];
         _opFree = new int[config.OpSlots];
         for (int i = 0; i < _opFree.Length; i++)

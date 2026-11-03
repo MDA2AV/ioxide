@@ -12,7 +12,6 @@ public static unsafe partial class Native {
     // large send into wire-size datagrams in the kernel, GRO coalesces a burst from one peer into
     // a single recv (segment size arrives as a cmsg).
     public const int SOCK_DGRAM   = 2;
-    public const int IPPROTO_UDP  = 17;
     public const int SOL_UDP      = 17;
     public const int UDP_SEGMENT  = 103;
     public const int UDP_GRO      = 104;
@@ -25,9 +24,8 @@ public static unsafe partial class Native {
     public const int IPV6_TCLASS      = 67;
     public const int IPV6_RECVTCLASS  = 66;
 
-    // msg_flags bits worth checking on a recvmsg completion.
+    // msg_flags bit worth checking on a recvmsg completion.
     public const int MSG_TRUNC  = 0x20;   // payload didn't fit the iovec - datagram tail dropped
-    public const int MSG_CTRUNC = 0x08;   // control buffer too small - cmsgs dropped
 
 #pragma warning disable CS8981 // lower-cased name deliberately mirrors the kernel struct name (uapi)
     // struct io_uring_recvmsg_out: the 16-byte header the kernel prepends to each multishot RECVMSG

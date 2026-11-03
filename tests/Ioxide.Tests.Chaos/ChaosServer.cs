@@ -99,8 +99,6 @@ public static class ChaosServer
                 {
                     return;
                 }
-
-                conn.ResetRead();
             }
         }
         finally

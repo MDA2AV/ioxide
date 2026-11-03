@@ -229,7 +229,6 @@ internal static class SendInFlightRecycleTests
                     {
                         return;
                     }
-                    conn.ResetRead();
                 }
             }
             finally

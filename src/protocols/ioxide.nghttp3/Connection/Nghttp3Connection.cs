@@ -24,8 +24,8 @@ namespace ioxide.nghttp3;
 /// valid-until-return contract ends.
 ///
 /// File layout: this file owns state, the run loop and pooling; PushToEngine (ingress into nghttp3),
-/// RunBuffered, RequestBody and Streamed (dispatch, per response and body mode), Egress
-/// (queue/pump/pack) and Callbacks (the unmanaged shim entry points) live in the sibling partials.
+/// RunBuffered and Streamed (dispatch, per response mode), RequestBody (the streamed request body),
+/// Egress (queue/pump/pack) and Callbacks (the unmanaged shim entry points) live in the sibling partials.
 /// </summary>
 public sealed partial class Nghttp3Connection : IDisposable
 {
@@ -36,11 +36,6 @@ public sealed partial class Nghttp3Connection : IDisposable
     private nint _nghttp3Handle;
     private GCHandle _self;
     private bool _protocolFailed;
-
-    // The first exception a native callback raised, kept for the log line. Teardown cannot happen
-    // inside a callback (nghttp3 is on the stack below it), so the callbacks record here and
-    // _protocolFailed carries the decision out to the run loops - see Callbacks.Fault.
-    private Exception? _callbackFault;
 
     // The handler takes a body reader: a request is dispatched at end-of-headers, its stream paced.
     private bool _streamBodies;

@@ -87,7 +87,6 @@ for (int i = 0; i &lt; config.ReactorCount; i++)
                 await conn.FlushAsync();                        // io_uring send
 
                 if (snapshot.IsClosed) return;
-                conn.ResetRead();
             }
         }
         finally { conn.DecRef(); }
@@ -106,7 +105,7 @@ foreach (var t in threads) t.Join();</code></pre>
     engine never names a client type, so adding one never touches the reactor:</p>
     <ul>
       <li><a href="postgres.html"><code>ioxide.pg</code></a> - pooled ring-native Postgres.</li>
-          <li><a href="files.html"><code>ioxide.file</code></a> - static files with baked responses.</li>
+          <li><a href="files.html"><code>ioxide.file</code></a> - static files, opened once and read off the ring.</li>
       <li><code>ioxide.httpclient</code> - the HTTP/1.1 upstream leg between a proxy and an
       origin.</li>
       <li><a href="clients.html">Your own</a> - the same seam in under 100 lines.</li>

@@ -141,25 +141,26 @@ public sealed unsafe partial class Reactor
     /// </summary>
     private int OpenClientUdpSocket()
     {
-        if (_udpFds.Length == 0)
+        if (_udpBufRing == null)
         {
             InitUdpBufRing();   // no UDP/QUIC in config, so startup skipped it
         }
 
         int fd = OpenUdpSocket(0, _config.DualStack, _udp.Gro, _udp.SocketBufferBytes);   // port 0: the kernel picks
+        ushort port = BoundPort(fd, _config.DualStack);
 
         // Append. Indices stay stable (recv completions carry theirs in user_data), so growing the
         // tables cannot disturb the multishot recvs already armed on the existing sockets.
         int index = _udpFds.Length;
         _udpFds     = [.. _udpFds, fd];
-        _udpFdPorts = [.. _udpFdPorts, BoundPort(fd, _config.DualStack)];
+        _udpFdPorts = [.. _udpFdPorts, port];
 
         ArmUdpRecv(index);
         return index;
     }
 
     // The port the kernel assigned to a bind(:0) - ngtcp2 needs the real local address for its
-    // path, so 0 will not do.
+    // path, so 0 will not do. Closes fd on failure: the caller has not stored it anywhere yet.
     private static ushort BoundPort(int fd, bool dualStack)
     {
         if (dualStack)
@@ -168,6 +169,7 @@ public sealed unsafe partial class Reactor
             uint len6 = (uint)sizeof(sockaddr_in6);
             if (getsockname(fd, &addr6, &len6) < 0)
             {
+                close(fd);
                 throw new InvalidOperationException("getsockname failed on the QUIC client socket");
             }
             return Htons(addr6.sin6_port);   // Htons is its own inverse (16-bit swap)
@@ -177,6 +179,7 @@ public sealed unsafe partial class Reactor
         uint len = (uint)sizeof(sockaddr_in);
         if (getsockname(fd, &addr, &len) < 0)
         {
+            close(fd);
             throw new InvalidOperationException("getsockname failed on the QUIC client socket");
         }
         return Htons(addr.sin_port);
@@ -188,39 +191,57 @@ public sealed unsafe partial class Reactor
     private void InitUdpBufRing()
     {
         int depth = RoundUpPow2(_udp.RecvSlots);
-        _udpBufRingMask = (uint)(depth - 1);
+        byte*   ring     = null;
+        byte*   slab     = null;
+        msghdr* template = null;
 
-        _udpBufRing = (byte*)NativeMemory.AlignedAlloc((nuint)depth * 16, (nuint)Environment.SystemPageSize);   // as the TCP ring
-        NativeMemory.Clear(_udpBufRing, (nuint)depth * 16);
-        _udpBufSlab = (byte*)NativeMemory.AlignedAlloc((nuint)depth * UdpRecvBufSize, 64);
-
-        for (ushort bid = 0; bid < depth; bid++)
+        try
         {
-            byte* entry = _udpBufRing + (uint)bid * 16;
-            *(ulong*)(entry + 0)  = (ulong)(_udpBufSlab + (nuint)bid * UdpRecvBufSize);
-            *(uint*)(entry + 8)   = UdpRecvBufSize;
-            *(ushort*)(entry + 12) = bid;
+            ring = (byte*)NativeMemory.AlignedAlloc((nuint)depth * 16, (nuint)Environment.SystemPageSize);   // as the TCP ring
+            NativeMemory.Clear(ring, (nuint)depth * 16);
+            slab = (byte*)NativeMemory.AlignedAlloc((nuint)depth * UdpRecvBufSize, 64);
+
+            // Template: reserved name/control sizes only; iov unused (buffer comes from the ring).
+            template = (msghdr*)NativeMemory.AlignedAlloc((nuint)sizeof(msghdr), 64);
+            Unsafe.InitBlockUnaligned(template, 0, (uint)sizeof(msghdr));
+            template->msg_namelen    = UdpNameCap;
+            template->msg_controllen = UdpCtrlCap;
+
+            for (ushort bid = 0; bid < depth; bid++)
+            {
+                byte* entry = ring + (uint)bid * 16;
+                *(ulong*)(entry + 0)  = (ulong)(slab + (nuint)bid * UdpRecvBufSize);
+                *(uint*)(entry + 8)   = UdpRecvBufSize;
+                *(ushort*)(entry + 12) = bid;
+            }
+            Volatile.Write(ref *(ushort*)(ring + 14), (ushort)depth);
+
+            var reg = new io_uring_buf_reg
+            {
+                ring_addr    = (ulong)ring,
+                ring_entries = (uint)depth,
+                bgid         = UdpBgId,
+            };
+            int ret = io_uring_register(_ring.Fd, IORING_REGISTER_PBUF_RING, &reg, 1);
+            if (ret < 0)
+            {
+                throw new InvalidOperationException($"register udp pbuf_ring failed with errno {-ret}");
+            }
         }
-        _udpBufRingTail = (ushort)depth;
-        Volatile.Write(ref *(ushort*)(_udpBufRing + 14), _udpBufRingTail);
-
-        var reg = new io_uring_buf_reg
+        catch
         {
-            ring_addr    = (ulong)_udpBufRing,
-            ring_entries = (uint)depth,
-            bgid         = UdpBgId,
-        };
-        int ret = io_uring_register(_ring.Fd, IORING_REGISTER_PBUF_RING, &reg, 1);
-        if (ret < 0)
-        {
-            throw new InvalidOperationException($"register udp pbuf_ring failed with errno {-ret}");
+            // None of it reached the kernel or a field, so a retried client open starts clean.
+            NativeMemory.AlignedFree(ring);
+            NativeMemory.AlignedFree(slab);
+            NativeMemory.AlignedFree(template);
+            throw;
         }
 
-        // Template: reserved name/control sizes only; iov unused (buffer comes from the ring).
-        _udpRecvTemplate = (msghdr*)NativeMemory.AlignedAlloc((nuint)sizeof(msghdr), 64);
-        Unsafe.InitBlockUnaligned(_udpRecvTemplate, 0, (uint)sizeof(msghdr));
-        _udpRecvTemplate->msg_namelen    = UdpNameCap;
-        _udpRecvTemplate->msg_controllen = UdpCtrlCap;
+        _udpBufRingMask  = (uint)(depth - 1);
+        _udpBufRingTail  = (ushort)depth;
+        _udpBufRing      = ring;
+        _udpBufSlab      = slab;
+        _udpRecvTemplate = template;
     }
 
     /// <summary>
@@ -331,6 +352,7 @@ public sealed unsafe partial class Reactor
 
             if (bind(fd, &addr6, (uint)sizeof(sockaddr_in6)) < 0)
             {
+                close(fd);
                 throw new InvalidOperationException($"udp bind :{port} failed");
             }
         }
@@ -345,6 +367,7 @@ public sealed unsafe partial class Reactor
 
             if (bind(fd, &addr, (uint)sizeof(sockaddr_in)) < 0)
             {
+                close(fd);
                 throw new InvalidOperationException($"udp bind :{port} failed");
             }
         }
