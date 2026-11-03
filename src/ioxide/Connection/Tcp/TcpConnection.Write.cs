@@ -8,7 +8,7 @@ namespace ioxide;
 /// <summary>
 /// The connection as an <see cref="IBufferWriter{T}"/>: a response is written into a per-connection
 /// slab. When it outgrows the slab the strategy is either Grow (realloc the buffer, TcpConnection.Write.Grow.cs)
-/// or Segmented (spill into pooled segments, TcpConnection.Write.Segmented.cs). FlushAsync
+/// or Segmented (spill into the connection's own segments, TcpConnection.Write.Segmented.cs). FlushAsync
 /// (TcpConnection.Write.Flush.cs) then hands the buffered bytes to the ring.
 /// </summary>
 public sealed unsafe partial class TcpConnection : IBufferWriter<byte>
@@ -23,7 +23,7 @@ public sealed unsafe partial class TcpConnection : IBufferWriter<byte>
     internal int   WriteInFlight;
 
     // Write-overflow strategy, chosen once at construction. Grow (default) reallocs the primary slab;
-    // Segmented chains pooled slabs flushed via one SENDMSG (TcpConnection.Segmented.cs).
+    // Segmented chains the connection's own segments, flushed via one SENDMSG (TcpConnection.Write.Segmented.cs).
     private WriteOverflowStrategy _overflow;
 
     // Outstanding IORING_CQE_F_NOTIF completions for in-flight zero-copy sends. The slab can't be
@@ -121,7 +121,7 @@ public sealed unsafe partial class TcpConnection : IBufferWriter<byte>
             return;
         }
 
-        // Segmented mode: spill across the primary slab and pooled overflow segments.
+        // Segmented mode: spill across the primary slab and the connection's own overflow segments.
         while (source.Length > 0)
         {
             Span<byte> dst = EnsureWritable(1);
@@ -141,7 +141,7 @@ public sealed unsafe partial class TcpConnection : IBufferWriter<byte>
 
     // Returns a writable span at the current write position. Grow: grow the contiguous slab
     // (TcpConnection.Write.Grow.cs). Segmented: stay in the primary slab until it fills, then write into
-    // pooled overflow segments (TcpConnection.Write.Segmented.cs).
+    // the connection's own overflow segments (TcpConnection.Write.Segmented.cs).
     private Span<byte> EnsureWritable(int need)
     {
         if (_overflow == WriteOverflowStrategy.Grow)

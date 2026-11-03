@@ -14,8 +14,9 @@ public sealed record TlsClientOptions
     public string? ServerName { get; init; }
 
     /// <summary>
-    /// ALPN protocols to offer, most preferred first, e.g. <c>["h2", "http/1.1"]</c>. Empty offers
-    /// none, which leaves the origin to assume a protocol - fine for HTTP/1.1, never for h2.
+    /// ALPN protocols to offer, most preferred first. <see cref="HttpClientPool"/> and
+    /// <see cref="RingHttpClient"/> send HTTP/1.1 whatever the origin picks, so offer
+    /// <c>["http/1.1"]</c>, or nothing, which leaves the origin to assume it.
     /// </summary>
     public string[] AlpnProtocols { get; init; } = [];
 

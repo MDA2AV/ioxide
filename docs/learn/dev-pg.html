@@ -60,12 +60,12 @@
 <pre><code class="language-csharp">private unsafe void WriteQueryAt(string sql)
 {
     int needed = PgProtocol.QueryLength(sql);
-    if (needed &gt; _sendCapacity)
-        throw new PgException($"query exceeds send buffer ({_sendCapacity} bytes)");
-    if (_sendEnd + needed &gt; _sendCapacity)
+    if (needed &gt; SendBufferSize)
+        throw new PgException($"query exceeds send buffer ({SendBufferSize} bytes)");
+    if (_sendEnd + needed &gt; SendBufferSize)
         throw new PgException("pipelined send buffer full");   // _send's address is held across awaits
     int written = PgProtocol.WriteQuery(
-        new Span&lt;byte&gt;((void*)(_send + _sendEnd), _sendCapacity - _sendEnd), sql);
+        new Span&lt;byte&gt;((void*)(_send + _sendEnd), SendBufferSize - _sendEnd), sql);
     _sendEnd += written;
 }</code></pre>
 <p class="src"><b>PgConnection.cs</b> · the recv buffer compacts before it grows, and is bounded by MaxReceiveBytes</p>

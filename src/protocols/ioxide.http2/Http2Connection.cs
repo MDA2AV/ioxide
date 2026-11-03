@@ -17,10 +17,9 @@ namespace ioxide.http2;
 /// one given an <see cref="Http2BodyReader"/> runs at the HEADERS and pulls the body as it arrives,
 /// one without gets it whole in <see cref="Http2Request.Body"/>.
 ///
-/// The default HTTP/2 here, and the one the features land on: streamed responses, streamed
-/// request bodies and non-blocking dispatch are all this side. <c>ioxide.nghttp2</c> remains as
-/// the battle-tested alternative - buffered only, and the reference implementation's coverage of
-/// the protocol's darker corners.
+/// The default HTTP/2 here, and the one the features land on. <c>ioxide.nghttp2</c> remains as
+/// the battle-tested alternative, with the same handler shapes and the reference implementation's
+/// coverage of the protocol's darker corners.
 ///
 /// It speaks to an <see cref="IDuplexPipe"/> and knows nothing about TLS: hand it a
 /// <c>TcpConnectionDualPipe</c> for h2c or a <c>TlsConnectionDualPipe</c> for h2 over TLS, and the
@@ -98,9 +97,6 @@ public sealed partial class Http2Connection : IDisposable
 
     /// <summary>True once the connection can serve no more.</summary>
     public bool IsBroken => _failed || _disposed;
-
-    /// <summary>Stop accepting new streams.</summary>
-    public void Shutdown() => _failed = true;
 
     public void Dispose()
     {
