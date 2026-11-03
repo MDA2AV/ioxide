@@ -86,7 +86,6 @@ public sealed partial class Http3Connection
         public int HeadersLen;
 
         public bool HeadersDone;                        // first HEADERS decoded (later ones = trailers)
-        public bool Dispatched;                         // streaming: handler already started
         public bool Finished;                           // fin seen and processed
 
         // The stream was paced, so the engine credited none of what arrived since: the parser
@@ -546,10 +545,9 @@ public sealed partial class Http3Connection
             return;
         }
 
-        if (_streamBodies && !rs.Dispatched)
+        if (_streamBodies)
         {
-            rs.Dispatched = true;
-            var sink = new Http3BodyReader(this, sid, ended: false);
+            var sink = new Http3BodyReader(this, sid);
             rs.Sink = sink;
             rs.Request.BodyReader = sink;
             _quicConnection.SetStreamPaced(sid, true);
