@@ -75,8 +75,8 @@ internal sealed class HttpClientConnection : IDisposable
         _transport = transport;
         _hostHeaderLine = hostHeaderLine;
 
-        // A header block cannot exceed the response ceiling, so the two agree rather than the
-        // parser accepting a megabyte of headers the arena would then refuse.
+        // A header block counts against the response ceiling, so the parser never accepts more
+        // header bytes than MaxResponseBytes allows.
         _limits = ParserLimits.Default with
         {
             MaxTotalHeaderBytes = Math.Min(ParserLimits.Default.MaxTotalHeaderBytes, options.MaxResponseBytes),
