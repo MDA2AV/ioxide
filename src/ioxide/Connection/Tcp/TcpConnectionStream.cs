@@ -125,7 +125,6 @@ public sealed class TcpConnectionStream : Stream, IValueTaskSource<int>, IValueT
 
                 _haveSnap = false;
                 bool closed = _snap.IsClosed;
-                _conn.ResetRead();
                 if (closed)
                 {
                     _eof = true;

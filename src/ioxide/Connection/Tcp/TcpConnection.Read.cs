@@ -256,14 +256,6 @@ public sealed unsafe partial class TcpConnection : IValueTaskSource<RecvSnapshot
     }
 
     /// <summary>
-    /// Nothing to do any more. Code written for the earlier contract calls this after every read, to
-    /// recycle the value task the next one waits on; <see cref="ReadAsync"/> now readies that itself,
-    /// when it parks. Calling it is harmless - including while a read is parked, which used to throw
-    /// that read's continuation away.
-    /// </summary>
-    public void ResetRead() { }
-
-    /// <summary>
     /// Wakes a parked <see cref="ReadAsync"/> with whatever is queued, possibly nothing, the way a
     /// recv completion does. Reactor thread only.
     /// </summary>

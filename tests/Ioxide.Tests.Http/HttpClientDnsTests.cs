@@ -111,7 +111,6 @@ internal static class HttpClientDnsTests
 
                 Wire.Write(connection, 200, host);
                 await connection.FlushAsync();
-                connection.ResetRead();
             }
         }
         finally

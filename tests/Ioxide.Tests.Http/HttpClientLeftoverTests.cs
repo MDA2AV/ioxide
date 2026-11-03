@@ -91,7 +91,6 @@ internal static class HttpClientLeftoverTests
                 {
                     return;
                 }
-                connection.ResetRead();
             }
         }
         finally

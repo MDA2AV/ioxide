@@ -78,7 +78,6 @@ internal static class HttpClientRequestHeadTests
 
                 Wire.Write(connection, 200, reply);
                 await connection.FlushAsync();
-                connection.ResetRead();
             }
         }
         finally
@@ -137,7 +136,6 @@ internal static class HttpClientRequestHeadTests
                 {
                     return;
                 }
-                connection.ResetRead();
             }
         }
         finally

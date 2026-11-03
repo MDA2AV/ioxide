@@ -332,7 +332,6 @@ internal static class CoreTests
                             {
                                 return;
                             }
-                            conn.ResetRead();
                         }
                     }
                     finally
@@ -565,7 +564,6 @@ internal static class CoreTests
                 {
                     return;
                 }
-                conn.ResetRead();
             }
         }
         finally
@@ -590,7 +588,6 @@ internal static class CoreTests
                 {
                     return;
                 }
-                conn.ResetRead();
             }
         }
         finally
@@ -614,7 +611,6 @@ internal static class CoreTests
                 {
                     return;
                 }
-                conn.ResetRead();
             }
         }
         finally

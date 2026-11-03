@@ -183,7 +183,6 @@ internal static class SessionLifetimeTests
                 {
                     break;
                 }
-                conn.ResetRead();
             }
 
             if (_served)
@@ -312,7 +311,6 @@ internal static class SessionLifetimeTests
             {
                 return;
             }
-            connection.ResetRead();
         }
     }
 

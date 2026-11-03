@@ -175,7 +175,6 @@ for (int i = 0; i < threads.Length; i++)
                 }
 
                 if (snapshot.IsClosed || tls.Closed) return;
-                conn.ResetRead();
             }
         }
         catch (Exception e)
