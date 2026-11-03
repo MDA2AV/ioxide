@@ -39,15 +39,6 @@ public readonly struct QuicCid : IEquatable<QuicCid>
         _len = (byte)bytes.Length;
     }
 
-    public void CopyTo(Span<byte> destination)
-    {
-        Span<byte> tmp = stackalloc byte[24];
-        BinaryPrimitives.WriteUInt64LittleEndian(tmp, _a);
-        BinaryPrimitives.WriteUInt64LittleEndian(tmp[8..], _b);
-        BinaryPrimitives.WriteUInt32LittleEndian(tmp[16..], _c);
-        tmp[.._len].CopyTo(destination);
-    }
-
     public bool Equals(QuicCid other) => _a == other._a && _b == other._b && _c == other._c && _len == other._len;
     public override bool Equals(object? obj) => obj is QuicCid other && Equals(other);
     public override int GetHashCode() => HashCode.Combine(_a, _b, _c, _len);

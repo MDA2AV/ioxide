@@ -496,12 +496,19 @@ public sealed unsafe class TlsSession : IDisposable
             }
         }
 
+        StageRecords(connection);
+    }
+
+    /// <summary>Moves the records waiting in the write BIO into the connection's slab, and returns the bytes staged.</summary>
+    internal int StageRecords(TcpConnection connection)
+    {
+        int staged = 0;
         while (true)
         {
             int pending = (int)BoringSsl.BIO_ctrl_pending(_wbio);
             if (pending <= 0)
             {
-                return;
+                return staged;
             }
 
             int chunk = Math.Min(pending, 16 * 1024);
@@ -515,9 +522,10 @@ public sealed unsafe class TlsSession : IDisposable
 
             if (n <= 0)
             {
-                return;
+                return staged;
             }
             connection.Advance(n);
+            staged += n;
         }
     }
 
@@ -594,9 +602,9 @@ public sealed unsafe class TlsSession : IDisposable
         // Clean server-side teardown: send close_notify so the peer can tell end-of-stream from a
         // truncation, whichever backend owns the write side - also when the peer closed first, which
         // RFC 8446 6.1 asks of both sides. Skip where a raw send cannot go out cleanly: into a send
-        // the ring still has, or past the FIN - which a reactor teardown marks too, once the fd may
-        // be someone else's.
-        if (_fd >= 0 && (_conn is null || (!_conn.FlushOutstanding && !_conn.FinSent)))
+        // the ring still has, past the FIN - which a reactor teardown marks too - or once the
+        // connection was recycled, when the fd may be someone else's.
+        if (_fd >= 0 && (_conn is null || (_conn.Generation == _generation && !_conn.FlushOutstanding && !_conn.FinSent)))
         {
             if (_txEnabled)
             {
@@ -674,16 +682,10 @@ public sealed unsafe class TlsSession : IDisposable
                 break;
             }
 
-            if (send(_fd, record, (nuint)n, MSG_NOSIGNAL | MSG_DONTWAIT) != n)
+            if (Native.send(_fd, record, (nuint)n, Native.MSG_NOSIGNAL | Native.MSG_DONTWAIT) != n)
             {
                 break;   // best effort: this is teardown and nothing here awaits a retry
             }
         }
     }
-
-    private const int MSG_NOSIGNAL = 0x4000;   // a dead peer must not SIGPIPE the process
-    private const int MSG_DONTWAIT = 0x40;     // teardown must never park the reactor thread
-
-    [DllImport("libc")]
-    private static extern nint send(int sockfd, byte* buf, nuint len, int flags);
 }

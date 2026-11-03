@@ -18,8 +18,8 @@ public sealed record PgOptions
     public string? Password { get; init; }
 
     /// <summary>
-    /// Connections opened per reactor. One connection carries one query at a time, so this is the
-    /// reactor's query concurrency; total server-side connections = PoolSize × ReactorCount.
+    /// Connections opened per reactor. Queries round-robin across them and pipeline, many in flight on
+    /// each; total server-side connections = PoolSize × ReactorCount.
     /// </summary>
     public int PoolSize { get; init; } = 8;
 

@@ -21,14 +21,24 @@ namespace ioxide.Kestrel;
 /// </summary>
 internal sealed class IoxideTlsFeature : ITlsConnectionFeature, ITlsHandshakeFeature, ITlsApplicationProtocolFeature
 {
-    private readonly TlsSession? _session;
+    private readonly byte[]? _peerCertificateDer;
     private X509Certificate2? _clientCertificate;
     private bool _clientCertificateRead;
 
     public IoxideTlsFeature(ReadOnlyMemory<byte> applicationProtocol, TlsSession? session = null)
     {
         ApplicationProtocol = applicationProtocol;
-        _session = session;
+
+        // Read now: the session is freed with the connection, and an HTTP/2 stream's handler can outlive it.
+        _peerCertificateDer = session?.PeerCertificateDer;
+        Protocol = session?.NegotiatedProtocolVersion switch
+        {
+            0x0304 => SslProtocols.Tls13,
+            0x0303 => SslProtocols.Tls12,
+            _ => SslProtocols.None,
+        };
+        // BoringSSL reports the suite by its IANA id, which is exactly how TlsCipherSuite is numbered.
+        NegotiatedCipherSuite = (TlsCipherSuite)(session?.NegotiatedCipherSuiteId ?? 0);
     }
 
     // ITlsApplicationProtocolFeature - the negotiated ALPN.
@@ -48,7 +58,7 @@ internal sealed class IoxideTlsFeature : ITlsConnectionFeature, ITlsHandshakeFea
             }
 
             _clientCertificateRead = true;
-            byte[]? der = _session?.PeerCertificateDer;
+            byte[]? der = _peerCertificateDer;
             if (der is not null)
             {
                 _clientCertificate = X509CertificateLoader.LoadCertificate(der);
@@ -69,15 +79,10 @@ internal sealed class IoxideTlsFeature : ITlsConnectionFeature, ITlsHandshakeFea
     // ITlsHandshakeFeature. NegotiatedCipherSuite is the modern accessor; the legacy
     // CipherAlgorithm/HashAlgorithm/KeyExchangeAlgorithm (+ *Strength) properties are obsolete
     // (SYSLIB0058) but still required interface members, so implement and suppress the warning.
-    public SslProtocols Protocol => _session?.NegotiatedProtocolVersion switch
-    {
-        0x0304 => SslProtocols.Tls13,
-        0x0303 => SslProtocols.Tls12,
-        _ => SslProtocols.None,
-    };
+    public SslProtocols Protocol { get; }
 
-    // BoringSSL reports the suite by its IANA id, which is exactly how TlsCipherSuite is numbered.
-    public TlsCipherSuite NegotiatedCipherSuite => (TlsCipherSuite)(_session?.NegotiatedCipherSuiteId ?? 0);
+    // Nullable as the interface declares it: a plain TlsCipherSuite leaves readers the interface's default, null.
+    public TlsCipherSuite? NegotiatedCipherSuite { get; }
     public string HostName => string.Empty;
 #pragma warning disable SYSLIB0058 // legacy ITlsHandshakeFeature cipher properties are obsolete but required
     public CipherAlgorithmType CipherAlgorithm => CipherAlgorithmType.Aes128;

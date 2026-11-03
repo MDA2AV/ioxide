@@ -259,27 +259,6 @@ public sealed unsafe class Ring : IDisposable
         return io_uring_enter(_enterFd, toSubmit, waitFor, flags | IORING_ENTER_EXT_ARG, &arg, (nuint)sizeof(io_uring_getevents_arg));
     }
 
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public bool TryGetCqe(out IoUringCqe cqe)
-    {
-        uint head = *_cqHead;
-        uint tail = Volatile.Read(ref *_cqTail);
-
-        if (head == tail)
-        {
-            cqe = default;
-
-            return false;
-        }
-
-        cqe = _cqes[head & _cqMask];
-
-        return true;
-    }
-
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public void CqeSeen() => Volatile.Write(ref *_cqHead, *_cqHead + 1);
-
     // Batched CQ drain (liburing io_uring_for_each_cqe + io_uring_cq_advance):
     // read the kernel-written tail once (acquire), process the whole batch,
     // then publish the consumed head once (release) instead of once per CQE.

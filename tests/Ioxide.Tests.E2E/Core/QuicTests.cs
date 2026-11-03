@@ -240,6 +240,26 @@ internal static class QuicTests
             Assert.True(Handshakes(client, serverPort), "the client's handshake never completed");
         }, skip: !confinable);
 
+        runner.Test("quic/client: a client socket whose port cannot be read is closed, so the failed open leaves no descriptor behind", () =>
+        {
+            // getsockname cannot fail on the socket the reactor just opened, so BoundPort gets a descriptor it fails on: not a socket.
+            const int attempts = 16;
+            int before = FdCount.Stable();
+
+            foreach (bool dualStack in new[] { false, true })
+            {
+                for (int i = 0; i < attempts; i++)
+                {
+                    int fd = ioxide.Native.open("/dev/null", 0, 0);
+                    Assert.True(fd >= 0, "could not open /dev/null");
+                    Assert.Throws<InvalidOperationException>(() => BoundPort(null, fd, dualStack), "getsockname failed");
+                }
+            }
+
+            int leaked = FdCount.Stable() - before;
+            Assert.True(leaked <= 2, $"{2 * attempts} failed port reads left {leaked} descriptors open");
+        });
+
         runner.Test("quic/client: a socket that could not be opened is opened by the next connect, on the buffer ring the first one brought up", () =>
         {
             Assert.Equal(0, getrlimit(RlimitNofile, out RLimit original));
@@ -341,6 +361,9 @@ internal static class QuicTests
         }, null);
         return done.Task.Wait(5_000);
     }
+
+    [UnsafeAccessor(UnsafeAccessorKind.StaticMethod, Name = "BoundPort")]
+    private static extern ushort BoundPort(Reactor? type, int fd, bool dualStack);
 
     // What a client-only reactor saw opening its QUIC socket twice in OnStart: once between fail and
     // restore, then again. Its UDP buffer ring is read after each.

@@ -16,6 +16,7 @@ public sealed record UdpOptions
     /// RECVMSG per socket draws buffers from this ring; each buffer pins ~64 KiB (a full GRO train
     /// plus the packed address/control header) and returns as soon as its datagram is handled, so
     /// the depth bounds how many datagrams can be in flight across all UDP sockets at once.
+    /// 1 to 32768, the most buffers a kernel buffer ring holds.
     /// </summary>
     public int RecvSlots { get; init; } = 16;
 

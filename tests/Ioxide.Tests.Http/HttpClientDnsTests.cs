@@ -73,9 +73,9 @@ internal static class HttpClientDnsTests
         {
             try
             {
-                IClientTransport transport = await ClientTransport.ConnectAsync(reactor, addresses, (ushort)port,
+                (RingSocket socket, _) = await ClientTransport.ConnectAsync(reactor, addresses, (ushort)port,
                     tls: null, serverName: null, connectTimeoutMs);
-                transport.Dispose();
+                socket.Dispose();
                 outcome.TrySetResult("connected");
             }
             catch (Exception e)

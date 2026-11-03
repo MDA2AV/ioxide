@@ -84,8 +84,6 @@ internal static unsafe class Nghttp3
     /// connection that must tell its peer why it died asks rather than keeping a table.</summary>
     [DllImport(Lib)] internal static extern ulong ih3_app_error_code(int libError);
 
-    // --- client side (ioxide.httpclient) ------------------------------------------------------
-
     /// <summary>
     /// Submit a response whose body arrives over time through <see cref="Callbacks.OnReadBody"/>.
     /// Nothing is copied here, unlike <c>ih3_submit_response</c>.
