@@ -144,7 +144,7 @@ public sealed unsafe partial class TcpConnection : IValueTaskSource, IFlushListe
     //
     // Segmented needs its own release, and zeroing the tail alone did nothing for it: once
     // _inOverflow is set every write is routed to overflow rather than to the slab, so the
-    // growth continued one pooled slab per fill. Clear() has always released them on recycle;
+    // growth continued one segment per fill. Clear() has always released them on recycle;
     // this is the same release on the path that never reaches recycle.
     private void DropStaged()
     {

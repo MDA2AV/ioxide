@@ -74,6 +74,29 @@ internal static class ReactorSetupTeardownTests
                 + "for the next socket the process opens");
         });
 
+        runner.Test("reactor: a listener bind that fails closes its socket, so a failed start leaks no descriptor", () =>
+        {
+            // A plain listener asks for no SO_REUSEPORT, so every bind to its port is refused, the dual-stack one too.
+            using var holder = new TcpListener(IPAddress.Any, 0);
+            holder.Start();
+            ushort port = (ushort)((IPEndPoint)holder.LocalEndpoint).Port;
+
+            const int attempts = 16;
+            int before = FdCount.Stable();
+
+            foreach (bool dualStack in new[] { false, true })
+            {
+                for (int i = 0; i < attempts; i++)
+                {
+                    Assert.Throws<InvalidOperationException>(
+                        () => OpenReusePortListener(null, port, backlog: 16, dualStack, userTimeoutMs: 0), "bind failed");
+                }
+            }
+
+            int leaked = FdCount.Stable() - before;
+            Assert.True(leaked <= 2, $"{2 * attempts} refused binds left {leaked} descriptors open");
+        });
+
         runner.Test("reactor: a ring the kernel refuses reaches OnFault instead of ending the process", () =>
         {
             // Every kernel refuses more than 32768 entries with EINVAL - the errno a kernel older than
@@ -275,6 +298,9 @@ internal static class ReactorSetupTeardownTests
 
     [UnsafeAccessor(UnsafeAccessorKind.Field, Name = "BufSlab")]
     private static extern unsafe ref byte* BufSlabOf(TcpConnection connection);
+
+    [UnsafeAccessor(UnsafeAccessorKind.StaticMethod, Name = "OpenReusePortListener")]
+    private static extern int OpenReusePortListener(Reactor? type, ushort port, int backlog, bool dualStack, int userTimeoutMs);
 
     // A connect completes into a listener's backlog without anyone accepting, so it succeeds exactly
     // while the listening socket is open.

@@ -45,9 +45,6 @@ public sealed class TlsClientStream : IDisposable
     /// <summary>The ALPN protocol the origin selected, or null when none was negotiated.</summary>
     public string? NegotiatedAlpn { get; private set; }
 
-    /// <summary>The socket underneath, for callers that need its descriptor.</summary>
-    public RingSocket Socket => _socket;
-
     private TlsClientStream(RingSocket socket, nint ssl, nint rbio, nint wbio)
     {
         _socket = socket;

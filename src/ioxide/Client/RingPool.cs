@@ -13,28 +13,6 @@ public sealed class RingPool<T> where T : class
     private readonly Queue<TaskCompletionSource<T>> _waiters = new();
     private readonly object _gate = new();
 
-    public int IdleCount
-    {
-        get
-        {
-            lock (_gate)
-            {
-                return _idle.Count;
-            }
-        }
-    }
-
-    public int WaiterCount
-    {
-        get
-        {
-            lock (_gate)
-            {
-                return _waiters.Count;
-            }
-        }
-    }
-
     /// <summary>
     /// Rent a resource, waiting (without blocking a thread) if none is idle.
     /// </summary>

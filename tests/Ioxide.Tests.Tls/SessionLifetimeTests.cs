@@ -1,3 +1,7 @@
+using System.Net;
+using System.Net.Security;
+using System.Net.Sockets;
+using System.Security.Authentication;
 using ioxide;
 using ioxide.tls;
 using ioxide.utils;
@@ -24,13 +28,11 @@ namespace Ioxide.Tests;
 ///    this one runs SSL_write against freed memory. Not exercised: OpenSSL happened to return an
 ///    error there, BoringSSL segfaults, and neither is something a test can pin.
 ///
-/// A THIRD shape is real but deliberately NOT tested here: Dispose sends a close_notify to a bare
-/// stored fd, and a caller that released the connection (recycling the fd through the pool) before
-/// disposing would write a TLS record into whatever inherited the number. Every in-repo caller
-/// disposes BEFORE DecRef, so nothing exercises it; a test would have to win an fd-reuse race to
-/// observe the misdirected write, which is exactly the timing-dependent flake tests/README.md
-/// forbids. The guarantee there is conventional (call ordering), not structural (no generation tag
-/// on the fd, unlike every reactor-side descriptor) - a note, not a test.
+/// A third shape is pinned as well: a caller that releases the connection before disposing. Dispose
+/// sends close_notify on a bare stored fd, which by then may be the next client's, so it first checks
+/// the connection is still in the life the session was made for. Showing it needs no race: one reactor
+/// and its LIFO pool hand the second client the first one's connection, and its fd, before the first
+/// session is disposed.
 /// </remarks>
 internal static class SessionLifetimeTests
 {
@@ -57,6 +59,63 @@ internal static class SessionLifetimeTests
             Assert.Equal("none", _secondDisposeError);   // the _disposed guard makes the 2nd Dispose a no-op
         });
 
+        runner.Test("lifetime: a session disposed after its connection was recycled sends the next client nothing", () =>
+        {
+            (string certPath, string keyPath) = TestCert.Ensure();
+            var options = new TlsOptions { CertificatePath = certPath, KeyPath = keyPath };
+            var reuse = new Reuse();
+            int port = TestServer.Start((r, conn) => ReuseHandler(r, conn, reuse), r => TlsService.Start(r, options));
+
+            // The probe's descriptor must be free before the first accept: freed after it, the second accept would take it.
+            Assert.True(reuse.ProbeGone.Wait(10_000), "the harness's readiness probe never reached the handler");
+
+            // Made up front: a client socket made later could take the descriptor the first connection frees.
+            using var first = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp) { ReceiveTimeout = 10_000 };
+            using var second = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp) { ReceiveTimeout = 10_000 };
+
+            first.Connect(IPAddress.Loopback, port);
+            using var firstTls = new SslStream(new NetworkStream(first), leaveInnerStreamOpen: false, (_, _, _, _) => true);
+            firstTls.AuthenticateAsClient(new SslClientAuthenticationOptions
+            {
+                TargetHost = "localhost",
+                EnabledSslProtocols = SslProtocols.Tls12,   // a misdirected close_notify then arrives as an alert record
+            });
+
+            first.Shutdown(SocketShutdown.Send);   // the server releases the connection and keeps the session
+            Assert.True(reuse.FirstReleased.Wait(10_000), "the server never released the first connection");
+
+            second.Connect(IPAddress.Loopback, port);
+            var tap = new FirstRecordType(new NetworkStream(second));
+            using var secondTls = new SslStream(tap, leaveInnerStreamOpen: false, (_, _, _, _) => true);
+            (int Status, string Body) answer = (0, "");
+            string? failure = null;
+            try
+            {
+                secondTls.AuthenticateAsClient(new SslClientAuthenticationOptions
+                {
+                    TargetHost = "localhost",
+                    EnabledSslProtocols = SslProtocols.Tls13,
+                });
+                Client.Send(secondTls, "/");
+                answer = Client.ReadResponse(secondTls);
+            }
+            catch (Exception e)
+            {
+                failure = e.Message;
+            }
+
+            Assert.True(reuse.Reused.Task.Wait(10_000), "the second client never reached the handler");
+            (bool sameConnection, int firstFd, int secondFd) = reuse.Reused.Task.Result;
+            Assert.True(sameConnection, "the second client was not handed the first one's pooled connection, so nothing was reused");
+            Assert.True(secondFd == firstFd,
+                $"the second client was accepted on fd {secondFd}, not the first one's {firstFd}, so a misdirected close_notify could not reach it");
+
+            Assert.True(tap.Type == HandshakeRecord,
+                $"the second client's first record was type {tap.Type}, not its ServerHello: the first session's close_notify reached it");
+            Assert.True(failure is null, $"the second client's TLS session failed: {failure}");
+            Assert.Equal(200, answer.Status);
+            Assert.Equal("ok", answer.Body);
+        });
     }
 
     /// <summary>Start a server, serve one TLS request, and wait for the post-dispose probe to run.</summary>
@@ -165,5 +224,121 @@ internal static class SessionLifetimeTests
     private static unsafe void AppendPlaintext(TlsSession tls, in SpscRecvRing.Item item, List<byte> carry)
     {
         carry.AddRange(tls.Decrypt(item.Ptr, item.Len).ToArray());
+    }
+
+    private sealed class Reuse
+    {
+        public readonly ManualResetEventSlim ProbeGone = new();
+        public readonly ManualResetEventSlim FirstReleased = new();
+        public readonly TaskCompletionSource<(bool SameConnection, int FirstFd, int SecondFd)> Reused =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        // Reactor thread only.
+        public TcpConnection? First;
+        public int FirstFd;
+        public TlsSession? Parked;
+    }
+
+    // Serves the readiness probe, then the first client, then the second; the test lets each in only after the last.
+    private static async Task ReuseHandler(Reactor reactor, TcpConnection connection, Reuse reuse)
+    {
+        if (reuse.Parked is { } parked)
+        {
+            // Disposed only now, while its connection already serves the second client.
+            reuse.Parked = null;
+            reuse.Reused.TrySetResult((ReferenceEquals(connection, reuse.First), reuse.FirstFd, connection.ClientFd));
+            parked.Dispose();
+        }
+
+        TlsSession session;
+        try
+        {
+            session = await reactor.GetService<TlsService>().AcceptAsync(connection);
+        }
+        catch (IOException)
+        {
+            connection.DecRef();
+            reuse.ProbeGone.Set();   // the harness's readiness probe never completes a handshake
+            return;
+        }
+
+        if (reuse.First is null)
+        {
+            await AnswerOne(connection, session);   // the first client asks nothing and leaves
+            reuse.First = connection;
+            reuse.FirstFd = connection.ClientFd;
+            reuse.Parked = session;
+            connection.DecRef();
+            reuse.FirstReleased.Set();
+            return;
+        }
+
+        try
+        {
+            await AnswerOne(connection, session);
+        }
+        finally
+        {
+            session.Dispose();
+            connection.DecRef();
+        }
+    }
+
+    // Answers one request, or returns once the peer has gone.
+    private static async Task AnswerOne(TcpConnection connection, TlsSession session)
+    {
+        var carry = new List<byte>();
+        while (true)
+        {
+            RecvSnapshot snapshot = await connection.ReadAsync();
+            while (connection.TryGetItem(snapshot, out SpscRecvRing.Item item))
+            {
+                if (item.HasBuffer)
+                {
+                    AppendPlaintext(session, item, carry);
+                    connection.ReturnBuffer(in item);
+                }
+            }
+
+            if (System.Runtime.InteropServices.CollectionsMarshal.AsSpan(carry).IndexOf("\r\n\r\n"u8) >= 0)
+            {
+                Wire.Write(connection, 200, "ok", session);
+                await connection.FlushAsync();
+                return;
+            }
+
+            if (snapshot.IsClosed)
+            {
+                return;
+            }
+        }
+    }
+
+    private const byte HandshakeRecord = 22;
+
+    /// <summary>Keeps the content type of the first record read off the socket, from under the SslStream.</summary>
+    private sealed class FirstRecordType(Stream inner) : Stream
+    {
+        public int Type { get; private set; } = -1;
+
+        public override int Read(byte[] buffer, int offset, int count)
+        {
+            int n = inner.Read(buffer, offset, count);
+            if (n > 0 && Type < 0)
+            {
+                Type = buffer[offset];
+            }
+            return n;
+        }
+
+        public override void Write(byte[] buffer, int offset, int count) => inner.Write(buffer, offset, count);
+        public override void Flush() => inner.Flush();
+        public override bool CanRead => true;
+        public override bool CanSeek => false;
+        public override bool CanWrite => true;
+        public override long Length => throw new NotSupportedException();
+        public override long Position { get => throw new NotSupportedException(); set => throw new NotSupportedException(); }
+        public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+        public override void SetLength(long value) => throw new NotSupportedException();
     }
 }

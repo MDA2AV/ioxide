@@ -67,7 +67,8 @@
     int ret = BoringSsl.SSL_accept(ssl);
     int err = ret == 1 ? 0 : BoringSsl.SSL_get_error(ssl, ret);   // read the error immediately
 
-    await FlushOutbound(conn, wbio);    // drain server flights into the slab, then io_uring send
+    if (session.StageRecords(conn) &gt; 0)   // drain server flights into the slab,
+        await conn.FlushAsync();           // then one io_uring send
 
     if (ret == 1) break;
     if (err != BoringSsl.SSL_ERROR_WANT_READ)

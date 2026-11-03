@@ -97,6 +97,28 @@ internal static class TlsPipeTests
             Assert.True(disposed.Task.Wait(TimeSpan.FromSeconds(60)), "DisposeAsync never returned");
         });
 
+        // Against a peer that stays quiet nothing else lets go of a read parked on the connection.
+        runner.Test("tls pipe: disposing the pipe ends a read parked on a quiet peer and closes the connection", () =>
+        {
+            (string certPath, string keyPath) = TestCert.Ensure();
+            var options = new TlsOptions { CertificatePath = certPath, KeyPath = keyPath };
+
+            var report = new TaskCompletionSource<(bool Parked, bool Ended, bool Closed)>(TaskCreationOptions.RunContinuationsAsynchronously);
+            int port = TestServer.Start(DisposeUnderParkedReadHandler(report), r => TlsService.Start(r, options));
+
+            using var client = new TcpClient();
+            client.Connect("127.0.0.1", port);
+            using var ssl = new SslStream(client.GetStream(), leaveInnerStreamOpen: false, (_, _, _, _) => true);
+            ssl.AuthenticateAsClient(new SslClientAuthenticationOptions { TargetHost = "localhost" });
+            ssl.Write("hello"u8);   // then nothing, until the handler has reported
+
+            Assert.True(report.Task.Wait(TimeSpan.FromSeconds(10)), "the handler never reported");
+            (bool parked, bool ended, bool closed) = report.Task.Result;
+            Assert.True(parked, "the second read did not park, so there was nothing to release");
+            Assert.True(ended, "the parked read did not end with the end of the stream");
+            Assert.True(closed, "disposing left the connection open, with the read still parked on it");
+        });
+
         runner.Test("tls pipe: nothing is decrypted until the handler reads", () =>
         {
             // The body lands while the handler reads nothing, so it waits as ciphertext and the
@@ -602,6 +624,57 @@ internal static class TlsPipeTests
                 }
             }
         };
+
+    // Takes one message, then disposes the pipe with a read parked for the next, which the peer never sends.
+    private static Func<Reactor, TcpConnection, Task> DisposeUnderParkedReadHandler(
+        TaskCompletionSource<(bool Parked, bool Ended, bool Closed)> report)
+        => async (reactor, connection) =>
+        {
+            TlsSession? session = null;
+            TlsConnectionDualPipe? pipe = null;
+            Task<bool>? next = null;
+            bool parked = false;
+            try
+            {
+                session = await reactor.GetService<TlsService>()!.AcceptAsync(connection);
+                pipe = new TlsConnectionDualPipe(connection, session);
+
+                ReadResult first = await pipe.Input.ReadAsync();
+                pipe.Input.AdvanceTo(first.Buffer.End);
+
+                next = EndOfStream(pipe.Input);
+                parked = !next.IsCompleted;
+            }
+            catch
+            {
+                // Harness port probes fail the handshake; not this test's concern.
+            }
+            finally
+            {
+                if (pipe is not null)
+                {
+                    await pipe.DisposeAsync();
+                }
+                else
+                {
+                    session?.Dispose();
+                }
+
+                if (next is not null)
+                {
+                    report.TrySetResult((parked, next.IsCompletedSuccessfully && next.Result, connection.IsClosed));
+                }
+                connection.DecRef();
+            }
+        };
+
+    // One read: whether it found the end of the stream.
+    private static async Task<bool> EndOfStream(PipeReader input)
+    {
+        ReadResult read = await input.ReadAsync();
+        input.AdvanceTo(read.Buffer.End);
+        return read.IsCompleted && read.Buffer.IsEmpty;
+    }
 
     /// <summary>
     /// Sends a head plus a body in one go and returns whatever came back. The body stays small enough

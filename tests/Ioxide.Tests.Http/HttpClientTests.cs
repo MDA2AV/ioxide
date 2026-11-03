@@ -160,11 +160,6 @@ internal static class HttpClientTests
 
         runner.Test("httpclient h1: a response above the arena's old default ceiling is intact", () =>
         {
-            // HttpClientResponse is shared by h1, h2 and h3, and h1 bounds responses a DIFFERENT
-            // way - Content-Length checked before allocating, never consulting Overflowed. Giving
-            // the shared arena a default ceiling therefore did not protect h1, it truncated it:
-            // parsing completed while the arena silently dropped bytes, and the caller got 200
-            // with empty headers and an empty body. Raising h1's own documented limit has to work.
             int origin = TestServer.Start(OriginHandler);
             int proxy = StartProxy(origin, maxResponseBytes: 32 * 1024 * 1024);
 

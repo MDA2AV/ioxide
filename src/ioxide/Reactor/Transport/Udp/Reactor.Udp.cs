@@ -150,19 +150,20 @@ public sealed unsafe partial class Reactor
         }
 
         int fd = OpenUdpSocket(0, _config.DualStack, _udp.Gro, _udp.SocketBufferBytes);   // port 0: the kernel picks
+        ushort port = BoundPort(fd, _config.DualStack);
 
         // Append. Indices stay stable (recv completions carry theirs in user_data), so growing the
         // tables cannot disturb the multishot recvs already armed on the existing sockets.
         int index = _udpFds.Length;
         _udpFds     = [.. _udpFds, fd];
-        _udpFdPorts = [.. _udpFdPorts, BoundPort(fd, _config.DualStack)];
+        _udpFdPorts = [.. _udpFdPorts, port];
 
         ArmUdpRecv(index);
         return index;
     }
 
     // The port the kernel assigned to a bind(:0) - ngtcp2 needs the real local address for its
-    // path, so 0 will not do.
+    // path, so 0 will not do. Closes fd on failure: the caller has not stored it anywhere yet.
     private static ushort BoundPort(int fd, bool dualStack)
     {
         if (dualStack)
@@ -171,6 +172,7 @@ public sealed unsafe partial class Reactor
             uint len6 = (uint)sizeof(sockaddr_in6);
             if (getsockname(fd, &addr6, &len6) < 0)
             {
+                close(fd);
                 throw new InvalidOperationException("getsockname failed on the QUIC client socket");
             }
             return Htons(addr6.sin6_port);   // Htons is its own inverse (16-bit swap)
@@ -180,6 +182,7 @@ public sealed unsafe partial class Reactor
         uint len = (uint)sizeof(sockaddr_in);
         if (getsockname(fd, &addr, &len) < 0)
         {
+            close(fd);
             throw new InvalidOperationException("getsockname failed on the QUIC client socket");
         }
         return Htons(addr.sin_port);
@@ -335,6 +338,7 @@ public sealed unsafe partial class Reactor
 
             if (bind(fd, &addr6, (uint)sizeof(sockaddr_in6)) < 0)
             {
+                close(fd);
                 throw new InvalidOperationException($"udp bind :{port} failed");
             }
         }
@@ -349,6 +353,7 @@ public sealed unsafe partial class Reactor
 
             if (bind(fd, &addr, (uint)sizeof(sockaddr_in)) < 0)
             {
+                close(fd);
                 throw new InvalidOperationException($"udp bind :{port} failed");
             }
         }
