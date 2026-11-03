@@ -21,9 +21,9 @@ public static class IoxideHttpExtensions
     /// Runs <paramref name="work"/> on this connection's reactor and returns its result. On the reactor (HTTP/1.1
     /// requests start there) it runs inline; from another thread (every HTTP/2 stream, which Kestrel runs on the
     /// ThreadPool, or after an await that resumed there) it switches to the reactor first, and throws
-    /// <see cref="ObjectDisposedException"/> if the reactor has stopped. The caller continues on the reactor
-    /// afterwards, so never block on the result (<c>.Result</c>, <c>.Wait()</c>): that stalls every connection the
-    /// reactor owns, including the one completing the call.
+    /// <see cref="ObjectDisposedException"/> if the reactor has stopped. The caller then continues where the work
+    /// completed, normally on the reactor, so never block on the result (<c>.Result</c>, <c>.Wait()</c>): that
+    /// stalls every connection the reactor owns, including the one completing the call.
     /// Materialize ring-native results (PgRow, file buffers) into your own objects inside <paramref name="work"/>.
     /// </summary>
     public static Task<T> OnReactor<T>(this HttpContext context, Func<Reactor, Task<T>> work)
