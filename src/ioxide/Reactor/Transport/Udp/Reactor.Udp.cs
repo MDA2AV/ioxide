@@ -154,7 +154,7 @@ public sealed unsafe partial class Reactor
     }
 
     // The port the kernel assigned to a bind(:0) - ngtcp2 needs the real local address for its
-    // path, so 0 will not do.
+    // path, so 0 will not do. Closes fd on failure, as BindAny does: the caller has not stored it yet.
     private static ushort BoundPort(int fd, bool dualStack)
     {
         if (dualStack)
@@ -163,6 +163,7 @@ public sealed unsafe partial class Reactor
             uint len6 = (uint)sizeof(sockaddr_in6);
             if (getsockname(fd, &addr6, &len6) < 0)
             {
+                close(fd);
                 throw new InvalidOperationException("getsockname failed on the QUIC client socket");
             }
             return Htons(addr6.sin6_port);   // Htons is its own inverse (16-bit swap)
@@ -172,6 +173,7 @@ public sealed unsafe partial class Reactor
         uint len = (uint)sizeof(sockaddr_in);
         if (getsockname(fd, &addr, &len) < 0)
         {
+            close(fd);
             throw new InvalidOperationException("getsockname failed on the QUIC client socket");
         }
         return Htons(addr.sin_port);
@@ -320,7 +322,7 @@ public sealed unsafe partial class Reactor
         }
         setsockopt(fd, IPPROTO_IP, IP_RECVTOS, &one, sizeof(int));
 
-        BindAny(fd, port, dualStack);
+        BindAny(fd, port, dualStack, "udp");
 
         // A pinned socket: same address as its siblings but naming ONE peer, so it outranks the
         // wildcard binds and the reuseport hash is never consulted for that peer. Measured: no

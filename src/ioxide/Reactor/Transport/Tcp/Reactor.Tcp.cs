@@ -444,10 +444,11 @@ public sealed unsafe partial class Reactor
             setsockopt(fd, IPPROTO_TCP, TCP_USER_TIMEOUT, &userTimeoutMs, sizeof(int));
         }
 
-        BindAny(fd, port, dualStack);
+        BindAny(fd, port, dualStack, "tcp");
 
         if (listen(fd, backlog) < 0)
         {
+            close(fd);
             throw new InvalidOperationException("listen failed");
         }
 
@@ -455,7 +456,7 @@ public sealed unsafe partial class Reactor
     }
 
     // Closes fd on failure: the caller has not stored it anywhere yet.
-    private static void BindAny(int fd, ushort port, bool dualStack)
+    private static void BindAny(int fd, ushort port, bool dualStack, string transport)
     {
         int rc;
         if (dualStack)
@@ -484,7 +485,7 @@ public sealed unsafe partial class Reactor
         if (rc < 0)
         {
             close(fd);
-            throw new InvalidOperationException($"bind failed on port {port}");
+            throw new InvalidOperationException($"{transport} bind failed on port {port}");
         }
     }
 }
