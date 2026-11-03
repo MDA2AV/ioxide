@@ -29,6 +29,7 @@ internal static class Program
         Http2OutputQueueTests.Register(runner);
         Http2StreamedRequestTests.Register(runner);
         Http2TrailerTests.Register(runner);
+        Http2RequestHeaderTests.Register(runner);
         Http2StreamedBodyTests.Register(runner);
         Http2FlowControlTests.Register(runner);
         Http2BufferedCreditTests.Register(runner);
