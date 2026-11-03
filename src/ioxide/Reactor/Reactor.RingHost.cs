@@ -21,7 +21,7 @@ public sealed unsafe partial class Reactor : IRingHost
     // exactly the operation's, with no allocation per wait.
     private __kernel_timespec* _opTimespecs;
     private int _opTimespecCapacity;
-    private int[] _opFree = null!;
+    private int[] _opFree;
     private int   _opFreeTop;
 
     // Off-reactor submissions marshal here (single-issuer SQ).
@@ -226,16 +226,6 @@ public sealed unsafe partial class Reactor : IRingHost
 
     private int AllocOpSlot(IRingCompletion completion)
     {
-        if (_opFree == null)
-        {
-            _opFree = new int[_opTargets.Length];
-            for (int i = 0; i < _opFree.Length; i++)
-            {
-                _opFree[i] = _opFree.Length - 1 - i;
-            }
-            _opFreeTop = _opFree.Length;
-        }
-
         if (_opFreeTop == 0)
         {
             int oldLength = _opTargets.Length;

@@ -61,7 +61,7 @@ public sealed unsafe partial class Reactor
 
     // Accept failures that leave the connection in the backlog, so an accept re-armed at once fails
     // again at once (#222): out of descriptors, the process's or the system's, or out of memory.
-    private const int ENOMEM = 12, ENFILE = 23, EMFILE = 24;
+    private const int ENFILE = 23, EMFILE = 24;
 
     // Listeners whose accept stopped on one of those; TcpSweep re-arms them on its next tick.
     private readonly List<int> _acceptPaused = [];

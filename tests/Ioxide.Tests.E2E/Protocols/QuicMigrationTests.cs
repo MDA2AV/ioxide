@@ -1,5 +1,7 @@
 using System.Net;
 using System.Net.Sockets;
+using System.Reflection;
+using System.Runtime.CompilerServices;
 using ioxide;
 using ioxide.http3;
 using ioxide.nghttp3;
@@ -140,6 +142,50 @@ internal static class QuicMigrationTests
             Assert.Equal(0L, Dropped());
             Assert.True(forwarder.FromServerAfterSwap > 0,
                 "the server never sent anything to the client's new address, so nothing migrated");
+        });
+
+        runner.Test("quic/migration: once the forwarded datagrams have run, no reactor still counts one in flight", () =>
+        {
+            // A count never taken back stays, and at the cap every later datagram for that reactor is dropped.
+            (string certPath, string keyPath) = TestCert.Ensure();
+            var engine = TestServer.Own(new QuicEngine(certPath, keyPath, cidLength: 8, alpn: ["h3"]));
+
+            (int serverPort, Reactor[] fleet) = TestServer.StartQuicSharded(4,
+                engine.CreateFactory(),
+                quicHandle: static (_, conn) => new Nghttp3Connection(conn).RunAsync(
+                    static _ => Nghttp3Response.Text("migrated-ok")),
+                routing: QuicRouting.Forward);
+
+            long Forwarded()
+            {
+                long n = 0;
+                foreach (Reactor reactor in fleet) { n += reactor.QuicForwardsSent; }
+                return n;
+            }
+
+            using var forwarder = new UdpForwarder(serverPort);
+            using var client = new H3TestClient("127.0.0.1", forwarder.Port);
+
+            client.Connect();
+            Assert.True(client.CompleteHandshake(10_000), "the handshake through the forwarder did not complete");
+            Assert.Equal(200, client.Request("GET", "/before", null, 10_000).Status);
+
+            // One connection, one owner: a count taken off the wrong reactor is not evened out by forwards to another.
+            int swaps = 0;
+            while (Forwarded() == 0 && swaps < 8)
+            {
+                swaps++;
+                forwarder.SwapUpstream();
+                Assert.Equal(200, client.Request("GET", $"/after-{swaps}", null, 15_000).Status);
+            }
+
+            Assert.True(Forwarded() > 0,
+                $"after {swaps} address changes nothing was forwarded, so nothing was counted toward a reactor");
+
+            // The client sends nothing between requests, so only the forwards already posted are left to run.
+            int[] outstanding = OutstandingOf(QuicFleetOf(fleet[0]));
+            Assert.True(WaitUntil(() => outstanding.All(n => n == 0), 5_000),
+                $"after {Forwarded()} forwards, still counted in flight toward each reactor: [{string.Join(", ", outstanding)}]");
         });
 
         runner.Test("quic/migration: claiming the new address stops the forwarding", () =>
@@ -742,6 +788,14 @@ internal static class QuicMigrationTests
         }
         return true;
     }
+
+    // QuicFleet is private, and the runtime refuses [UnsafeAccessorType] on a field accessor's return.
+    private static object QuicFleetOf(Reactor reactor)
+        => typeof(Reactor).GetField("_quicFleet", BindingFlags.NonPublic | BindingFlags.Instance)?.GetValue(reactor)
+           ?? throw new Exception("Reactor._quicFleet is gone, or this reactor joined no fleet");
+
+    [UnsafeAccessor(UnsafeAccessorKind.Field, Name = "Outstanding")]
+    private static extern ref int[] OutstandingOf([UnsafeAccessorType("ioxide.Reactor+QuicFleet, ioxide")] object fleet);
 
     private sealed class EvictionReporting(QuicEngine engine, TaskCompletionSource evicted) : QuicEngineConnection(engine)
     {
