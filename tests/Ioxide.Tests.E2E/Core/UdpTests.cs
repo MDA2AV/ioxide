@@ -29,6 +29,13 @@ internal static class UdpTests
             }
         });
 
+        // One socket on [::] serves both families: IPv4 peers reach it as IPv4-mapped addresses.
+        runner.Test("core: a dual-stack udp socket takes datagrams over IPv4", () => DualStackEcho(IPAddress.Loopback),
+            skip: !Socket.OSSupportsIPv6);
+
+        runner.Test("core: a dual-stack udp socket takes datagrams over IPv6", () => DualStackEcho(IPAddress.IPv6Loopback),
+            skip: !Ipv6LoopbackUp());
+
         runner.Test("core: udp 8 KiB payload + two clients (per-datagram addressing)", () =>
         {
             (_, int udpPort) = TestServer.StartDatagram(
@@ -149,5 +156,34 @@ internal static class UdpTests
             using var probe = new TcpClient();
             probe.Connect("127.0.0.1", tcpPort);   // the owning reactor is still alive
         });
+    }
+
+    private static void DualStackEcho(IPAddress peer)
+    {
+        (_, int udpPort) = TestServer.StartDatagramConfigured(
+            static (Reactor r, in UdpDatagram d) => r.UdpSendTo(d.SocketFd, d.PeerAddr, d.PeerAddrLen, d.Payload),
+            dualStack: true);
+
+        using var client = new UdpClient(peer.AddressFamily);
+        client.Client.ReceiveTimeout = 4000;
+        client.Send("dual"u8.ToArray(), 4, new IPEndPoint(peer, udpPort));
+
+        IPEndPoint? from = null;
+        Assert.Equal("dual", Encoding.ASCII.GetString(client.Receive(ref from)));
+    }
+
+    // ::1 binds only where the loopback has an IPv6 address, which a container often lacks.
+    private static bool Ipv6LoopbackUp()
+    {
+        try
+        {
+            using var probe = new Socket(AddressFamily.InterNetworkV6, SocketType.Dgram, ProtocolType.Udp);
+            probe.Bind(new IPEndPoint(IPAddress.IPv6Loopback, 0));
+            return true;
+        }
+        catch (SocketException)
+        {
+            return false;
+        }
     }
 }
