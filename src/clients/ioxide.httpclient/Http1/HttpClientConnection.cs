@@ -26,7 +26,8 @@ namespace ioxide.httpclient;
 internal sealed class HttpClientConnection : IDisposable
 {
     private readonly HttpClientOptions _options;
-    private readonly IClientTransport _transport;
+    private readonly RingSocket _socket;
+    private readonly TlsClientStream? _tls;   // https:// only: the TLS session over _socket
     private readonly byte[] _hostHeaderLine;
 
     private nint _send;
@@ -65,18 +66,20 @@ internal sealed class HttpClientConnection : IDisposable
     public unsafe bool ClosedWhileIdle()
     {
         // POLLRDHUP rather than a read: TLS can leave a close_notify or ticket unread ahead of the FIN.
-        var fd = new PollFd { Fd = _transport.Fd, Events = POLLRDHUP };
+        var fd = new PollFd { Fd = _socket.Fd, Events = POLLRDHUP };
         return poll(&fd, 1, 0) != 0;
     }
 
-    private unsafe HttpClientConnection(HttpClientOptions options, IClientTransport transport, byte[] hostHeaderLine)
+    private unsafe HttpClientConnection(HttpClientOptions options, RingSocket socket, TlsClientStream? tls,
+        byte[] hostHeaderLine)
     {
         _options = options;
-        _transport = transport;
+        _socket = socket;
+        _tls = tls;
         _hostHeaderLine = hostHeaderLine;
 
-        // A header block cannot exceed the response ceiling, so the two agree rather than the
-        // parser accepting a megabyte of headers the arena would then refuse.
+        // A header block counts against the response ceiling, so the parser never accepts more
+        // header bytes than MaxResponseBytes allows.
         _limits = ParserLimits.Default with
         {
             MaxTotalHeaderBytes = Math.Min(ParserLimits.Default.MaxTotalHeaderBytes, options.MaxResponseBytes),
@@ -102,10 +105,10 @@ internal sealed class HttpClientConnection : IDisposable
         string authority = options.Port == (options.Tls is null ? 80 : 443) ? name : $"{name}:{options.Port}";
         byte[] hostHeaderLine = System.Text.Encoding.ASCII.GetBytes($"host: {authority}\r\n");
 
-        IClientTransport transport = await ClientTransport.ConnectAsync(
+        (RingSocket socket, TlsClientStream? tls) = await ClientTransport.ConnectAsync(
             host, options.Host, options.Port, options.Tls, options.ConnectTimeoutMs);
 
-        return new HttpClientConnection(options, transport, hostHeaderLine);
+        return new HttpClientConnection(options, socket, tls, hostHeaderLine);
     }
 
     /// <summary>Send one request and read its response. The response owns its bytes.</summary>
@@ -157,7 +160,9 @@ internal sealed class HttpClientConnection : IDisposable
         int sent = 0;
         while (sent < length)
         {
-            int n = await _transport.SendAsync(buffer + sent, length - sent);
+            int n = await (_tls is null
+                ? _socket.SendAsync(buffer + sent, length - sent)
+                : _tls.SendAsync(buffer + sent, length - sent));
             if (n <= 0)
             {
                 throw new HttpClientException(n == 0 ? "peer closed while sending" : $"send failed: errno {-n}");
@@ -380,7 +385,9 @@ internal sealed class HttpClientConnection : IDisposable
     {
         EnsureReceiveSpace();
 
-        int n = await _transport.RecvAsync(_receive + _received, _receiveCapacity - _received);
+        int n = await (_tls is null
+            ? _socket.RecvAsync(_receive + _received, _receiveCapacity - _received)
+            : _tls.RecvAsync(_receive + _received, _receiveCapacity - _received));
         if (n <= 0)
         {
             throw new HttpClientException(n == 0 ? "peer closed mid-response" : $"recv failed: errno {-n}");
@@ -706,7 +713,8 @@ internal sealed class HttpClientConnection : IDisposable
     public unsafe void Dispose()
     {
         _broken = true;
-        _transport.Dispose();
+        _tls?.Dispose();
+        _socket.Dispose();   // already closed by the TLS session, if any; a second Dispose does nothing
         _head.Dispose();   // returns the header list's pooled arrays
         if (_send != 0)
         {

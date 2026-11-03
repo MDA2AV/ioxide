@@ -8,9 +8,7 @@ namespace ioxide.file;
 /// <remarks>
 /// To serve safely across a reload, take a <see cref="Lease"/> with <see cref="Acquire"/> and hold
 /// it for the whole request (lookup → ring read → send): the old snapshot's descriptors are freed
-/// only once every lease on it is released, so an in-flight read can never hit a closed fd. The bare
-/// <see cref="TryGet(string, out AssetCache.Asset)"/> overloads don't hold a lease and are only safe
-/// when <see cref="Reload"/> is never called concurrently.
+/// only once every lease on it is released, so an in-flight read can never hit a closed fd.
 /// </remarks>
 public sealed class StaticAssets : IDisposable
 {
@@ -46,14 +44,6 @@ public sealed class StaticAssets : IDisposable
             // The snapshot we read was swapped out and is releasing; re-read the live one.
         }
     }
-
-    /// <summary>Look up a pre-opened asset by URL path in the live snapshot (no lease - see remarks).</summary>
-    public bool TryGet(string urlPath, out AssetCache.Asset asset)
-        => Volatile.Read(ref _cache).TryGet(urlPath, out asset);
-
-    /// <summary>Hot-path lookup straight from request bytes - no per-request string (no lease - see remarks).</summary>
-    public bool TryGet(ReadOnlySpan<byte> urlPath, out AssetCache.Asset asset)
-        => Volatile.Read(ref _cache).TryGet(urlPath, out asset);
 
     /// <summary>
     /// Rebuild the snapshot from disk and swap it in atomically, then release the old one (it frees

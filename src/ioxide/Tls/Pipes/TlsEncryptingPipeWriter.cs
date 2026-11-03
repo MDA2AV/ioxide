@@ -40,11 +40,11 @@ public sealed class TlsEncryptingPipeWriter : PipeWriter, IValueTaskSource<Flush
     private ValueTaskAwaiter _pendingFlush;
     private readonly Action _onFlushDone;
 
-    public TlsEncryptingPipeWriter(TcpConnection connection, TlsSession session, int initialCapacity = 16 * 1024)
+    public TlsEncryptingPipeWriter(TcpConnection connection, TlsSession session)
     {
         _conn = connection ?? throw new ArgumentNullException(nameof(connection));
         _tls = session ?? throw new ArgumentNullException(nameof(session));
-        _staging = ArrayPool<byte>.Shared.Rent(Math.Max(initialCapacity, 4 * 1024));
+        _staging = ArrayPool<byte>.Shared.Rent(16 * 1024);
         _onFlushDone = OnFlushDone;
     }
 
@@ -153,15 +153,7 @@ public sealed class TlsEncryptingPipeWriter : PipeWriter, IValueTaskSource<Flush
     // Completion of a flush that waited - runs inline on the reactor.
     private void OnFlushDone()
     {
-        try
-        {
-            _pendingFlush.GetResult();
-        }
-        catch (Exception e)
-        {
-            _core.SetException(e);
-            return;
-        }
+        _pendingFlush.GetResult();
 
         // Report the cancel on the flush it was aimed at, and clear it. CancelPendingFlush cannot
         // wake a flush already parked on the connection's send - only the completion or a close
