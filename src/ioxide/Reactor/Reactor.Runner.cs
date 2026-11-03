@@ -74,8 +74,7 @@ public sealed unsafe partial class Reactor
         StartTicker();
 
             ranLoop = true;
-            if (_incremental) LoopIncremental();
-            else LoopSharedRing();
+            Loop();
         }
         catch (Exception e) when (OnFault is not null)
         {
@@ -200,7 +199,7 @@ public sealed unsafe partial class Reactor
         }
     }
 
-    // Set cross-thread by Stop(); the loops check it at the top of each iteration and exit, after which
+    // Set cross-thread by Stop(); the loop checks it at the top of each iteration and exits, after which
     // Run() tears the ring down on this (the reactor) thread - mandatory for a single-issuer ring.
     private volatile bool _stopRequested;
 

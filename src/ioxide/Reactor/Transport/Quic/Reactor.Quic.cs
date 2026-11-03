@@ -333,8 +333,8 @@ public sealed unsafe partial class Reactor
         _quicSweepScratch.AddRange(_quicConnSet);
         foreach (QuicConnection conn in _quicSweepScratch)
         {
-            // One connection's fault must not take the loop down with it. This runs bare in both
-            // loop bodies and nothing above it catches, so an exception out of a protocol engine
+            // One connection's fault must not take the loop down with it. This runs bare in the
+            // loop body and nothing above it catches, so an exception out of a protocol engine
             // would kill the reactor thread and every connection on it.
             //
             // The faulted connection is dropped rather than skipped, because its deadline is still

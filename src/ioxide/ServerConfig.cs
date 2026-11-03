@@ -36,8 +36,7 @@ public sealed record ServerConfig
 
     /// <summary>
     /// Per-connection buffer rings (IOU_PBUF_RING_INC, kernel 6.12+): setting this IS enabling
-    /// the mode - the reactor runs its incremental loop variant and the shared-ring knobs above
-    /// go unused. Null (default) = shared ring.
+    /// the mode - the shared-ring knobs above go unused. Null (default) = shared ring.
     /// </summary>
     public IncrementalOptions? Incremental { get; init; }
 

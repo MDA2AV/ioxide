@@ -144,14 +144,16 @@ int    fd   = (int)(uint)cqe.user_data;</code></pre>
     multishot accept, the wake poll, and the periodic timer; then fall into the loop.</p>
 
     <h3>The loop and dispatch</h3>
-    <p><code>LoopShared</code> / <code>LoopIncremental</code> drain the hand-off queues, then
-    <code>SubmitAndWait(1)</code>, then dispatch every ready CQE by kind:</p>
+    <p><code>Loop</code> drains the hand-off queues, then <code>SubmitAndWait(1)</code>, then
+    dispatches every ready CQE by kind. Both recv modes run it: the mode picks the buffer-return
+    queue once a pass and the dispatcher once a batch, so no completion pays for the test:</p>
 <p class="src"><b>Reactor.cs</b> · the loop - drain the hand-offs, one syscall, then a batched dispatch</p>
-<pre><code class="language-csharp">private void LoopShared()
+<pre><code class="language-csharp">private void Loop()
 {
     while (true)
     {
-        DrainReturnQ();      // buffer returns from off-reactor handlers
+        if (_incremental) DrainReturnQIncremental();   // buffer returns from off-reactor handlers
+        else DrainReturnQ();
         DrainFlushQ();       // flushes
         DrainRecycleQ();     // connection teardowns
         DrainRemoteOps();    // client-op submissions
@@ -164,9 +166,19 @@ int    fd   = (int)(uint)cqe.user_data;</code></pre>
         }
 
         uint ready = Ring.CqReady();      // read the CQ tail once
-        for (uint i = 0; i &lt; ready; i++)
+        if (_incremental)
         {
-            Dispatch(in Ring.CqeAt(i));   // dispatching frequently runs handler code inline
+            for (uint i = 0; i &lt; ready; i++)
+            {
+                DispatchIncremental(in Ring.CqeAt(i));   // dispatching frequently runs handler code inline
+            }
+        }
+        else
+        {
+            for (uint i = 0; i &lt; ready; i++)
+            {
+                DispatchSharedRing(in Ring.CqeAt(i));
+            }
         }
         Ring.CqAdvance(ready);            // publish the consumed head once
     }
@@ -462,8 +474,8 @@ memory directly; <code>Stream</code> cannot.</p>
     <code>DualStack</code>, the shared-ring knobs (<code>RecvBufferSize</code>,
     <code>RecvSlots</code>) and <code>Incremental</code> - a nullable
     <code>IncrementalOptions</code> (<code>MaxConnections</code>, <code>RecvSlots</code>,
-    <code>RecvBufferSize</code>); setting it selects the per-connection-ring mode and the
-    incremental reactor loop variant, null means the shared ring: io_uring provided-buffer
+    <code>RecvBufferSize</code>); setting it selects the per-connection-ring mode, null means
+    the shared ring: io_uring provided-buffer
     rings are per-reactor machinery, not socket config. Under <code>Tcp</code> (a
     <code>TcpOptions</code>): <code>Port</code> + <code>ExtraPorts</code>,
     <code>ListenBacklog</code>, <code>WriteSlabSize</code>, <code>PoolMax</code>,

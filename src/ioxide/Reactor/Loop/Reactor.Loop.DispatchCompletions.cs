@@ -8,7 +8,7 @@ public sealed unsafe partial class Reactor
 
 #region Send
 
-    // Shared by both loops. Handles plain SEND (one CQE) and SEND_ZC (a data CQE carrying
+    // Shared by both dispatchers. Handles plain SEND (one CQE) and SEND_ZC (a data CQE carrying
     // IORING_CQE_F_MORE, then a separate IORING_CQE_F_NOTIF once the kernel releases the slab).
     private void OnSendCompletion(int fd, ushort gen, int res, uint cqeFlags)
     {
