@@ -15,8 +15,8 @@ public sealed record HttpClientOptions
 
     public ushort Port { get; init; } = 80;
 
-    /// <summary>Connections opened to the origin. Requests round-robin across them, one request
-    /// in flight each, so this is the concurrency ceiling for this reactor.</summary>
+    /// <summary>Connections opened to the origin. A request takes the one that went idle last, and
+    /// each carries one request at a time, so this is the concurrency ceiling for this reactor.</summary>
     public int PoolSize { get; init; } = 4;
 
     /// <summary>Per-request ceiling for headers + body; a bigger response fails the request
