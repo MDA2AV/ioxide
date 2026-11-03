@@ -68,11 +68,10 @@ public sealed unsafe partial class Reactor
     private ushort _bufRingTail;
 
     // Transport settings resolved once. _tcp / _udp are always non-null so the sizing knobs stay
-    // readable; the _enabled flags record whether the config actually asked for that transport.
+    // readable; _tcpEnabled records whether the config actually asked for TCP.
     private readonly TcpOptions _tcp;
     private readonly bool _tcpEnabled;
     private readonly UdpOptions _udp;
-    private readonly bool _udpEnabled;
 
     // TcpConnection pool, reactor-thread-only. PoolMax × WriteSlabSize × ReactorCount bounds
     // the reserved native memory.
@@ -107,7 +106,6 @@ public sealed unsafe partial class Reactor
 
         _tcpEnabled = config.Tcp is not null;
         _tcp = config.Tcp ?? new TcpOptions();
-        _udpEnabled = config.Udp is not null;
         _udp = config.Udp ?? new UdpOptions();
 
         _port = _tcp.Port;
@@ -133,7 +131,17 @@ public sealed unsafe partial class Reactor
             ArgumentOutOfRangeException.ThrowIfNegativeOrZero(config.RecvBufferSize, "config.RecvBufferSize");
         }
 
+        // The UDP ring rounds this up to a power of two, which past 32768 is more than the kernel takes.
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(_udp.RecvSlots, "config.Udp.RecvSlots");
+        ArgumentOutOfRangeException.ThrowIfGreaterThan(_udp.RecvSlots, MaxBufRingEntries, "config.Udp.RecvSlots");
+
         _opTargets = new IRingCompletion?[config.OpSlots];
+        _opFree = new int[config.OpSlots];
+        for (int i = 0; i < _opFree.Length; i++)
+        {
+            _opFree[i] = _opFree.Length - 1 - i;
+        }
+        _opFreeTop = _opFree.Length;
         _incremental = config.Incremental is not null;
         _recvBufferSize = (uint)config.RecvBufferSize;
         _bufferRingEntries = (uint)config.RecvSlots;
@@ -182,13 +190,29 @@ public sealed unsafe partial class Reactor
         _connections[fd] = conn;
     }
 
+    // Writes addr, len and bid only: bytes 14-15 of entry 0 are the ring's tail.
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static void WriteBufRingEntry(byte* ring, uint index, byte* slab, uint bufferSize, ushort bid)
+    {
+        byte* entry = ring + index * 16;
+        *(ulong*)(entry + 0)   = (ulong)(slab + bid * (nuint)bufferSize);
+        *(uint*)(entry + 8)    = bufferSize;
+        *(ushort*)(entry + 12) = bid;
+    }
+
+    private static void FillBufRing(byte* ring, uint entries, byte* slab, uint bufferSize)
+    {
+        for (ushort bid = 0; bid < entries; bid++)
+        {
+            WriteBufRingEntry(ring, bid, slab, bufferSize, bid);
+        }
+        Volatile.Write(ref *(ushort*)(ring + 14), (ushort)entries);
+    }
+
     // Stage a buffer without publishing; batch drains publish once for N buffers.
     private void ReturnBufferLocal(ushort bid)
     {
-        byte* slot = _bufRing + (_bufRingTail & _bufRingMask) * 16;
-        *(ulong*)(slot + 0)  = (ulong)(_bufSlab + bid * (nuint)_recvBufferSize);
-        *(uint*)(slot + 8)   = _recvBufferSize;
-        *(ushort*)(slot + 12) = bid;
+        WriteBufRingEntry(_bufRing, _bufRingTail & _bufRingMask, _bufSlab, _recvBufferSize, bid);
         _bufRingTail++;
         _buffersReturned = true;   // lets the loop re-arm recvs parked on -ENOBUFS (#93)
     }

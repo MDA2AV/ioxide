@@ -87,8 +87,6 @@ public static class Handlers
                 {
                     return;
                 }
-
-                conn.ResetRead();
             }
         }
         finally
@@ -133,8 +131,6 @@ public static class Handlers
                 {
                     return;
                 }
-
-                conn.ResetRead();
             }
         }
         finally
@@ -203,8 +199,6 @@ public static class Handlers
                 {
                     return;
                 }
-
-                conn.ResetRead();
             }
         }
         finally
@@ -245,7 +239,6 @@ public static class Handlers
                     $"HTTP/1.1 200 OK\r\ncontent-length: {body.Length}\r\n\r\n{subject}"));
 
                 await connection.FlushAsync();
-                connection.ResetRead();
             }
         }
         finally
@@ -275,9 +268,6 @@ public static class Handlers
                 await connection.FlushAsync();
             }
 
-            // No ResetRead above: that belongs to a read that was actually issued, and calling it
-            // for one that never happened leaves the connection's read state describing a read
-            // nobody made.
             while (true)
             {
                 RecvSnapshot snapshot = await connection.ReadAsync();
@@ -294,7 +284,6 @@ public static class Handlers
                 session.Write(connection, [.. head, .. who]);
 
                 await connection.FlushAsync();
-                connection.ResetRead();
             }
         }
         finally
@@ -337,9 +326,6 @@ public static class Handlers
                 await connection.FlushAsync();
             }
 
-            // No ResetRead above: that belongs to a read that was actually issued, and calling it
-            // for one that never happened leaves the connection's read state describing a read
-            // nobody made.
             while (true)
             {
                 RecvSnapshot snapshot = await connection.ReadAsync();
@@ -352,7 +338,6 @@ public static class Handlers
                 session.Write(connection, "HTTP/1.1 200 OK\r\ncontent-length: 2\r\n\r\nok"u8.ToArray());
 
                 await connection.FlushAsync();
-                connection.ResetRead();
             }
         }
         finally
@@ -413,8 +398,6 @@ public static class Handlers
                 {
                     return;
                 }
-
-                conn.ResetRead();
             }
         }
         catch (Exception e)

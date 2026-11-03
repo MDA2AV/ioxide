@@ -2,7 +2,7 @@ namespace ioxide;
 
 /// <summary>
 /// All server tunables; override via object initializer. Engine-wide knobs live here; everything
-/// transport-specific is grouped: <see cref="Tcp"/> (listeners, buffer rings, write path),
+/// transport-specific is grouped: <see cref="Tcp"/> (listeners, connection pool, write path),
 /// <see cref="Udp"/> (raw datagram sockets), <see cref="Quic"/> (the QUIC transport, which binds
 /// its own UDP port).
 /// </summary>

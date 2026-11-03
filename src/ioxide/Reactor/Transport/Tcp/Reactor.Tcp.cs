@@ -22,27 +22,11 @@ public sealed unsafe partial class Reactor
         sqe->user_data = Tag(KindTcpRecv, gen, fd);
     }
 
-    // Dispatch a send to this connection's strategy. A predictable per-connection branch (ZeroCopySend
-    // is constant for the run; kTLS pins plain) instead of an indirect call - so SubmitSendImpl stays
-    // inlinable on the hot send path.
     private void SubmitSend(TcpConnection conn, int fd, ushort gen, byte* buf, uint len, uint opFlags)
     {
-        if (conn.UseZc)
-        {
-            SubmitSendImpl(this, IORING_OP_SEND_ZC, fd, gen, buf, len, opFlags);
-        }
-        else
-        {
-            SubmitSendImpl(this, IORING_OP_SEND, fd, gen, buf, len, opFlags);
-        }
-    }
-
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private static void SubmitSendImpl(Reactor r, byte opcode, int fd, ushort gen, byte* buf, uint len, uint opFlags)
-    {
-        IoUringSqe* sqe = r.GetSqeOrFlush();
+        IoUringSqe* sqe = GetSqeOrFlush();
         Unsafe.InitBlockUnaligned(sqe, 0, 64);
-        sqe->opcode    = opcode;
+        sqe->opcode    = conn.UseZc ? IORING_OP_SEND_ZC : IORING_OP_SEND;
         sqe->fd        = fd;
         sqe->addr      = (ulong)buf;
         sqe->len       = len;
@@ -77,7 +61,7 @@ public sealed unsafe partial class Reactor
 
     // Accept failures that leave the connection in the backlog, so an accept re-armed at once fails
     // again at once (#222): out of descriptors, the process's or the system's, or out of memory.
-    private const int ENOMEM = 12, ENFILE = 23, EMFILE = 24;
+    private const int ENFILE = 23, EMFILE = 24;
 
     // Listeners whose accept stopped on one of those; TcpSweep re-arms them on its next tick.
     private readonly List<int> _acceptPaused = [];
@@ -444,10 +428,24 @@ public sealed unsafe partial class Reactor
             setsockopt(fd, IPPROTO_TCP, TCP_USER_TIMEOUT, &userTimeoutMs, sizeof(int));
         }
 
+        BindAny(fd, port, dualStack, "tcp");
+
+        if (listen(fd, backlog) < 0)
+        {
+            close(fd);
+            throw new InvalidOperationException("listen failed");
+        }
+
+        return fd;
+    }
+
+    // Closes fd on failure: the caller has not stored it anywhere yet.
+    private static void BindAny(int fd, ushort port, bool dualStack, string transport)
+    {
+        int rc;
         if (dualStack)
         {
-            // A single AF_INET6 listener bound to :: with IPV6_V6ONLY=0 accepts both IPv6 and
-            // IPv4-mapped clients - one socket serves both families.
+            // :: with IPV6_V6ONLY=0 also takes IPv4-mapped peers, so one socket serves both families.
             int v6only = 0;
             setsockopt(fd, IPPROTO_IPV6, IPV6_V6ONLY, &v6only, sizeof(int));
 
@@ -456,10 +454,7 @@ public sealed unsafe partial class Reactor
             addr6.sin6_port   = Htons(port);
             // sin6_addr left zero == in6addr_any (::)
 
-            if (bind(fd, &addr6, (uint)sizeof(sockaddr_in6)) < 0)
-            {
-                throw new InvalidOperationException("bind failed");
-            }
+            rc = bind(fd, &addr6, (uint)sizeof(sockaddr_in6));
         }
         else
         {
@@ -468,17 +463,13 @@ public sealed unsafe partial class Reactor
             addr.sin_port        = Htons(port);
             addr.sin_addr.s_addr = 0; // 0.0.0.0
 
-            if (bind(fd, &addr, (uint)sizeof(sockaddr_in)) < 0)
-            {
-                throw new InvalidOperationException("bind failed");
-            }
+            rc = bind(fd, &addr, (uint)sizeof(sockaddr_in));
         }
 
-        if (listen(fd, backlog) < 0)
+        if (rc < 0)
         {
-            throw new InvalidOperationException("listen failed");
+            close(fd);
+            throw new InvalidOperationException($"{transport} bind failed on port {port}");
         }
-
-        return fd;
     }
 }

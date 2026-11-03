@@ -192,7 +192,6 @@ internal static class TlsClientErrorQueueTests
 
                 Wire.Write(connection, 200, $"{status}|{detail}");
                 await connection.FlushAsync();
-                connection.ResetRead();
             }
         }
         finally

@@ -67,8 +67,6 @@ public sealed unsafe partial class Reactor
         public int    SocketFd;
         public ushort LocalPort;
         public byte   Tos;
-        public int    Owner;              // the ShardIndex this was addressed to
-        public QuicFleet Fleet = null!;
         public Reactor   Target = null!;
     }
 
@@ -162,8 +160,6 @@ public sealed unsafe partial class Reactor
         forward.SocketFd  = datagram.SocketFd;
         forward.LocalPort = datagram.LocalPort;
         forward.Tos       = datagram.Tos;
-        forward.Owner     = owner;
-        forward.Fleet     = fleet;
         forward.Target    = target;
 
         _quicForwardsSent++;
@@ -183,7 +179,7 @@ public sealed unsafe partial class Reactor
     // Runs on the OWNING reactor's thread, out of its post queue.
     private void QuicReceiveForward(QuicForward forward)
     {
-        QuicFleet fleet = forward.Fleet;
+        QuicFleet fleet = _quicFleet!;   // only a reactor that joined a fleet is forwarded to
 
         try
         {
@@ -200,8 +196,7 @@ public sealed unsafe partial class Reactor
         }
         finally
         {
-            Interlocked.Decrement(ref fleet.Outstanding[forward.Owner]);
-            forward.Fleet  = null!;
+            Interlocked.Decrement(ref fleet.Outstanding[_id]);
             forward.Target = null!;
             fleet.Spare.Enqueue(forward);
         }

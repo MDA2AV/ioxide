@@ -14,7 +14,6 @@ public sealed unsafe partial class TcpConnection
     internal byte*   BufSlab;
     internal ushort  Bgid;
     internal uint    BufRingMask;
-    internal int     BufRingEntries;
     internal bool    IncrementalMode;
 
     internal int[]?  CumOffset;        // per-bid: offset where the next slice begins

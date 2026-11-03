@@ -84,8 +84,6 @@ internal static unsafe class Nghttp3
     /// connection that must tell its peer why it died asks rather than keeping a table.</summary>
     [DllImport(Lib)] internal static extern ulong ih3_app_error_code(int libError);
 
-    // --- client side (ioxide.httpclient) ------------------------------------------------------
-
     /// <summary>
     /// Submit a response whose body arrives over time through <see cref="Callbacks.OnReadBody"/>.
     /// Nothing is copied here, unlike <c>ih3_submit_response</c>.
@@ -94,15 +92,6 @@ internal static unsafe class Nghttp3
 
     /// <summary>Undefer a stream that answered a body pull with "nothing yet".</summary>
     [DllImport(Lib)] internal static extern int ih3_resume_stream(nint connection, long streamId);
-
-    /// <summary>Create the client-side nghttp3 connection; same event surface as the server one,
-    /// requests out instead of responses. 0 on failure.</summary>
-    [DllImport(Lib)] internal static extern nint ih3_client_new(Callbacks callbacks, void* user);
-
-    /// <summary>Submit a request on a client-opened bidi stream: packed headers, optional body
-    /// (copied by the shim, freed at stream close). 0 or a negative nghttp3 error.</summary>
-    [DllImport(Lib)] internal static extern int  ih3_submit_request(
-        nint connection, long streamId, byte* headers, nuint headersLength, byte* body, nuint bodyLength);
 
     /// <summary>Queue the GOAWAY pair on the control stream (carried out by the next
     /// <see cref="ih3_writev"/> drain) and start rejecting NEW request streams; in-flight
@@ -116,12 +105,7 @@ internal static unsafe class Nghttp3
     /// Use <see cref="StrError"/> for the marshalled form.</summary>
     [DllImport(Lib)] internal static extern nint ih3_strerror(int liberr);
 
-    /// <summary>Version string of the bundled nghttp3 build. Use <see cref="Version"/> for the
-    /// marshalled form.</summary>
-    [DllImport(Lib)] internal static extern nint ih3_version();
-
     internal const int NGHTTP3_ERR_STREAM_NOT_FOUND = -110;   // nghttp3.h
 
     internal static string StrError(int liberr) => Marshal.PtrToStringUTF8(ih3_strerror(liberr)) ?? liberr.ToString();
-    internal static string Version() => Marshal.PtrToStringUTF8(ih3_version()) ?? "unknown";
 }

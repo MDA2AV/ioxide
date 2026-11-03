@@ -30,17 +30,8 @@ public sealed unsafe partial class Reactor
             throw new InvalidOperationException($"register pbuf_ring failed with errno {-ret}");
         }
 
-        // Slot 0 overlaps the ring's tail field at offset 14; writing only addr/len/bid
-        // (offsets 0..13) keeps tail zero until published explicitly.
-        for (ushort bid = 0; bid < _bufferRingEntries; bid++) {
-            byte* slot = _bufRing + (uint)bid * 16;
-            *(ulong*)(slot + 0)  = (ulong)(_bufSlab + bid * (nuint)_recvBufferSize);
-            *(uint*)(slot + 8)   = _recvBufferSize;
-            *(ushort*)(slot + 12) = bid;
-        }
+        FillBufRing(_bufRing, _bufferRingEntries, _bufSlab, _recvBufferSize);
         _bufRingTail = (ushort)_bufferRingEntries;
-
-        PublishBufRingTail();
     }
 
     private void DispatchSharedRing(in IoUringCqe cqe)

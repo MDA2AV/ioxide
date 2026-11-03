@@ -11,7 +11,7 @@ namespace ioxide.httpclient;
 /// <code>
 /// using var tls = TlsClientContext.Create(new TlsClientOptions
 /// {
-///     AlpnProtocols = ["h2", "http/1.1"],
+///     AlpnProtocols = ["http/1.1"],
 /// });
 /// </code>
 /// </summary>

@@ -1,5 +1,8 @@
+using System.Diagnostics;
 using System.Net;
 using System.Net.Sockets;
+using System.Runtime.CompilerServices;
+using System.Runtime.InteropServices;
 using ioxide;
 using ioxide.ngtcp2;
 
@@ -236,6 +239,75 @@ internal static class QuicTests
                 $"a port-0 bind confined to free port {free} was not given it, so confinement does not work here");
             Assert.True(Handshakes(client, serverPort), "the client's handshake never completed");
         }, skip: !confinable);
+
+        runner.Test("quic/client: a client socket whose port cannot be read is closed, so the failed open leaves no descriptor behind", () =>
+        {
+            // getsockname cannot fail on the socket the reactor just opened, so BoundPort gets a descriptor it fails on: not a socket.
+            const int attempts = 16;
+            int before = FdCount.Stable();
+
+            foreach (bool dualStack in new[] { false, true })
+            {
+                for (int i = 0; i < attempts; i++)
+                {
+                    int fd = ioxide.Native.open("/dev/null", 0, 0);
+                    Assert.True(fd >= 0, "could not open /dev/null");
+                    Assert.Throws<InvalidOperationException>(() => BoundPort(null, fd, dualStack), "getsockname failed");
+                }
+            }
+
+            int leaked = FdCount.Stable() - before;
+            Assert.True(leaked <= 2, $"{2 * attempts} failed port reads left {leaked} descriptors open");
+        });
+
+        runner.Test("quic/client: a socket that could not be opened is opened by the next connect, on the buffer ring the first one brought up", () =>
+        {
+            Assert.Equal(0, getrlimit(RlimitNofile, out RLimit original));
+            var none = new RLimit { Cur = 0, Max = original.Max };
+
+            // With no descriptor to be had the ring still comes up, and then the socket cannot be opened.
+            ClientOpens opens = OpenAfterAFailure(
+                fail: _ => setrlimit(RlimitNofile, in none),
+                restore: _ => setrlimit(RlimitNofile, in original));
+
+            Assert.True(opens.Failed?.Message.Contains("udp socket failed") == true,
+                $"the first open was to fail at the socket, after the ring came up; got: {opens.Failed?.Message ?? "no failure"}");
+            Assert.True(opens.Retried is null, $"the next open failed: {opens.Retried?.Message}");
+            Assert.True(opens.RingAfterRetry == opens.RingAfterFailure, "the next open brought up a second buffer ring, leaking the first");
+            Assert.True(Handshakes(opens.Client, opens.ServerPort), "the client's handshake never completed");
+        });
+
+        runner.Test("quic/client: a buffer ring the kernel refused is freed, so the next connect brings one up from scratch", () =>
+        {
+            // A ring of the test's own holds the UDP ring's group id, so the reactor's registration is refused.
+            nint held = 0;
+            ClientOpens opens = OpenAfterAFailure(
+                fail: reactor => held = HoldUdpGroup(reactor),
+                restore: reactor => ReleaseUdpGroup(reactor, held));
+
+            Assert.True(opens.Failed?.Message.Contains("register udp pbuf_ring failed") == true,
+                $"the first open was to fail at the ring's registration; got: {opens.Failed?.Message ?? "no failure"}");
+            Assert.True(opens.RingAfterFailure == 0, "the refused ring was kept, so the next open would arm its socket on a ring the kernel never took");
+            Assert.True(opens.Retried is null, $"the next open failed: {opens.Retried?.Message}");
+            Assert.True(Handshakes(opens.Client, opens.ServerPort), "the client's handshake never completed");
+        });
+
+        runner.Test("quic/client: a buffer ring whose buffers could not be allocated is freed, so the next connect brings one up from scratch", () =>
+        {
+            Assert.Equal(0, getrlimit(RlimitAs, out RLimit original));
+
+            // 64 MiB of headroom fits the 64 KiB ring, not its 257 MiB of buffers, which only a new mapping could supply.
+            ClientOpens opens = OpenAfterAFailure(
+                fail: _ => setrlimit(RlimitAs, new RLimit { Cur = AddressSpaceInUse() + 64 * 1024 * 1024, Max = original.Max }),
+                restore: _ => setrlimit(RlimitAs, in original),
+                udpRecvSlots: 4096);
+
+            Assert.True(opens.Failed is OutOfMemoryException,
+                $"the first open was to fail allocating the ring's buffers; got: {opens.Failed?.Message ?? "no failure"}");
+            Assert.True(opens.RingAfterFailure == 0, "the ring from the failed setup was kept, so the next open would arm its socket on a ring the kernel never took");
+            Assert.True(opens.Retried is null, $"the next open failed: {opens.Retried?.Message}");
+            Assert.True(Handshakes(opens.Client, opens.ServerPort), "the client's handshake never completed");
+        });
     }
 
     // A QUIC server, and a client-only reactor that has opened its ephemeral socket.
@@ -289,6 +361,108 @@ internal static class QuicTests
         }, null);
         return done.Task.Wait(5_000);
     }
+
+    [UnsafeAccessor(UnsafeAccessorKind.StaticMethod, Name = "BoundPort")]
+    private static extern ushort BoundPort(Reactor? type, int fd, bool dualStack);
+
+    // What a client-only reactor saw opening its QUIC socket twice in OnStart: once between fail and
+    // restore, then again. Its UDP buffer ring is read after each.
+    private readonly record struct ClientOpens(
+        Reactor Client, int ServerPort, Exception? Failed, nint RingAfterFailure, Exception? Retried, nint RingAfterRetry);
+
+    private static ClientOpens OpenAfterAFailure(Action<Reactor> fail, Action<Reactor> restore, int udpRecvSlots = 16)
+    {
+        (string certPath, string keyPath) = TestCert.Ensure();
+        var engine = TestServer.Own(new QuicEngine(certPath, keyPath, cidLength: 8));
+        (_, int serverPort) = TestServer.StartDatagram(onDatagram: null, quicFactory: engine.CreateFactory());
+
+        var opened = new TaskCompletionSource<ClientOpens>(TaskCreationOptions.RunContinuationsAsynchronously);
+        TestServer.StartQuicClientHost(
+            tcpHandle: static (_, _) => Task.CompletedTask,
+            onStart: reactor =>
+            {
+                Exception? failed;
+                try
+                {
+                    fail(reactor);
+                    failed = TryOpen(reactor);
+                }
+                finally
+                {
+                    restore(reactor);   // a process limit left lowered would fail every later test
+                }
+                nint ring = UdpRing(reactor);
+                Exception? retried = TryOpen(reactor);
+                opened.TrySetResult(new ClientOpens(reactor, serverPort, failed, ring, retried, UdpRing(reactor)));
+            },
+            udpRecvSlots: udpRecvSlots);
+
+        Assert.True(opened.Task.Wait(10_000), "the client reactor never tried to open its socket");
+        return opened.Task.Result;
+    }
+
+    private static Exception? TryOpen(Reactor reactor)
+    {
+        try
+        {
+            reactor.QuicEnsureClientTransport();
+            return null;
+        }
+        catch (Exception e)
+        {
+            return e;
+        }
+    }
+
+    // The group id the reactor registers its UDP buffer ring under.
+    private const ushort UdpGroupId = 0;
+
+    private static unsafe nint HoldUdpGroup(Reactor reactor)
+    {
+        nuint page = (nuint)Environment.SystemPageSize;
+        void* ring = NativeMemory.AlignedAlloc(page, page);
+        var reg = new Native.io_uring_buf_reg { ring_addr = (ulong)ring, ring_entries = 1, bgid = UdpGroupId };
+        Native.io_uring_register(RingOf(reactor).Fd, Native.IORING_REGISTER_PBUF_RING, &reg, 1);
+        return (nint)ring;
+    }
+
+    private static unsafe void ReleaseUdpGroup(Reactor reactor, nint ring)
+    {
+        var reg = new Native.io_uring_buf_reg { bgid = UdpGroupId };
+        Native.io_uring_register(RingOf(reactor).Fd, Native.IORING_UNREGISTER_PBUF_RING, &reg, 1);
+        NativeMemory.AlignedFree((void*)ring);
+    }
+
+    private static unsafe nint UdpRing(Reactor reactor) => (nint)UdpRingOf(reactor);
+
+    [UnsafeAccessor(UnsafeAccessorKind.Field, Name = "_udpBufRing")]
+    private static extern unsafe ref byte* UdpRingOf(Reactor reactor);
+
+    [UnsafeAccessor(UnsafeAccessorKind.Field, Name = "_ring")]
+    private static extern ref Ring RingOf(Reactor reactor);
+
+    private const int RlimitNofile = 7;
+    private const int RlimitAs = 9;
+
+    // What RLIMIT_AS counts: the address space mapped now.
+    private static ulong AddressSpaceInUse()
+    {
+        using Process self = Process.GetCurrentProcess();
+        return (ulong)self.VirtualMemorySize64;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct RLimit
+    {
+        public ulong Cur;
+        public ulong Max;
+    }
+
+    [DllImport("libc", SetLastError = true)]
+    private static extern int getrlimit(int resource, out RLimit limit);
+
+    [DllImport("libc", SetLastError = true)]
+    private static extern int setrlimit(int resource, in RLimit limit);
 
     private static UdpClient NewClient(int udpPort, out IPEndPoint server, int receiveTimeoutMs = 4000)
     {

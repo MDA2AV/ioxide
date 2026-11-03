@@ -116,8 +116,6 @@ internal static class TimerTests
                 {
                     return;
                 }
-
-                conn.ResetRead();
             }
         }
         finally

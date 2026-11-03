@@ -57,7 +57,6 @@ public sealed class Nghttp3ResponseWriter : IBufferWriter<byte>
 
     private bool _headersSent;
     private bool _completed;   // the handler has finished producing
-    private bool _finReported; // nghttp3 has been told this is the end
     private bool _gone;        // the peer stopped reading, or the stream closed under the handler
 
     // Headers written off the reactor, submitted by the next flush or the completion, which run on it.
@@ -86,7 +85,6 @@ public sealed class Nghttp3ResponseWriter : IBufferWriter<byte>
         _offered = 0;
         _headersSent = false;
         _completed = false;
-        _finReported = false;
         _gone = false;
         _unsent = null;
         HandlerRunning = false;
@@ -353,7 +351,6 @@ public sealed class Nghttp3ResponseWriter : IBufferWriter<byte>
                 buffer = null;
                 length = 0;
                 fin = true;
-                _finReported = true;
                 return;
             }
 
@@ -367,7 +364,6 @@ public sealed class Nghttp3ResponseWriter : IBufferWriter<byte>
         length = (nuint)_inFlightLength;
         _offered = _inFlightLength;
         fin = _completed && _staged == 0;
-        _finReported = fin;
     }
 
     // Swapping raw pointers needs an unsafe context, and an async method cannot be one.

@@ -21,7 +21,7 @@ public sealed class IoxideTransportOptions
     /// <summary>
     /// Per-reactor startup hook, run on each reactor's own thread before its loop starts - open ring-native
     /// clients here (e.g. <c>PgPool.Start(r, pgOptions)</c>, <c>AssetReader.CreatePool(r, ...)</c>) so DB and
-    /// file I/O ride that reactor's ring. Endpoints resolve them via <c>IoxideReactor.Current.GetService&lt;T&gt;()</c>.
+    /// file I/O ride that reactor's ring. Endpoints resolve them via <c>HttpContext.GetReactor().GetService&lt;T&gt;()</c>.
     /// </summary>
     public Action<Reactor>? OnReactorStart { get; set; }
 

@@ -60,7 +60,7 @@ public sealed unsafe class QuicClientEngine : IDisposable
     /// </summary>
     public QuicEngineConnection Connect(Reactor reactor, string ipv4, ushort port, string serverName)
     {
-        int socketFd = reactor.QuicEnsureClientTransport();
+        reactor.QuicEnsureClientTransport();   // QuicLocalPort is 0 until the socket is open
 
         // Peer sockaddr, owned by the connection for its lifetime (ngtcp2 keeps the pointer).
         nint peerAddr = (nint)NativeMemory.AllocZeroed(128);
@@ -70,7 +70,7 @@ public sealed unsafe class QuicClientEngine : IDisposable
         Span<byte> localCid = stackalloc byte[QuicCid.MaxLength];
 
         var connection = new QuicEngineConnection(this);
-        if (!connection.TryConnect(_engine, reactor, socketFd, reactor.QuicLocalPort,
+        if (!connection.TryConnect(_engine, reactor, reactor.QuicLocalPort,
                 peerAddr, peerAddrLen, serverName, Alpn, cidLength, localCid))
         {
             NativeMemory.Free((void*)peerAddr);
@@ -99,8 +99,6 @@ public sealed unsafe class QuicClientEngine : IDisposable
         address.TryWriteBytes(sockaddr[4..], out _);
         return 16;
     }
-
-    internal nint Handle => _engine;
 
     public void Dispose()
     {

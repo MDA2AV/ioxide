@@ -332,7 +332,6 @@ internal static class CoreTests
                             {
                                 return;
                             }
-                            conn.ResetRead();
                         }
                     }
                     finally
@@ -565,7 +564,6 @@ internal static class CoreTests
                 {
                     return;
                 }
-                conn.ResetRead();
             }
         }
         finally
@@ -590,7 +588,6 @@ internal static class CoreTests
                 {
                     return;
                 }
-                conn.ResetRead();
             }
         }
         finally
@@ -614,7 +611,6 @@ internal static class CoreTests
                 {
                     return;
                 }
-                conn.ResetRead();
             }
         }
         finally
@@ -730,7 +726,7 @@ internal static class CoreTests
     private static byte Pattern(int seed, int i) => unchecked((byte)(seed * 131 + i * 7 + (i >> 12)));
 
     // A 48 KiB body against a 4 KiB write slab forces the overflow machinery; the strategy picks
-    // Grow (realloc, one SEND) or Segmented (pooled slabs, vectored SENDMSG).
+    // Grow (realloc, one SEND) or Segmented (the connection's own segments, vectored SENDMSG).
     private static void BigBodyRoundTrip(WriteOverflowStrategy strategy)
     {
         string body = new string('x', 48 * 1024);
