@@ -1,5 +1,6 @@
 using System.Buffers;
 using System.Diagnostics.CodeAnalysis;
+using System.Runtime.CompilerServices;
 using ioxide;
 
 namespace ioxide.http3;
@@ -197,26 +198,33 @@ public sealed partial class Http3Connection
         }
         finally
         {
-            foreach (ReqStream rs in _requests.Values)
-            {
-                rs.Sink?.Abort();   // its handler may still be running, on a chunk it was handed
-                ReleaseParseBuffers(rs);
-            }
-            FireBodyWakes();
-            _requests.Clear();
-            _pendingBodies.Clear();
-
-            // Tell the peer why. A protocol error used to end the handler and leave the connection
-            // registered and routable: no H3 error code ever reached the client, and the connection
-            // sat there until the transport's idle sweep - up to a minute per abusive peer, and
-            // with nothing on the wire to explain a request that simply stopped.
-            if (_fatal)
-            {
-                _quicConnection.Close(_fatalCode);
-            }
-
-            _quicConnection.DecRef();
+            TearDown();
         }
+    }
+
+    // Not in RunCoreAsync's finally: a loop there stops the JIT tiering the run loop up with PGO.
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private void TearDown()
+    {
+        foreach (ReqStream rs in _requests.Values)
+        {
+            rs.Sink?.Abort();   // its handler may still be running, on a chunk it was handed
+            ReleaseParseBuffers(rs);
+        }
+        FireBodyWakes();
+        _requests.Clear();
+        _pendingBodies.Clear();
+
+        // Tell the peer why. A protocol error used to end the handler and leave the connection
+        // registered and routable: no H3 error code ever reached the client, and the connection
+        // sat there until the transport's idle sweep - up to a minute per abusive peer, and
+        // with nothing on the wire to explain a request that simply stopped.
+        if (_fatal)
+        {
+            _quicConnection.Close(_fatalCode);
+        }
+
+        _quicConnection.DecRef();
     }
 
     // Our control stream: stream type 0x00, then SETTINGS pinning the QPACK dynamic table to 0
