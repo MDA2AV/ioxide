@@ -1,15 +1,17 @@
 using System.Runtime.CompilerServices;
 
-namespace ioxide.httpclient;
+namespace ioxide;
 
 /// <summary>
 /// An ordered list of HTTP field lines as raw bytes - names and values both
 /// <see cref="ReadOnlyMemory{T}"/>, never decoded to text. Enumerate with <see cref="AsSpan"/>.
 /// Same shape as Glyph11's KeyValueList (the h1 stack's), minus the ArrayPool: see below.
 ///
-/// Ordered and duplicate-preserving: HTTP fields may repeat (set-cookie, and h1 allows repeats
-/// generally), so this is a list, not a map. The array is allocated lazily on first Add and
-/// RETAINED by <see cref="Clear"/>, so a pooled request/response keeps its capacity.
+/// Ordered and duplicate-preserving: HTTP fields may repeat (set-cookie on responses, cookie on
+/// h3 requests), so this is a list, not a map. The array is allocated lazily on first Add and
+/// RETAINED by <see cref="Clear"/>, so a recycled request keeps its capacity. Not ArrayPool-backed
+/// on purpose: response headers are app-built and never handed back, and rent-without-return
+/// degrades the pool into a slow allocator (measured ~9% off the request rate).
 /// </summary>
 public sealed class KeyValueList
 {
@@ -33,7 +35,22 @@ public sealed class KeyValueList
     public ReadOnlySpan<KeyValuePair<ReadOnlyMemory<byte>, ReadOnlyMemory<byte>>> AsSpan()
         => _items.AsSpan(0, _count);
 
-    /// <summary>Append a field line.</summary>
+    /// <summary>First value for a field name, or false when absent. Names are lowercase.</summary>
+    public bool TryGetValue(ReadOnlySpan<byte> name, out ReadOnlyMemory<byte> value)
+    {
+        foreach (KeyValuePair<ReadOnlyMemory<byte>, ReadOnlyMemory<byte>> field in AsSpan())
+        {
+            if (field.Key.Span.SequenceEqual(name))
+            {
+                value = field.Value;
+                return true;
+            }
+        }
+        value = default;
+        return false;
+    }
+
+    /// <summary>Append a field line. Names must be lowercase ASCII (the h3 wire requirement).</summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public void Add(ReadOnlyMemory<byte> name, ReadOnlyMemory<byte> value)
     {

@@ -1,4 +1,4 @@
-namespace ioxide.nghttp3;
+namespace ioxide;
 
 /// <summary>
 /// Walks a request's cookies as (name, value) byte pairs, straight off its <c>cookie</c> field
@@ -13,7 +13,7 @@ public ref struct CookieEnumerator
     private int _lineIndex;
     private ReadOnlyMemory<byte> _rest;   // unparsed tail of the current cookie line
 
-    internal CookieEnumerator(KeyValueList headers)
+    public CookieEnumerator(KeyValueList headers)
     {
         _headers = headers;
         _lineIndex = 0;
