@@ -428,37 +428,7 @@ public sealed unsafe partial class Reactor
             setsockopt(fd, IPPROTO_TCP, TCP_USER_TIMEOUT, &userTimeoutMs, sizeof(int));
         }
 
-        if (dualStack)
-        {
-            // A single AF_INET6 listener bound to :: with IPV6_V6ONLY=0 accepts both IPv6 and
-            // IPv4-mapped clients - one socket serves both families.
-            int v6only = 0;
-            setsockopt(fd, IPPROTO_IPV6, IPV6_V6ONLY, &v6only, sizeof(int));
-
-            sockaddr_in6 addr6 = default;
-            addr6.sin6_family = AF_INET6;
-            addr6.sin6_port   = Htons(port);
-            // sin6_addr left zero == in6addr_any (::)
-
-            if (bind(fd, &addr6, (uint)sizeof(sockaddr_in6)) < 0)
-            {
-                close(fd);
-                throw new InvalidOperationException("bind failed");
-            }
-        }
-        else
-        {
-            sockaddr_in addr = default;
-            addr.sin_family      = AF_INET;
-            addr.sin_port        = Htons(port);
-            addr.sin_addr.s_addr = 0; // 0.0.0.0
-
-            if (bind(fd, &addr, (uint)sizeof(sockaddr_in)) < 0)
-            {
-                close(fd);
-                throw new InvalidOperationException("bind failed");
-            }
-        }
+        BindAny(fd, port, dualStack, "tcp");
 
         if (listen(fd, backlog) < 0)
         {
@@ -467,5 +437,39 @@ public sealed unsafe partial class Reactor
         }
 
         return fd;
+    }
+
+    // Closes fd on failure: the caller has not stored it anywhere yet.
+    private static void BindAny(int fd, ushort port, bool dualStack, string transport)
+    {
+        int rc;
+        if (dualStack)
+        {
+            // :: with IPV6_V6ONLY=0 also takes IPv4-mapped peers, so one socket serves both families.
+            int v6only = 0;
+            setsockopt(fd, IPPROTO_IPV6, IPV6_V6ONLY, &v6only, sizeof(int));
+
+            sockaddr_in6 addr6 = default;
+            addr6.sin6_family = AF_INET6;
+            addr6.sin6_port   = Htons(port);
+            // sin6_addr left zero == in6addr_any (::)
+
+            rc = bind(fd, &addr6, (uint)sizeof(sockaddr_in6));
+        }
+        else
+        {
+            sockaddr_in addr = default;
+            addr.sin_family      = AF_INET;
+            addr.sin_port        = Htons(port);
+            addr.sin_addr.s_addr = 0; // 0.0.0.0
+
+            rc = bind(fd, &addr, (uint)sizeof(sockaddr_in));
+        }
+
+        if (rc < 0)
+        {
+            close(fd);
+            throw new InvalidOperationException($"{transport} bind failed on port {port}");
+        }
     }
 }

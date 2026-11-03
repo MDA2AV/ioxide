@@ -204,6 +204,39 @@ internal static class ReactorSetupTeardownTests
             Assert.True(!Accepts(port), "the listener still accepted after Run returned, so the probe cannot tell");
         });
 
+        runner.Test("reactor: a listener whose listen fails closes its socket, so a failed start leaks no descriptor", () =>
+        {
+            // A full reuseport group takes one more bind, and then the kernel refuses its listen with ENOMEM.
+            ushort port = (ushort)TestServer.NextPort();
+            var group = new List<int>(ReuseportGroupCap);
+            try
+            {
+                while (group.Count < ReuseportGroupCap)
+                {
+                    group.Add(OpenReusePortListener(null, port, backlog: 1, dualStack: false, userTimeoutMs: 0));
+                }
+
+                const int attempts = 16;
+                int before = FdCount.Stable();
+
+                for (int i = 0; i < attempts; i++)
+                {
+                    Assert.Throws<InvalidOperationException>(
+                        () => OpenReusePortListener(null, port, backlog: 1, dualStack: false, userTimeoutMs: 0), "listen failed");
+                }
+
+                int leaked = FdCount.Stable() - before;
+                Assert.True(leaked <= 2, $"{attempts} refused listens left {leaked} descriptors open");
+            }
+            finally
+            {
+                foreach (int fd in group)
+                {
+                    Native.close(fd);
+                }
+            }
+        }, skip: OpenFileLimit() < ReuseportGroupCap + 4096);
+
         RegisterStopFrees(runner);
     }
 
@@ -345,6 +378,17 @@ internal static class ReactorSetupTeardownTests
         {
             return false;
         }
+    }
+
+    // The kernel will not grow one SO_REUSEPORT group past this many sockets.
+    private const int ReuseportGroupCap = 32768;
+
+    // The soft RLIMIT_NOFILE, which the runtime raises to the hard limit at startup.
+    private static long OpenFileLimit()
+    {
+        string line = File.ReadLines("/proc/self/limits").First(l => l.StartsWith("Max open files", StringComparison.Ordinal));
+        string soft = line.Split(' ', StringSplitOptions.RemoveEmptyEntries)[3];
+        return soft == "unlimited" ? long.MaxValue : long.Parse(soft);
     }
 
     // ServerConfig.Tcp defaulted to new(), a listener on 8080, so a config that never asked for TCP bound

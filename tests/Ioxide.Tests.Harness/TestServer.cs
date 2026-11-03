@@ -512,14 +512,15 @@ public static class TestServer
         Func<QuicOptions, QuicOptions>? quicOptions = null)
         => StartDatagramConfigured(onDatagram, quicFactory, quicReadMs, udpRecvSlots: 16, quicHandle, quicOptions);
 
-    /// <summary>StartDatagram with a tunable UDP ring depth (for the -ENOBUFS re-arm burst test).</summary>
+    /// <summary>StartDatagram with a tunable UDP ring depth (for the -ENOBUFS re-arm burst test), or dual-stack sockets.</summary>
     public static (int TcpPort, int UdpPort) StartDatagramConfigured(
         UdpDatagramHandler? onDatagram,
         QuicConnectionFactory? quicFactory = null,
         int quicReadMs = 60_000,
         int udpRecvSlots = 16,
         Func<Reactor, QuicConnection, Task>? quicHandle = null,
-        Func<QuicOptions, QuicOptions>? quicOptions = null)
+        Func<QuicOptions, QuicOptions>? quicOptions = null,
+        bool dualStack = false)
     {
         int tcpPort = ReserveFreePort();
         int udpPort = ReserveFreePort();
@@ -529,6 +530,7 @@ public static class TestServer
             ReactorCount = 1,
             RecvBufferSize = 4096,
             RecvSlots = 256,
+            DualStack = dualStack,
             Tcp = new TcpOptions
             {
                 Port = (ushort)tcpPort,
