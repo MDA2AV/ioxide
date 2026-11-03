@@ -577,7 +577,7 @@ public static class TestServer
     /// shape. Outbound HTTP/3 connections make the reactor open its own ephemeral-port socket on
     /// first use, so being an h3 client needs no listener, no fixed port and no accept factory.
     /// </summary>
-    public static int StartQuicClientHost(Func<Reactor, TcpConnection, Task> tcpHandle, Action<Reactor> onStart)
+    public static int StartQuicClientHost(Func<Reactor, TcpConnection, Task> tcpHandle, Action<Reactor> onStart, int udpRecvSlots = 16)
     {
         int tcpPort = ReserveFreePort();
 
@@ -593,7 +593,7 @@ public static class TestServer
                 PoolMax = 64,
                 RecvQueueEntries = 64,
             },
-            Udp = new UdpOptions { RecvSlots = 16 },
+            Udp = new UdpOptions { RecvSlots = udpRecvSlots },
             // No Quic block at all: the client opens its own socket when it first connects.
         };
 
