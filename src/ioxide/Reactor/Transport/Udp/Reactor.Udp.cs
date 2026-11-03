@@ -186,8 +186,7 @@ public sealed unsafe partial class Reactor
     }
 
     // Provided-buffer ring (power-of-two depth) + a slab of UdpRecvBufSize buffers, plus the shared
-    // msghdr template. Mirrors the TCP shared-ring setup; buffer 0's entry overlaps the tail field at
-    // offset 14, so the fill writes only addr/len/bid and publishes the tail afterwards.
+    // msghdr template. Mirrors the TCP shared-ring setup.
     private void InitUdpBufRing()
     {
         int depth = RoundUpPow2(_udp.RecvSlots);
@@ -207,14 +206,7 @@ public sealed unsafe partial class Reactor
             template->msg_namelen    = UdpNameCap;
             template->msg_controllen = UdpCtrlCap;
 
-            for (ushort bid = 0; bid < depth; bid++)
-            {
-                byte* entry = ring + (uint)bid * 16;
-                *(ulong*)(entry + 0)  = (ulong)(slab + (nuint)bid * UdpRecvBufSize);
-                *(uint*)(entry + 8)   = UdpRecvBufSize;
-                *(ushort*)(entry + 12) = bid;
-            }
-            Volatile.Write(ref *(ushort*)(ring + 14), (ushort)depth);
+            FillBufRing(ring, (uint)depth, slab, UdpRecvBufSize);
 
             var reg = new io_uring_buf_reg
             {
@@ -297,10 +289,7 @@ public sealed unsafe partial class Reactor
 
     private void ReturnUdpBuffer(ushort bid)
     {
-        byte* entry = _udpBufRing + (_udpBufRingTail & _udpBufRingMask) * 16;
-        *(ulong*)(entry + 0)  = (ulong)(_udpBufSlab + (nuint)bid * UdpRecvBufSize);
-        *(uint*)(entry + 8)   = UdpRecvBufSize;
-        *(ushort*)(entry + 12) = bid;
+        WriteBufRingEntry(_udpBufRing, _udpBufRingTail & _udpBufRingMask, _udpBufSlab, UdpRecvBufSize, bid);
         _udpBufRingTail++;
         Volatile.Write(ref *(ushort*)(_udpBufRing + 14), _udpBufRingTail);
     }

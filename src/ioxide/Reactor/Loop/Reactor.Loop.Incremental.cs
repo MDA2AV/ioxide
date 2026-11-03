@@ -84,14 +84,7 @@ public sealed unsafe partial class Reactor
         conn.BufRingMask     = (uint)(entries - 1);
         conn.IncrementalMode = true;
 
-        for (ushort bid = 0; bid < entries; bid++)
-        {
-            byte* slot = conn.BufRing + (uint)bid * 16;
-            *(ulong*)(slot + 0)   = (ulong)(conn.BufSlab + bid * (nuint)_incRecvBufferSize);
-            *(uint*)(slot + 8)    = _incRecvBufferSize;
-            *(ushort*)(slot + 12) = bid;
-        }
-        Volatile.Write(ref *(ushort*)(conn.BufRing + 14), (ushort)entries);
+        FillBufRing(conn.BufRing, (uint)entries, conn.BufSlab, _incRecvBufferSize);
         return true;
     }
 
@@ -116,10 +109,7 @@ public sealed unsafe partial class Reactor
         conn.KernelDone![bid] = false;
 
         ushort tail = Volatile.Read(ref *(ushort*)(conn.BufRing + 14));
-        byte* slot  = conn.BufRing + (tail & conn.BufRingMask) * 16;
-        *(ulong*)(slot + 0)   = (ulong)(conn.BufSlab + bid * (nuint)_incRecvBufferSize);
-        *(uint*)(slot + 8)    = _incRecvBufferSize;
-        *(ushort*)(slot + 12) = bid;
+        WriteBufRingEntry(conn.BufRing, tail & conn.BufRingMask, conn.BufSlab, _incRecvBufferSize, bid);
         Volatile.Write(ref *(ushort*)(conn.BufRing + 14), (ushort)(tail + 1));
         _buffersReturned = true;   // lets the loop re-arm recvs parked on -ENOBUFS (#93)
     }
