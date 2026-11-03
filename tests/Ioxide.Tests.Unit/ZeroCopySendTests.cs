@@ -9,7 +9,8 @@ namespace Ioxide.Tests;
 /// <summary>
 /// <see cref="TcpOptions.ZeroCopySend"/> is bound onto every connection at accept, in both recv
 /// modes. Only the shared-ring branch of the accept set it, so incremental-mode connections sent
-/// with plain SEND whatever the option said (#100).
+/// with plain SEND whatever the option said (#100). And the binding must pick the opcode: SEND_ZC
+/// with it, plain SEND without.
 /// </summary>
 /// <remarks>
 /// Here rather than in E2E because the send a connection uses is only visible from inside it
@@ -34,6 +35,79 @@ internal static class ZeroCopySendTests
         {
             AssertEverySend("plain", Ask(Config(incremental: true, zeroCopy: false)));
         }, skip: !TestServer.KernelAtLeast(6, 12));
+
+        runner.Test("tcp: a ZeroCopySend connection sends with SEND_ZC, so its flush waits for the notif until the peer reads", () =>
+        {
+            AssertSentWith(zeroCopy: true);
+        });
+
+        runner.Test("tcp: control: a connection without ZeroCopySend sends with plain SEND, so its flush ends before the peer reads", () =>
+        {
+            AssertSentWith(zeroCopy: false);
+        });
+    }
+
+    /// <summary>Far past what the peer's 4 KB window takes, well inside the server's socket send buffer.</summary>
+    private const int UnreadBytes = 256 * 1024;
+
+    /// <summary>
+    /// Against a peer that reads nothing, a plain SEND completes once its bytes are in the socket, and
+    /// the flush with it. A SEND_ZC completes owing a notif (<see cref="TcpConnection.ZcNotifPending"/>)
+    /// that comes only once the peer has acked every byte, and the flush waits for it.
+    /// </summary>
+    private static void AssertSentWith(bool zeroCopy)
+    {
+        var writing = new TaskCompletionSource<TcpConnection>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var flushed = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        (int port, _, _) = TestServer.StartConfigured(async (_, conn) =>
+        {
+            try
+            {
+                if (await Asked(conn))
+                {
+                    conn.Write(new byte[UnreadBytes]);
+                    writing.TrySetResult(conn);
+                    await conn.FlushAsync();
+                    flushed.TrySetResult();
+                }
+            }
+            finally
+            {
+                conn.DecRef();
+            }
+        }, Config(incremental: false, zeroCopy));
+
+        // Never read: draining through a 4 KB window takes seconds, and the close resets a parked send.
+        using var client = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp)
+        {
+            ReceiveBufferSize = 4096,   // before the connect, so the window the server sees is small
+        };
+        client.Connect(IPAddress.Loopback, port);
+        client.Send("?"u8);
+
+        Assert.True(writing.Task.Wait(5_000), "the handler never wrote its response");
+        TcpConnection conn = writing.Task.Result;
+
+        // Either send settles with the peer still not reading: the flush has ended, or a notif is owed.
+        Assert.True(SpinWait.SpinUntil(() => flushed.Task.IsCompleted || Volatile.Read(ref conn.ZcNotifPending) != 0, 5_000),
+            "the send never completed into the socket");
+        bool notifOwed = Volatile.Read(ref conn.ZcNotifPending) != 0;
+        bool ended = flushed.Task.IsCompleted;
+
+        Assert.True(client.Available < UnreadBytes,
+            "the peer's window took the whole response unread, so a SEND_ZC would have ended too and this proved nothing");
+
+        if (zeroCopy)
+        {
+            Assert.True(notifOwed && !ended,
+                "the zero-copy connection's flush ended before the peer read, with no notif owed: it was sent with plain SEND");
+        }
+        else
+        {
+            Assert.True(ended && !notifOwed,
+                "the plain connection's send completed owing a notif: it was sent with SEND_ZC");
+        }
     }
 
     private static ServerConfig Config(bool incremental, bool zeroCopy) => new()
@@ -115,6 +189,22 @@ internal static class ZeroCopySendTests
             conn.DecRef();
         }
     };
+
+    // Whether the first read brought bytes - the readiness probe's brings none.
+    private static async Task<bool> Asked(TcpConnection conn)
+    {
+        RecvSnapshot snapshot = await conn.ReadAsync();
+        bool asked = false;
+        while (conn.TryGetItem(snapshot, out SpscRecvRing.Item item))
+        {
+            if (item.HasBuffer)
+            {
+                asked = true;
+                conn.ReturnBuffer(in item);
+            }
+        }
+        return asked;
+    }
 
     private static Socket Connect(int port)
     {

@@ -8,7 +8,7 @@ public enum WriteOverflowStrategy
     /// <summary>Grow the single contiguous slab (realloc + copy); the flush stays one SEND.</summary>
     Grow,
 
-    /// <summary>Chain pooled slabs and flush them with one vectored SENDMSG (no realloc copies).</summary>
+    /// <summary>Chain the connection's own segments and flush them with one vectored SENDMSG (no realloc copies).</summary>
     Segmented,
 }
 
@@ -32,8 +32,8 @@ public sealed record TcpOptions
     public int WriteSlabSize { get; init; } = 16 * 1024;
     public int PoolMax       { get; init; } = 1024;
 
-    // How a response larger than WriteSlabSize is buffered: grow the slab (default) or chain pooled
-    // slabs flushed with one vectored SENDMSG.
+    // How a response larger than WriteSlabSize is buffered: grow the slab (default) or chain the
+    // connection's own segments, flushed with one vectored SENDMSG.
     public WriteOverflowStrategy WriteOverflow { get; init; } = WriteOverflowStrategy.Grow;
 
     // Inject IORING_OP_SEND_ZC (zero-copy send) for the response path instead of IORING_OP_SEND.
