@@ -144,7 +144,7 @@ public sealed unsafe partial class Reactor
     /// </summary>
     private int OpenClientUdpSocket()
     {
-        if (_udpFds.Length == 0)
+        if (_udpBufRing == null)
         {
             InitUdpBufRing();   // no UDP/QUIC in config, so startup skipped it
         }
@@ -217,6 +217,11 @@ public sealed unsafe partial class Reactor
         int ret = io_uring_register(_ring.Fd, IORING_REGISTER_PBUF_RING, &reg, 1);
         if (ret < 0)
         {
+            // The kernel took none of it: freed now, so a retried client open starts clean.
+            NativeMemory.AlignedFree(_udpBufRing);
+            NativeMemory.AlignedFree(_udpBufSlab);
+            _udpBufRing = null;
+            _udpBufSlab = null;
             throw new InvalidOperationException($"register udp pbuf_ring failed with errno {-ret}");
         }
 
