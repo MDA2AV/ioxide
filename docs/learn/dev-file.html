@@ -39,55 +39,44 @@
 
   <main class="doc">
     <h1>File internals</h1>
-    <p class="lead"><code>ioxide.file</code> serves static files off the ring: small files are served
-    from a fully precomputed HTTP response in native memory (no I/O at all), large files are read with
-    positional <code>IORING_OP_READ</code>s. Reloads swap whole snapshots, and a lease keeps a snapshot
+    <p class="lead"><code>ioxide.file</code> serves static files off the ring: every file is opened once,
+    and every read is a positional <code>IORING_OP_READ</code> - no bytes are cached and no HTTP is
+    spoken, so the caller frames the response. Reloads swap whole snapshots, and a lease keeps a snapshot
     alive across an in-flight read. Every class below.</p>
 
     <h2>AssetCache &middot; <span class="dim">AssetCache.cs</span></h2>
     <p>An immutable snapshot of a directory, keyed by URL path. At build time it walks the root and, for
     each file, opens a descriptor (held for the snapshot's lifetime so the raw fd stays valid - one fd
-    per file, mind <code>RLIMIT_NOFILE</code>). Files at or below <code>maxCachedFileBytes</code>
-    (default 256&nbsp;KB) get their <em>entire</em> HTTP response - header + body - baked into one
-    contiguous native block at build time, so the hot path serves them with no file I/O, no header
-    formatting, and no allocation. Larger files keep just the fd and are read off the ring.</p>
+    per file, mind <code>RLIMIT_NOFILE</code>). An entry is an <code>Asset</code>: the descriptor, the
+    absolute path, and the length at build time. No file bytes are read and no response is formatted -
+    the caller reads the body off the ring and frames it for its own protocol. A deploy is picked up by
+    a reload, not by a stat per request.</p>
     <ul>
-      <li><b>Baking</b> - <code>BuildResponse</code> reads the body first (so a file truncated under us
-      still yields a consistent Content-Length), formats the header with <code>WriteResponseHeader</code>
-      (the one place asset headers are formatted - baking and ring-read serving both use it), and
-      concatenates into one native block.</li>
       <li><b>Hot-path lookup</b> - <code>TryGet(ReadOnlySpan&lt;byte&gt; urlPath)</code> resolves
       straight from the recv buffer: ASCII→UTF16 via a stack buffer, then a dictionary
       <code>GetAlternateLookup&lt;ReadOnlySpan&lt;char&gt;&gt;</code> - zero per-request string
       allocation. A string overload exists for convenience.</li>
       <li><b>Symlink safety</b> - enumeration skips reparse points
-      (<code>AttributesToSkip = ReparsePoint</code>), so a symlink can't point outside the root and a
-      symlinked directory isn't descended into - traversal is blocked.</li>
+      (<code>AttributesToSkip = ReparsePoint | Hidden | System</code>), so a symlink can't point outside
+      the root and a symlinked directory isn't descended into - traversal is blocked. Hidden entries are
+      skipped too, and on Linux that is any name starting with a dot, so dot-files and a
+      <code>.well-known/</code> directory are not served.</li>
       <li><b>Refcounting</b> - the snapshot is reference-counted (<code>TryAddRef</code> /
       <code>Release</code>, starting at 1 for the live reference). It is actually freed - descriptors
-      closed, native blocks freed - only when the last reference is dropped. This is what makes reloads
-      safe (below).</li>
+      closed - only when the last reference is dropped. This is what makes reloads safe (below).</li>
     </ul>
-<p class="src"><b>AssetCache.cs</b> · baking - read the body, format the header, concatenate into one native block</p>
-<pre><code class="language-csharp">private static unsafe (nint Response, int Length) BuildResponse(SafeFileHandle handle, int bodyLength, string path)
+<p class="src"><b>AssetCache.cs</b> · building the snapshot - one descriptor, path and length per file, no bytes read</p>
+<pre><code class="language-csharp">public readonly record struct Asset(int Fd, string Path, long Length);
+
+foreach (string path in Directory.EnumerateFiles(RootDir, "*", walk))
 {
-    nint scratch = (nint)NativeMemory.Alloc((nuint)Math.Max(bodyLength, 1));
-    int read = 0;
-    while (read &lt; bodyLength)
-    {
-        int n = RandomAccess.Read(handle, new Span&lt;byte&gt;((void*)(scratch + read), bodyLength - read), read);
-        if (n &lt;= 0) break;
-        read += n;                                       // body first - Content-Length matches what ships
-    }
+    SafeFileHandle handle = File.OpenHandle(path, FileMode.Open, FileAccess.Read, FileShare.Read);
+    handles.Add(handle);   // kept open for the snapshot's lifetime
 
-    Span&lt;byte&gt; header = stackalloc byte[256];
-    int h = WriteResponseHeader(header, path, read);     // the one place asset headers are formatted
+    int fd = (int)handle.DangerousGetHandle();
+    string key = "/" + Path.GetRelativePath(RootDir, path).Replace('\\', '/');
 
-    nint response = (nint)NativeMemory.Alloc((nuint)(h + read));
-    header[..h].CopyTo(new Span&lt;byte&gt;((void*)response, h));
-    Buffer.MemoryCopy((void*)scratch, (void*)(response + h), read, read);
-    NativeMemory.Free((void*)scratch);
-    return (response, h + read);                          // header + body, one contiguous block
+    _assets[key] = new Asset(fd, path, RandomAccess.GetLength(handle));   // no body read, no header formatted
 }</code></pre>
 <p class="src"><b>AssetCache.cs</b> · the hot path - resolve straight from the recv bytes, zero string allocation</p>
 <pre><code class="language-csharp">public bool TryGet(ReadOnlySpan&lt;byte&gt; urlPath, out Asset asset)
@@ -130,7 +119,7 @@ internal void Release()
 {
     if (Interlocked.Decrement(ref _refs) == 0)
     {
-        DisposeCore();                   // close every fd, free every native block
+        DisposeCore();                   // close every fd
     }
 }</code></pre>
 
@@ -138,7 +127,7 @@ internal void Release()
     <p>A reloadable holder around an <code>AssetCache</code>. <code>Reload</code> builds a fresh snapshot,
     swaps it in atomically (<code>Interlocked.Exchange</code>), and drops the live reference on the old
     one - which is then freed only once every outstanding lease on it is released. No timer, no grace
-    window: an in-flight read on the old snapshot can never hit a closed fd or freed memory.</p>
+    window: an in-flight read on the old snapshot can never hit a closed fd.</p>
     <ul>
       <li><b>Acquire / Lease</b> - <code>Acquire()</code> returns a <code>Lease</code> (a refcounted
       hold) on the live snapshot; the handler holds it for the whole request - lookup → ring read →
@@ -164,7 +153,7 @@ public void Reload()
     lock (_reloadLock)
     {
         AssetCache fresh;
-        try { fresh = new AssetCache(_root, _maxCachedFileBytes); }
+        try { fresh = new AssetCache(_root); }
         catch (Exception e)
         {
             Console.Error.WriteLine($"[ioxide] asset reload failed, keeping current snapshot: {e.Message}");
@@ -199,8 +188,9 @@ public void Reload()
 
     <p class="lead" style="margin-top:2rem">Reads use positional <code>IORING_OP_READ</code> (pread
     semantics) into native memory; opens are one-time and blocking (off the hot path), reads are the hot
-    path and async. The small-file baked path is allocation- and copy-free per request; large files take
-    one copy (kernel → native buffer → write slab).</p>
+    path and async. Nothing is cached, so every request reads its file: an <code>AssetReader</code> costs
+    one copy (kernel → native buffer → write slab), and the core's <code>TcpConnection.ReadFileAsync</code>
+    none - it reads straight into the write slab, on a cleartext connection or under kTLS TX.</p>
 
     <div class="next"><a href="overview.html">Back to the Guide →</a></div>
   </main>
