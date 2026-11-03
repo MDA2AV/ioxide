@@ -6255,7 +6255,7 @@ var config = new ServerConfig
         ListenBacklog    = 1024,                        // listen() accept-queue depth per SO_REUSEPORT listener
         WriteSlabSize    = 16 * 1024,                   // per-connection write slab before overflow
         PoolMax          = 1024,                        // max pooled connection objects per reactor
-        WriteOverflow    = WriteOverflowStrategy.Grow,  // grow the slab; Segmented chains pooled slabs
+        WriteOverflow    = WriteOverflowStrategy.Grow,  // grow the slab; Segmented chains the connection&#x27;s own segments
         ZeroCopySend     = false,                       // plain SEND; SEND_ZC only wins for large responses
         RecvQueueEntries = 64,                          // per-connection SPSC recv queue depth (power of two)
         ReadTimeoutMs    = 60_000,                      // close a connection whose read waits this long on a silent peer; 0 = off
