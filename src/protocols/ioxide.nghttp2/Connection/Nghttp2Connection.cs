@@ -120,9 +120,6 @@ public sealed partial class Nghttp2Connection : IDisposable
         }
     }
 
-    /// <summary>Send GOAWAY and stop accepting new streams. In-flight ones still finish.</summary>
-    public void Shutdown() => _failed = true;
-
     public void Dispose()
     {
         if (_disposed)
