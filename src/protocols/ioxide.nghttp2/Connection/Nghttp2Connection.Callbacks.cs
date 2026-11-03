@@ -10,8 +10,7 @@ namespace ioxide.nghttp2;
 ///
 /// Nothing here may throw either. These are <c>[UnmanagedCallersOnly]</c>, so an exception would
 /// cross native frames and take the process down rather than fail one request. Each body is
-/// guarded, and the fault lands on _failed, which the loops act on once the native call unwinds
-/// and which still sends GOAWAY on the way out.
+/// guarded, and the fault lands on _failed, which the loops act on once the native call unwinds.
 /// </summary>
 public sealed partial class Nghttp2Connection
 {
@@ -27,7 +26,6 @@ public sealed partial class Nghttp2Connection
         try
         {
             Nghttp2Connection connection = From(user);
-            connection._callbackFault ??= e;
             connection._failed = true;
             Console.Error.WriteLine($"[ioxide.nghttp2] callback faulted, failing the connection: {e}");
         }

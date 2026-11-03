@@ -36,6 +36,9 @@ public sealed unsafe partial class Reactor
             return;
         }
 
+        // Set once the loop is entered, so Teardown can tell a failed start from a stop.
+        bool ranLoop = false;
+
         // Covers setup, not just the loop: OnStart is user code, and a throw from it used to leak
         // the listener, the eventfd and both ring mappings.
         try
@@ -61,15 +64,16 @@ public sealed unsafe partial class Reactor
         ArmWakePoll();
 
         // After OnStart, so a reactor that serves no TCP registers nothing and the sweep costs it
-        // not even a table walk.
-        if (TcpSweepEnabled)
+        // not even a table walk. Whenever TCP is on, clocks or not: the sweep sends the deferred FIN
+        // (TcpConnection.DecRef).
+        if (_tcpEnabled)
         {
             AddTicker(TcpSweep);
         }
 
         StartTicker();
 
-            _ranLoop = true;
+            ranLoop = true;
             if (_incremental) LoopIncremental();
             else LoopSharedRing();
         }
@@ -81,7 +85,7 @@ public sealed unsafe partial class Reactor
         finally
         {
             // Runs on every exit path: a fatal io_uring_enter, a throw from OnStart, a full SQ.
-            Teardown();
+            Teardown(startFailed: !ranLoop);
         }
     }
 
@@ -110,15 +114,11 @@ public sealed unsafe partial class Reactor
                           $" (incremental={_incremental})");
     }
 
-    /// <summary>Set once the loop is entered, so Teardown can tell a failed start from a stop.</summary>
-    private bool _ranLoop;
-
     // Still on the reactor thread, in dependency order: sockets close while the ring is alive
     // (in-flight ops surface as errors/cancels and are dropped), the ring fd goes next, and native
     // memory the kernel could reference is freed only after that.
-    private void Teardown()
+    private void Teardown(bool startFailed)
     {
-        bool startFailed = !_ranLoop;
         // A faulted loop never set it: UdpSendTo sends directly from here, as nothing submits the ring again.
         _stopRequested = true;
 
@@ -215,11 +215,8 @@ public sealed unsafe partial class Reactor
         _stopRequested = true;
 
         // Wake a loop parked in io_uring_enter so it observes the flag promptly. Writing the eventfd is
-        // the only ring-adjacent action safe off the reactor thread. The guard covers Stop() racing ahead
-        // of Run() creating _wakeFd - the loop still sees the flag on its first iteration.
-        if (_wakeFd > 0)
-        {
-            WakeFdWrite();
-        }
+        // the only ring-adjacent action safe off the reactor thread. WakeFdWrite skips a _wakeFd Run() has
+        // not created yet - the loop still sees the flag on its first iteration.
+        WakeFdWrite();
     }
 }

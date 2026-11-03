@@ -114,7 +114,7 @@ for (int i = 0; i < threads.Length; i++)
         {
             Host              = upstreamHost,     // origin name or address; a name is resolved off the reactor
             Port              = upstreamPort,     // origin port
-            PoolSize          = upstreamPool,     // connections kept open; round-robin, one request each
+            PoolSize          = upstreamPool,     // connections kept open; one request each
             MaxResponseBytes  = 8 * 1024 * 1024,  // per-request ceiling for headers + body
             SendBufferSize    = 16 * 1024,        // per-connection send buffer
             ReceiveBufferSize = 16 * 1024,        // per-connection recv buffer (grows to MaxResponseBytes)
@@ -175,7 +175,6 @@ for (int i = 0; i < threads.Length; i++)
                 }
 
                 if (snapshot.IsClosed || tls.Closed) return;
-                conn.ResetRead();
             }
         }
         catch (Exception e)

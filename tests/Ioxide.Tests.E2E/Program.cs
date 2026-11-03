@@ -15,6 +15,7 @@ internal static class Program
         ListenerReleaseTests.Register(runner);
         TimerTests.Register(runner);
         AffinityTests.Register(runner);
+        KestrelTests.Register(runner);
         HardeningTests.Register(runner);
         IncrementalTests.Register(runner);
         RecvBufferReclaimTests.Register(runner);
@@ -64,11 +65,13 @@ internal static class Program
         QuicStreamingCreditTests.Register(runner);
         Http3BodyTests.Register(runner);
         H3BodyModeTests.Register(runner);
+        H3BufferedFaultTests.Register(runner);
         H3BodyLimitTests.Register(runner);
         H3LargeResponseTests.Register(runner);
         OffReactorStreamTests.Register(runner);
         OffReactorH2FixTests.Register(runner);
         OffReactorH3FixTests.Register(runner);
+        KestrelTlsTests.Register(runner);
 
         return runner.Summary();
     }

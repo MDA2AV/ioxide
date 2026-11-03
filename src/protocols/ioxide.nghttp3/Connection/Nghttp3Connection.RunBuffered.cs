@@ -5,7 +5,7 @@ namespace ioxide.nghttp3;
 /// with all of it in <see cref="Nghttp3Request.Body"/>, and requests recycle the moment their
 /// valid-until-return contract ends - right after a sync handler returns, or when an async
 /// handler's task completes (sole owner: the request left _requests at dispatch). A handler that
-/// takes a body reader dispatches as RequestBody does.
+/// takes a body reader shares the async dispatch, at end-of-headers (see RequestBody).
 /// </summary>
 public sealed partial class Nghttp3Connection
 {
@@ -40,7 +40,7 @@ public sealed partial class Nghttp3Connection
         Func<Nghttp3Request, ValueTask<Nghttp3Response>> buffered = request => handler(request, request.BodyReader!);
         return RunCoreAsync(() =>
         {
-            DispatchStreaming(buffered);
+            DispatchBufferedAsync(buffered);
             PumpEgress();
         });
     }
@@ -88,7 +88,8 @@ public sealed partial class Nghttp3Connection
     {
         for (int i = 0; i < _readyStreamIds.Count && !_protocolFailed; i++)
         {
-            if (!_requests.Remove(_readyStreamIds[i], out Nghttp3Request? request))
+            long streamId = _readyStreamIds[i];
+            if (!TakeReady(streamId, out Nghttp3Request? request))
             {
                 continue;
             }
@@ -103,15 +104,17 @@ public sealed partial class Nghttp3Connection
             catch (Exception exception)
             {
                 Console.Error.WriteLine($"[ioxide.nghttp3] request handler faulted: {exception.GetBaseException().Message}");
-                QueueResponse(request.StreamId, new Nghttp3Response { Status = 500 });
-                ReleaseRequest(request);
+                RetireBody(request);
+                QueueResponse(streamId, new Nghttp3Response { Status = 500 });
+                RequestHandled(request);
                 continue;
             }
 
             if (pending.IsCompletedSuccessfully)
             {
-                QueueResponse(request.StreamId, pending.Result);   // fast path: the handler never awaited
-                ReleaseRequest(request);
+                RetireBody(request);
+                QueueResponse(streamId, pending.Result);   // fast path: the handler never awaited
+                RequestHandled(request);
             }
             else
             {
@@ -121,8 +124,8 @@ public sealed partial class Nghttp3Connection
         _readyStreamIds.Clear();
     }
 
-    // Continuation for a buffered-async handler that awaited: the request left _requests at
-    // dispatch, so once the handler's task completes we are the sole owner - submit and recycle.
+    // Continuation for a handler that awaited (body chunks, a db call): resumes inline on the
+    // reactor; submit + pump unless the connection died underneath it.
     private async Task CompleteBufferedAsync(ValueTask<Nghttp3Response> pending, Nghttp3Request request)
     {
         Nghttp3Response response;
@@ -137,11 +140,20 @@ public sealed partial class Nghttp3Connection
         }
 
         await new ReactorSwitch(Reactor);   // back on the reactor, wherever the handler finished
+        long streamId = request.StreamId;
+        request.HandlerDone = true;
+        RetireBody(request);
+
         if (_nghttp3Handle != 0 && !_protocolFailed)
         {
-            QueueResponse(request.StreamId, response);
+            QueueResponse(streamId, response);
             PumpEgress();
         }
-        ReleaseRequest(request);
+
+        // RequestHandled's release, kept after the submit: the response may slice the request's memory.
+        if (!_streamBodies || request.Detached)
+        {
+            ReleaseRequest(request);
+        }
     }
 }

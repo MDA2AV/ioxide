@@ -74,6 +74,55 @@ internal static class ReactorSetupTeardownTests
                 + "for the next socket the process opens");
         });
 
+        runner.Test("reactor: a listener bind that fails closes its socket, so a failed start leaks no descriptor", () =>
+        {
+            // A plain listener asks for no SO_REUSEPORT, so every bind to its port is refused, the dual-stack one too.
+            using var holder = new TcpListener(IPAddress.Any, 0);
+            holder.Start();
+            ushort port = (ushort)((IPEndPoint)holder.LocalEndpoint).Port;
+
+            const int attempts = 16;
+            int before = FdCount.Stable();
+
+            foreach (bool dualStack in new[] { false, true })
+            {
+                for (int i = 0; i < attempts; i++)
+                {
+                    Assert.Throws<InvalidOperationException>(
+                        () => OpenReusePortListener(null, port, backlog: 16, dualStack, userTimeoutMs: 0), "bind failed");
+                }
+            }
+
+            int leaked = FdCount.Stable() - before;
+            Assert.True(leaked <= 2, $"{2 * attempts} refused binds left {leaked} descriptors open");
+        });
+
+        runner.Test("reactor: a start that fails keeps its ring's descriptor open, so the number is not handed out mid-run", () =>
+        {
+            // A number handed back mid-run goes to the next socket opened, and a stale close of it ends that connection.
+            int ringFd = -1;
+            Exception? reported = null;
+
+            var reactor = new Reactor(0, new ServerConfig { ReactorCount = 1, RecvBufferSize = 4096, RecvSlots = 256 })
+            {
+                OnStart = r =>
+                {
+                    ringFd = RingOf(r).Fd;
+                    throw new InvalidOperationException("fault-on-purpose");
+                },
+                OnFault = (_, e) => reported = e,
+            };
+
+            var thread = new Thread(reactor.Run) { IsBackground = true };
+            thread.Start();
+
+            Assert.True(thread.Join(TimeSpan.FromSeconds(10)), "Run should have returned after OnStart threw");
+            Assert.True(reported is InvalidOperationException { Message: "fault-on-purpose" },
+                $"the start failed somewhere other than OnStart: {reported}");
+            Assert.True(ExecInheritance.Target(ringFd) == "anon_inode:[io_uring]",
+                $"the failed start closed its ring's descriptor {ringFd}, so the number went back to the process mid-run");
+        });
+
         runner.Test("reactor: a ring the kernel refuses reaches OnFault instead of ending the process", () =>
         {
             // Every kernel refuses more than 32768 entries with EINVAL - the errno a kernel older than
@@ -235,7 +284,6 @@ internal static class ReactorSetupTeardownTests
                         {
                             return;   // the harness's readiness probe, which sends no request
                         }
-                        conn.ResetRead();
 
                         conn.Write(new byte[ResponseBytes]);   // past the slab, so a segmented write rents spare slabs
                         await conn.FlushAsync();
@@ -249,7 +297,6 @@ internal static class ReactorSetupTeardownTests
                         while (!(snapshot = await conn.ReadAsync()).IsClosed)
                         {
                             Wire.ReadPath(conn, snapshot);
-                            conn.ResetRead();
                         }
                     }
                     finally
@@ -313,6 +360,9 @@ internal static class ReactorSetupTeardownTests
 
     [UnsafeAccessor(UnsafeAccessorKind.StaticMethod, Name = "OpenReusePortListener")]
     private static extern int OpenReusePortListener(Reactor? type, ushort port, int backlog, bool dualStack, int userTimeoutMs);
+
+    [UnsafeAccessor(UnsafeAccessorKind.Field, Name = "_ring")]
+    private static extern ref Ring RingOf(Reactor reactor);
 
     // A connect completes into a listener's backlog without anyone accepting, so it succeeds exactly
     // while the listening socket is open.

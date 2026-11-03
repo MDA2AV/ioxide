@@ -171,7 +171,6 @@ internal static class BufferRingPageTests
                 {
                     return;
                 }
-                conn.ResetRead();
             }
         }
         finally

@@ -102,7 +102,6 @@ for (int i = 0; i < threads.Length; i++)
                 await conn.FlushAsync();
 
                 if (snapshot.IsClosed) return;   // peer went away
-                conn.ResetRead();                // arm the next read
             }
         }
         finally

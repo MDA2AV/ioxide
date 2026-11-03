@@ -54,7 +54,6 @@ public sealed unsafe partial class Reactor
     private const int UdpSendBlockSize   = UdpSendPayloadOff + UdpPayloadCap;
 
     private const int ECANCELED = 125;
-    private const int ENOBUFS_UDP = 105;
 
     private int[]    _udpFds     = [];
 
@@ -68,7 +67,6 @@ public sealed unsafe partial class Reactor
     private byte*  _udpBufSlab;
     private ushort _udpBufRingTail;
     private uint   _udpBufRingMask;
-    private int    _udpRingDepth;
 
     // One persistent msghdr template, shared by every socket's multishot arm: it only conveys the
     // reserved namelen/controllen (identical for all), the kernel writes into the ring buffer.
@@ -78,13 +76,12 @@ public sealed unsafe partial class Reactor
     private nint[] _udpSendBlocks = [];
     private int[]  _udpSendFree   = [];
     private int    _udpSendFreeTop;
-    private int    _udpSendCount;
 
     private void OpenUdpSockets()
     {
-        // Udp == null means no RAW datagram sockets; QUIC still binds its own port below and
-        // uses the resolved _udp defaults for Gro / RecvSlots.
-        ushort[] rawPorts = _udpEnabled ? _udp.Ports : [];
+        // Udp == null resolves to the defaults, whose Ports is empty: no RAW datagram sockets. QUIC
+        // still binds its own port below and uses those defaults for Gro / RecvSlots.
+        ushort[] rawPorts = _udp.Ports;
 
         if (rawPorts.Length == 0 && _config.Quic == null)
         {
@@ -144,7 +141,7 @@ public sealed unsafe partial class Reactor
     /// </summary>
     private int OpenClientUdpSocket()
     {
-        if (_udpFds.Length == 0)
+        if (_udpBufRing == null)
         {
             InitUdpBufRing();   // no UDP/QUIC in config, so startup skipped it
         }
@@ -185,40 +182,57 @@ public sealed unsafe partial class Reactor
     private void InitUdpBufRing()
     {
         int depth = RoundUpPow2(_udp.RecvSlots);
-        _udpRingDepth   = depth;
-        _udpBufRingMask = (uint)(depth - 1);
+        byte*   ring     = null;
+        byte*   slab     = null;
+        msghdr* template = null;
 
-        _udpBufRing = (byte*)NativeMemory.AlignedAlloc((nuint)depth * 16, (nuint)Environment.SystemPageSize);   // as the TCP ring
-        NativeMemory.Clear(_udpBufRing, (nuint)depth * 16);
-        _udpBufSlab = (byte*)NativeMemory.AlignedAlloc((nuint)depth * UdpRecvBufSize, 64);
-
-        for (ushort bid = 0; bid < depth; bid++)
+        try
         {
-            byte* entry = _udpBufRing + (uint)bid * 16;
-            *(ulong*)(entry + 0)  = (ulong)(_udpBufSlab + (nuint)bid * UdpRecvBufSize);
-            *(uint*)(entry + 8)   = UdpRecvBufSize;
-            *(ushort*)(entry + 12) = bid;
+            ring = (byte*)NativeMemory.AlignedAlloc((nuint)depth * 16, (nuint)Environment.SystemPageSize);   // as the TCP ring
+            NativeMemory.Clear(ring, (nuint)depth * 16);
+            slab = (byte*)NativeMemory.AlignedAlloc((nuint)depth * UdpRecvBufSize, 64);
+
+            // Template: reserved name/control sizes only; iov unused (buffer comes from the ring).
+            template = (msghdr*)NativeMemory.AlignedAlloc((nuint)sizeof(msghdr), 64);
+            Unsafe.InitBlockUnaligned(template, 0, (uint)sizeof(msghdr));
+            template->msg_namelen    = UdpNameCap;
+            template->msg_controllen = UdpCtrlCap;
+
+            for (ushort bid = 0; bid < depth; bid++)
+            {
+                byte* entry = ring + (uint)bid * 16;
+                *(ulong*)(entry + 0)  = (ulong)(slab + (nuint)bid * UdpRecvBufSize);
+                *(uint*)(entry + 8)   = UdpRecvBufSize;
+                *(ushort*)(entry + 12) = bid;
+            }
+            Volatile.Write(ref *(ushort*)(ring + 14), (ushort)depth);
+
+            var reg = new io_uring_buf_reg
+            {
+                ring_addr    = (ulong)ring,
+                ring_entries = (uint)depth,
+                bgid         = UdpBgId,
+            };
+            int ret = io_uring_register(_ring.Fd, IORING_REGISTER_PBUF_RING, &reg, 1);
+            if (ret < 0)
+            {
+                throw new InvalidOperationException($"register udp pbuf_ring failed with errno {-ret}");
+            }
         }
-        _udpBufRingTail = (ushort)depth;
-        Volatile.Write(ref *(ushort*)(_udpBufRing + 14), _udpBufRingTail);
-
-        var reg = new io_uring_buf_reg
+        catch
         {
-            ring_addr    = (ulong)_udpBufRing,
-            ring_entries = (uint)depth,
-            bgid         = UdpBgId,
-        };
-        int ret = io_uring_register(_ring.Fd, IORING_REGISTER_PBUF_RING, &reg, 1);
-        if (ret < 0)
-        {
-            throw new InvalidOperationException($"register udp pbuf_ring failed with errno {-ret}");
+            // None of it reached the kernel or a field, so a retried client open starts clean.
+            NativeMemory.AlignedFree(ring);
+            NativeMemory.AlignedFree(slab);
+            NativeMemory.AlignedFree(template);
+            throw;
         }
 
-        // Template: reserved name/control sizes only; iov unused (buffer comes from the ring).
-        _udpRecvTemplate = (msghdr*)NativeMemory.AlignedAlloc((nuint)sizeof(msghdr), 64);
-        Unsafe.InitBlockUnaligned(_udpRecvTemplate, 0, (uint)sizeof(msghdr));
-        _udpRecvTemplate->msg_namelen    = UdpNameCap;
-        _udpRecvTemplate->msg_controllen = UdpCtrlCap;
+        _udpBufRingMask  = (uint)(depth - 1);
+        _udpBufRingTail  = (ushort)depth;
+        _udpBufRing      = ring;
+        _udpBufSlab      = slab;
+        _udpRecvTemplate = template;
     }
 
     /// <summary>
@@ -389,7 +403,7 @@ public sealed unsafe partial class Reactor
             {
                 return;
             }
-            if (res != -ENOBUFS_UDP)
+            if (res != -ENOBUFS)
             {
                 Console.Error.WriteLine($"[r{_id}] udp recv error: {res}");
             }
@@ -579,17 +593,17 @@ public sealed unsafe partial class Reactor
 
     private void GrowUdpSendSlots()
     {
-        int add = _udpSendCount == 0 ? 16 : _udpSendCount;
-        int newCount = _udpSendCount + add;
+        int count = _udpSendBlocks.Length;
+        int add = count == 0 ? 16 : count;
+        int newCount = count + add;
 
         Array.Resize(ref _udpSendBlocks, newCount);
         Array.Resize(ref _udpSendFree, newCount);
-        for (int i = _udpSendCount; i < newCount; i++)
+        for (int i = count; i < newCount; i++)
         {
             _udpSendBlocks[i] = (nint)NativeMemory.AlignedAlloc(UdpSendBlockSize, 64);
             _udpSendFree[_udpSendFreeTop++] = i;
         }
-        _udpSendCount = newCount;
     }
 
     // Split teardown: fds close while the ring is still alive (in-flight RECVMSG ops surface as
@@ -624,11 +638,10 @@ public sealed unsafe partial class Reactor
             _udpRecvTemplate = null;
         }
 
-        for (int i = 0; i < _udpSendCount; i++)
+        for (int i = 0; i < _udpSendBlocks.Length; i++)
         {
             NativeMemory.AlignedFree((void*)_udpSendBlocks[i]);
         }
-        _udpSendCount = 0;
         _udpSendFreeTop = 0;
         _udpSendBlocks = [];
         _udpSendFree = [];

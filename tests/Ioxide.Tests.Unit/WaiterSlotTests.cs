@@ -25,8 +25,8 @@ internal static unsafe class WaiterSlotTests
         {
             // ReadAsync used to take its arm back without looking at the exchange's result, so a recv
             // that had already taken it delivered too - into the read's value task, after the caller had
-            // been served at once and moved on. That completion raced the caller's ResetRead and next
-            // read: the value task came out torn ("Operation is not valid due to the current state of
+            // been served at once and moved on. That completion raced the caller's next read: the
+            // value task came out torn ("Operation is not valid due to the current state of
             // the object"), or the next read, parked for real, looked complete, and the one after it
             // found the arm still taken and was refused as already armed.
             Reactor reactor = NeverRunning();
@@ -52,7 +52,6 @@ internal static unsafe class WaiterSlotTests
                             while (conn.TryGetItem(snapshot, out var item))
                             {
                             }
-                            conn.ResetRead();
                             read = conn.ReadAsync();
                         }
                     }
@@ -77,24 +76,6 @@ internal static unsafe class WaiterSlotTests
             Assert.True(overlapped >= MinOverlapped, $"only {overlapped} recv completions landed while a read was parking: the race never ran");
             Assert.True(broken == 0, $"{broken} of {Rounds} rounds broke a read after the first: refused as already armed, or its value task torn");
         }, skip: Environment.ProcessorCount < 2);
-
-        runner.Test("conn: ResetRead while a raw read is parked leaves the read to complete", () =>
-        {
-            // ReadAsync readies its value task itself now, so ResetRead has nothing left to do. It used
-            // to reset that value task even with a read parked on it, throwing the read's continuation
-            // away.
-            TcpConnection conn = Connection(NeverRunning());
-            ValueTask<RecvSnapshot> read = conn.ReadAsync();
-            bool resumed = false;
-            read.GetAwaiter().UnsafeOnCompleted(() => resumed = true);
-
-            conn.ResetRead();
-            conn.MarkClosed();
-
-            Assert.True(resumed, "the parked read was never resumed after ResetRead");
-            Assert.True(read.Result.IsClosed, "the parked read resumed without the close");
-            conn.Dispose();
-        });
 
         runner.Test("conn: a completion that lands while a read readies its listener is served by that read, which then lets go of the slot", () =>
         {

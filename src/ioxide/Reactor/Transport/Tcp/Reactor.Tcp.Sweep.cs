@@ -26,9 +26,6 @@ public sealed unsafe partial class Reactor
     /// </summary>
     internal long NowMs = Native.MonotonicMs;
 
-    // Whenever TCP is on: the deferred FIN (TcpConnection.DecRef) is sent from here, clocks or not.
-    private bool TcpSweepEnabled => _tcpEnabled;
-
     /// <summary>
     /// One pass over the connection table. Runs on the reactor thread from the ticker, so it owns
     /// the table outright and can touch a connection directly.

@@ -10,7 +10,7 @@
     <PackageId>ioxide.file</PackageId>
     <Version>0.24.444</Version>
     <Authors>MDA2AV</Authors>
-    <Description>File serving for the ioxide io_uring runtime: immutable asset snapshots with baked responses, pooled positional ring reads, atomic reloads.</Description>
+    <Description>File serving for the ioxide io_uring runtime: immutable directory snapshots of pre-opened files keyed by URL path, pooled positional ring reads, lease-safe atomic reloads.</Description>
     <PackageLicenseExpression>MIT</PackageLicenseExpression>
     <PackageProjectUrl>https://mda2av.github.io/ioxide/learn/files.html</PackageProjectUrl>
     <RepositoryUrl>https://github.com/MDA2AV/ioxide</RepositoryUrl>

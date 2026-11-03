@@ -141,7 +141,6 @@ internal static class ExecInheritanceTests
             if (!snapshot.IsClosed)
             {
                 accepted.TrySetResult(ExecInheritance.Target(conn.ClientFd));
-                conn.ResetRead();
                 await conn.ReadAsync();
             }
         }

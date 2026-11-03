@@ -157,7 +157,6 @@ reactor.OnStart = r =&gt; TlsService.Start(r, options);</code></pre>
             await conn.FlushAsync();       // ordinary io_uring send, once per batch
 
             if (snapshot.IsClosed || (tls?.Closed ?? false)) return;
-            conn.ResetRead();
         }
     }
     finally { tls?.Dispose(); conn.DecRef(); }

@@ -1,5 +1,6 @@
 using System.Net;
 using System.Net.Sockets;
+using System.Runtime.CompilerServices;
 using System.Text;
 using ioxide;
 
@@ -132,6 +133,14 @@ internal static class UdpTests
             Assert.True(seen.Count >= count - 2, $"only {seen.Count}/{count} datagrams echoed through the ring");
         });
 
+        runner.Test("core: udp RecvSlots past what a kernel buffer ring holds is refused by name, not spun on at startup", () =>
+        {
+            // 40000 rounds up to a 65536-buffer ring, which a ushort buffer id never counts to.
+            Assert.Throws<ArgumentException>(
+                () => TestServer.StartDatagramConfigured(onDatagram: null, udpRecvSlots: 40_000),
+                "config.Udp.RecvSlots ('40000') must be less than or equal to '32768'");
+        });
+
         runner.Test("core: udp with no handler drops datagrams, reactor stays up", () =>
         {
             (int tcpPort, int udpPort) = TestServer.StartDatagram(onDatagram: null);
@@ -156,7 +165,36 @@ internal static class UdpTests
             using var probe = new TcpClient();
             probe.Connect("127.0.0.1", tcpPort);   // the owning reactor is still alive
         });
+
+        runner.Test("core: a udp bind that fails closes its socket, so a pin retried every sweep leaks no descriptor", () =>
+        {
+            // No SO_REUSEADDR or SO_REUSEPORT here, so every bind to this port is refused, the dual-stack one too.
+            using var holder = new Socket(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp);
+            holder.Bind(new IPEndPoint(IPAddress.Any, 0));
+            ushort port = (ushort)((IPEndPoint)holder.LocalEndPoint!).Port;
+
+            const int attempts = 16;
+            int before = FdCount.Stable();
+
+            foreach (bool dualStack in new[] { false, true })
+            {
+                for (int i = 0; i < attempts; i++)
+                {
+                    // 64 KiB: small enough that no buffer-clamp warning is printed.
+                    Assert.Throws<InvalidOperationException>(
+                        () => OpenUdpSocket(null, port, dualStack, gro: false, socketBufferBytes: 64 * 1024, connectTo: 0, connectLen: 0),
+                        "udp bind");
+                }
+            }
+
+            int leaked = FdCount.Stable() - before;
+            Assert.True(leaked <= 2, $"{2 * attempts} refused binds left {leaked} descriptors open");
+        });
     }
+
+    [UnsafeAccessor(UnsafeAccessorKind.StaticMethod, Name = "OpenUdpSocket")]
+    private static extern int OpenUdpSocket(Reactor? type, ushort port, bool dualStack, bool gro, int socketBufferBytes,
+        nint connectTo, int connectLen);
 
     private static void DualStackEcho(IPAddress peer)
     {

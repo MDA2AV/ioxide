@@ -28,7 +28,6 @@ public sealed class PgConnection : IDisposable
     // Native wire buffers. Kept as nint (not byte*) so the async protocol flow can do address
     // arithmetic without an unsafe context; only the small parse/format helpers touch memory.
     private nint _send;
-    private int _sendCapacity;
     private nint _recv;
     private int _recvCapacity;
     private readonly int _maxBufferSize;   // ceiling on a single backend message (PgOptions.MaxReceiveBytes)
@@ -58,7 +57,6 @@ public sealed class PgConnection : IDisposable
         _socket = socket;
         _maxBufferSize = maxBufferSize;
         _send = (nint)NativeMemory.Alloc(SendBufferSize);
-        _sendCapacity = SendBufferSize;
         _recv = (nint)NativeMemory.Alloc(InitialBufferSize);
         _recvCapacity = InitialBufferSize;
     }
@@ -258,22 +256,7 @@ public sealed class PgConnection : IDisposable
             _prepared[sql] = name!;
         }
 
-        var pending = new Pending(onRow) { PreparedSql = cached ? sql : null, Sql = sql, EnqueuedAtMs = Native.MonotonicMs };
-        _inflight.Enqueue(pending);
-
-        if (!_sending)
-        {
-            _sending = true;
-            _ = SenderLoopAsync();
-        }
-
-        if (!_reading)
-        {
-            _reading = true;
-            _ = ReaderLoopAsync();
-        }
-
-        return new ValueTask<PgResult>(pending, pending.Version);
+        return Enqueue(new Pending(onRow) { PreparedSql = cached ? sql : null, Sql = sql });
     }
 
     // The send buffer and the waiter queue are the reactor's, so a query from another thread is made
@@ -314,7 +297,14 @@ public sealed class PgConnection : IDisposable
             return ValueTask.FromException<PgResult>(ex);
         }
 
-        var pending = new Pending(onRow) { EnqueuedAtMs = Native.MonotonicMs };
+        return Enqueue(new Pending(onRow));
+    }
+
+    // Queue a staged command's waiter and make sure the sender and reader are running.
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private ValueTask<PgResult> Enqueue(Pending pending)
+    {
+        pending.EnqueuedAtMs = Native.MonotonicMs;
         _inflight.Enqueue(pending);
 
         if (!_sending)
@@ -460,7 +450,7 @@ public sealed class PgConnection : IDisposable
         {
             IsBroken = true;
             _reading = false;
-            FailAll(ex is PgException p ? p : new PgException(ex.Message));
+            FailAll(ex);
         }
 
         if (IsBroken)
@@ -669,18 +659,18 @@ public sealed class PgConnection : IDisposable
     private unsafe int WriteSaslInitial(string clientFirst)
     {
         byte[] payload = Encoding.UTF8.GetBytes(clientFirst);
-        return PgProtocol.WriteSaslInitialResponse(new Span<byte>((void*)_send, _sendCapacity), "SCRAM-SHA-256", payload);
+        return PgProtocol.WriteSaslInitialResponse(new Span<byte>((void*)_send, SendBufferSize), "SCRAM-SHA-256", payload);
     }
 
     private unsafe int WriteSaslFinal(string clientFinal)
     {
         byte[] payload = Encoding.UTF8.GetBytes(clientFinal);
-        return PgProtocol.WriteSaslResponse(new Span<byte>((void*)_send, _sendCapacity), payload);
+        return PgProtocol.WriteSaslResponse(new Span<byte>((void*)_send, SendBufferSize), payload);
     }
 
     private unsafe int WriteStartup(string user, string database)
     {
-        return PgProtocol.WriteStartup(new Span<byte>((void*)_send, _sendCapacity), user, database);
+        return PgProtocol.WriteStartup(new Span<byte>((void*)_send, SendBufferSize), user, database);
     }
 
     // Append a Query message to the pipelined send buffer. Fixed buffer (an in-flight send holds its
@@ -688,17 +678,17 @@ public sealed class PgConnection : IDisposable
     private unsafe void WriteQueryAt(string sql)
     {
         int needed = PgProtocol.QueryLength(sql);
-        if (needed > _sendCapacity)
+        if (needed > SendBufferSize)
         {
-            throw new PgException($"query exceeds send buffer ({_sendCapacity} bytes)");
+            throw new PgException($"query exceeds send buffer ({SendBufferSize} bytes)");
         }
 
-        if (_sendEnd + needed > _sendCapacity)
+        if (_sendEnd + needed > SendBufferSize)
         {
             throw new PgException("pipelined send buffer full");
         }
 
-        int written = PgProtocol.WriteQuery(new Span<byte>((void*)(_send + _sendEnd), _sendCapacity - _sendEnd), sql);
+        int written = PgProtocol.WriteQuery(new Span<byte>((void*)(_send + _sendEnd), SendBufferSize - _sendEnd), sql);
         _sendEnd += written;
     }
 
@@ -707,18 +697,18 @@ public sealed class PgConnection : IDisposable
     private unsafe void WriteExtendedAt(bool parse, string statementName, string sql, ReadOnlySpan<PgParam> args)
     {
         int needed = PgProtocol.ExtendedLength(parse, statementName, sql, args);
-        if (needed > _sendCapacity)
+        if (needed > SendBufferSize)
         {
-            throw new PgException($"query exceeds send buffer ({_sendCapacity} bytes)");
+            throw new PgException($"query exceeds send buffer ({SendBufferSize} bytes)");
         }
 
-        if (_sendEnd + needed > _sendCapacity)
+        if (_sendEnd + needed > SendBufferSize)
         {
             throw new PgException("pipelined send buffer full");
         }
 
         int written = PgProtocol.WriteExtended(
-            new Span<byte>((void*)(_send + _sendEnd), _sendCapacity - _sendEnd), parse, statementName, sql, args);
+            new Span<byte>((void*)(_send + _sendEnd), SendBufferSize - _sendEnd), parse, statementName, sql, args);
         _sendEnd += written;
     }
 

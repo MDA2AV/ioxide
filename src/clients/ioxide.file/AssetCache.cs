@@ -19,7 +19,6 @@ public sealed class AssetCache : IDisposable
 
     private readonly Dictionary<string, Asset> _assets;
     private readonly SafeFileHandle[] _handles;
-    private int _disposed;
     private int _refs = 1;   // the "live" reference held by StaticAssets; leases add/drop more
 
     /// <summary>The absolute root directory the cache was built over.</summary>
@@ -114,7 +113,7 @@ public sealed class AssetCache : IDisposable
     {
         if (Interlocked.Decrement(ref _refs) == 0)
         {
-            DisposeCore();
+            DisposeCore();   // runs once: TryAddRef never lifts a count back off zero
         }
     }
 
@@ -123,11 +122,6 @@ public sealed class AssetCache : IDisposable
 
     private void DisposeCore()
     {
-        if (Interlocked.Exchange(ref _disposed, 1) != 0)
-        {
-            return;
-        }
-
         foreach (SafeFileHandle handle in _handles)
         {
             handle.Dispose();
