@@ -78,7 +78,7 @@ public sealed class TlsService
             //
             // MarkClosed is what wakes the handshake NOW, rather than one io_uring round trip
             // later, with the closed snapshot its loop already knows how to handle.
-            Sockets.Shutdown(head.Conn.ClientFd);
+            Native.shutdown(head.Conn.ClientFd, Native.SHUT_RDWR);
             head.Conn.MarkClosed();
         }
     }
@@ -1449,12 +1449,13 @@ public sealed class TlsService
     private static unsafe int TakeWaiting(int fd, nint rbio, int count)
     {
         byte* buffer = stackalloc byte[16 * 1024];
-        int n = Sockets.ReceiveWaiting(fd, buffer, Math.Min(count, 16 * 1024));
-        if (n > 0)
+        long n = Native.recv(fd, buffer, (nuint)Math.Min(count, 16 * 1024), Native.MSG_DONTWAIT);
+        if (n <= 0)
         {
-            BoringSsl.BIO_write(rbio, buffer, n);
+            return 0;   // nothing waiting, or an error the caller's next ring recv reports
         }
-        return n;
+        BoringSsl.BIO_write(rbio, buffer, (int)n);
+        return (int)n;
     }
 
     /// <summary>
