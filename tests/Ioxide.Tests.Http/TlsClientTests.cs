@@ -1,3 +1,4 @@
+using System.Runtime.CompilerServices;
 using System.Text;
 using ioxide;
 using ioxide.httpclient;
@@ -136,6 +137,52 @@ internal static class TlsClientTests
             }
 
             Assert.True(threw, "an empty ServerName must be rejected");
+        });
+
+        runner.Test("tls client: a connection's TLS session is freed when the pool discards the connection, and when the pool is disposed", () =>
+        {
+            // The socket closes either way, so only the session's own state shows its SSL and buffers were freed.
+            using TlsTestOrigin origin = TlsTestOrigin.Start("http/1.1");
+            origin.CloseAfterResponse = true;   // the next request on a connection fails, so the pool discards it
+            (string certPath, _) = TestCert.Ensure();
+            var options = new HttpClientOptions
+            {
+                Host = "127.0.0.1",
+                Port = (ushort)origin.Port,
+                PoolSize = 1,
+                Tls = TlsClientContext.Create(new TlsClientOptions
+                {
+                    ServerName = "localhost",
+                    AlpnProtocols = ["http/1.1"],
+                    CaFile = certPath,
+                }),
+            };
+
+            string outcome = OnReactor.Run(async reactor =>
+            {
+                HttpClientPool pool = HttpClientPool.CreateOnDemand(reactor, options);   // no sweep: only the failed request discards
+                (await pool.GetAsync("/")).Dispose();
+                TlsClientStream first = TlsOf(IdleOf(pool)[0])!;
+                string pooled = State(first);
+
+                string discarded;
+                try
+                {
+                    (await pool.GetAsync("/")).Dispose();
+                    discarded = "never (served)";
+                }
+                catch (Exception)
+                {
+                    discarded = State(first);
+                }
+
+                (await pool.GetAsync("/")).Dispose();
+                TlsClientStream second = TlsOf(IdleOf(pool)[0])!;
+                pool.Dispose();
+                return $"pooled {pooled}, discarded {discarded}, pool disposed {State(second)}";
+            });
+
+            Assert.Equal("pooled open, discarded freed, pool disposed freed", outcome);
         });
 
         RegisterMutualTls(runner);
@@ -327,4 +374,15 @@ internal static class TlsClientTests
             connection.DecRef();
         }
     }
+
+    private static string State(TlsClientStream session) => DisposedOf(session) ? "freed" : "open";
+
+    [UnsafeAccessor(UnsafeAccessorKind.Field, Name = "_idle")]
+    private static extern ref List<HttpClientConnection> IdleOf(HttpClientPool pool);
+
+    [UnsafeAccessor(UnsafeAccessorKind.Field, Name = "_tls")]
+    private static extern ref TlsClientStream? TlsOf(HttpClientConnection connection);
+
+    [UnsafeAccessor(UnsafeAccessorKind.Field, Name = "_disposed")]
+    private static extern ref bool DisposedOf(TlsClientStream stream);
 }
