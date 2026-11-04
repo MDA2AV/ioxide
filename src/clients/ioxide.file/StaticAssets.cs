@@ -32,6 +32,7 @@ public sealed class StaticAssets : IDisposable
     /// (descriptors open) until the lease is disposed, even across a concurrent <see cref="Reload"/>.
     /// Dispose it when the response has been fully sent.
     /// </summary>
+    /// <exception cref="ObjectDisposedException">This was disposed and its snapshot freed.</exception>
     public Lease Acquire()
     {
         while (true)
@@ -41,7 +42,10 @@ public sealed class StaticAssets : IDisposable
             {
                 return new Lease(cache);
             }
-            // The snapshot we read was swapped out and is releasing; re-read the live one.
+
+            // Refused. A Reload swaps the live snapshot before releasing the old one, so a refusal from the
+            // one still live means Dispose freed it and nothing will replace it; otherwise re-read the live one.
+            ObjectDisposedException.ThrowIf(cache == Volatile.Read(ref _cache), this);
         }
     }
 

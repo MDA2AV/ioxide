@@ -7,6 +7,7 @@ internal static class Program
     {
         var runner = new Runner();
         FileTests.Register(runner);
+        LeaseTests.Register(runner);
         return runner.Summary();
     }
 }

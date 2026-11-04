@@ -62,8 +62,10 @@
       skipped too, and on Linux that is any name starting with a dot, so dot-files and a
       <code>.well-known/</code> directory are not served.</li>
       <li><b>Refcounting</b> - the snapshot is reference-counted (<code>TryAddRef</code> /
-      <code>Release</code>, starting at 1 for the live reference). It is actually freed - descriptors
-      closed - only when the last reference is dropped. This is what makes reloads safe (below).</li>
+      <code>Release</code>). The live reference counts as 2<sup>30</sup> and each lease as 1, so lease
+      releases alone, even a lease disposed twice, never take the live snapshot to zero. It is actually
+      freed - descriptors closed - only once a reload or <code>Dispose</code> has dropped the live
+      reference and the last lease is gone. This is what makes reloads safe (below).</li>
     </ul>
 <p class="src"><b>AssetCache.cs</b> · building the snapshot - one descriptor, path and length per file, no bytes read</p>
 <pre><code class="language-csharp">public readonly record struct Asset(int Fd, string Path, long Length);
@@ -103,13 +105,16 @@ foreach (string path in Directory.EnumerateFiles(RootDir, "*", walk))
     AttributesToSkip = FileAttributes.ReparsePoint | FileAttributes.Hidden | FileAttributes.System,
 };</code></pre>
 <p class="src"><b>AssetCache.cs</b> · a lock-free refcount - the snapshot frees only when the last hold drops</p>
-<pre><code class="language-csharp">internal bool TryAddRef()
+<pre><code class="language-csharp">private const int LiveRef = 1 &lt;&lt; 30;   // lease releases alone never reach 0
+private int _refs = LiveRef;           // plus one per lease
+
+internal bool TryAddRef()
 {
     int r;
     do
     {
         r = Volatile.Read(ref _refs);
-        if (r == 0) return false;        // already releasing - don't resurrect
+        if (r &lt;= 0) return false;        // freed - don't resurrect
     }
     while (Interlocked.CompareExchange(ref _refs, r + 1, r) != r);
     return true;
@@ -120,6 +125,14 @@ internal void Release()
     if (Interlocked.Decrement(ref _refs) == 0)
     {
         DisposeCore();                   // close every fd
+    }
+}
+
+public void Dispose()                    // drops the live reference: Reload, or StaticAssets.Dispose
+{
+    if (Interlocked.Add(ref _refs, -LiveRef) == 0)
+    {
+        DisposeCore();
     }
 }</code></pre>
 
@@ -132,7 +145,10 @@ internal void Release()
       <li><b>Acquire / Lease</b> - <code>Acquire()</code> returns a <code>Lease</code> (a refcounted
       hold) on the live snapshot; the handler holds it for the whole request - lookup → ring read →
       send - and disposes it when the response is fully sent. <code>TryAddRef</code> fails if the
-      snapshot is already releasing, so <code>Acquire</code> simply re-reads the live one.</li>
+      snapshot is already releasing, so <code>Acquire</code> simply re-reads the live one. A reload
+      swaps the live snapshot before it releases the old one, so a refusal from the snapshot that is
+      still live means <code>Dispose</code> freed it, and <code>Acquire</code> throws
+      <code>ObjectDisposedException</code> instead of retrying.</li>
     </ul>
 <p class="src"><b>StaticAssets.cs</b> · Acquire leases the live snapshot; Reload swaps a fresh one in atomically</p>
 <pre><code class="language-csharp">public Lease Acquire()
@@ -144,7 +160,8 @@ internal void Release()
         {
             return new Lease(cache);
         }
-        // the snapshot we read was swapped out and is releasing; re-read the live one
+        // refused: swapped out by a reload (re-read the live one), or freed by Dispose if still live
+        ObjectDisposedException.ThrowIf(cache == Volatile.Read(ref _cache), this);
     }
 }
 
