@@ -43,6 +43,9 @@ public sealed class Http2ResponseWriter : IBufferWriter<byte>
     // The names and values of _unsent: the caller's memories are its own again once WriteHeaders returns.
     private byte[] _unsentFields = [];
 
+    // What a flush waits on while its bytes are queued behind the write pump's flush in flight.
+    private readonly TurnWaiter _turn = new();
+
     internal Http2ResponseWriter(Http2Connection connection, int streamId)
     {
         _connection = connection;
@@ -211,13 +214,28 @@ public sealed class Http2ResponseWriter : IBufferWriter<byte>
         // Not in answer to the peer's own reset (RFC 9113 5.4.2), and not on a connection that is gone.
         if (_connection.IsResponseLive(_streamId))
         {
-            await _connection.ResetStreamedAsync(_streamId);
+            await _connection.ResetStreamedAsync(_streamId, _turn);
         }
     }
 
     private static readonly FlushResult PeerGone = new(isCanceled: false, isCompleted: true);
 
-    private async ValueTask<FlushResult> FlushCore(bool endStream)
+    // Not async on the reactor: a flush that sends and then only waits for the write pump's turn returns that
+    // wait as it is, on this writer's own waiter, so it allocates nothing. The rest goes the async way.
+    private ValueTask<FlushResult> FlushCore(bool endStream)
+    {
+        var onReactor = new ReactorSwitch(_connection.Reactor);
+        if (!_headersSent || !onReactor.IsCompleted)
+        {
+            return FlushCoreAsync(endStream);
+        }
+
+        onReactor.GetResult();   // throws once the reactor has stopped, as awaiting it does
+        SendUnsentHeaders();
+        return Send(endStream, sent: 0);
+    }
+
+    private async ValueTask<FlushResult> FlushCoreAsync(bool endStream)
     {
         if (!_headersSent)
         {
@@ -226,13 +244,23 @@ public sealed class Http2ResponseWriter : IBufferWriter<byte>
 
         await new ReactorSwitch(_connection.Reactor);
 
+        SendUnsentHeaders();
+        return await Send(endStream, sent: 0);
+    }
+
+    private void SendUnsentHeaders()
+    {
         if (_unsent is Http2Response unsent)
         {
             _unsent = null;
             SendHeaders(unsent);
         }
+    }
 
-        int sent = 0;
+    // Everything staged from `sent` on, as far as credit allows, then the flush. Out of credit, the rest goes on in
+    // SendAfterCreditAsync.
+    private ValueTask<FlushResult> Send(bool endStream, int sent)
+    {
         while (sent < _staged)
         {
             // Bounded by the frame size AND by both windows: exceeding either is a connection
@@ -241,29 +269,11 @@ public sealed class Http2ResponseWriter : IBufferWriter<byte>
             if (credit < 0)
             {
                 _staged = 0;   // reset by the peer, or the connection is gone: nobody to send it to
-                return PeerGone;
+                return new ValueTask<FlushResult>(PeerGone);
             }
             if (credit == 0)
             {
-                // Take the wait BEFORE flushing. The flush below is an await, and the WINDOW_UPDATE
-                // it exists to provoke can arrive while this writer is still inside it - at which
-                // point a release has no waiter to find, is dropped, and the writer then parks on a
-                // message that has already been and gone. Registering first means that credit
-                // completes this task instead, and the await below returns at once.
-                Task credited = _connection.WaitForSendCreditAsync(_streamId);
-
-                // Everything staged so far has to REACH the peer before waiting on it to open the
-                // window. WINDOW_UPDATE is what a peer sends once it has consumed DATA, so parking
-                // with those bytes still in the connection's buffer waits for a message that the
-                // wait itself prevents - and any body larger than the initial 65535-byte window
-                // deadlocks until the client times out. The flush is unconditional because inside a
-                // pass the pass flush would otherwise carry them, and this stream is about to stop
-                // making progress rather than return to it.
-                _sinceRealFlush = 0;
-                await _connection.FlushOutboundAsync();
-
-                await credited;
-                continue;
+                return SendAfterCreditAsync(endStream, sent);
             }
 
             int chunk = Math.Min(credit, _staged - sent);
@@ -279,7 +289,7 @@ public sealed class Http2ResponseWriter : IBufferWriter<byte>
         // Sending proved the stream live; with nothing sent it still has to be asked.
         if (sent == 0 && !_connection.IsResponseLive(_streamId))
         {
-            return PeerGone;
+            return new ValueTask<FlushResult>(PeerGone);
         }
 
         if (endStream && sent == 0)
@@ -297,8 +307,30 @@ public sealed class Http2ResponseWriter : IBufferWriter<byte>
         }
 
         _sinceRealFlush = 0;
-        await _connection.FlushOutboundAsync();
-        return default;
+        return _connection.FlushOutboundAsync(_turn);
+    }
+
+    private async ValueTask<FlushResult> SendAfterCreditAsync(bool endStream, int sent)
+    {
+        // Take the wait BEFORE flushing. The flush below is an await, and the WINDOW_UPDATE
+        // it exists to provoke can arrive while this writer is still inside it - at which
+        // point a release has no waiter to find, is dropped, and the writer then parks on a
+        // message that has already been and gone. Registering first means that credit
+        // completes this task instead, and the await below returns at once.
+        Task credited = _connection.WaitForSendCreditAsync(_streamId);
+
+        // Everything staged so far has to REACH the peer before waiting on it to open the
+        // window. WINDOW_UPDATE is what a peer sends once it has consumed DATA, so parking
+        // with those bytes still in the connection's buffer waits for a message that the
+        // wait itself prevents - and any body larger than the initial 65535-byte window
+        // deadlocks until the client times out. The flush is unconditional because inside a
+        // pass the pass flush would otherwise carry them, and this stream is about to stop
+        // making progress rather than return to it.
+        _sinceRealFlush = 0;
+        await _connection.FlushOutboundAsync(_turn);
+
+        await credited;
+        return await Send(endStream, sent);
     }
 
     private void EnsureStaging(int sizeHint)

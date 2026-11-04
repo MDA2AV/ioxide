@@ -1,5 +1,6 @@
 
 
+using System.IO.Pipelines;
 using ioxide.http2;
 
 namespace Ioxide.Tests;
@@ -128,7 +129,85 @@ internal static class Http2OutputQueueTests
 
             Assert.True(run.Wait(5_000), "connection wound down after the transport fault");
         });
+
+        runner.Test("h2 queue: a faulted flush wakes the writer whose bytes it carried", () =>
+        {
+            using var client = new StrictClient();
+
+            var gate = new TaskCompletionSource();
+            var woke = new TaskCompletionSource();
+            Task run = client.Connection.RunAsync(async (_, writer) =>
+            {
+                writer.WriteHeaders(new Http2Response { Status = 200 });
+                await gate.Task;                         // resumed outside the pass, its flush in flight
+                Push(writer, "lost");
+                try
+                {
+                    await writer.FlushAsync();           // queued behind it: its turn is the flush after
+                }
+                catch
+                {
+                    // The transport is gone; waking at all is what this test is about.
+                }
+                woke.SetResult();
+            });
+
+            client.ReleaseFlush();                       // server SETTINGS
+            client.SendRequests(1);                      // the pass flush is in flight
+            gate.SetResult();                            // the chunk queues, and the writer waits for its turn
+            client.ReleaseFlush();                       // the pump sends the chunk: the writer's turn
+            client.FaultFlush();                         // and that flush faults
+
+            Assert.True(woke.Task.Wait(5_000), "the writer whose chunk the faulted flush carried never woke");
+            Assert.True(run.Wait(5_000), "connection wound down after the transport fault");
+        });
+
+        runner.Test("h2 queue: a streamed flush that waits for the pump's turn allocates nothing", () =>
+        {
+            using var client = new StrictClient();
+
+            TaskCompletionSource[] gates = [new(), new(), new(), new()];
+            long[] allocated = new long[gates.Length];
+            Task run = client.Connection.RunAsync(async (_, writer) =>
+            {
+                writer.WriteHeaders(new Http2Response { Status = 200 });
+                for (int i = 0; i < gates.Length; i++)
+                {
+                    await gates[i].Task;                 // resumed outside the pass, its flush in flight
+                    Push(writer, "x");
+
+                    long before = GC.GetAllocatedBytesForCurrentThread();
+                    ValueTask<FlushResult> flush = writer.FlushAsync();   // queued behind it: waits for its turn
+                    allocated[i] = GC.GetAllocatedBytesForCurrentThread() - before;
+
+                    await flush;
+                }
+            });
+
+            client.ReleaseFlush();                       // server SETTINGS
+            client.SendRequests(1);                      // the pass flush is in flight
+            for (int i = 0; i < gates.Length; i++)
+            {
+                if (i > 0)
+                {
+                    client.Feed(Ping());                 // a pass whose flush, the PING ack, is in flight
+                }
+                gates[i].SetResult();
+                client.ReleaseFlush();                   // the flush in flight; the pump then sends the chunk
+                client.ReleaseFlush();                   // the chunk's flush: the writer's turn
+            }
+            client.Drain();                              // END_STREAM
+            client.Close(run);
+
+            // The first wait grows the connection's queue; every wait after it reuses everything.
+            for (int i = 1; i < allocated.Length; i++)
+            {
+                Assert.True(allocated[i] == 0, $"flush {i} allocated {allocated[i]} B while it waited for its turn");
+            }
+        });
     }
+
+    private static byte[] Ping() => [0, 0, 8, 0x6, 0, 0, 0, 0, 0, 1, 2, 3, 4, 5, 6, 7, 8];
 
     private static void Push(Http2ResponseWriter writer, string text)
     {

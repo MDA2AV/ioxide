@@ -42,7 +42,14 @@ public sealed partial class Http2Connection : IDisposable
     private byte[] _headerScratch = new byte[16 * 1024];
 
     private readonly Dictionary<int, PendingRequest> _streams = new();
-    private readonly List<PendingRequest> _ready = [];
+
+    // Requests ready for their handler, and the list a dispatch is walking: swapped each pass, so the
+    // parser never adds to the list being walked and no snapshot is copied.
+    private List<PendingRequest> _ready = [];
+    private List<PendingRequest> _dispatching = [];
+
+    // Retired requests, each keeping its Http2Request, header list and field ranges for the next stream.
+    private readonly Stack<PendingRequest> _pendingPool = new();
 
     // Readers whose parked ReadAsync has something to hand over. Collected during parsing and
     // fired once it has unwound, so a resumed handler cannot re-enter the parser mid-frame.
@@ -134,10 +141,7 @@ public sealed partial class Http2Connection : IDisposable
 
         // A writer parked on its turn of the write pump has to wake into IsBroken, not hang: the
         // flush that would have completed its turn is never coming.
-        foreach (TaskCompletionSource waiter in TakeTurn())
-        {
-            waiter.TrySetResult();
-        }
+        Wake(TakeTurn());
 
         // Last: a handler parked on its body resumes into its end once everything above is released.
         FireBodyWakes();
@@ -288,58 +292,61 @@ public sealed partial class Http2Connection : IDisposable
         _inboundUsed += data.Length;
     }
 
-    // Snapshot and clear first: the list must not be mutated while it is walked.
-    private PendingRequest[] TakeReady()
+    // Taken whole before the walk: the list must not be mutated while it is walked. The caller clears
+    // it once done.
+    private List<PendingRequest> TakeReady()
     {
-        if (_ready.Count == 0)
-        {
-            return [];
-        }
-
-        PendingRequest[] ready = _ready.ToArray();
-        _ready.Clear();
-        return ready;
+        (_ready, _dispatching) = (_dispatching, _ready);
+        return _dispatching;
     }
 
     private void DispatchBuffered(Func<Http2Request, ValueTask<Http2Response>> handler)
     {
-        foreach (PendingRequest pending in TakeReady())
+        List<PendingRequest> ready = TakeReady();
+        try
         {
-            ValueTask<Http2Response> inFlight;
+            foreach (PendingRequest pending in ready)
+            {
+                ValueTask<Http2Response> inFlight;
 
-            try
-            {
-                Http2Request request = pending.Freeze();
-                inFlight = handler(request);
-            }
-            catch (Exception exception)
-            {
-                // A synchronous handler throws before there is a task. It gets what a faulted task
-                // gets, a 500 on its own stream, rather than taking the connection down.
-                inFlight = ValueTask.FromException<Http2Response>(exception);
-            }
-
-            // Answered synchronously, which nearly every handler does. Stay inline: this response
-            // is staged in time for the pass flush, so it still leaves with every other one, and
-            // there is no Task to allocate.
-            if (inFlight.IsCompletedSuccessfully)
-            {
                 try
                 {
-                    WriteResponse(pending.StreamId, inFlight.Result);
+                    Http2Request request = pending.Freeze();
+                    inFlight = handler(request);
                 }
-                finally
+                catch (Exception exception)
                 {
-                    RetireStream(pending);
+                    // A synchronous handler throws before there is a task. It gets what a faulted task
+                    // gets, a 500 on its own stream, rather than taking the connection down.
+                    inFlight = ValueTask.FromException<Http2Response>(exception);
                 }
-                continue;
-            }
 
-            // It parked - a database, an upstream, a disk. Awaiting here would hold every OTHER
-            // stream on this connection behind it, including responses already staged and ready to
-            // go, because they all share this one dispatch loop and one TCP connection. So it
-            // finishes on its own and writes its own bytes when it does.
-            _ = CompleteBufferedAsync(inFlight, pending);
+                // Answered synchronously, which nearly every handler does. Stay inline: this response
+                // is staged in time for the pass flush, so it still leaves with every other one, and
+                // there is no Task to allocate.
+                if (inFlight.IsCompletedSuccessfully)
+                {
+                    try
+                    {
+                        WriteResponse(pending.StreamId, inFlight.Result);
+                    }
+                    finally
+                    {
+                        RetireStream(pending);
+                    }
+                    continue;
+                }
+
+                // It parked - a database, an upstream, a disk. Awaiting here would hold every OTHER
+                // stream on this connection behind it, including responses already staged and ready to
+                // go, because they all share this one dispatch loop and one TCP connection. So it
+                // finishes on its own and writes its own bytes when it does.
+                _ = CompleteBufferedAsync(inFlight, pending);
+            }
+        }
+        finally
+        {
+            ready.Clear();
         }
     }
 
@@ -379,12 +386,25 @@ public sealed partial class Http2Connection : IDisposable
     /// <summary>
     /// Done with a stream. The buffered path already took it out of <c>_streams</c> when it became
     /// ready; a streamed request is still in there, because DATA frames were arriving the whole
-    /// time the handler ran.
+    /// time the handler ran. Once per dispatched request: it goes back for the next stream.
     /// </summary>
     private void RetireStream(PendingRequest pending)
     {
         _streams.Remove(pending.StreamId);
         pending.Dispose();
+        _pendingPool.Push(pending);
+    }
+
+    // Opens at what the peer's SETTINGS advertised, not at the RFC default. Streams are created
+    // long after those SETTINGS arrive, so starting at 65535 and waiting for a WINDOW_UPDATE means
+    // waiting for one the peer has no reason to send - it believes we still have its whole window.
+    // That stalls any response longer than 65535 bytes.
+    private PendingRequest RentPending(int streamId)
+    {
+        PendingRequest pending = _pendingPool.TryPop(out PendingRequest? pooled) ? pooled : new PendingRequest();
+        pending.StreamId = streamId;
+        pending.SendWindow = _peerInitialStreamWindow;
+        return pending;
     }
 
     /// <summary>Return a consumed chunk's credit to the peer, on both windows it was charged to.</summary>

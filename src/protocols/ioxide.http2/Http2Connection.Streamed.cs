@@ -1,4 +1,5 @@
 using System.Buffers;
+using System.IO.Pipelines;
 
 namespace ioxide.http2;
 
@@ -54,19 +55,27 @@ public sealed partial class Http2Connection
     /// </summary>
     private void DispatchStreamed(Func<Http2Request, Http2ResponseWriter, ValueTask> handler)
     {
-        foreach (PendingRequest pending in TakeReady())
+        List<PendingRequest> ready = TakeReady();
+        try
         {
-            try
+            foreach (PendingRequest pending in ready)
             {
-                Http2Request request = pending.Freeze();
-                Http2ResponseWriter writer = RentWriter(request.StreamId);
-                _ = ServeStreamedAsync(handler, request, writer, pending);   // the writer owns this stream, and retires it when done
+                try
+                {
+                    Http2Request request = pending.Freeze();
+                    Http2ResponseWriter writer = RentWriter(request.StreamId);
+                    _ = ServeStreamedAsync(handler, request, writer, pending);   // the writer owns this stream, and retires it when done
+                }
+                catch
+                {
+                    pending.Dispose();
+                    throw;
+                }
             }
-            catch
-            {
-                pending.Dispose();
-                throw;
-            }
+        }
+        finally
+        {
+            ready.Clear();
         }
     }
 
@@ -99,8 +108,7 @@ public sealed partial class Http2Connection
             // the connection grows without bound - 20 GB over eight seconds of load, measured.
             _creditWaiters.Remove(writer.StreamId);
             _responseWindows.Remove(writer.StreamId);
-            _streams.Remove(writer.StreamId);
-            pending.Dispose();
+            RetireStream(pending);
             _writerPool.Push(writer);
         }
     }
@@ -179,17 +187,17 @@ public sealed partial class Http2Connection
     /// pump that carries them (Http2Connection.Write.cs) - so completions sharing a reactor turn
     /// still share a write.
     /// </summary>
-    internal ValueTask MaybeFlushAsync()
-        => _passFlushPending ? ValueTask.CompletedTask : FlushAsync();
+    internal ValueTask<FlushResult> MaybeFlushAsync()
+        => _passFlushPending ? default : FlushAsync();
 
-    /// <summary>A streamed writer's flush: out to the transport, or the write queue's next turn.</summary>
-    internal ValueTask FlushOutboundAsync() => FlushAsync();
+    /// <summary>A streamed writer's flush: out to the transport, or the write queue's next turn, waited for on the writer's own waiter.</summary>
+    internal ValueTask<FlushResult> FlushOutboundAsync(TurnWaiter turn) => FlushAsync(turn);
 
     /// <summary>A streamed response its handler could not finish: RST_STREAM, then out it goes.</summary>
-    internal ValueTask ResetStreamedAsync(int streamId)
+    internal ValueTask<FlushResult> ResetStreamedAsync(int streamId, TurnWaiter turn)
     {
         ResetStream(streamId, Http2Error.InternalError);
-        return InDispatchPass ? default : FlushOutboundAsync();
+        return InDispatchPass ? default : FlushOutboundAsync(turn);
     }
 
     /// <summary>
