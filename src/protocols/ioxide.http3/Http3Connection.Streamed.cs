@@ -102,6 +102,7 @@ public sealed partial class Http3Connection
         {
             _writers.Remove(writer.StreamId);
             _writerPool.Push(writer);
+            Recycle(rs, response: null);   // what it wrote was copied out as it went
         }
     }
 
