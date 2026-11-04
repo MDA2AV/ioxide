@@ -34,8 +34,10 @@ public unsafe partial class QuicEngineConnection
     private readonly Dictionary<long, OutStream> _outStreams = new();
 
     // Streams whose send side is done, kept for the next stream that sends: the object and its queue
-    // otherwise cost every HTTP/3 response about 185 B of garbage (#487).
+    // otherwise cost every HTTP/3 response about 185 B of garbage (#487). Capped, so a burst of streams
+    // leaves no more than this on an idle connection.
     private readonly Stack<OutStream> _outStreamPool = new();
+    private const int MaxPooledStreams = 32;
 
     // A pooled queue keeps at most this many slots, so a stream that queued many small chunks does not
     // leave a large array on the connection for the rest of its life.
@@ -371,10 +373,14 @@ public unsafe partial class QuicEngineConnection
 
         // Everything reaches an OutStream through _outStreams by its id, so the old id finds nothing from here
         // on; PumpOut, still holding it after a purge, sees a stream with nothing left to send.
+        if (_outStreamPool.Count >= MaxPooledStreams)
+        {
+            return;
+        }
         os.Reset();
         if (os.Chunks.Capacity > MaxPooledChunks)
         {
-            os.Chunks.TrimExcess();
+            os.Chunks.TrimExcess(MaxPooledChunks);
         }
         _outStreamPool.Push(os);
     }

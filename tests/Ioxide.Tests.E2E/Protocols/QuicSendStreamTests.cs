@@ -17,10 +17,12 @@ internal static class QuicSendStreamTests
             (string certPath, string keyPath) = TestCert.Ensure();
             var engine = TestServer.Own(new QuicEngine(certPath, keyPath, cidLength: 8, alpn: ["h3"]));
 
-            const int warm = 16;
-            const int measured = 32;
+            // Few requests: the test client spends about 1.5 s on each.
+            const int warm = 4;
+            const int measured = 12;
             Nghttp3Response response = Nghttp3Response.Text("ok");   // shared, so the handler allocates nothing
             long[] marks = new long[2];
+            int[] threads = new int[2];
             int served = 0;
 
             (_, int udpPort) = TestServer.StartDatagram(
@@ -30,13 +32,11 @@ internal static class QuicSendStreamTests
                 {
                     // On the reactor's thread: what it allocated between these two requests.
                     int n = ++served;
-                    if (n == warm)
+                    int mark = n == warm ? 0 : n == warm + measured ? 1 : -1;
+                    if (mark >= 0)
                     {
-                        marks[0] = GC.GetAllocatedBytesForCurrentThread();
-                    }
-                    else if (n == warm + measured)
-                    {
-                        marks[1] = GC.GetAllocatedBytesForCurrentThread();
+                        marks[mark] = GC.GetAllocatedBytesForCurrentThread();
+                        threads[mark] = Environment.CurrentManagedThreadId;
                     }
                     return response;
                 }));
@@ -52,6 +52,8 @@ internal static class QuicSendStreamTests
                 Assert.Equal(200, status);
                 Assert.Equal("ok", body);
             }
+
+            Assert.True(threads[0] == threads[1] && marks[1] >= marks[0], "both marks come from the reactor's thread");
 
             long perResponse = (marks[1] - marks[0]) / measured;
             Assert.True(perResponse < 64, $"a response on a warm connection allocated {perResponse} B on the reactor");
