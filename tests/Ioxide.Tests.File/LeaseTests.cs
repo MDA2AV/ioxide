@@ -4,7 +4,7 @@ namespace Ioxide.Tests;
 
 /// <summary>
 /// <see cref="StaticAssets"/> leases: a snapshot stays open while leased and closes once it is retired and
-/// released, and a lease disposed twice cannot close the live one.
+/// released, a lease disposed twice cannot close the live one, and Acquire after Dispose throws.
 /// </summary>
 internal static class LeaseTests
 {
@@ -36,23 +36,29 @@ internal static class LeaseTests
             copy.Dispose();
             lease.Dispose();
 
-            bool found = false;
-            var acquirer = new Thread(() =>
-            {
-                using StaticAssets.Lease next = assets.Acquire();
-                found = next.TryGet("/a.txt", out _);
-            }) { IsBackground = true };
-            acquirer.Start();
-
-            bool returned = acquirer.Join(TimeSpan.FromSeconds(2));
-            if (!returned)
-            {
-                assets.Reload();   // the one thing that ends the spin, so the thread doesn't keep a core for the rest of the run
-                acquirer.Join(TimeSpan.FromSeconds(2));
-            }
-
+            (bool returned, Exception? thrown, bool found) = AcquireOnThread(assets);
             Assert.True(returned, "Acquire was still spinning 2 s later");
+            Assert.True(thrown is null, $"Acquire threw {thrown?.GetType().Name}");
             Assert.True(found, "the lease Acquire returned should find /a.txt");
+        });
+
+        // Dispose frees the live snapshot and nothing replaces it, so a retry that waits for a Reload's swap
+        // would re-read the freed snapshot forever. A second Dispose takes its count below zero.
+        runner.Test("file: Acquire after Dispose throws ObjectDisposedException, also after a second Dispose", () =>
+        {
+            var assets = new StaticAssets(LeaseAssets());
+
+            assets.Dispose();
+            (bool returned, Exception? thrown, _) = AcquireOnThread(assets);
+            Assert.True(returned, "Acquire after Dispose was still spinning 2 s later");
+            Assert.True(thrown is ObjectDisposedException,
+                $"Acquire after Dispose: expected ObjectDisposedException, got {thrown?.GetType().Name ?? "a lease"}");
+
+            assets.Dispose();
+            (returned, thrown, _) = AcquireOnThread(assets);
+            Assert.True(returned, "Acquire after a second Dispose was still spinning 2 s later");
+            Assert.True(thrown is ObjectDisposedException,
+                $"Acquire after a second Dispose: expected ObjectDisposedException, got {thrown?.GetType().Name ?? "a lease"}");
         });
 
         // What the live reference must not change: a reload keeps the old snapshot open for the lease still
@@ -81,6 +87,36 @@ internal static class LeaseTests
                 $"a reload with no lease out kept the old snapshot's fd {unleased.Fd} open");
             assets.Dispose();
         });
+    }
+
+    // Acquire on its own thread, so a spin fails the test instead of hanging the run: whether it returned or
+    // threw within 2 s, what it threw, and whether the lease it returned finds /a.txt.
+    private static (bool Returned, Exception? Thrown, bool Found) AcquireOnThread(StaticAssets assets)
+    {
+        Exception? thrown = null;
+        bool found = false;
+        var acquirer = new Thread(() =>
+        {
+            try
+            {
+                using StaticAssets.Lease lease = assets.Acquire();
+                found = lease.TryGet("/a.txt", out _);
+            }
+            catch (Exception e)
+            {
+                thrown = e;
+            }
+        }) { IsBackground = true };
+        acquirer.Start();
+
+        bool returned = acquirer.Join(TimeSpan.FromSeconds(2));
+        if (!returned)
+        {
+            assets.Reload();   // the one thing that ends the spin, so the thread doesn't keep a core for the rest of the run
+            acquirer.Join(TimeSpan.FromSeconds(2));
+        }
+
+        return (returned, thrown, found);
     }
 
     private static string LeaseAssets()

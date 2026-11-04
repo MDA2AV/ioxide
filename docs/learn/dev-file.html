@@ -114,7 +114,7 @@ internal bool TryAddRef()
     do
     {
         r = Volatile.Read(ref _refs);
-        if (r == 0) return false;        // already releasing - don't resurrect
+        if (r &lt;= 0) return false;        // freed - don't resurrect
     }
     while (Interlocked.CompareExchange(ref _refs, r + 1, r) != r);
     return true;
@@ -145,7 +145,10 @@ public void Dispose()                    // drops the live reference: Reload, or
       <li><b>Acquire / Lease</b> - <code>Acquire()</code> returns a <code>Lease</code> (a refcounted
       hold) on the live snapshot; the handler holds it for the whole request - lookup → ring read →
       send - and disposes it when the response is fully sent. <code>TryAddRef</code> fails if the
-      snapshot is already releasing, so <code>Acquire</code> simply re-reads the live one.</li>
+      snapshot is already releasing, so <code>Acquire</code> simply re-reads the live one. A reload
+      swaps the live snapshot before it releases the old one, so a refusal from the snapshot that is
+      still live means <code>Dispose</code> freed it, and <code>Acquire</code> throws
+      <code>ObjectDisposedException</code> instead of retrying.</li>
     </ul>
 <p class="src"><b>StaticAssets.cs</b> · Acquire leases the live snapshot; Reload swaps a fresh one in atomically</p>
 <pre><code class="language-csharp">public Lease Acquire()
@@ -157,7 +160,8 @@ public void Dispose()                    // drops the live reference: Reload, or
         {
             return new Lease(cache);
         }
-        // the snapshot we read was swapped out and is releasing; re-read the live one
+        // refused: swapped out by a reload (re-read the live one), or freed by Dispose if still live
+        ObjectDisposedException.ThrowIf(cache == Volatile.Read(ref _cache), this);
     }
 }
 

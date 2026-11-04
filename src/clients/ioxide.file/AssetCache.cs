@@ -101,9 +101,9 @@ public sealed class AssetCache : IDisposable
         do
         {
             r = Volatile.Read(ref _refs);
-            if (r == 0)
+            if (r <= 0)
             {
-                return false;   // already releasing - don't resurrect
+                return false;   // freed, or below zero after a second Dispose - don't resurrect
             }
         }
         while (Interlocked.CompareExchange(ref _refs, r + 1, r) != r);
