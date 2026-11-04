@@ -87,6 +87,89 @@ internal static class LeaseTests
                 $"a reload with no lease out kept the old snapshot's fd {unleased.Fd} open");
             assets.Dispose();
         });
+
+        // A reload signalled during shutdown (SIGHUP, say) runs after Dispose, with a request's lease still out. It
+        // must not bring the assets back, and the snapshot that lease holds must still close when it is released.
+        runner.Test("file: after Dispose, Reload does nothing and Acquire throws, and a lease still out keeps its snapshot", () =>
+        {
+            var assets = new StaticAssets(LeaseAssets());
+            StaticAssets.Lease held = assets.Acquire();
+            Assert.True(held.TryGet("/a.txt", out AssetCache.Asset asset), "the snapshot should hold /a.txt");
+
+            assets.Dispose();
+            assets.Reload();
+            Assert.Throws<ObjectDisposedException>(() => assets.Acquire().Dispose(), nameof(StaticAssets));   // after Dispose and a Reload
+            Assert.Equal(asset.Path, ExecInheritance.Target(asset.Fd));   // the lease still reads its file
+
+            held.Dispose();
+            Assert.True(ExecInheritance.Target(asset.Fd) != asset.Path,
+                $"the snapshot kept fd {asset.Fd} open after its last lease was released");
+        });
+
+        // Each Dispose used to subtract the live reference again: a 32-bit count wrapped on the fourth back to a
+        // live-looking value, and Acquire handed out leases on the freed snapshot.
+        runner.Test("file: Dispose can be called any number of times", () =>
+        {
+            string root = LeaseAssets();
+            for (int times = 1; times <= 6; times++)
+            {
+                var assets = new StaticAssets(root);
+                for (int i = 0; i < times; i++)
+                {
+                    assets.Dispose();
+                }
+                Assert.Throws<ObjectDisposedException>(() => assets.Acquire().Dispose(), nameof(StaticAssets));
+            }
+        });
+
+        // Acquire's retry is for exactly this: a snapshot that a concurrent Reload swapped out refuses the lease,
+        // and the next read finds the new one. None of that may surface as an exception or a failed lookup.
+        runner.Test("file: Acquire racing Reload always gets a lease on a whole snapshot", () =>
+        {
+            var assets = new StaticAssets(LeaseAssets());
+            int failures = 0;
+            long leases = 0;
+            bool stop = false;
+
+            var acquirers = new Thread[3];
+            for (int t = 0; t < acquirers.Length; t++)
+            {
+                acquirers[t] = new Thread(() =>
+                {
+                    while (!Volatile.Read(ref stop))
+                    {
+                        try
+                        {
+                            using StaticAssets.Lease lease = assets.Acquire();
+                            if (!lease.TryGet("/a.txt", out _))
+                            {
+                                Interlocked.Increment(ref failures);
+                            }
+                            Interlocked.Increment(ref leases);
+                        }
+                        catch
+                        {
+                            Interlocked.Increment(ref failures);
+                        }
+                    }
+                }) { IsBackground = true };
+                acquirers[t].Start();
+            }
+
+            for (int i = 0; i < 5_000; i++)
+            {
+                assets.Reload();
+            }
+            Volatile.Write(ref stop, true);
+            foreach (Thread acquirer in acquirers)
+            {
+                Assert.True(acquirer.Join(TimeSpan.FromSeconds(5)), "an Acquire racing Reload never returned");
+            }
+            assets.Dispose();
+
+            Assert.True(leases > 0, "no lease was taken while reloading");
+            Assert.Equal(0, failures);
+        });
     }
 
     // Acquire on its own thread, so a spin fails the test instead of hanging the run: whether it returned or
