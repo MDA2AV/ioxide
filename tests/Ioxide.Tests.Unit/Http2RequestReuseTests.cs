@@ -28,13 +28,13 @@ internal static class Http2RequestReuseTests
             client.ReleaseFlush();                       // their ack
             client.Feed(Request(1, post: true, "/first", "a.example", [("x-one", "1"), ("x-two", "2")], body: "hello"));
             client.ReleaseFlush();
-            client.Feed(Request(3, post: false, "/", authority: null, [], body: null));
+            client.Feed(Request(3, post: false, "/", authority: null, [], body: null, https: true));
             client.ReleaseFlush();
             client.Close(run);
 
             Assert.Equal(2, seen.Count);
-            Assert.Equal("1 POST /first a.example [x-one=1 x-two=2] hello", seen[0].Fields);
-            Assert.Equal("3 GET / - [] -", seen[1].Fields);
+            Assert.Equal("1 POST http /first a.example [x-one=1 x-two=2] hello", seen[0].Fields);
+            Assert.Equal("3 GET https / - [] -", seen[1].Fields);
             Assert.True(ReferenceEquals(seen[0].Request, seen[1].Request), "the second stream reuses the first one's request");
         });
 
@@ -43,20 +43,30 @@ internal static class Http2RequestReuseTests
             using var client = new StrictClient();
 
             Http2Response response = Http2Response.Text("ok");   // shared, so the handler allocates nothing
-            Task run = client.Connection.RunAsync(_ => response);
+            int served = 0;
+            Task run = client.Connection.RunAsync(_ =>
+            {
+                served++;
+                return response;
+            });
 
             client.ReleaseFlush();                       // server SETTINGS
             client.SendRequests();                       // preface and SETTINGS
             client.ReleaseFlush();                       // their ack
 
+            // Two warm-up passes: the ready lists swap each pass, so each grows in a pass of its own.
             const int perPass = 16;
-            client.Feed(Batch(1, perPass));              // warm-up: the requests the next batch reuses
+            client.Feed(Batch(1, perPass));
+            client.ReleaseFlush();
+            client.Feed(Batch(1 + (2 * perPass), perPass));
             client.ReleaseFlush();
 
-            byte[] batch = Batch(1 + (2 * perPass), perPass);
+            byte[] batch = Batch(1 + (4 * perPass), perPass);
+            int servedBefore = served;
             long before = GC.GetAllocatedBytesForCurrentThread();
             client.Feed(batch);                          // parsed, dispatched and answered inline
             long perRequest = (GC.GetAllocatedBytesForCurrentThread() - before) / perPass;
+            Assert.Equal(perPass, served - servedBefore);   // all of them inside the window
 
             client.ReleaseFlush();
             client.Close(run);
@@ -75,7 +85,7 @@ internal static class Http2RequestReuseTests
             fields.Add($"{Ascii(field.Key)}={Ascii(field.Value)}");
         }
 
-        return $"{request.StreamId} {Ascii(request.Method)} {Ascii(request.Path)} {Or(request.Authority)} "
+        return $"{request.StreamId} {Ascii(request.Method)} {Ascii(request.Scheme)} {Ascii(request.Path)} {Or(request.Authority)} "
              + $"[{string.Join(' ', fields)}] {Or(request.Body)}";
 
         static string Or(ReadOnlyMemory<byte> bytes) => bytes.IsEmpty ? "-" : Ascii(bytes);
@@ -97,9 +107,9 @@ internal static class Http2RequestReuseTests
     // HEADERS, with END_STREAM unless a DATA frame carrying the body follows. HPACK from the static table and
     // literals without indexing only, so the request needs no encoder of its own.
     private static byte[] Request(int streamId, bool post, string path, string? authority,
-        (string Name, string Value)[] fields, string? body)
+        (string Name, string Value)[] fields, string? body, bool https = false)
     {
-        var block = new List<byte> { post ? (byte)0x83 : (byte)0x82, 0x86 };   // :method, :scheme http
+        var block = new List<byte> { post ? (byte)0x83 : (byte)0x82, https ? (byte)0x87 : (byte)0x86 };   // :method, :scheme
         if (path == "/")
         {
             block.Add(0x84);                                                    // :path /

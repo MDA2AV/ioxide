@@ -35,6 +35,9 @@ public sealed partial class Http2Connection
     private TurnWaiter? _turnHead;
     private TurnWaiter? _turnTail;
 
+    // What a waiter woken by a turn that will never carry its bytes is told: as a TCP pipe writer reports a closed peer.
+    private static readonly FlushResult PeerGone = new(isCanceled: false, isCompleted: true);
+
     private void Stage(ReadOnlySpan<byte> bytes)
     {
         if (_disposed || _writeDead)
@@ -94,7 +97,7 @@ public sealed partial class Http2Connection
 
                 // May resume writers inline; _flushing is still true, so anything they stage
                 // lands in the queue and is picked up by the check just below.
-                Wake(turn);
+                Wake(turn, default);
                 turn = null;
 
                 if (_queuedUsed == 0 || _disposed)
@@ -134,8 +137,9 @@ public sealed partial class Http2Connection
     private void EndTurn(TurnWaiter? faulted)
     {
         _flushing = false;
-        Wake(faulted);
-        Wake(TakeTurn());
+        FlushResult result = _writeDead || _disposed ? PeerGone : default;
+        Wake(faulted, result);
+        Wake(TakeTurn(), result);
     }
 
     private async Task EndTurnOnReactorAsync(TurnWaiter? faulted)
@@ -180,14 +184,14 @@ public sealed partial class Http2Connection
     }
 
     // Each link is read before its waiter wakes: one resumed inline may park again, relinking itself.
-    private static void Wake(TurnWaiter? turn)
+    private static void Wake(TurnWaiter? turn, FlushResult result)
     {
         while (turn is not null)
         {
             TurnWaiter? next = turn.Next;
             turn.Next = null;
             turn.Enlisted = false;
-            turn.Release();
+            turn.Release(result);
             turn = next;
         }
     }
@@ -254,7 +258,7 @@ public sealed partial class Http2Connection
     {
         if (_streams.Remove(streamId, out PendingRequest? pending))
         {
-            pending.Abort();
+            Discard(pending);
         }
 
         Span<byte> frame = stackalloc byte[FrameHeader.Size + 4];

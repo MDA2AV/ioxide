@@ -48,8 +48,10 @@ public sealed partial class Http2Connection : IDisposable
     private List<PendingRequest> _ready = [];
     private List<PendingRequest> _dispatching = [];
 
-    // Retired requests, each keeping its Http2Request, header list and field ranges for the next stream.
+    // Retired requests, each keeping its Http2Request, header list and field ranges for the next stream. Capped,
+    // so a burst of streams leaves no more than this on an idle connection.
     private readonly Stack<PendingRequest> _pendingPool = new();
+    private const int MaxPooledRequests = 32;
 
     // Readers whose parked ReadAsync has something to hand over. Collected during parsing and
     // fired once it has unwound, so a resumed handler cannot re-enter the parser mid-frame.
@@ -141,7 +143,7 @@ public sealed partial class Http2Connection : IDisposable
 
         // A writer parked on its turn of the write pump has to wake into IsBroken, not hang: the
         // flush that would have completed its turn is never coming.
-        Wake(TakeTurn());
+        Wake(TakeTurn(), PeerGone);
 
         // Last: a handler parked on its body resumes into its end once everything above is released.
         FireBodyWakes();
@@ -391,8 +393,33 @@ public sealed partial class Http2Connection : IDisposable
     private void RetireStream(PendingRequest pending)
     {
         _streams.Remove(pending.StreamId);
+        Recycle(pending);
+    }
+
+    // Disposed, and kept for the next stream when the pool has room and the request grew nothing large: a peer
+    // sending thousands of header fields must not leave lists that size on the connection. Only on the reactor,
+    // which is the one thread that rents.
+    private void Recycle(PendingRequest pending)
+    {
         pending.Dispose();
-        _pendingPool.Push(pending);
+        if (_pendingPool.Count < MaxPooledRequests && pending.IsSmall && !OffReactor)
+        {
+            _pendingPool.Push(pending);
+        }
+    }
+
+    // A stream that ended before its request did: one without a body reader was never dispatched, so nothing else
+    // holds it. One with a reader has a handler running on it, which retires it when done.
+    private void Discard(PendingRequest pending)
+    {
+        if (pending.BodyReader is null)
+        {
+            Recycle(pending);
+        }
+        else
+        {
+            pending.Abort();
+        }
     }
 
     // Opens at what the peer's SETTINGS advertised, not at the RFC default. Streams are created

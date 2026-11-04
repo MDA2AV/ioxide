@@ -168,6 +168,7 @@ internal static class Http2OutputQueueTests
 
             TaskCompletionSource[] gates = [new(), new(), new(), new()];
             long[] allocated = new long[gates.Length];
+            bool[] waited = new bool[gates.Length];
             Task run = client.Connection.RunAsync(async (_, writer) =>
             {
                 writer.WriteHeaders(new Http2Response { Status = 200 });
@@ -179,6 +180,7 @@ internal static class Http2OutputQueueTests
                     long before = GC.GetAllocatedBytesForCurrentThread();
                     ValueTask<FlushResult> flush = writer.FlushAsync();   // queued behind it: waits for its turn
                     allocated[i] = GC.GetAllocatedBytesForCurrentThread() - before;
+                    waited[i] = !flush.IsCompleted;
 
                     await flush;
                 }
@@ -202,8 +204,54 @@ internal static class Http2OutputQueueTests
             // The first wait grows the connection's queue; every wait after it reuses everything.
             for (int i = 1; i < allocated.Length; i++)
             {
+                Assert.True(waited[i], $"flush {i} did not wait for its turn, so it measured nothing");
                 Assert.True(allocated[i] == 0, $"flush {i} allocated {allocated[i]} B while it waited for its turn");
             }
+        });
+
+        // A stream window at zero while the peer opens the connection a byte at a time: the writer wakes on each
+        // WINDOW_UPDATE, still has no credit, and waits again, all inside one flush. Those waits have to be one loop,
+        // not one more async frame each, kept until the flush ends and unwound off this thread when it does.
+        runner.Test("h2 queue: a flush that waits for credit again and again keeps one frame, and resumes inline", () =>
+        {
+            using var client = new StrictClient();
+
+            int thread = Environment.CurrentManagedThreadId;
+            var resumed = new TaskCompletionSource<int>();
+            Task run = client.Connection.RunAsync(async (_, writer) =>
+            {
+                writer.WriteHeaders(new Http2Response { Status = 200 });
+                Push(writer, "x");
+                await writer.FlushAsync();
+                resumed.SetResult(Environment.CurrentManagedThreadId);
+            });
+
+            client.ReleaseFlush();                       // server SETTINGS
+            client.Feed([.. Http2FlowControlTests.Open((Http2FlowControlTests.InitialWindowSize, 0)), .. Http2FlowControlTests.Get(1)]);
+            client.Drain();
+
+            byte[] connectionByte = Http2FlowControlTests.WindowUpdate(0, 1);
+            for (int i = 0; i < 1_000; i++)
+            {
+                client.Feed(connectionByte);
+                client.Drain();
+            }
+
+            long before = GC.GetTotalMemory(forceFullCollection: true);
+            for (int i = 0; i < 20_000; i++)
+            {
+                client.Feed(connectionByte);
+                client.Drain();
+            }
+            long retained = GC.GetTotalMemory(forceFullCollection: true) - before;
+
+            client.Feed(Http2FlowControlTests.WindowUpdate(1, 1));   // the stream's credit: the chunk goes, the flush ends
+            client.Drain();
+
+            Assert.True(resumed.Task.Wait(5_000), "the flush never completed");
+            Assert.True(retained < 256 * 1024, $"20,000 waits for credit inside one flush retained {retained} B");
+            Assert.Equal(thread, resumed.Task.Result);
+            client.Close(run);
         });
     }
 

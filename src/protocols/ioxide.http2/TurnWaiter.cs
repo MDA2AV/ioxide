@@ -29,7 +29,7 @@ internal sealed class TurnWaiter : IValueTaskSource<FlushResult>
         return new ValueTask<FlushResult>(this, _core.Version);
     }
 
-    internal void Release() => _core.SetResult(default);
+    internal void Release(FlushResult result) => _core.SetResult(result);
 
     FlushResult IValueTaskSource<FlushResult>.GetResult(short token) => _core.GetResult(token);
 

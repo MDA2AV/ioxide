@@ -230,9 +230,16 @@ public sealed class Http2ResponseWriter : IBufferWriter<byte>
             return FlushCoreAsync(endStream);
         }
 
-        onReactor.GetResult();   // throws once the reactor has stopped, as awaiting it does
-        SendUnsentHeaders();
-        return Send(endStream, sent: 0);
+        try
+        {
+            onReactor.GetResult();   // throws once the reactor has stopped, as awaiting it does
+            SendUnsentHeaders();
+            return Send(endStream);
+        }
+        catch (Exception exception)
+        {
+            return ValueTask.FromException<FlushResult>(exception);   // through the task, as an async method would
+        }
     }
 
     private async ValueTask<FlushResult> FlushCoreAsync(bool endStream)
@@ -245,7 +252,7 @@ public sealed class Http2ResponseWriter : IBufferWriter<byte>
         await new ReactorSwitch(_connection.Reactor);
 
         SendUnsentHeaders();
-        return await Send(endStream, sent: 0);
+        return await Send(endStream);
     }
 
     private void SendUnsentHeaders()
@@ -257,9 +264,21 @@ public sealed class Http2ResponseWriter : IBufferWriter<byte>
         }
     }
 
-    // Everything staged from `sent` on, as far as credit allows, then the flush. Out of credit, the rest goes on in
-    // SendAfterCreditAsync.
-    private ValueTask<FlushResult> Send(bool endStream, int sent)
+    private enum Progress : byte { Sent, Stalled, Gone }
+
+    private ValueTask<FlushResult> Send(bool endStream)
+    {
+        int sent = 0;
+        return SendStaged(endStream, ref sent) switch
+        {
+            Progress.Sent => Finish(endStream, sent),
+            Progress.Stalled => SendAfterCreditAsync(endStream, sent),
+            _ => new ValueTask<FlushResult>(PeerGone),
+        };
+    }
+
+    // Everything staged from `sent` on, as far as credit allows.
+    private Progress SendStaged(bool endStream, ref int sent)
     {
         while (sent < _staged)
         {
@@ -269,11 +288,11 @@ public sealed class Http2ResponseWriter : IBufferWriter<byte>
             if (credit < 0)
             {
                 _staged = 0;   // reset by the peer, or the connection is gone: nobody to send it to
-                return new ValueTask<FlushResult>(PeerGone);
+                return Progress.Gone;
             }
             if (credit == 0)
             {
-                return SendAfterCreditAsync(endStream, sent);
+                return Progress.Stalled;
             }
 
             int chunk = Math.Min(credit, _staged - sent);
@@ -282,7 +301,12 @@ public sealed class Http2ResponseWriter : IBufferWriter<byte>
             _connection.SendStreamedData(_streamId, _staging.AsSpan(sent, chunk), last);
             sent += chunk;
         }
+        return Progress.Sent;
+    }
 
+    // The staged bytes are out: the stream's end if it is owed one, then the flush.
+    private ValueTask<FlushResult> Finish(bool endStream, int sent)
+    {
         _staged = 0;
         _sinceRealFlush += sent;
 
@@ -310,27 +334,41 @@ public sealed class Http2ResponseWriter : IBufferWriter<byte>
         return _connection.FlushOutboundAsync(_turn);
     }
 
+    // Out of credit. It loops rather than calling back into Send: one frame for the whole flush, however many
+    // times the peer opens the window by a byte.
     private async ValueTask<FlushResult> SendAfterCreditAsync(bool endStream, int sent)
     {
-        // Take the wait BEFORE flushing. The flush below is an await, and the WINDOW_UPDATE
-        // it exists to provoke can arrive while this writer is still inside it - at which
-        // point a release has no waiter to find, is dropped, and the writer then parks on a
-        // message that has already been and gone. Registering first means that credit
-        // completes this task instead, and the await below returns at once.
-        Task credited = _connection.WaitForSendCreditAsync(_streamId);
+        while (true)
+        {
+            // Take the wait BEFORE flushing. The flush below is an await, and the WINDOW_UPDATE
+            // it exists to provoke can arrive while this writer is still inside it - at which
+            // point a release has no waiter to find, is dropped, and the writer then parks on a
+            // message that has already been and gone. Registering first means that credit
+            // completes this task instead, and the await below returns at once.
+            Task credited = _connection.WaitForSendCreditAsync(_streamId);
 
-        // Everything staged so far has to REACH the peer before waiting on it to open the
-        // window. WINDOW_UPDATE is what a peer sends once it has consumed DATA, so parking
-        // with those bytes still in the connection's buffer waits for a message that the
-        // wait itself prevents - and any body larger than the initial 65535-byte window
-        // deadlocks until the client times out. The flush is unconditional because inside a
-        // pass the pass flush would otherwise carry them, and this stream is about to stop
-        // making progress rather than return to it.
-        _sinceRealFlush = 0;
-        await _connection.FlushOutboundAsync(_turn);
+            // Everything staged so far has to REACH the peer before waiting on it to open the
+            // window. WINDOW_UPDATE is what a peer sends once it has consumed DATA, so parking
+            // with those bytes still in the connection's buffer waits for a message that the
+            // wait itself prevents - and any body larger than the initial 65535-byte window
+            // deadlocks until the client times out. The flush is unconditional because inside a
+            // pass the pass flush would otherwise carry them, and this stream is about to stop
+            // making progress rather than return to it.
+            _sinceRealFlush = 0;
+            await _connection.FlushOutboundAsync(_turn);
 
-        await credited;
-        return await Send(endStream, sent);
+            await credited;
+
+            Progress progress = SendStaged(endStream, ref sent);
+            if (progress == Progress.Gone)
+            {
+                return PeerGone;
+            }
+            if (progress == Progress.Sent)
+            {
+                return await Finish(endStream, sent);
+            }
+        }
     }
 
     private void EnsureStaging(int sizeHint)

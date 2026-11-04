@@ -554,7 +554,7 @@ public sealed partial class Http2Connection
     {
         if (_streams.Remove(header.StreamId, out PendingRequest? pending))
         {
-            pending.Abort();   // the peer gave up; there is nobody to answer
+            Discard(pending);   // the peer gave up; there is nobody to answer
         }
 
         // A response in flight may send nothing more on the stream (RFC 9113 5.1), and a writer parked
@@ -591,6 +591,9 @@ public sealed partial class Http2Connection
         public int SendWindow = 65535;
 
         public int BodyLength => _body.Length;
+
+        // Grew nothing a pooled request should keep: a field list past this was a peer's thousands of header lines.
+        public bool IsSmall => _fields.Capacity <= 64;
 
         public (int Offset, int Length) Method;
         public (int Offset, int Length) Path;
@@ -690,7 +693,6 @@ public sealed partial class Http2Connection
             request.Body       = Slice(_body);
             request.BodyReader = BodyReader;
 
-            request.Headers.Clear();   // keeps the array a previous stream grew
             foreach ((int nameOffset, int nameLength, int valueOffset, int valueLength) in _fields)
             {
                 request.Headers.Add(_arena.AsMemory(nameOffset, nameLength),
@@ -734,6 +736,12 @@ public sealed partial class Http2Connection
                 _arena = [];
             }
             _used = 0;
+
+            // Its request still points into the arena that just went back: let go of it, so the pool does not pin
+            // the array, and keep the header list's capacity for the next stream.
+            _request.Headers.Clear();
+            _request.Method = _request.Path = _request.Scheme = _request.Authority = _request.Body = default;
+            _request.BodyReader = null;
 
             // Fresh for the next stream that rents it.
             StreamId = 0;
