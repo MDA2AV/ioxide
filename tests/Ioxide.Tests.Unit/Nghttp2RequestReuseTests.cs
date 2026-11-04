@@ -5,11 +5,14 @@ namespace Ioxide.Tests;
 
 /// <summary>
 /// ioxide.nghttp2 keeps a retired request whose body arrived whole, with its header list and field ranges, for
-/// the next stream: the next request must come back holding nothing of the one before, and a warm connection's
-/// request allocates none of the parser's objects. Driven over the strict test transport, like the managed stack.
+/// the next stream: the next request must come back holding nothing of the one before, a request still reading its
+/// streamed body must never be handed on, and a warm connection's request allocates none of the parser's objects.
+/// Driven over the strict test transport, like the managed stack.
 /// </summary>
 internal static class Nghttp2RequestReuseTests
 {
+    private static readonly Nghttp2Response Ok = Nghttp2Response.Text("ok");   // shared, so handlers allocate nothing
+
     public static void Register(Runner runner)
     {
         runner.Test("nghttp2 request: the next stream's request holds nothing of the one before", () =>
@@ -21,21 +24,80 @@ internal static class Nghttp2RequestReuseTests
             Task run = connection.RunAsync(request =>
             {
                 seen.Add((request, Describe(request)));
-                return Nghttp2Response.Text("ok");
+                return Ok;
             });
 
-            client.SendRequests();                       // preface and SETTINGS
-            client.Drain();
+            Open(client);
             client.Feed(Request(1, post: true, "/first", "a.example", [("x-one", "1"), ("x-two", "2")], body: "hello"));
             client.Drain();
-            client.Feed(Request(3, post: false, "/", "b.example", [], body: null));   // nghttp2 refuses a request with no authority
+            // nghttp2 wants an authority or a host; a host alone leaves :authority unset, so a stale one would show.
+            client.Feed(Request(3, post: false, "/", authority: null, [("host", "b.example")], body: null));
             client.Drain();
             Close(client, connection, run);
 
             Assert.Equal(2, seen.Count);
             Assert.Equal("1 POST /first a.example [x-one=1 x-two=2] hello", seen[0].Fields);
-            Assert.Equal("3 GET / b.example [] -", seen[1].Fields);
+            Assert.Equal("3 GET / - [host=b.example] -", seen[1].Fields);
             Assert.True(ReferenceEquals(seen[0].Request, seen[1].Request), "the second stream reuses the first one's request");
+        });
+
+        runner.Test("nghttp2 request: a parked handler's request goes back once it answers, holding nothing", () =>
+        {
+            using var client = new StrictClient();
+            var connection = new Nghttp2Connection(client);
+
+            var parked = new TaskCompletionSource<Nghttp2Response>();
+            var seen = new Dictionary<int, (Nghttp2Request Request, string Fields)>();
+            Task run = connection.RunAsync(request =>
+            {
+                seen[request.StreamId] = (request, Describe(request));
+                return request.Path.Span.SequenceEqual("/park"u8)
+                    ? new ValueTask<Nghttp2Response>(parked.Task)   // answered later, through CompleteAsync
+                    : new ValueTask<Nghttp2Response>(Ok);
+            });
+
+            Open(client);
+            client.Feed(Request(1, post: true, "/park", "a.example", [("x-one", "1")], body: "hello"));
+            client.Drain();
+            client.Feed(Request(3, post: false, "/quick", "a.example", [], body: null));
+            client.Drain();
+            parked.SetResult(Ok);                        // stream 1 answers now, and its request is the last to go back
+            client.Drain();
+            client.Feed(Request(5, post: false, "/", authority: null, [("host", "c.example")], body: null));
+            client.Drain();
+            Close(client, connection, run);
+
+            Assert.Equal("5 GET / - [host=c.example] -", seen[5].Fields);
+            Assert.True(ReferenceEquals(seen[1].Request, seen[5].Request), "the parked handler's request was reused");
+        });
+
+        // A handler that takes a body reader is dispatched at the headers, and its request stays in _pending until
+        // the stream ends, because the body's DATA and trailers still find it there. Handed to the next stream, that
+        // stream's headers would land on it as trailers and its request would never be dispatched.
+        runner.Test("nghttp2 request: a request whose body is still arriving is not handed to the next stream", () =>
+        {
+            using var client = new StrictClient();
+            var connection = new Nghttp2Connection(client);
+
+            var seen = new List<(Nghttp2Request Request, string Fields)>();
+            Task run = connection.RunAsync((request, body) =>
+            {
+                seen.Add((request, Describe(request)));
+                return new ValueTask<Nghttp2Response>(Ok);   // done before its body ends
+            });
+
+            Open(client);
+            client.Feed(Request(1, post: true, "/upload", "a.example", [("x-one", "1")], body: null, endStream: false));
+            client.Drain();
+            client.Feed(Request(3, post: false, "/", "b.example", [], body: null));
+            client.Drain();
+            client.Feed([.. FrameHeader(5, 0x0, 0x1, 1), .. "hello"u8.ToArray()]);   // stream 1's body, and its end
+            client.Drain();
+            Close(client, connection, run);
+
+            Assert.Equal(2, seen.Count);
+            Assert.Equal("3 GET / b.example [] -", seen[1].Fields);
+            Assert.True(!ReferenceEquals(seen[0].Request, seen[1].Request), "a request still in _pending was handed on");
         });
 
         runner.Test("nghttp2 request: a warm connection's request allocates none of the parser's objects", () =>
@@ -43,20 +105,28 @@ internal static class Nghttp2RequestReuseTests
             using var client = new StrictClient();
             var connection = new Nghttp2Connection(client);
 
-            Nghttp2Response response = Nghttp2Response.Text("ok");   // shared, so the handler allocates nothing
-            Task run = connection.RunAsync(_ => response);
+            int served = 0;
+            Task run = connection.RunAsync(_ =>
+            {
+                served++;
+                return Ok;
+            });
 
-            client.SendRequests();                       // preface and SETTINGS
-            client.Drain();
+            Open(client);
 
+            // Two warm-up passes: the ready lists swap each pass, so each grows in a pass of its own.
             const int perPass = 16;
-            client.Feed(Batch(1, perPass));              // warm-up: the requests the next batch reuses
+            client.Feed(Batch(1, perPass));
+            client.Drain();
+            client.Feed(Batch(1 + (2 * perPass), perPass));
             client.Drain();
 
-            byte[] batch = Batch(1 + (2 * perPass), perPass);
+            byte[] batch = Batch(1 + (4 * perPass), perPass);
+            int servedBefore = served;
             long before = GC.GetAllocatedBytesForCurrentThread();
             client.Feed(batch);                          // parsed, dispatched and answered inline
             long perRequest = (GC.GetAllocatedBytesForCurrentThread() - before) / perPass;
+            Assert.Equal(perPass, served - servedBefore);   // all of them inside the window
 
             client.Drain();
             Close(client, connection, run);
@@ -65,6 +135,12 @@ internal static class Nghttp2RequestReuseTests
             // transport's own flush, shared by the pass.
             Assert.True(perRequest < 200, $"a request on a warm connection allocated {perRequest} B");
         });
+    }
+
+    private static void Open(StrictClient client)
+    {
+        client.SendRequests();                           // preface and SETTINGS
+        client.Drain();
     }
 
     private static void Close(StrictClient client, Nghttp2Connection connection, Task run)
@@ -100,10 +176,10 @@ internal static class Nghttp2RequestReuseTests
         return bytes.ToArray();
     }
 
-    // HEADERS, with END_STREAM unless a DATA frame carrying the body follows. HPACK from the static table and
-    // literals without indexing only, so the request needs no encoder of its own.
-    private static byte[] Request(int streamId, bool post, string path, string authority,
-        (string Name, string Value)[] fields, string? body)
+    // HEADERS, then a DATA frame with the body if there is one; the last frame carries END_STREAM unless told not
+    // to. HPACK from the static table and literals without indexing only, so the request needs no encoder of its own.
+    private static byte[] Request(int streamId, bool post, string path, string? authority,
+        (string Name, string Value)[] fields, string? body, bool endStream = true)
     {
         var block = new List<byte> { post ? (byte)0x83 : (byte)0x82, 0x86 };   // :method, :scheme http
         if (path == "/")
@@ -115,8 +191,11 @@ internal static class Nghttp2RequestReuseTests
             block.Add(0x04);                                                    // :path, literal value
             AddString(block, path);
         }
-        block.Add(0x01);                                                        // :authority, literal value
-        AddString(block, authority);
+        if (authority is not null)
+        {
+            block.Add(0x01);                                                    // :authority, literal value
+            AddString(block, authority);
+        }
         foreach ((string name, string value) in fields)
         {
             block.Add(0x00);                                                    // literal name and value
@@ -124,12 +203,13 @@ internal static class Nghttp2RequestReuseTests
             AddString(block, value);
         }
 
+        bool headersEnd = endStream && body is null;
         var frames = new List<byte>();
-        frames.AddRange(FrameHeader(block.Count, 0x1, body is null ? (byte)0x5 : (byte)0x4, streamId));
+        frames.AddRange(FrameHeader(block.Count, 0x1, headersEnd ? (byte)0x5 : (byte)0x4, streamId));
         frames.AddRange(block);
         if (body is not null)
         {
-            frames.AddRange(FrameHeader(body.Length, 0x0, 0x1, streamId));
+            frames.AddRange(FrameHeader(body.Length, 0x0, endStream ? (byte)0x1 : (byte)0x0, streamId));
             frames.AddRange(Encoding.ASCII.GetBytes(body));
         }
         return frames.ToArray();

@@ -75,8 +75,10 @@ public sealed partial class Nghttp2Connection : IDisposable
     private List<PendingRequest> _dispatching = [];
 
     // Retired requests with a buffered body, each keeping its Nghttp2Request, header list and field
-    // ranges for the next stream (#489).
+    // ranges for the next stream (#489). Capped, so a burst of streams leaves no more than this on an idle
+    // connection.
     private readonly Stack<PendingRequest> _pendingPool = new();
+    private const int MaxPooledRequests = 32;
 
     private PendingRequest RentPending(int streamId)
     {
@@ -93,7 +95,10 @@ public sealed partial class Nghttp2Connection : IDisposable
     private void Retire(PendingRequest pending)
     {
         pending.Dispose();
-        if (pending.BodyReader is null)
+
+        // Only on the reactor, the one thread that rents, and never one whose field list a peer's thousands of
+        // header lines grew: it would stay that size on the connection.
+        if (pending.BodyReader is null && _pendingPool.Count < MaxPooledRequests && !OffReactor && pending.IsSmall)
         {
             pending.Reset();
             _pendingPool.Push(pending);
@@ -268,7 +273,6 @@ public sealed partial class Nghttp2Connection : IDisposable
             request.Body       = Slice(_body);
             request.BodyReader = BodyReader;
 
-            request.Headers.Clear();   // keeps the array a previous stream grew
             foreach ((int nameOffset, int nameLength, int valueOffset, int valueLength) in _fields)
             {
                 request.Headers.Add(_arena.AsMemory(nameOffset, nameLength),
@@ -300,6 +304,14 @@ public sealed partial class Nghttp2Connection : IDisposable
             StreamId = 0;
             Overflowed = false;
             Method = Path = Scheme = Authority = _body = default;
+
+            // Its request still points into the arena Dispose returned: let go of it, so the pool does not pin
+            // the array, and keep the header list's capacity for the next stream.
+            _request.Headers.Clear();
+            _request.Method = _request.Path = _request.Scheme = _request.Authority = _request.Body = default;
+            _request.BodyReader = null;
         }
+
+        public bool IsSmall => _fields.Capacity <= 64;
     }
 }
