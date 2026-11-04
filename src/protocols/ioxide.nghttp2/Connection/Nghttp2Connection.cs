@@ -70,8 +70,35 @@ public sealed partial class Nghttp2Connection : IDisposable
     private readonly Dictionary<int, PendingRequest> _pending = new();
 
     // Requests whose streams ended during the current ih2_read. The callbacks only record them;
-    // the loop dispatches after mem_recv returns.
-    private readonly List<PendingRequest> _readyThisPass = [];
+    // the loop dispatches after mem_recv returns, walking the other list: the two swap each pass.
+    private List<PendingRequest> _readyThisPass = [];
+    private List<PendingRequest> _dispatching = [];
+
+    // Retired requests with a buffered body, each keeping its Nghttp2Request, header list and field
+    // ranges for the next stream (#489).
+    private readonly Stack<PendingRequest> _pendingPool = new();
+
+    private PendingRequest RentPending(int streamId)
+    {
+        PendingRequest pending = _pendingPool.TryPop(out PendingRequest? pooled) ? pooled : new PendingRequest();
+        pending.StreamId = streamId;
+        return pending;
+    }
+
+    /// <summary>
+    /// Done with a dispatched request, once its handler has returned. A buffered body's request left
+    /// <c>_pending</c> before it was dispatched, so nothing can reach it any more and it goes back for the
+    /// next stream. A streamed body's stays in <c>_pending</c> until its stream ends, so it is only disposed.
+    /// </summary>
+    private void Retire(PendingRequest pending)
+    {
+        pending.Dispose();
+        if (pending.BodyReader is null)
+        {
+            pending.Reset();
+            _pendingPool.Push(pending);
+        }
+    }
 
     /// <summary>
     /// Serve over an already-chosen transport. The pipe is the caller's to dispose - it may be a
@@ -163,6 +190,7 @@ public sealed partial class Nghttp2Connection : IDisposable
         private int _used;
         private readonly List<(int NameOffset, int NameLength, int ValueOffset, int ValueLength)> _fields = [];
         private (int Offset, int Length) _body = (0, 0);
+        private readonly Nghttp2Request _request = new();
 
         public int StreamId;
 
@@ -228,20 +256,19 @@ public sealed partial class Nghttp2Connection : IDisposable
             }
         }
 
-        /// <summary>Materialize the public request. Valid until <see cref="Dispose"/>.</summary>
+        /// <summary>Materialize the public request, this one's own and reused. Valid until <see cref="Dispose"/>.</summary>
         public Nghttp2Request Freeze()
         {
-            var request = new Nghttp2Request
-            {
-                StreamId   = StreamId,
-                Method     = Slice(Method),
-                Path       = Slice(Path),
-                Scheme     = Slice(Scheme),
-                Authority  = Slice(Authority),
-                Body       = Slice(_body),
-                BodyReader = BodyReader,
-            };
+            Nghttp2Request request = _request;
+            request.StreamId   = StreamId;
+            request.Method     = Slice(Method);
+            request.Path       = Slice(Path);
+            request.Scheme     = Slice(Scheme);
+            request.Authority  = Slice(Authority);
+            request.Body       = Slice(_body);
+            request.BodyReader = BodyReader;
 
+            request.Headers.Clear();   // keeps the array a previous stream grew
             foreach ((int nameOffset, int nameLength, int valueOffset, int valueLength) in _fields)
             {
                 request.Headers.Add(_arena.AsMemory(nameOffset, nameLength),
@@ -265,6 +292,14 @@ public sealed partial class Nghttp2Connection : IDisposable
                 _arena = [];
             }
             _used = 0;
+        }
+
+        /// <summary>Fresh for the next stream that rents it, after <see cref="Dispose"/>.</summary>
+        public void Reset()
+        {
+            StreamId = 0;
+            Overflowed = false;
+            Method = Path = Scheme = Authority = _body = default;
         }
     }
 }

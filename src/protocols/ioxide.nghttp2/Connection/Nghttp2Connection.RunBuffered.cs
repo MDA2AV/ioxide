@@ -126,18 +126,12 @@ public sealed partial class Nghttp2Connection
         }
     }
 
-    // Snapshot and clear first: a handler that awaits can let another read pass land more
-    // requests here, and the list must not be mutated while it is walked.
-    private PendingRequest[] TakeReady()
+    // Taken whole before the walk: the list must not be mutated while it is walked, and the next
+    // read pass lands its requests in the other one. The caller clears it once done.
+    private List<PendingRequest> TakeReady()
     {
-        if (_readyThisPass.Count == 0)
-        {
-            return [];
-        }
-
-        PendingRequest[] ready = _readyThisPass.ToArray();
-        _readyThisPass.Clear();
-        return ready;
+        (_readyThisPass, _dispatching) = (_dispatching, _readyThisPass);
+        return _dispatching;
     }
 
     // A request that outgrew MaxRequestBytes is reset instead of dispatched, whichever the response mode.
@@ -160,7 +154,20 @@ public sealed partial class Nghttp2Connection
 
     private void DispatchBuffered(Func<Nghttp2Request, ValueTask<Nghttp2Response>> handler)
     {
-        foreach (PendingRequest pending in TakeReady())
+        List<PendingRequest> ready = TakeReady();
+        try
+        {
+            DispatchBuffered(handler, ready);
+        }
+        finally
+        {
+            ready.Clear();
+        }
+    }
+
+    private void DispatchBuffered(Func<Nghttp2Request, ValueTask<Nghttp2Response>> handler, List<PendingRequest> ready)
+    {
+        foreach (PendingRequest pending in ready)
         {
             if (RefuseOverflowed(pending))
             {
@@ -194,7 +201,7 @@ public sealed partial class Nghttp2Connection
                 {
                     // The arena backs the request's memories, so it can only go back once the
                     // handler has returned and the response is submitted (which copies).
-                    pending.Dispose();
+                    Retire(pending);
                 }
                 continue;
             }
@@ -234,7 +241,7 @@ public sealed partial class Nghttp2Connection
         }
         finally
         {
-            pending.Dispose();
+            Retire(pending);
             await FlushEgressAsync();
         }
     }

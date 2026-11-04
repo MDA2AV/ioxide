@@ -47,7 +47,7 @@ public sealed partial class Nghttp2Connection
             // the request we have rather than replacing it and losing everything accumulated.
             if (!connection._pending.ContainsKey(streamId))
             {
-                connection._pending[streamId] = new PendingRequest { StreamId = streamId };
+                connection._pending[streamId] = connection.RentPending(streamId);
             }
         }
         catch (Exception e)
