@@ -47,6 +47,7 @@ internal static class Program
         QuicUnansweredStreamTests.Register(runner);
         QuicDeferredFaultTests.Register(runner);
         QuicStreamAllowanceTests.Register(runner);
+        QuicSendStreamTests.Register(runner);
         QuicTimerTests.Register(runner);
         QuicSniHostileTests.Register(runner);
         QuicDemuxRoutingTests.Register(runner);
