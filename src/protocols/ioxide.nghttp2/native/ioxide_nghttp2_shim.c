@@ -146,6 +146,17 @@ static int on_frame_recv(nghttp2_session *session, const nghttp2_frame *frame, v
         c->cbs.on_end_stream(c->user, frame->hd.stream_id);
     }
 
+    /* A peer's RST_STREAM(NO_ERROR) closes a stream as quietly as its normal end, so on_stream_close
+     * cannot tell the two apart: nghttp2 marks the stream half-closed before it closes it. It is
+     * reported here instead, where the reset itself arrives - on a stream whose request is still
+     * arriving, the managed side holds a half-built request that nothing else releases (#493).
+     * Resets with an error code are reported from on_stream_close, which a managed side that reads
+     * request bodies itself hears for every close. */
+    if (frame->hd.type == NGHTTP2_RST_STREAM && frame->rst_stream.error_code == NGHTTP2_NO_ERROR &&
+        !c->manual_flow && c->cbs.on_stream_error != NULL) {
+        c->cbs.on_stream_error(c->user, frame->hd.stream_id, NGHTTP2_NO_ERROR);
+    }
+
     return 0;
 }
 
@@ -168,7 +179,8 @@ static int on_stream_close(nghttp2_session *session, int32_t stream_id, uint32_t
 
     /* NO_ERROR here is the normal end of a stream whose response already completed, so only a
      * real error is worth waking the managed side for - unless it reads request bodies itself:
-     * a peer's RST_STREAM(NO_ERROR) ends one of those too. */
+     * a peer's RST_STREAM(NO_ERROR) ends one of those too. Otherwise that reset is reported from
+     * on_frame_recv, as it arrives. */
     if ((error_code != NGHTTP2_NO_ERROR || c->manual_flow) && c->cbs.on_stream_error != NULL) {
         c->cbs.on_stream_error(c->user, stream_id, error_code);
     }

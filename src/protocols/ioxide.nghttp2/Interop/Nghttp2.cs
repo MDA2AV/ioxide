@@ -34,6 +34,8 @@ internal static unsafe partial class Nghttp2
     /// validated out of <see cref="ih2_read"/>. With <paramref name="manualFlow"/> non-zero nghttp2
     /// sends no WINDOW_UPDATE for DATA by itself - every byte handed to OnData is credited once,
     /// through <see cref="ih2_consume"/> - and OnStreamError reports every close, NO_ERROR included.
+    /// Without it, OnStreamError reports a close with an error code and a peer's RST_STREAM(NO_ERROR),
+    /// but not the normal NO_ERROR end of a request and its response.
     /// Returns the handle, or 0 on failure.</summary>
     [DllImport(Lib)] internal static extern nint ih2_server_new(Callbacks callbacks, void* user, int manualFlow);
 
