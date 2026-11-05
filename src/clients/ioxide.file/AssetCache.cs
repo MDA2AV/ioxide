@@ -19,9 +19,7 @@ public sealed class AssetCache : IDisposable
 
     private readonly Dictionary<string, Asset> _assets;
     private readonly SafeFileHandle[] _handles;
-    // The live reference counts as 2^48, so lease releases alone, even one disposed twice on every request, cannot
-    // reach 0 in any real lifetime (2^48 of them: years at a million a second), and leaks cannot overflow it.
-    private const long LiveRef = 1L << 48;
+    private const long LiveRef = 1L << 48;   // extra releases or leaked leases need years at 1M/s to drain or overflow it
     private long _refs = LiveRef;   // plus one per lease
 
     /// <summary>The absolute root directory the cache was built over.</summary>

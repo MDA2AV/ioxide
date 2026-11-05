@@ -42,8 +42,7 @@ internal static class LeaseTests
             Assert.True(found, "the lease Acquire returned should find /a.txt");
         });
 
-        // Dispose frees the live snapshot and nothing replaces it, so a retry that waits for a Reload's swap
-        // would re-read the freed snapshot forever. A second Dispose takes its count below zero.
+        // After Dispose there is no snapshot left to lease, and a second Dispose changes nothing.
         runner.Test("file: Acquire after Dispose throws ObjectDisposedException, also after a second Dispose", () =>
         {
             var assets = new StaticAssets(LeaseAssets());
@@ -106,18 +105,24 @@ internal static class LeaseTests
                 $"the snapshot kept fd {asset.Fd} open after its last lease was released");
         });
 
-        // Each Dispose used to subtract the live reference again: a 32-bit count wrapped on the fourth back to a
-        // live-looking value, and Acquire handed out leases on the freed snapshot.
+        // Only the first Dispose may drop the live reference, or the lease held across the rest never frees its snapshot.
         runner.Test("file: Dispose can be called any number of times", () =>
         {
             string root = LeaseAssets();
             for (int times = 1; times <= 6; times++)
             {
                 var assets = new StaticAssets(root);
+                StaticAssets.Lease held = assets.Acquire();
+                Assert.True(held.TryGet("/a.txt", out AssetCache.Asset asset), "the snapshot should hold /a.txt");
                 for (int i = 0; i < times; i++)
                 {
                     assets.Dispose();
                 }
+                Assert.Equal(asset.Path, ExecInheritance.Target(asset.Fd));   // the lease still reads its file
+
+                held.Dispose();
+                Assert.True(ExecInheritance.Target(asset.Fd) != asset.Path,
+                    $"after {times} Dispose calls the snapshot kept fd {asset.Fd} open past its last lease");
                 Assert.Throws<ObjectDisposedException>(() => assets.Acquire().Dispose(), nameof(StaticAssets));
             }
         });
@@ -195,7 +200,7 @@ internal static class LeaseTests
         bool returned = acquirer.Join(TimeSpan.FromSeconds(2));
         if (!returned)
         {
-            assets.Reload();   // the one thing that ends the spin, so the thread doesn't keep a core for the rest of the run
+            assets.Reload();   // ends a spin on a live instance, so the thread doesn't keep a core for the rest of the run
             acquirer.Join(TimeSpan.FromSeconds(2));
         }
 
