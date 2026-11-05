@@ -545,6 +545,12 @@ public sealed partial class Http3Connection
             return;
         }
 
+        if (rs.Request.Malformed)
+        {
+            RefuseMalformed(sid, rs, "a pseudo-header in the request is repeated, unknown or after a regular field");
+            return;
+        }
+
         if (_streamBodies)
         {
             var sink = new Http3BodyReader(this, sid);
