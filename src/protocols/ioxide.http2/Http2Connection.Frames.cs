@@ -320,6 +320,13 @@ public sealed partial class Http2Connection
                 discard ? static (_, _) => { } : (name, value) => target.AddHeader(name, value));
             pending.ClearHeaderBlock();
             pending.HeadersDone = true;
+            pending.ClosePseudoHeaders();
+
+            if (pending.Malformed)
+            {
+                ResetStream(pending.StreamId, Http2Error.ProtocolError);   // decoded whole, so HPACK is in step and only this request ends
+                return false;
+            }
             return true;
         }
         catch (HpackDecoder.HpackException)
@@ -603,6 +610,13 @@ public sealed partial class Http2Connection
         public (int Offset, int Length) Scheme;
         public (int Offset, int Length) Authority;
 
+        // A pseudo-header out of place: the stream is reset once the block is decoded, never dispatched.
+        public bool Malformed;
+
+        // One bit for each pseudo-header seen, and one once a regular field or the end of a block closes them.
+        private int _pseudoSeen;
+        private const int PseudoClosed = 16;
+
         public ReadOnlySpan<byte> HeaderBlock => _block.AsSpan(0, _blockUsed);
 
         public void AppendHeaderBlock(ReadOnlySpan<byte> data)
@@ -635,18 +649,29 @@ public sealed partial class Http2Connection
         {
             if (name.Length > 0 && name[0] == (byte)':')
             {
-                (int Offset, int Length) pseudo = Append(value);
-                if (name.SequenceEqual(":method"u8))         Method = pseudo;
-                else if (name.SequenceEqual(":path"u8))      Path = pseudo;
-                else if (name.SequenceEqual(":scheme"u8))    Scheme = pseudo;
-                else if (name.SequenceEqual(":authority"u8)) Authority = pseudo;
+                if (name.SequenceEqual(":method"u8))         Method = Pseudo(1, value);
+                else if (name.SequenceEqual(":path"u8))      Path = Pseudo(2, value);
+                else if (name.SequenceEqual(":scheme"u8))    Scheme = Pseudo(4, value);
+                else if (name.SequenceEqual(":authority"u8)) Authority = Pseudo(8, value);
+                else Malformed = true;
                 return;
             }
 
+            ClosePseudoHeaders();
             (int Offset, int Length) nameRange = Append(name);
             (int Offset, int Length) valueRange = Append(value);
             _fields.Add((nameRange.Offset, nameRange.Length, valueRange.Offset, valueRange.Length));
         }
+
+        // RFC 9113 8.3: each at most once and ahead of every regular field; 8.1: none in trailers.
+        private (int Offset, int Length) Pseudo(int seen, ReadOnlySpan<byte> value)
+        {
+            Malformed |= (_pseudoSeen & (seen | PseudoClosed)) != 0;
+            _pseudoSeen |= seen;
+            return Append(value);
+        }
+
+        public void ClosePseudoHeaders() => _pseudoSeen |= PseudoClosed;
 
         public void AppendBody(ReadOnlySpan<byte> data)
         {
@@ -733,6 +758,8 @@ public sealed partial class Http2Connection
             BodyReader?.Drop();
             BodyReader = null;
 
+            Malformed = false;
+            _pseudoSeen = 0;
             ClearHeaderBlock();
             _fields.Clear();
             if (_arena.Length > 0)
