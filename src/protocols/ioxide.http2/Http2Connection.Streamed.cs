@@ -55,27 +55,19 @@ public sealed partial class Http2Connection
     /// </summary>
     private void DispatchStreamed(Func<Http2Request, Http2ResponseWriter, ValueTask> handler)
     {
-        try
+        while (_ready.TryDequeue(out PendingRequest? pending))
         {
-            for (int i = 0; i < _ready.Count; i++)
+            try
             {
-                PendingRequest pending = _ready[i];
-                try
-                {
-                    Http2Request request = pending.Freeze();
-                    Http2ResponseWriter writer = RentWriter(request.StreamId);
-                    _ = ServeStreamedAsync(handler, request, writer, pending);   // the writer owns this stream, and retires it when done
-                }
-                catch
-                {
-                    pending.Dispose();
-                    throw;
-                }
+                Http2Request request = pending.Freeze();
+                Http2ResponseWriter writer = RentWriter(request.StreamId);
+                _ = ServeStreamedAsync(handler, request, writer, pending);   // the writer owns this stream, and retires it when done
             }
-        }
-        finally
-        {
-            _ready.Clear();
+            catch
+            {
+                pending.Dispose();
+                throw;
+            }
         }
     }
 

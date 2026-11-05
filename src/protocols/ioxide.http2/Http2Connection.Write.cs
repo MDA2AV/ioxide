@@ -139,6 +139,10 @@ public sealed partial class Http2Connection
         FlushResult result = _writeDead || _disposed ? PeerGone : default;
         Wake(faulted, result);
         Wake(TakeTurn(), result);
+        if (_writeDead)
+        {
+            ReleaseAllCreditWaiters();   // the fault reached a writer, so no teardown is on its way to them
+        }
     }
 
     private async Task EndTurnOnReactorAsync(TurnWaiter? faulted)

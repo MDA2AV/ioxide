@@ -190,6 +190,42 @@ internal static class Http2OutputQueueTests
             client.Close(run);
         });
 
+        // Stream 1's own flush is long done, and the fault reaches stream 3, so only the turn's end can wake stream 1.
+        runner.Test("h2 queue: a flush parked on credit hears the peer gone when another writer's flush faults", () =>
+        {
+            using var client = new StrictClient();
+
+            var gates = new Dictionary<int, TaskCompletionSource> { [1] = new(), [3] = new() };
+            var outcome = new TaskCompletionSource<string>();
+            Task run = client.Connection.RunAsync(async (request, writer) =>
+            {
+                int id = request.StreamId;
+                writer.WriteHeaders(new Http2Response { Status = 200 });
+                await gates[id].Task;
+                Push(writer, id == 1 ? "xy" : "x");
+                string result = await FlushOutcome(writer);
+                if (id == 1)
+                {
+                    outcome.TrySetResult(result);
+                }
+            });
+
+            client.ReleaseFlush();                       // server SETTINGS
+            client.Feed([.. Http2FlowControlTests.Open((Http2FlowControlTests.InitialWindowSize, 0)),
+                .. Http2FlowControlTests.Get(1), .. Http2FlowControlTests.Get(3),
+                .. Http2FlowControlTests.WindowUpdate(3, 1_000), .. Http2FlowControlTests.WindowUpdate(1, 1)]);
+            client.Drain();                              // the pass is out; the read loop waits for input
+            gates[1].SetResult();                        // stream 1 sends its one byte of credit
+            client.ReleaseFlush();                       // that flush ends, and it parks for more
+            Assert.True(!outcome.Task.IsCompleted, "stream 1 was meant to be waiting for credit");
+            gates[3].SetResult();                        // stream 3 flushes
+            client.FaultFlush();                         // and that flush faults
+
+            Assert.True(outcome.Task.IsCompleted, "stream 1's flush still waited for credit after the write side died");
+            Assert.Equal("peer gone", outcome.Task.Result);
+            client.Close(run);
+        });
+
         runner.Test("h2 queue: a streamed flush that waits for the pump's turn allocates nothing", () =>
         {
             using var client = new StrictClient();

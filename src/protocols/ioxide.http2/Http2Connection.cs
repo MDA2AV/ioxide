@@ -42,7 +42,7 @@ public sealed partial class Http2Connection : IDisposable
     private byte[] _headerScratch = new byte[16 * 1024];
 
     private readonly Dictionary<int, PendingRequest> _streams = new();
-    private readonly List<PendingRequest> _ready = [];
+    private readonly Queue<PendingRequest> _ready = new();
 
     // Retired requests, kept for the next stream; capped, so a burst leaves little on an idle connection.
     private readonly Stack<PendingRequest> _pendingPool = new();
@@ -291,52 +291,43 @@ public sealed partial class Http2Connection : IDisposable
 
     private void DispatchBuffered(Func<Http2Request, ValueTask<Http2Response>> handler)
     {
-        try
+        while (_ready.TryDequeue(out PendingRequest? pending))
         {
-            // Only ParseAvailable adds to the list, and it never runs during the walk.
-            for (int i = 0; i < _ready.Count; i++)
-            {
-                PendingRequest pending = _ready[i];
-                ValueTask<Http2Response> inFlight;
+            ValueTask<Http2Response> inFlight;
 
+            try
+            {
+                Http2Request request = pending.Freeze();
+                inFlight = handler(request);
+            }
+            catch (Exception exception)
+            {
+                // A synchronous handler throws before there is a task. It gets what a faulted task
+                // gets, a 500 on its own stream, rather than taking the connection down.
+                inFlight = ValueTask.FromException<Http2Response>(exception);
+            }
+
+            // Answered synchronously, which nearly every handler does. Stay inline: this response
+            // is staged in time for the pass flush, so it still leaves with every other one, and
+            // there is no Task to allocate.
+            if (inFlight.IsCompletedSuccessfully)
+            {
                 try
                 {
-                    Http2Request request = pending.Freeze();
-                    inFlight = handler(request);
+                    WriteResponse(pending.StreamId, inFlight.Result);
                 }
-                catch (Exception exception)
+                finally
                 {
-                    // A synchronous handler throws before there is a task. It gets what a faulted task
-                    // gets, a 500 on its own stream, rather than taking the connection down.
-                    inFlight = ValueTask.FromException<Http2Response>(exception);
+                    RetireStream(pending);
                 }
-
-                // Answered synchronously, which nearly every handler does. Stay inline: this response
-                // is staged in time for the pass flush, so it still leaves with every other one, and
-                // there is no Task to allocate.
-                if (inFlight.IsCompletedSuccessfully)
-                {
-                    try
-                    {
-                        WriteResponse(pending.StreamId, inFlight.Result);
-                    }
-                    finally
-                    {
-                        RetireStream(pending);
-                    }
-                    continue;
-                }
-
-                // It parked - a database, an upstream, a disk. Awaiting here would hold every OTHER
-                // stream on this connection behind it, including responses already staged and ready to
-                // go, because they all share this one dispatch loop and one TCP connection. So it
-                // finishes on its own and writes its own bytes when it does.
-                _ = CompleteBufferedAsync(inFlight, pending);
+                continue;
             }
-        }
-        finally
-        {
-            _ready.Clear();
+
+            // It parked - a database, an upstream, a disk. Awaiting here would hold every OTHER
+            // stream on this connection behind it, including responses already staged and ready to
+            // go, because they all share this one dispatch loop and one TCP connection. So it
+            // finishes on its own and writes its own bytes when it does.
+            _ = CompleteBufferedAsync(inFlight, pending);
         }
     }
 

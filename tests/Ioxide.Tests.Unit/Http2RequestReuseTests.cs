@@ -64,6 +64,9 @@ internal static class Http2RequestReuseTests
             client.Drain();
             parked.SetResult(Http2Response.Text("late"));
             client.Drain();
+            Http2Request retired = seen[0].Request;      // in the pool now, which must not pin the arena it read from
+            Assert.True(retired.Method.IsEmpty && retired.Path.IsEmpty && retired.Headers.AsSpan().IsEmpty,
+                "a retired request still points into the arena that went back");
             client.Feed(Request(3, post: false, "/", authority: null, [], body: null));
             client.Drain();
             client.Close(run);
@@ -90,8 +93,7 @@ internal static class Http2RequestReuseTests
             client.Feed([.. Request(1, post: true, "/first", "a.example", [("x-one", "1")], body: "hel", endStream: false),
                 .. Http2FlowControlTests.RstStream(1, 8)]);
             client.Drain();
-            int pooled = ((ICollection)typeof(Http2Connection)
-                .GetField("_pendingPool", BindingFlags.NonPublic | BindingFlags.Instance)!.GetValue(client.Connection)!).Count;
+            int pooled = Pooled(client.Connection);
             client.Feed(Request(3, post: false, "/", authority: null, [], body: null));
             client.Drain();
             client.Close(run);
@@ -99,6 +101,69 @@ internal static class Http2RequestReuseTests
             Assert.Equal(1, pooled);
             Assert.True(seen.SequenceEqual(["3 GET http / - [] -"]), $"the handler was handed: {string.Join(", ", seen)}");
         });
+
+        runner.Test("h2 request: a handler that disposes the connection leaves a parked handler's request alone", () =>
+        {
+            using var client = new StrictClient();
+
+            var parked = new TaskCompletionSource<Http2Response>();
+            Http2Request? held = null;
+            Task run = client.Connection.RunAsync(request =>
+            {
+                if (request.StreamId == 1)
+                {
+                    held = request;
+                    return new ValueTask<Http2Response>(parked.Task);
+                }
+                client.Connection.Dispose();             // in the same dispatch as stream 1
+                return new ValueTask<Http2Response>(Http2Response.Text("ok"));
+            });
+
+            client.ReleaseFlush();                       // server SETTINGS
+            client.SendRequests(1, 3);
+            string path = Ascii(held!.Path);
+            parked.SetResult(Http2Response.Text("late"));
+            client.Close(run);
+
+            Assert.Equal("/", path);
+        });
+
+        runner.Test("h2 request: a burst leaves at most 32 requests on the connection", () =>
+        {
+            using var client = new StrictClient();
+            Task run = client.Connection.RunAsync(_ => Http2Response.Text("ok"));
+
+            client.ReleaseFlush();                       // server SETTINGS
+            client.SendRequests();                       // preface and SETTINGS
+            client.Drain();
+            client.Feed(Batch(1, 40));                   // one read, so all 40 are open before the first retires
+            client.Drain();
+            int pooled = Pooled(client.Connection);
+            client.Close(run);
+
+            Assert.Equal(32, pooled);
+        });
+
+        foreach ((int lines, int kept) in new[] { (64, 1), (65, 0) })
+        {
+            int count = lines, expected = kept;
+            runner.Test($"h2 request: a request with {count} header lines {(expected == 1 ? "is" : "is not")} kept for the next stream", () =>
+            {
+                using var client = new StrictClient();
+                Task run = client.Connection.RunAsync(_ => Http2Response.Text("ok"));
+
+                client.ReleaseFlush();                   // server SETTINGS
+                client.SendRequests();                   // preface and SETTINGS
+                client.Drain();
+                client.Feed(Request(1, post: false, "/", authority: null,
+                    Enumerable.Range(0, count).Select(i => ($"x-{i}", "1")).ToArray(), body: null));
+                client.Drain();
+                int pooled = Pooled(client.Connection);
+                client.Close(run);
+
+                Assert.Equal(expected, pooled);
+            });
+        }
 
         runner.Test("h2 request: a warm connection's request allocates none of the parser's objects", () =>
         {
@@ -116,7 +181,7 @@ internal static class Http2RequestReuseTests
             client.SendRequests();                       // preface and SETTINGS
             client.ReleaseFlush();                       // their ack
 
-            // Two warm-up passes grow the ready list and the pool.
+            // Two warm-up passes grow the ready queue and the pool.
             const int perPass = 16;
             client.Feed(Batch(1, perPass));
             client.ReleaseFlush();
@@ -137,6 +202,10 @@ internal static class Http2RequestReuseTests
             Assert.True(perRequest < 100, $"a request on a warm connection allocated {perRequest} B");
         });
     }
+
+    private static int Pooled(Http2Connection connection)
+        => ((ICollection)typeof(Http2Connection)
+            .GetField("_pendingPool", BindingFlags.NonPublic | BindingFlags.Instance)!.GetValue(connection)!).Count;
 
     private static string Describe(Http2Request request)
     {
