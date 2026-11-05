@@ -56,8 +56,7 @@ public sealed partial class Http2Connection
         }
     }
 
-    // Not async: a caller that only waits for the pump's next turn gets that wait as it is. A streamed
-    // writer passes the waiter it keeps, so its flush allocates nothing; anyone else parks a new one.
+    // Not async: a wait for the pump's next turn is returned as it is, on the caller's own waiter if it keeps one.
     private ValueTask<FlushResult> FlushAsync(TurnWaiter? waiter = null)
     {
         if (_disposed || _writeDead)

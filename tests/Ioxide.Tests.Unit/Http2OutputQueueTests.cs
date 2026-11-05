@@ -135,21 +135,13 @@ internal static class Http2OutputQueueTests
             using var client = new StrictClient();
 
             var gate = new TaskCompletionSource();
-            var woke = new TaskCompletionSource();
+            var woke = new TaskCompletionSource<string>();
             Task run = client.Connection.RunAsync(async (_, writer) =>
             {
                 writer.WriteHeaders(new Http2Response { Status = 200 });
                 await gate.Task;                         // resumed outside the pass, its flush in flight
                 Push(writer, "lost");
-                try
-                {
-                    await writer.FlushAsync();           // queued behind it: its turn is the flush after
-                }
-                catch
-                {
-                    // The transport is gone; waking at all is what this test is about.
-                }
-                woke.SetResult();
+                woke.SetResult(await FlushOutcome(writer));   // queued behind it: its turn is the flush after
             });
 
             client.ReleaseFlush();                       // server SETTINGS
@@ -159,7 +151,43 @@ internal static class Http2OutputQueueTests
             client.FaultFlush();                         // and that flush faults
 
             Assert.True(woke.Task.Wait(5_000), "the writer whose chunk the faulted flush carried never woke");
+            Assert.Equal("peer gone", woke.Task.Result);
             Assert.True(run.Wait(5_000), "connection wound down after the transport fault");
+        });
+
+        // The fault reaches the writer that pumps, not the read loop, so no teardown releases stream 1's wait for credit.
+        runner.Test("h2 queue: a flush waiting for credit hears the peer gone when the turn it waits on faults", () =>
+        {
+            using var client = new StrictClient();
+
+            var gates = new Dictionary<int, TaskCompletionSource> { [1] = new(), [3] = new() };
+            var outcome = new TaskCompletionSource<string>();
+            Task run = client.Connection.RunAsync(async (request, writer) =>
+            {
+                int id = request.StreamId;
+                writer.WriteHeaders(new Http2Response { Status = 200 });
+                await gates[id].Task;
+                Push(writer, id == 1 ? "xy" : "x");
+                string result = await FlushOutcome(writer);
+                if (id == 1)
+                {
+                    outcome.TrySetResult(result);
+                }
+            });
+
+            client.ReleaseFlush();                       // server SETTINGS
+            client.Feed([.. Http2FlowControlTests.Open((Http2FlowControlTests.InitialWindowSize, 0)),
+                .. Http2FlowControlTests.Get(1), .. Http2FlowControlTests.Get(3),
+                .. Http2FlowControlTests.WindowUpdate(3, 1_000), .. Http2FlowControlTests.WindowUpdate(1, 1)]);
+            client.Drain();                              // the pass is out; the read loop waits for input
+            gates[3].SetResult();                        // stream 3 flushes first, so it is the pump
+            gates[1].SetResult();                        // stream 1 queues its one byte of credit, then waits for more
+            client.ReleaseFlush();                       // stream 3's flush; the pump's next turn carries stream 1's byte
+            client.FaultFlush();                         // and that flush faults
+
+            Assert.True(outcome.Task.IsCompleted, "stream 1's flush still waited for credit after its turn faulted");
+            Assert.Equal("peer gone", outcome.Task.Result);
+            client.Close(run);
         });
 
         runner.Test("h2 queue: a streamed flush that waits for the pump's turn allocates nothing", () =>
@@ -209,9 +237,7 @@ internal static class Http2OutputQueueTests
             }
         });
 
-        // A stream window at zero while the peer opens the connection a byte at a time: the writer wakes on each
-        // WINDOW_UPDATE, still has no credit, and waits again, all inside one flush. Those waits have to be one loop,
-        // not one more async frame each, kept until the flush ends and unwound off this thread when it does.
+        // The stream window stays shut while the connection opens a byte at a time: every wait for credit is one flush's.
         runner.Test("h2 queue: a flush that waits for credit again and again keeps one frame, and resumes inline", () =>
         {
             using var client = new StrictClient();
@@ -256,6 +282,18 @@ internal static class Http2OutputQueueTests
     }
 
     private static byte[] Ping() => [0, 0, 8, 0x6, 0, 0, 0, 0, 0, 1, 2, 3, 4, 5, 6, 7, 8];
+
+    private static async Task<string> FlushOutcome(Http2ResponseWriter writer)
+    {
+        try
+        {
+            return (await writer.FlushAsync()).IsCompleted ? "peer gone" : "flushed";
+        }
+        catch (Exception e)
+        {
+            return e.GetType().Name;
+        }
+    }
 
     private static void Push(Http2ResponseWriter writer, string text)
     {

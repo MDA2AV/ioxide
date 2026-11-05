@@ -42,14 +42,9 @@ public sealed partial class Http2Connection : IDisposable
     private byte[] _headerScratch = new byte[16 * 1024];
 
     private readonly Dictionary<int, PendingRequest> _streams = new();
+    private readonly List<PendingRequest> _ready = [];
 
-    // Requests ready for their handler, and the list a dispatch is walking: swapped each pass, so the
-    // parser never adds to the list being walked and no snapshot is copied.
-    private List<PendingRequest> _ready = [];
-    private List<PendingRequest> _dispatching = [];
-
-    // Retired requests, each keeping its Http2Request, header list and field ranges for the next stream. Capped,
-    // so a burst of streams leaves no more than this on an idle connection.
+    // Retired requests, kept for the next stream; capped, so a burst leaves little on an idle connection.
     private readonly Stack<PendingRequest> _pendingPool = new();
     private const int MaxPooledRequests = 32;
 
@@ -294,21 +289,14 @@ public sealed partial class Http2Connection : IDisposable
         _inboundUsed += data.Length;
     }
 
-    // Taken whole before the walk: the list must not be mutated while it is walked. The caller clears
-    // it once done.
-    private List<PendingRequest> TakeReady()
-    {
-        (_ready, _dispatching) = (_dispatching, _ready);
-        return _dispatching;
-    }
-
     private void DispatchBuffered(Func<Http2Request, ValueTask<Http2Response>> handler)
     {
-        List<PendingRequest> ready = TakeReady();
         try
         {
-            foreach (PendingRequest pending in ready)
+            // Only ParseAvailable adds to the list, and it never runs during the walk.
+            for (int i = 0; i < _ready.Count; i++)
             {
+                PendingRequest pending = _ready[i];
                 ValueTask<Http2Response> inFlight;
 
                 try
@@ -348,7 +336,7 @@ public sealed partial class Http2Connection : IDisposable
         }
         finally
         {
-            ready.Clear();
+            _ready.Clear();
         }
     }
 
@@ -396,9 +384,7 @@ public sealed partial class Http2Connection : IDisposable
         Recycle(pending);
     }
 
-    // Disposed, and kept for the next stream when the pool has room and the request grew nothing large: a peer
-    // sending thousands of header fields must not leave lists that size on the connection. Only on the reactor,
-    // which is the one thread that rents.
+    // Kept unless the pool is full or a peer's header lines grew its lists; only the reactor rents.
     private void Recycle(PendingRequest pending)
     {
         pending.Dispose();
@@ -408,8 +394,7 @@ public sealed partial class Http2Connection : IDisposable
         }
     }
 
-    // A stream that ended before its request did: one without a body reader was never dispatched, so nothing else
-    // holds it. One with a reader has a handler running on it, which retires it when done.
+    // Ended before its request did: without a body reader it was never dispatched; with one, its handler retires it.
     private void Discard(PendingRequest pending)
     {
         if (pending.BodyReader is null)

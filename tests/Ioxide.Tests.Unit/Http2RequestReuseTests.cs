@@ -1,12 +1,12 @@
+using System.Collections;
+using System.Reflection;
 using System.Text;
 using ioxide.http2;
 
 namespace Ioxide.Tests;
 
 /// <summary>
-/// A connection keeps a retired request, with its header list and field ranges, for the next stream: the next
-/// request must come back holding nothing of the one before, and a warm connection's request allocates none
-/// of the parser's objects.
+/// A connection hands a retired request, with its header list and field ranges, to the next stream.
 /// </summary>
 internal static class Http2RequestReuseTests
 {
@@ -28,14 +28,76 @@ internal static class Http2RequestReuseTests
             client.ReleaseFlush();                       // their ack
             client.Feed(Request(1, post: true, "/first", "a.example", [("x-one", "1"), ("x-two", "2")], body: "hello"));
             client.ReleaseFlush();
-            client.Feed(Request(3, post: false, "/", authority: null, [], body: null, https: true));
+            // Split over HEADERS and CONTINUATION, so a header-block flag left set by the request before would show.
+            client.Feed(Request(3, post: false, "/", authority: null, [], body: null, https: true, split: true));
+            client.ReleaseFlush();
+            client.Feed(Request(5, post: true, "/again", "c.example", [], body: "world", split: true));
             client.ReleaseFlush();
             client.Close(run);
 
-            Assert.Equal(2, seen.Count);
+            Assert.Equal(3, seen.Count);
             Assert.Equal("1 POST http /first a.example [x-one=1 x-two=2] hello", seen[0].Fields);
             Assert.Equal("3 GET https / - [] -", seen[1].Fields);
-            Assert.True(ReferenceEquals(seen[0].Request, seen[1].Request), "the second stream reuses the first one's request");
+            Assert.Equal("5 POST http /again c.example [] world", seen[2].Fields);
+            Assert.True(ReferenceEquals(seen[0].Request, seen[1].Request) && ReferenceEquals(seen[1].Request, seen[2].Request),
+                "each stream reuses the request of the one before");
+        });
+
+        runner.Test("h2 request: a parked handler's request goes back once it answers", () =>
+        {
+            using var client = new StrictClient();
+
+            var parked = new TaskCompletionSource<Http2Response>();
+            var seen = new List<(Http2Request Request, string Fields)>();
+            Task run = client.Connection.RunAsync(request =>
+            {
+                seen.Add((request, Describe(request)));
+                return request.StreamId == 1
+                    ? new ValueTask<Http2Response>(parked.Task)   // answered later, through CompleteBufferedAsync
+                    : new ValueTask<Http2Response>(Http2Response.Text("ok"));
+            });
+
+            client.ReleaseFlush();                       // server SETTINGS
+            client.SendRequests();                       // preface and SETTINGS
+            client.Drain();
+            client.Feed(Request(1, post: false, "/park", "a.example", [("x-one", "1")], body: null));
+            client.Drain();
+            parked.SetResult(Http2Response.Text("late"));
+            client.Drain();
+            client.Feed(Request(3, post: false, "/", authority: null, [], body: null));
+            client.Drain();
+            client.Close(run);
+
+            Assert.Equal("3 GET http / - [] -", seen[1].Fields);
+            Assert.True(ReferenceEquals(seen[0].Request, seen[1].Request), "the parked handler's request was reused");
+        });
+
+        runner.Test("h2 request: a request reset before it ends comes back for the next stream holding nothing", () =>
+        {
+            using var client = new StrictClient();
+
+            var seen = new List<string>();
+            Task run = client.Connection.RunAsync(request =>
+            {
+                seen.Add(Describe(request));
+                return Http2Response.Text("ok");
+            });
+
+            client.ReleaseFlush();                       // server SETTINGS
+            client.SendRequests();                       // preface and SETTINGS
+            client.Drain();
+            // Its headers and part of its body, then the reset: never dispatched, so the parser takes it back.
+            client.Feed([.. Request(1, post: true, "/first", "a.example", [("x-one", "1")], body: "hel", endStream: false),
+                .. Http2FlowControlTests.RstStream(1, 8)]);
+            client.Drain();
+            int pooled = ((ICollection)typeof(Http2Connection)
+                .GetField("_pendingPool", BindingFlags.NonPublic | BindingFlags.Instance)!.GetValue(client.Connection)!).Count;
+            client.Feed(Request(3, post: false, "/", authority: null, [], body: null));
+            client.Drain();
+            client.Close(run);
+
+            Assert.Equal(1, pooled);
+            Assert.True(seen.SequenceEqual(["3 GET http / - [] -"]), $"the handler was handed: {string.Join(", ", seen)}");
         });
 
         runner.Test("h2 request: a warm connection's request allocates none of the parser's objects", () =>
@@ -54,7 +116,7 @@ internal static class Http2RequestReuseTests
             client.SendRequests();                       // preface and SETTINGS
             client.ReleaseFlush();                       // their ack
 
-            // Two warm-up passes: the ready lists swap each pass, so each grows in a pass of its own.
+            // Two warm-up passes grow the ready list and the pool.
             const int perPass = 16;
             client.Feed(Batch(1, perPass));
             client.ReleaseFlush();
@@ -71,9 +133,8 @@ internal static class Http2RequestReuseTests
             client.ReleaseFlush();
             client.Close(run);
 
-            // Before reuse, every request allocated about 700 B of parser objects. What is left is the test
-            // transport's own flush, shared by the pass.
-            Assert.True(perRequest < 200, $"a request on a warm connection allocated {perRequest} B");
+            // What is left is the test transport's own flush, shared by the pass: about 65 B.
+            Assert.True(perRequest < 100, $"a request on a warm connection allocated {perRequest} B");
         });
     }
 
@@ -104,10 +165,10 @@ internal static class Http2RequestReuseTests
         return bytes.ToArray();
     }
 
-    // HEADERS, with END_STREAM unless a DATA frame carrying the body follows. HPACK from the static table and
-    // literals without indexing only, so the request needs no encoder of its own.
+    // HEADERS, with END_STREAM unless a DATA frame carrying the body follows; split, a CONTINUATION ends the block.
+    // HPACK from the static table and literals without indexing only, so the request needs no encoder of its own.
     private static byte[] Request(int streamId, bool post, string path, string? authority,
-        (string Name, string Value)[] fields, string? body, bool https = false)
+        (string Name, string Value)[] fields, string? body, bool https = false, bool split = false, bool endStream = true)
     {
         var block = new List<byte> { post ? (byte)0x83 : (byte)0x82, https ? (byte)0x87 : (byte)0x86 };   // :method, :scheme
         if (path == "/")
@@ -131,12 +192,24 @@ internal static class Http2RequestReuseTests
             AddString(block, value);
         }
 
+        byte end = body is null && endStream ? (byte)0x1 : (byte)0x0;
         var frames = new List<byte>();
-        frames.AddRange(FrameHeader(block.Count, 0x1, body is null ? (byte)0x5 : (byte)0x4, streamId));
-        frames.AddRange(block);
+        if (split)
+        {
+            int half = block.Count / 2;
+            frames.AddRange(FrameHeader(half, 0x1, end, streamId));                  // no END_HEADERS
+            frames.AddRange(block.Take(half));
+            frames.AddRange(FrameHeader(block.Count - half, 0x9, 0x4, streamId));    // CONTINUATION, END_HEADERS
+            frames.AddRange(block.Skip(half));
+        }
+        else
+        {
+            frames.AddRange(FrameHeader(block.Count, 0x1, (byte)(end | 0x4), streamId));
+            frames.AddRange(block);
+        }
         if (body is not null)
         {
-            frames.AddRange(FrameHeader(body.Length, 0x0, 0x1, streamId));
+            frames.AddRange(FrameHeader(body.Length, 0x0, endStream ? (byte)0x1 : (byte)0x0, streamId));
             frames.AddRange(Encoding.ASCII.GetBytes(body));
         }
         return frames.ToArray();

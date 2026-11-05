@@ -737,13 +737,11 @@ public sealed partial class Http2Connection
             }
             _used = 0;
 
-            // Its request still points into the arena that just went back: let go of it, so the pool does not pin
-            // the array, and keep the header list's capacity for the next stream.
+            // Its request still points into the arena that just went back, which the pool must not pin.
             _request.Headers.Clear();
             _request.Method = _request.Path = _request.Scheme = _request.Authority = _request.Body = default;
             _request.BodyReader = null;
 
-            // Fresh for the next stream that rents it.
             StreamId = 0;
             HeadersDone = false;
             RequestEnded = false;

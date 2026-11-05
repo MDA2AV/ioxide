@@ -163,6 +163,7 @@ public sealed class Http2ResponseWriter : IBufferWriter<byte>
     /// <see cref="FlushResult.IsCompleted"/> once the peer has reset the stream or the connection is
     /// gone, as a TCP pipe writer reports a closed peer: nothing written from then on reaches anyone.
     /// </returns>
+    /// <remarks>Each call has to complete before the next one is made.</remarks>
     public ValueTask<FlushResult> FlushAsync() => FlushCore(endStream: false);
 
     /// <summary>
@@ -220,8 +221,7 @@ public sealed class Http2ResponseWriter : IBufferWriter<byte>
 
     private static readonly FlushResult PeerGone = new(isCanceled: false, isCompleted: true);
 
-    // Not async on the reactor: a flush that sends and then only waits for the write pump's turn returns that
-    // wait as it is, on this writer's own waiter, so it allocates nothing. The rest goes the async way.
+    // Not async on the reactor: a flush that only waits for the pump's turn returns that wait, on this writer's waiter.
     private ValueTask<FlushResult> FlushCore(bool endStream)
     {
         var onReactor = new ReactorSwitch(_connection.Reactor);
@@ -334,8 +334,7 @@ public sealed class Http2ResponseWriter : IBufferWriter<byte>
         return _connection.FlushOutboundAsync(_turn);
     }
 
-    // Out of credit. It loops rather than calling back into Send: one frame for the whole flush, however many
-    // times the peer opens the window by a byte.
+    // Out of credit: one loop, so one async frame, however many times the peer opens the window by a byte.
     private async ValueTask<FlushResult> SendAfterCreditAsync(bool endStream, int sent)
     {
         while (true)
@@ -355,7 +354,11 @@ public sealed class Http2ResponseWriter : IBufferWriter<byte>
             // pass the pass flush would otherwise carry them, and this stream is about to stop
             // making progress rather than return to it.
             _sinceRealFlush = 0;
-            await _connection.FlushOutboundAsync(_turn);
+            if ((await _connection.FlushOutboundAsync(_turn)).IsCompleted)
+            {
+                _staged = 0;   // the write side is gone, so no credit is coming either
+                return PeerGone;
+            }
 
             await credited;
 

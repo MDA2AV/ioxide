@@ -55,11 +55,11 @@ public sealed partial class Http2Connection
     /// </summary>
     private void DispatchStreamed(Func<Http2Request, Http2ResponseWriter, ValueTask> handler)
     {
-        List<PendingRequest> ready = TakeReady();
         try
         {
-            foreach (PendingRequest pending in ready)
+            for (int i = 0; i < _ready.Count; i++)
             {
+                PendingRequest pending = _ready[i];
                 try
                 {
                     Http2Request request = pending.Freeze();
@@ -75,7 +75,7 @@ public sealed partial class Http2Connection
         }
         finally
         {
-            ready.Clear();
+            _ready.Clear();
         }
     }
 

@@ -3,10 +3,7 @@ using System.Threading.Tasks.Sources;
 
 namespace ioxide.http2;
 
-/// <summary>
-/// A flush waiting for the write pump's next turn (<c>Http2Connection.Write.cs</c>). Reusable: a streamed writer
-/// keeps one for its whole life, so a flush that only waits for the turn allocates nothing.
-/// </summary>
+/// <summary>A flush waiting for the write pump's next turn; a streamed writer keeps one for its whole life.</summary>
 internal sealed class TurnWaiter : IValueTaskSource<FlushResult>
 {
     private ManualResetValueTaskSourceCore<FlushResult> _core = new()
@@ -17,10 +14,7 @@ internal sealed class TurnWaiter : IValueTaskSource<FlushResult>
     /// <summary>The waiter parked after this one, for the same turn.</summary>
     internal TurnWaiter? Next;
 
-    /// <summary>
-    /// Parked and not woken yet. A flush whose wait was never awaited leaves its writer in the turn, and the
-    /// writer's next flush then waits for that same wake instead of joining a second time.
-    /// </summary>
+    /// <summary>Parked and not woken yet: a writer whose wait went unawaited waits for that same wake again.</summary>
     internal bool Enlisted;
 
     internal ValueTask<FlushResult> Arm()
