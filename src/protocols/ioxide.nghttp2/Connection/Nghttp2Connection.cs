@@ -45,6 +45,7 @@ public sealed partial class Nghttp2Connection : IDisposable
     // RFC 9113 ENHANCE_YOUR_CALM: a request body past MaxRequestBytes, as the managed stack resets it.
     private const uint EnhanceYourCalm = 0xb;
     private const int  ErrInvalidArgument = -501;   // NGHTTP2_ERR_INVALID_ARGUMENT
+    private const int  ErrStreamClosed = -510;      // NGHTTP2_ERR_STREAM_CLOSED
 
     private readonly IDuplexPipe _pipe;
     private readonly Nghttp2Options _options;

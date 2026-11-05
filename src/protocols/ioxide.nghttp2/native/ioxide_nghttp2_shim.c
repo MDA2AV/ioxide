@@ -396,7 +396,7 @@ int ih2_submit_response_stream(ih2_conn *c, int32_t stream_id,
         return NGHTTP2_ERR_INVALID_STATE;
     }
     if (nghttp2_session_find_stream(c->session, stream_id) == NULL) {
-        return 0;   /* reset while its handler ran: no callback would ever free a body attached now */
+        return NGHTTP2_ERR_STREAM_CLOSED;   /* the peer reset it: no callback would ever free a stream attached now */
     }
 
     nghttp2_nv nv[IH2_MAX_HEADERS];
@@ -520,7 +520,7 @@ int ih2_submit_response(ih2_conn *c, int32_t stream_id,
         return NGHTTP2_ERR_INVALID_STATE;
     }
     if (nghttp2_session_find_stream(c->session, stream_id) == NULL) {
-        return 0;   /* reset while its handler ran: no callback would ever free a body attached now */
+        return 0;   /* the peer reset it: no callback would ever free a body attached now, and an error fails the connection */
     }
 
     nghttp2_nv nv[IH2_MAX_HEADERS];

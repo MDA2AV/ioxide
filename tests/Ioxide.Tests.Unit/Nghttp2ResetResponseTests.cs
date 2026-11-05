@@ -45,41 +45,57 @@ internal static class Nghttp2ResetResponseTests
 
             client.Close(run);
             connection.Dispose();
-            Assert.True(grown < 2 * 1024 * 1024,
+            Assert.True(grown < 6 * 1024 * 1024,         // malloc is the whole process's; the leak is 12.8 MiB
                 $"{total - warm} responses of 64 KiB to reset streams left {grown / 1024} KiB on the native heap");
         });
 
-        runner.Test("nghttp2: a streamed response to a stream reset in the same read as its end hears the peer gone", () =>
+        foreach (int staged in new[] { 128 * 1024, 0 })
         {
-            using var client = new StrictClient();
-            var connection = new Nghttp2Connection(client);
-
-            var go = new TaskCompletionSource();
-            var outcome = new TaskCompletionSource<string>();
-            Task run = connection.RunAsync(async (_, writer) =>
+            int bytes = staged;
+            runner.Test($"nghttp2: a streamed response to a stream reset in the same read as its end hears the peer gone at a flush of {bytes} B", () =>
             {
-                await go.Task;
-                for (int k = 0; k < 8; k++)              // past the 64 KiB a flush may run ahead of nghttp2
+                using var client = new StrictClient();
+                var connection = new Nghttp2Connection(client);
+
+                var go = new TaskCompletionSource();
+                var outcome = new TaskCompletionSource<string>();
+                bool servedNext = false;
+                Task run = connection.RunAsync(async (request, writer) =>
                 {
-                    writer.GetSpan(16 * 1024)[..(16 * 1024)].Fill((byte)'x');
-                    writer.Advance(16 * 1024);
-                }
-                FlushResult flushed = await writer.FlushAsync();
-                outcome.SetResult(flushed.IsCompleted ? "peer gone" : "flushed");
+                    if (request.StreamId != 1)
+                    {
+                        servedNext = true;
+                        return;
+                    }
+
+                    await go.Task;
+                    if (bytes > 0)                       // past the 64 KiB a flush may run ahead of nghttp2
+                    {
+                        writer.GetSpan(bytes)[..bytes].Fill((byte)'x');
+                        writer.Advance(bytes);
+                    }
+                    FlushResult flushed = await writer.FlushAsync();
+                    outcome.SetResult(flushed.IsCompleted ? "peer gone" : "flushed");
+                });
+
+                client.SendRequests();
+                client.Drain();
+                client.Feed([.. Get(1), .. Http2FlowControlTests.RstStream(1, 8)]);   // its writer is made after the reset
+                client.Drain();
+                go.SetResult();
+                client.Drain();
+
+                Assert.True(outcome.Task.IsCompleted, "the flush of a stream nghttp2 had already closed never returned");
+                Assert.Equal("peer gone", outcome.Task.Result);
+
+                Assert.True(!connection.IsBroken, "one stream's reset failed the connection");   // the loop only sees that after its next read
+                client.Feed(Get(3));
+                client.Drain();
+                Assert.True(servedNext, "the connection served nothing after the reset");
+                client.Close(run);
+                connection.Dispose();
             });
-
-            client.SendRequests();
-            client.Drain();
-            client.Feed([.. Get(1), .. Http2FlowControlTests.RstStream(1, 8)]);   // its writer is made after the reset
-            client.Drain();
-            go.SetResult();
-            client.Drain();
-
-            Assert.True(outcome.Task.IsCompleted, "the flush of a stream nghttp2 had already closed never returned");
-            Assert.Equal("peer gone", outcome.Task.Result);
-            client.Close(run);
-            connection.Dispose();
-        });
+        }
     }
 
     // A GET with END_STREAM: :scheme http, :path /, and an :authority, which nghttp2 requires.

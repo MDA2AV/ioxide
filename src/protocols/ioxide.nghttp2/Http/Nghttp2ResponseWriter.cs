@@ -80,9 +80,9 @@ public sealed class Nghttp2ResponseWriter : IBufferWriter<byte>, IValueTaskSourc
 
     private void SendHeaders(Nghttp2Response response)
     {
-        if (!_gone)
+        if (!_gone && !_connection.SendStreamedHeaders(StreamId, response))
         {
-            _connection.SendStreamedHeaders(StreamId, response);
+            _gone = true;
         }
     }
 
