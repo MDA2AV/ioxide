@@ -71,7 +71,7 @@ public sealed partial class Nghttp2Connection : IDisposable
 
     // Requests whose streams ended during the current ih2_read. The callbacks only record them;
     // the loop dispatches after mem_recv returns.
-    private readonly List<PendingRequest> _readyThisPass = [];
+    private readonly Queue<PendingRequest> _readyThisPass = new();
 
     // Retired buffered requests, kept for the next stream; capped, so a burst leaves little on an idle connection.
     private readonly Stack<PendingRequest> _pendingPool = new();

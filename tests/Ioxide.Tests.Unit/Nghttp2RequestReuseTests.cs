@@ -62,6 +62,9 @@ internal static class Nghttp2RequestReuseTests
             client.Drain();
             parked.SetResult(Ok);                        // stream 1 answers now, and its request is the last to go back
             client.Drain();
+            Nghttp2Request retired = seen[1].Request;    // in the pool now, which must not pin the arena it read from
+            Assert.True(retired.Method.IsEmpty && retired.Path.IsEmpty && retired.Body.IsEmpty && retired.Headers.AsSpan().IsEmpty,
+                "a retired request still points into the arena that went back");
             client.Feed(Request(5, post: false, "/", authority: null, [("host", "c.example")], body: null));
             client.Drain();
             Close(client, connection, run);
@@ -190,7 +193,7 @@ internal static class Nghttp2RequestReuseTests
 
             Open(client);
 
-            // Two warm-up passes: the ready lists swap each pass, so each grows in a pass of its own.
+            // Two warm-up passes grow the ready queue and the pool.
             const int perPass = 16;
             client.Feed(Batch(1, perPass));
             client.Drain();
@@ -251,8 +254,7 @@ internal static class Nghttp2RequestReuseTests
         return bytes.ToArray();
     }
 
-    // HEADERS, then a DATA frame with the body if there is one; the last frame carries END_STREAM unless told not
-    // to. HPACK from the static table and literals without indexing only, so the request needs no encoder of its own.
+    // HEADERS, then DATA with the body if any; the last carries END_STREAM unless told not to. Static table and literals only.
     private static byte[] Request(int streamId, bool post, string path, string? authority,
         (string Name, string Value)[] fields, string? body, bool endStream = true)
     {

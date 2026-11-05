@@ -146,22 +146,8 @@ public sealed partial class Nghttp2Connection
 
     private void DispatchBuffered(Func<Nghttp2Request, ValueTask<Nghttp2Response>> handler)
     {
-        try
+        while (_readyThisPass.TryDequeue(out PendingRequest? pending))
         {
-            DispatchBuffered(handler, _readyThisPass);
-        }
-        finally
-        {
-            _readyThisPass.Clear();
-        }
-    }
-
-    // Callbacks only run inside ih2_read, which never runs during this walk.
-    private void DispatchBuffered(Func<Nghttp2Request, ValueTask<Nghttp2Response>> handler, List<PendingRequest> ready)
-    {
-        for (int i = 0; i < ready.Count; i++)
-        {
-            PendingRequest pending = ready[i];
             if (RefuseOverflowed(pending))
             {
                 continue;

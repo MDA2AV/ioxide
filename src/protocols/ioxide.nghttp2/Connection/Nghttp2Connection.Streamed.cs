@@ -42,21 +42,8 @@ public sealed partial class Nghttp2Connection
     /// </summary>
     private void DispatchStreamed(Func<Nghttp2Request, Nghttp2ResponseWriter, ValueTask> handler)
     {
-        try
+        while (_readyThisPass.TryDequeue(out PendingRequest? pending))
         {
-            DispatchStreamed(handler, _readyThisPass);
-        }
-        finally
-        {
-            _readyThisPass.Clear();
-        }
-    }
-
-    private void DispatchStreamed(Func<Nghttp2Request, Nghttp2ResponseWriter, ValueTask> handler, List<PendingRequest> ready)
-    {
-        for (int i = 0; i < ready.Count; i++)
-        {
-            PendingRequest pending = ready[i];
             if (RefuseOverflowed(pending))
             {
                 continue;
