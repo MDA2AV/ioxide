@@ -67,6 +67,8 @@ typedef struct ih3_conn {
     ih3_callbacks   cbs;
     void           *user;
     ih3_stream     *streams;
+    nghttp3_nv     *nv;       /* the fields being submitted; keeps its size */
+    size_t          nv_cap;
 } ih3_conn;
 
 static ih3_stream *ih3_stream_find(ih3_conn *c, int64_t id)
@@ -305,6 +307,7 @@ void ih3_free(ih3_conn *c)
         ih3_stream_drop(c, c->streams->id);
     }
     nghttp3_conn_del(c->conn);
+    free(c->nv);
     free(c);
 }
 
@@ -326,14 +329,23 @@ int64_t ih3_read_stream(ih3_conn *c, int64_t stream_id, const uint8_t *data, siz
     return (int64_t)rv;
 }
 
-#define IH3_MAX_NV 64
-
 /* headers: [u16 namelen][name][u16 valuelen][value] repeated, little-endian u16 (written and read
- * on the same host). Returns the entry count, or -1 on a malformed buffer. */
-static int ih3_unpack_headers(const uint8_t *headers, size_t headers_len, nghttp3_nv *nva)
+ * on the same host). Unpacks into c->nv, which nghttp3 copies out of during submit. Returns the
+ * entry count, or a negative nghttp3 error. */
+static int ih3_unpack_headers(ih3_conn *c, const uint8_t *headers, size_t headers_len)
 {
     size_t nvlen = 0;
-    for (size_t off = 0; off + 2 <= headers_len && nvlen < IH3_MAX_NV; nvlen++) {
+    for (size_t off = 0; off + 2 <= headers_len; nvlen++) {
+        if (nvlen == c->nv_cap) {
+            size_t cap = c->nv_cap == 0 ? 64 : c->nv_cap * 2;
+            nghttp3_nv *grown = realloc(c->nv, cap * sizeof(*grown));
+            if (grown == NULL) {
+                return NGHTTP3_ERR_NOMEM;
+            }
+            c->nv = grown;
+            c->nv_cap = cap;
+        }
+
         uint16_t namelen;
         memcpy(&namelen, headers + off, 2);
         off += 2;
@@ -341,7 +353,7 @@ static int ih3_unpack_headers(const uint8_t *headers, size_t headers_len, nghttp
         off += namelen;
 
         if (off + 2 > headers_len) {
-            return -1;
+            return NGHTTP3_ERR_INVALID_ARGUMENT;
         }
         uint16_t valuelen;
         memcpy(&valuelen, headers + off, 2);
@@ -350,14 +362,14 @@ static int ih3_unpack_headers(const uint8_t *headers, size_t headers_len, nghttp
         off += valuelen;
 
         if (off > headers_len) {
-            return -1;
+            return NGHTTP3_ERR_INVALID_ARGUMENT;
         }
 
-        nva[nvlen].name     = (uint8_t *)name;
-        nva[nvlen].namelen  = namelen;
-        nva[nvlen].value    = (uint8_t *)value;
-        nva[nvlen].valuelen = valuelen;
-        nva[nvlen].flags    = NGHTTP3_NV_FLAG_NONE;
+        c->nv[nvlen].name     = (uint8_t *)name;
+        c->nv[nvlen].namelen  = namelen;
+        c->nv[nvlen].value    = (uint8_t *)value;
+        c->nv[nvlen].valuelen = valuelen;
+        c->nv[nvlen].flags    = NGHTTP3_NV_FLAG_NONE;
 
         if (off == headers_len) {
             return (int)(nvlen + 1);
@@ -371,10 +383,9 @@ int ih3_submit_response(ih3_conn *c, int64_t stream_id,
                         const uint8_t *headers, size_t headers_len,
                         const uint8_t *body, size_t body_len)
 {
-    nghttp3_nv nva[IH3_MAX_NV];
-    int nvlen = ih3_unpack_headers(headers, headers_len, nva);
+    int nvlen = ih3_unpack_headers(c, headers, headers_len);
     if (nvlen < 0) {
-        return NGHTTP3_ERR_INVALID_ARGUMENT;
+        return nvlen;
     }
 
     ih3_stream *s = NULL;
@@ -396,7 +407,7 @@ int ih3_submit_response(ih3_conn *c, int64_t stream_id,
     }
 
     nghttp3_data_reader dr = { .read_data = ih3_read_body };
-    int rv = nghttp3_conn_submit_response(c->conn, stream_id, nva, (size_t)nvlen,
+    int rv = nghttp3_conn_submit_response(c->conn, stream_id, c->nv, (size_t)nvlen,
                                           body_len > 0 ? &dr : NULL);
     if (rv != 0 && s != NULL) {
         ih3_stream_drop(c, stream_id);
@@ -410,10 +421,9 @@ int ih3_submit_response(ih3_conn *c, int64_t stream_id,
 int ih3_submit_response_stream(ih3_conn *c, int64_t stream_id,
                                const uint8_t *headers, size_t headers_len)
 {
-    nghttp3_nv nva[IH3_MAX_NV];
-    int nvlen = ih3_unpack_headers(headers, headers_len, nva);
+    int nvlen = ih3_unpack_headers(c, headers, headers_len);
     if (nvlen < 0) {
-        return NGHTTP3_ERR_INVALID_ARGUMENT;
+        return nvlen;
     }
 
     ih3_stream *s = calloc(1, sizeof(*s));
@@ -426,7 +436,7 @@ int ih3_submit_response_stream(ih3_conn *c, int64_t stream_id,
     c->streams  = s;
 
     nghttp3_data_reader dr = { .read_data = ih3_read_body_streamed };
-    int rv = nghttp3_conn_submit_response(c->conn, stream_id, nva, (size_t)nvlen, &dr);
+    int rv = nghttp3_conn_submit_response(c->conn, stream_id, c->nv, (size_t)nvlen, &dr);
     if (rv != 0) {
         ih3_stream_drop(c, stream_id);
     }
@@ -446,10 +456,9 @@ int ih3_submit_request(ih3_conn *c, int64_t stream_id,
                        const uint8_t *headers, size_t headers_len,
                        const uint8_t *body, size_t body_len)
 {
-    nghttp3_nv nva[IH3_MAX_NV];
-    int nvlen = ih3_unpack_headers(headers, headers_len, nva);
+    int nvlen = ih3_unpack_headers(c, headers, headers_len);
     if (nvlen < 0) {
-        return NGHTTP3_ERR_INVALID_ARGUMENT;
+        return nvlen;
     }
 
     ih3_stream *s = NULL;
@@ -471,7 +480,7 @@ int ih3_submit_request(ih3_conn *c, int64_t stream_id,
     }
 
     nghttp3_data_reader dr = { .read_data = ih3_read_body };
-    int rv = nghttp3_conn_submit_request(c->conn, stream_id, nva, (size_t)nvlen,
+    int rv = nghttp3_conn_submit_request(c->conn, stream_id, c->nv, (size_t)nvlen,
                                          body_len > 0 ? &dr : NULL, NULL);
     if (rv != 0 && s != NULL) {
         ih3_stream_drop(c, stream_id);
