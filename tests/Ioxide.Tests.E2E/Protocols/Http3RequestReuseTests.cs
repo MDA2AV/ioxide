@@ -1,4 +1,5 @@
 using System.Text;
+using System.Threading.Tasks.Sources;
 using ioxide;
 using ioxide.http3;
 using ioxide.ngtcp2;
@@ -7,17 +8,15 @@ using ioxide.timer;
 namespace Ioxide.Tests;
 
 /// <summary>
-/// ioxide.http3 keeps a request stream whose body arrived whole, with its request, arena and lists, for the next
-/// stream: on every dispatch path the next request must come back holding nothing of the one before, and a warm
-/// connection's requests allocate none of those objects on the reactor.
+/// ioxide.http3 hands a finished request stream, with its request, to the next stream on the connection.
 /// </summary>
 internal static class Http3RequestReuseTests
 {
-    private enum Shape { Synchronous, Parked, Streamed }
+    private enum Shape { Synchronous, Completed, Parked, Streamed }
 
     public static void Register(Runner runner)
     {
-        foreach (Shape shape in new[] { Shape.Synchronous, Shape.Parked, Shape.Streamed })
+        foreach (Shape shape in new[] { Shape.Synchronous, Shape.Completed, Shape.Parked, Shape.Streamed })
         {
             Shape s = shape;
             runner.Test($"h3 request (ioxide.http3, {s.ToString().ToLowerInvariant()} handler): the next stream's request holds nothing of the one before", () =>
@@ -28,18 +27,28 @@ internal static class Http3RequestReuseTests
                 using H3TestClient client = Connect(udpPort);
                 Assert.Equal(200, client.Request("POST", "/first", "hello"u8.ToArray(),
                     [("x-one", "1"), ("x-two", "2"), ("content-length", "5")], timeoutMs: 5000).Status);
-                Assert.Equal(200, client.Get("/", timeoutMs: 5000).Status);
+                Assert.Equal(200, client.Request("GET", "/", null, [("host", "b.example")], timeoutMs: 5000).Status);
                 // A content-length the request before it already counted down must not read as a repeated one.
                 Assert.Equal(200, client.Request("POST", "/again", "world"u8.ToArray(), [("content-length", "5")], timeoutMs: 5000).Status);
 
                 Assert.Equal(3, seen.Count);
-                Assert.Equal("POST /first [x-one=1 x-two=2 content-length=5] hello", seen[0].Fields);
-                Assert.Equal("GET / [] -", seen[1].Fields);
-                Assert.Equal("POST /again [content-length=5] world", seen[2].Fields);
+                Assert.Equal("POST localhost /first [x-one=1 x-two=2 content-length=5] hello", seen[0].Fields);
+                Assert.Equal("GET - / [host=b.example] -", seen[1].Fields);
+                Assert.Equal("POST localhost /again [content-length=5] world", seen[2].Fields);
                 Assert.True(ReferenceEquals(seen[0].Request, seen[1].Request) && ReferenceEquals(seen[1].Request, seen[2].Request),
                     "each stream reuses the request of the one before");
             });
         }
+
+        runner.Test("h3 request (ioxide.http3): a response that points into its request keeps its bytes when it is sent again", () =>
+        {
+            Http3Response? kept = null;
+            int udpPort = Start(Shape.Synchronous, _ => { }, request => kept ??= new Http3Response { Body = request.Path });
+
+            using H3TestClient client = Connect(udpPort);
+            Assert.Equal("/aaaa", client.Get("/aaaa", timeoutMs: 5000).Body);
+            Assert.Equal("/aaaa", client.Get("/bbbb", timeoutMs: 5000).Body);   // the same response object, sent again
+        });
 
         runner.Test("h3 request (ioxide.http3): a warm connection's request allocates none of the request objects", () =>
         {
@@ -71,8 +80,7 @@ internal static class Http3RequestReuseTests
 
             Assert.True(threads[0] == threads[1] && marks[1] >= marks[0], "both marks come from the reactor's thread");
 
-            // Before reuse, every request allocated about 1.8 KB of these. What may remain is the QUIC send queue's
-            // per-stream state, about 185 B, which the engine reuses as well once that change is in.
+            // Allows for the QUIC layer's per-stream send state, about 185 B, which this connection does not own.
             long perRequest = (marks[1] - marks[0]) / measured;
             Assert.True(perRequest < 400, $"a request on a warm connection allocated {perRequest} B on the reactor");
         });
@@ -80,9 +88,8 @@ internal static class Http3RequestReuseTests
 
     private static readonly Http3Response Ok = Http3Response.Text("ok");   // shared, so the handler allocates nothing
 
-    // One connection's server, answering "ok" through the handler shape asked for: a synchronous handler, one that
-    // parks on a ring timer before it answers, or one that streams its response.
-    private static int Start(Shape shape, Action<Http3Request> observe)
+    // One connection's server, answering "ok" (or what respond makes) through the handler shape asked for.
+    private static int Start(Shape shape, Action<Http3Request> observe, Func<Http3Request, Http3Response>? respond = null)
     {
         (string certPath, string keyPath) = TestCert.Ensure();
         var engine = TestServer.Own(new QuicEngine(certPath, keyPath, cidLength: 8, alpn: ["h3"]));
@@ -99,7 +106,14 @@ internal static class Http3RequestReuseTests
                         return connection.RunAsync(request =>
                         {
                             observe(request);
-                            return Ok;
+                            return respond?.Invoke(request) ?? Ok;
+                        });
+
+                    case Shape.Completed:
+                        return connection.RunAsync(request =>
+                        {
+                            observe(request);
+                            return new ValueTask<Http3Response>(new ReadOnce(Ok), 0);
                         });
 
                     case Shape.Parked:
@@ -141,8 +155,30 @@ internal static class Http3RequestReuseTests
             fields.Add($"{Ascii(name)}={Ascii(value)}");
         }
 
-        return $"{Ascii(request.Method)} {Ascii(request.Path)} [{string.Join(' ', fields)}] "
+        string authority = request.Authority.IsEmpty ? "-" : Ascii(request.Authority);
+        return $"{Ascii(request.Method)} {authority} {Ascii(request.Path)} [{string.Join(' ', fields)}] "
              + (request.Body.IsEmpty ? "-" : Ascii(request.Body));
+    }
+
+    // Complete before it is returned and readable once, as a pooled source is: a second read throws.
+    private sealed class ReadOnce(Http3Response response) : IValueTaskSource<Http3Response>
+    {
+        private bool _read;
+
+        public Http3Response GetResult(short token)
+        {
+            if (_read)
+            {
+                throw new InvalidOperationException("the handler's ValueTask was read twice");
+            }
+            _read = true;
+            return response;
+        }
+
+        public ValueTaskSourceStatus GetStatus(short token) => ValueTaskSourceStatus.Succeeded;
+
+        public void OnCompleted(Action<object?> continuation, object? state, short token, ValueTaskSourceOnCompletedFlags flags)
+            => continuation(state);
     }
 
     private static string Ascii(ReadOnlyMemory<byte> bytes) => Encoding.ASCII.GetString(bytes.Span);

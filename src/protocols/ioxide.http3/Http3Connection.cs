@@ -58,8 +58,7 @@ public sealed partial class Http3Connection
     private readonly Dictionary<long, ReqStream> _requests = new();
     private readonly Dictionary<long, UniStream> _unis = new();
 
-    // Request streams whose body arrived whole, kept with their Http3Request, arena and lists for the
-    // next stream (#488). Capped, so a burst of streams leaves no more than this on an idle connection.
+    // Request streams whose body arrived whole, kept for the next stream; capped, so a burst leaves little behind.
     private readonly Stack<ReqStream> _reqPool = new();
     private const int MaxPooledRequests = 32;
     private readonly List<long> _ready = [];
@@ -750,24 +749,16 @@ public sealed partial class Http3Connection
         Recycle(rs, resp);
     }
 
-    /// <summary>
-    /// Done with a request once its handler is done and its response submitted. One whose body arrived whole
-    /// left <c>_requests</c> at dispatch, so nothing reaches it by its id any more and it goes back for the next
-    /// stream. A streamed body's stays in <c>_requests</c> until its stream ends, so it is left alone.
-    /// </summary>
+    /// <summary>Back for the next stream once the handler is done and the response submitted.</summary>
     private void Recycle(ReqStream rs, Http3Response? response)
     {
-        // Only on the reactor, the one thread that rents, and never one whose lists a peer's thousands of header
-        // lines grew: those would stay that size on the connection.
+        // A streamed body's request stays in _requests until its stream ends; only the reactor rents.
         if (_streamBodies || _reqPool.Count >= MaxPooledRequests || OffReactor || !rs.Request.IsSmall)
         {
             return;
         }
 
-        // A response can outlive its request: a handler may hand the same response object out again later. So an
-        // arena the response points into (an echo of a header, say) goes with it, and the next stream starts a
-        // fresh one. A body that waits for send capacity needs nothing more: only bodies past 4 KiB wait, and an
-        // arena that large is never kept (Http3Request.MaxPooledArena).
+        // A handler may send this response object again later, so an arena its body points into goes with it.
         if (response is not null
             && MemoryMarshal.TryGetArray(response.Body, out ArraySegment<byte> body)
             && ReferenceEquals(body.Array, rs.Request.Arena))

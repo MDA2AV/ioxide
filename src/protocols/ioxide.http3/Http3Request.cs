@@ -105,9 +105,7 @@ public sealed class Http3Request
 
     private ReadOnlyMemory<byte> Slice((int Off, int Len) r) => r.Len < 0 ? default : Arena.AsMemory(r.Off, r.Len);
 
-    // An arena past this is not kept for the next stream: a peer sending large headers would otherwise
-    // leave a large array on the connection for the rest of its life. At most the inline-body limit, so a
-    // response body that waits for send capacity never points into a kept arena.
+    // Not above the inline-body limit, so a response body that waits for send capacity never points into a kept arena.
     internal const int MaxPooledArena = 4 * 1024;
 
     // Grew nothing a pooled request should keep: lists past this were a peer's thousands of header lines.
