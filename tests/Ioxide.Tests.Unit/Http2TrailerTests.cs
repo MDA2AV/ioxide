@@ -209,7 +209,7 @@ internal static class Http2TrailerTests
 
     // A literal with a new name: without indexing, or with incremental indexing, which inserts it
     // into the dynamic table at index 62.
-    private static byte[] Field(string name, string value, bool index = false)
+    internal static byte[] Field(string name, string value, bool index = false)
     {
         var block = new List<byte> { (byte)(index ? 0x40 : 0x00) };
         Literal(block, name);

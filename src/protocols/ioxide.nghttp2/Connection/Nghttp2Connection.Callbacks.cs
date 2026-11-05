@@ -36,6 +36,13 @@ public sealed partial class Nghttp2Connection
         }
     }
 
+    // Left pending, so nothing later in this read can start a fresh request on the stream; reset once ih2_read unwinds.
+    private void Overflow(PendingRequest pending)
+    {
+        pending.Overflowed = true;
+        _readyThisPass.Add(pending);
+    }
+
     [UnmanagedCallersOnly]
     private static unsafe void CallbackBeginHeaders(void* user, int streamId)
     {
@@ -65,8 +72,16 @@ public sealed partial class Nghttp2Connection
             Nghttp2Connection connection = From(user);
 
             // A dispatched request's trailers are dropped: its arena backs memories a handler holds.
-            if (!connection._pending.TryGetValue(streamId, out PendingRequest? pending) || pending.BodyReader is not null)
+            if (!connection._pending.TryGetValue(streamId, out PendingRequest? pending) || pending.BodyReader is not null || pending.Overflowed)
             {
+                return;
+            }
+
+            // RFC 9113 6.5.2's measure. nghttp2 calls back once per decoded field, whatever a block arrived as.
+            pending.HeaderListSize += (long)nameLength + (long)valueLength + 32;
+            if (pending.HeaderListSize > connection._options.MaxHeaderListSize)
+            {
+                connection.Overflow(pending);
                 return;
             }
 
@@ -139,9 +154,7 @@ public sealed partial class Nghttp2Connection
             {
                 if (pending.BodyLength + (long)dataLength > connection._options.MaxRequestBytes)
                 {
-                    // Left pending, so a trailer later in this read cannot start a fresh request on the stream.
-                    pending.Overflowed = true;
-                    connection._readyThisPass.Add(pending);
+                    connection.Overflow(pending);
                     return;
                 }
                 pending.AppendBody(new ReadOnlySpan<byte>(data, (int)dataLength));

@@ -166,8 +166,11 @@ public sealed partial class Nghttp2Connection : IDisposable
 
         public int StreamId;
 
-        // The body passed MaxRequestBytes: the stream is reset once ih2_read unwinds, never dispatched.
+        // The body passed MaxRequestBytes, or the headers MaxHeaderListSize: the stream is reset once ih2_read unwinds, never dispatched.
         public bool Overflowed;
+
+        // What this request's header blocks have decoded to so far.
+        public long HeaderListSize;
 
         /// <summary>
         /// Set once a streamed body's request is dispatched at its headers, and kept after its handler
@@ -265,6 +268,7 @@ public sealed partial class Nghttp2Connection : IDisposable
                 _arena = [];
             }
             _used = 0;
+            HeaderListSize = 0;
         }
     }
 }
