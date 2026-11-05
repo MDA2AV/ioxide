@@ -87,8 +87,7 @@ internal static class LeaseTests
             assets.Dispose();
         });
 
-        // A reload signalled during shutdown (SIGHUP, say) runs after Dispose, with a request's lease still out. It
-        // must not bring the assets back, and the snapshot that lease holds must still close when it is released.
+        // A reload signalled during shutdown runs after Dispose, with a request's lease still out: it must revive nothing.
         runner.Test("file: after Dispose, Reload does nothing and Acquire throws, and a lease still out keeps its snapshot", () =>
         {
             var assets = new StaticAssets(LeaseAssets());
@@ -97,7 +96,9 @@ internal static class LeaseTests
 
             assets.Dispose();
             assets.Reload();
-            Assert.Throws<ObjectDisposedException>(() => assets.Acquire().Dispose(), nameof(StaticAssets));   // after Dispose and a Reload
+            Assert.Throws<ObjectDisposedException>(() => assets.Acquire().Dispose(), nameof(StaticAssets));
+            Assert.Throws<ObjectDisposedException>(() => _ = assets.Count, nameof(StaticAssets));
+            Assert.Throws<ObjectDisposedException>(() => _ = assets.RootDir, nameof(StaticAssets));
             Assert.Equal(asset.Path, ExecInheritance.Target(asset.Fd));   // the lease still reads its file
 
             held.Dispose();
@@ -127,8 +128,50 @@ internal static class LeaseTests
             }
         });
 
-        // Acquire's retry is for exactly this: a snapshot that a concurrent Reload swapped out refuses the lease,
-        // and the next read finds the new one. None of that may surface as an exception or a failed lookup.
+        // They share a lock, so a reload in progress finishes first and its snapshot is the one dropped.
+        runner.Test("file: Dispose racing Reload leaves no descriptor open and nothing to lease", () =>
+        {
+            string root = LeaseAssets();
+            string file = new FileInfo(Path.Combine(root, "a.txt")).FullName;
+            for (int round = 0; round < 300; round++)
+            {
+                var assets = new StaticAssets(root);
+                int reloads = 0;
+                bool stop = false;
+                Exception? thrown = null;
+                var reloader = new Thread(() =>
+                {
+                    try
+                    {
+                        while (!Volatile.Read(ref stop))
+                        {
+                            assets.Reload();
+                            Interlocked.Increment(ref reloads);
+                        }
+                    }
+                    catch (Exception e)
+                    {
+                        thrown = e;
+                    }
+                }) { IsBackground = true };
+                reloader.Start();
+
+                while (Volatile.Read(ref reloads) == 0 && reloader.IsAlive)
+                {
+                    Thread.SpinWait(16);                 // so the Dispose lands on a reload under way
+                }
+                assets.Dispose();
+                Volatile.Write(ref stop, true);
+                Assert.True(reloader.Join(TimeSpan.FromSeconds(5)), "a Reload racing Dispose never returned");
+
+                Assert.True(thrown is null, $"Reload threw {thrown?.GetType().Name} in round {round}");
+                Assert.Throws<ObjectDisposedException>(() => assets.Acquire().Dispose(), nameof(StaticAssets));
+                HashSet<int> open = ExecInheritance.Referring(file);
+                Assert.True(open.Count == 0, $"round {round} left fds {string.Join(", ", open)} open on the file");
+            }
+        });
+
+        // A snapshot a concurrent Reload swapped out refuses the lease, and the next read finds the new one: no exception, no failed lookup.
         runner.Test("file: Acquire racing Reload always gets a lease on a whole snapshot", () =>
         {
             var assets = new StaticAssets(LeaseAssets());

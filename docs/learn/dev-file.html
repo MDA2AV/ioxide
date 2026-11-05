@@ -106,7 +106,7 @@ foreach (string path in Directory.EnumerateFiles(RootDir, "*", walk))
     AttributesToSkip = FileAttributes.ReparsePoint | FileAttributes.Hidden | FileAttributes.System,
 };</code></pre>
 <p class="src"><b>AssetCache.cs</b> · a lock-free refcount - the snapshot frees only when the last hold drops</p>
-<pre><code class="language-csharp">private const long LiveRef = 1L &lt;&lt; 48;   // lease releases alone cannot reach 0
+<pre><code class="language-csharp">private const long LiveRef = 1L &lt;&lt; 48;   // extra releases or leaked leases need years at 1M/s to drain or overflow it
 private long _refs = LiveRef;            // plus one per lease
 
 internal bool TryAddRef()
@@ -140,8 +140,8 @@ public void Dispose()                    // drops the live reference: Reload, or
     <h2>StaticAssets &middot; <span class="dim">StaticAssets.cs</span></h2>
     <p>A reloadable holder around an <code>AssetCache</code>. <code>Reload</code> builds a fresh snapshot,
     swaps it in atomically (<code>Interlocked.Exchange</code>), and drops the live reference on the old
-    one - which is then freed only once every outstanding lease on it is released. No timer, no grace
-    window: with each lease disposed once, an in-flight read on the old snapshot never hits a closed fd.
+    one. With each lease disposed once, the old snapshot is freed only when the last lease on it is
+    released, so with no timer and no grace window, an in-flight read on it never hits a closed fd.
     <code>Dispose</code> drops the live snapshot the same way, under the same lock as a reload, and is
     idempotent; after it <code>Acquire</code> throws <code>ObjectDisposedException</code> and
     <code>Reload</code> does nothing, so a reload signalled during shutdown cannot bring the assets back.</p>
@@ -151,7 +151,7 @@ public void Dispose()                    // drops the live reference: Reload, or
       send - and disposes it when the response is fully sent. <code>TryAddRef</code> fails if the
       snapshot is already releasing, so <code>Acquire</code> simply re-reads the live one. A reload
       swaps the live snapshot before it releases the old one, so a refusal from the snapshot that is
-      still live means it was freed under it, and <code>Acquire</code> throws
+      still live means extra lease releases drained it, and <code>Acquire</code> throws
       <code>ObjectDisposedException</code> instead of retrying, as it does once the assets are disposed.</li>
     </ul>
 <p class="src"><b>StaticAssets.cs</b> · Acquire leases the live snapshot; Reload swaps a fresh one in atomically</p>

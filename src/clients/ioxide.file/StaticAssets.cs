@@ -9,8 +9,8 @@ namespace ioxide.file;
 /// To serve safely across a reload, take a <see cref="Lease"/> with <see cref="Acquire"/> and hold
 /// it for the whole request (lookup → ring read → send), and dispose it once: the old snapshot's
 /// descriptors are freed only once every lease on it is released, so an in-flight read never hits a
-/// closed fd. After <see cref="Dispose"/>, <see cref="Acquire"/> throws and <see cref="Reload"/> does
-/// nothing; leases already out keep the last snapshot open until they are released.
+/// closed fd. After <see cref="Dispose"/>, <see cref="Acquire"/>, <see cref="Count"/> and <see cref="RootDir"/>
+/// throw and <see cref="Reload"/> does nothing; leases already out keep the last snapshot open until they are released.
 /// </remarks>
 public sealed class StaticAssets : IDisposable
 {
