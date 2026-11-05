@@ -126,14 +126,6 @@ public sealed partial class Nghttp2Connection
         }
     }
 
-    // Taken whole before the walk: the list must not be mutated while it is walked, and the next
-    // read pass lands its requests in the other one. The caller clears it once done.
-    private List<PendingRequest> TakeReady()
-    {
-        (_readyThisPass, _dispatching) = (_dispatching, _readyThisPass);
-        return _dispatching;
-    }
-
     // A request that outgrew MaxRequestBytes is reset instead of dispatched, whichever the response mode.
     private bool RefuseOverflowed(PendingRequest pending)
     {
@@ -154,21 +146,22 @@ public sealed partial class Nghttp2Connection
 
     private void DispatchBuffered(Func<Nghttp2Request, ValueTask<Nghttp2Response>> handler)
     {
-        List<PendingRequest> ready = TakeReady();
         try
         {
-            DispatchBuffered(handler, ready);
+            DispatchBuffered(handler, _readyThisPass);
         }
         finally
         {
-            ready.Clear();
+            _readyThisPass.Clear();
         }
     }
 
+    // Callbacks only run inside ih2_read, which never runs during this walk.
     private void DispatchBuffered(Func<Nghttp2Request, ValueTask<Nghttp2Response>> handler, List<PendingRequest> ready)
     {
-        foreach (PendingRequest pending in ready)
+        for (int i = 0; i < ready.Count; i++)
         {
+            PendingRequest pending = ready[i];
             if (RefuseOverflowed(pending))
             {
                 continue;

@@ -70,13 +70,10 @@ public sealed partial class Nghttp2Connection : IDisposable
     private readonly Dictionary<int, PendingRequest> _pending = new();
 
     // Requests whose streams ended during the current ih2_read. The callbacks only record them;
-    // the loop dispatches after mem_recv returns, walking the other list: the two swap each pass.
-    private List<PendingRequest> _readyThisPass = [];
-    private List<PendingRequest> _dispatching = [];
+    // the loop dispatches after mem_recv returns.
+    private readonly List<PendingRequest> _readyThisPass = [];
 
-    // Retired requests with a buffered body, each keeping its Nghttp2Request, header list and field
-    // ranges for the next stream (#489). Capped, so a burst of streams leaves no more than this on an idle
-    // connection.
+    // Retired buffered requests, kept for the next stream; capped, so a burst leaves little on an idle connection.
     private readonly Stack<PendingRequest> _pendingPool = new();
     private const int MaxPooledRequests = 32;
 
@@ -87,17 +84,12 @@ public sealed partial class Nghttp2Connection : IDisposable
         return pending;
     }
 
-    /// <summary>
-    /// Done with a dispatched request, once its handler has returned. A buffered body's request left
-    /// <c>_pending</c> before it was dispatched, so nothing can reach it any more and it goes back for the
-    /// next stream. A streamed body's stays in <c>_pending</c> until its stream ends, so it is only disposed.
-    /// </summary>
+    /// <summary>Done with a dispatched request once its handler has returned; a streamed body's stays in _pending.</summary>
     private void Retire(PendingRequest pending)
     {
         pending.Dispose();
 
-        // Only on the reactor, the one thread that rents, and never one whose field list a peer's thousands of
-        // header lines grew: it would stay that size on the connection.
+        // Only the reactor rents, and a field list a peer's header lines grew would stay that size.
         if (pending.BodyReader is null && _pendingPool.Count < MaxPooledRequests && !OffReactor && pending.IsSmall)
         {
             pending.Reset();
@@ -305,8 +297,7 @@ public sealed partial class Nghttp2Connection : IDisposable
             Overflowed = false;
             Method = Path = Scheme = Authority = _body = default;
 
-            // Its request still points into the arena Dispose returned: let go of it, so the pool does not pin
-            // the array, and keep the header list's capacity for the next stream.
+            // Its request still points into the arena Dispose returned, which the pool must not pin.
             _request.Headers.Clear();
             _request.Method = _request.Path = _request.Scheme = _request.Authority = _request.Body = default;
             _request.BodyReader = null;

@@ -1,13 +1,12 @@
+using System.Collections;
+using System.Reflection;
 using System.Text;
 using ioxide.nghttp2;
 
 namespace Ioxide.Tests;
 
 /// <summary>
-/// ioxide.nghttp2 keeps a retired request whose body arrived whole, with its header list and field ranges, for
-/// the next stream: the next request must come back holding nothing of the one before, a request still reading its
-/// streamed body must never be handed on, and a warm connection's request allocates none of the parser's objects.
-/// Driven over the strict test transport, like the managed stack.
+/// ioxide.nghttp2 hands a retired request whose body arrived whole to the next stream on the connection.
 /// </summary>
 internal static class Nghttp2RequestReuseTests
 {
@@ -71,9 +70,86 @@ internal static class Nghttp2RequestReuseTests
             Assert.True(ReferenceEquals(seen[1].Request, seen[5].Request), "the parked handler's request was reused");
         });
 
-        // A handler that takes a body reader is dispatched at the headers, and its request stays in _pending until
-        // the stream ends, because the body's DATA and trailers still find it there. Handed to the next stream, that
-        // stream's headers would land on it as trailers and its request would never be dispatched.
+        runner.Test("nghttp2 request: a streamed response's request goes back once its handler is done", () =>
+        {
+            using var client = new StrictClient();
+            var connection = new Nghttp2Connection(client);
+
+            var seen = new List<(Nghttp2Request Request, string Fields)>();
+            Task run = connection.RunAsync((request, writer) =>
+            {
+                seen.Add((request, Describe(request)));
+                return ValueTask.CompletedTask;            // the connection sends a 200 with no body
+            });
+
+            Open(client);
+            client.Feed(Request(1, post: false, "/first", "a.example", [("x-one", "1")], body: null));
+            client.Drain();
+            client.Feed(Request(3, post: false, "/", authority: null, [("host", "b.example")], body: null));
+            client.Drain();
+            Close(client, connection, run);
+
+            Assert.Equal("3 GET / - [host=b.example] -", seen[1].Fields);
+            Assert.True(ReferenceEquals(seen[0].Request, seen[1].Request), "the second stream reuses the first one's request");
+        });
+
+        runner.Test("nghttp2 request: a request a peer sent 65 header lines is not kept for the next stream", () =>
+        {
+            using var client = new StrictClient();
+            var connection = new Nghttp2Connection(client);
+
+            var seen = new List<Nghttp2Request>();
+            Task run = connection.RunAsync(request =>
+            {
+                seen.Add(request);
+                return Ok;
+            });
+
+            Open(client);
+            (string, string)[] many = [.. Enumerable.Range(0, 65).Select(i => ($"x-{i}", "v"))];
+            client.Feed(Request(1, post: false, "/", "a.example", many, body: null));
+            client.Drain();
+            client.Feed(Request(3, post: false, "/", "a.example", [], body: null));
+            client.Drain();
+            client.Feed(Request(5, post: false, "/", "a.example", [], body: null));
+            client.Drain();
+            Close(client, connection, run);
+
+            Assert.Equal(3, seen.Count);
+            Assert.True(!ReferenceEquals(seen[0], seen[1]), "a request whose field list grew past 64 entries was kept");
+            Assert.True(ReferenceEquals(seen[1], seen[2]), "control: a small request is kept");
+        });
+
+        runner.Test("nghttp2 request: a connection keeps at most 32 requests for later streams", () =>
+        {
+            using var client = new StrictClient();
+            var connection = new Nghttp2Connection(client);
+
+            var parked = new List<TaskCompletionSource<Nghttp2Response>>();   // one each: a shared one resumes off-thread
+            Task run = connection.RunAsync(_ =>
+            {
+                var answer = new TaskCompletionSource<Nghttp2Response>();
+                parked.Add(answer);
+                return new ValueTask<Nghttp2Response>(answer.Task);
+            });
+
+            Open(client);
+            client.Feed(Batch(1, 40));
+            client.Drain();
+            foreach (TaskCompletionSource<Nghttp2Response> answer in parked)
+            {
+                answer.SetResult(Ok);                    // each retires inline, on this thread
+            }
+            client.Drain();
+            int pooled = ((ICollection)typeof(Nghttp2Connection)
+                .GetField("_pendingPool", BindingFlags.NonPublic | BindingFlags.Instance)!.GetValue(connection)!).Count;
+            Close(client, connection, run);
+
+            Assert.Equal(40, parked.Count);
+            Assert.Equal(32, pooled);
+        });
+
+        // A body reader's request stays in _pending until its stream ends; handed on, the next stream's headers land on it.
         runner.Test("nghttp2 request: a request whose body is still arriving is not handed to the next stream", () =>
         {
             using var client = new StrictClient();
@@ -131,8 +207,7 @@ internal static class Nghttp2RequestReuseTests
             client.Drain();
             Close(client, connection, run);
 
-            // Before reuse, every request allocated about 650 B of parser objects. What is left is the test
-            // transport's own flush, shared by the pass.
+            // What is left is the test transport's own flush, shared by the pass.
             Assert.True(perRequest < 200, $"a request on a warm connection allocated {perRequest} B");
         });
     }
