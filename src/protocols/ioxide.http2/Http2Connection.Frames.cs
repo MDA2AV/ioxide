@@ -316,8 +316,16 @@ public sealed partial class Http2Connection
             }
 
             PendingRequest target = pending;
+            int limit = _options.MaxHeaderListSize;
             _decoder.Decode(block, _headerScratch,
-                discard ? static (_, _) => { } : (name, value) => target.AddHeader(name, value));
+                discard ? static (_, _) => { } : (name, value) => target.AddHeader(name, value, limit));
+
+            if (pending.HeaderListSize > limit)
+            {
+                ResetStream(pending.StreamId, Http2Error.EnhanceYourCalm);   // decoded whole, so HPACK is in step and only this request ends
+                return false;
+            }
+
             pending.ClearHeaderBlock();
             pending.HeadersDone = true;
             return true;
@@ -590,6 +598,9 @@ public sealed partial class Http2Connection
         public bool HeadersDone;
         public bool RequestEnded;
 
+        // What this request's header blocks have decoded to so far.
+        public long HeaderListSize;
+
         /// <summary>Set only when the body is being streamed; the arena stays empty then.</summary>
         public Http2BodyReader? BodyReader;
 
@@ -631,8 +642,14 @@ public sealed partial class Http2Connection
             _blockUsed = 0;
         }
 
-        public void AddHeader(ReadOnlySpan<byte> name, ReadOnlySpan<byte> value)
+        public void AddHeader(ReadOnlySpan<byte> name, ReadOnlySpan<byte> value, int limit)
         {
+            HeaderListSize += name.Length + value.Length + 32;   // RFC 9113 6.5.2's measure
+            if (HeaderListSize > limit)
+            {
+                return;   // the stream is reset once the block is decoded, so there is nothing to keep it for
+            }
+
             if (name.Length > 0 && name[0] == (byte)':')
             {
                 (int Offset, int Length) pseudo = Append(value);
@@ -735,6 +752,7 @@ public sealed partial class Http2Connection
 
             ClearHeaderBlock();
             _fields.Clear();
+            HeaderListSize = 0;
             if (_arena.Length > 0)
             {
                 ArrayPool<byte>.Shared.Return(_arena);
