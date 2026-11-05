@@ -4,9 +4,7 @@ using ioxide.ngtcp2;
 namespace Ioxide.Tests;
 
 /// <summary>
-/// The QUIC engine's per-stream send state: a connection keeps the state of a stream whose send side is done for
-/// the next stream that sends, so a warm connection's responses allocate none of it. ioxide.nghttp3 makes no
-/// other garbage per request, so what the reactor allocates across its responses is that state alone.
+/// A QUIC connection hands a closed stream's send state to the next stream that sends.
 /// </summary>
 internal static class QuicSendStreamTests
 {
@@ -19,7 +17,8 @@ internal static class QuicSendStreamTests
 
             // Few requests: the test client spends about 1.5 s on each.
             const int warm = 4;
-            const int measured = 12;
+            const int measured = 4;
+            const int oneStreamState = 184;   // an OutStream, its Queue and the queue's first array
             Nghttp3Response response = Nghttp3Response.Text("ok");   // shared, so the handler allocates nothing
             long[] marks = new long[2];
             int[] threads = new int[2];
@@ -55,8 +54,9 @@ internal static class QuicSendStreamTests
 
             Assert.True(threads[0] == threads[1] && marks[1] >= marks[0], "both marks come from the reactor's thread");
 
-            long perResponse = (marks[1] - marks[0]) / measured;
-            Assert.True(perResponse < 64, $"a response on a warm connection allocated {perResponse} B on the reactor");
+            long allocated = marks[1] - marks[0];   // nghttp3 makes no other garbage per request
+            Assert.True(allocated < oneStreamState,
+                $"{measured} responses on a warm connection allocated {allocated} B on the reactor, a stream's send state or more");
         });
     }
 }
