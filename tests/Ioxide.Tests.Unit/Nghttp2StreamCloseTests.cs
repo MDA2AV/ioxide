@@ -4,11 +4,7 @@ using ioxide.nghttp2;
 
 namespace Ioxide.Tests;
 
-/// <summary>
-/// A request its peer resets before it ends has to leave the connection whatever error code the reset carries:
-/// nghttp2 closes and frees the stream on its side, and only the shim's close callback can release the half-built
-/// request the managed side holds for it.
-/// </summary>
+/// <summary>A request its peer resets before it ends leaves the connection, whatever code the reset carries.</summary>
 internal static class Nghttp2StreamCloseTests
 {
     public static void Register(Runner runner)
