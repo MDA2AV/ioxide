@@ -1,7 +1,6 @@
 using System.Buffers;
 using System.Diagnostics.CodeAnalysis;
 using System.Runtime.CompilerServices;
-using System.Runtime.InteropServices;
 using ioxide;
 
 namespace ioxide.http3;
@@ -676,7 +675,7 @@ public sealed partial class Http3Connection
             }
 
             Submit(rs.Request.StreamId, resp);
-            Recycle(rs, resp);
+            Recycle(rs);
         }
         _ready.Clear();
     }
@@ -707,7 +706,7 @@ public sealed partial class Http3Connection
                 Console.Error.WriteLine($"[ioxide.http3] request handler faulted: {e.GetBaseException().Message}");
                 RetireBody(rs);
                 Submit(sid, new Http3Response { Status = 500 });
-                Recycle(rs, response: null);
+                Recycle(rs);
                 continue;
             }
 
@@ -716,7 +715,7 @@ public sealed partial class Http3Connection
                 RetireBody(rs);
                 Http3Response response = pending.Result;   // once: a ValueTask is consumed by reading it
                 Submit(sid, response);
-                Recycle(rs, response);
+                Recycle(rs);
             }
             else
             {
@@ -746,24 +745,16 @@ public sealed partial class Http3Connection
             return;
         }
         Submit(rs.Request.StreamId, resp);
-        Recycle(rs, resp);
+        Recycle(rs);
     }
 
     /// <summary>Back for the next stream once the handler is done and the response submitted.</summary>
-    private void Recycle(ReqStream rs, Http3Response? response)
+    private void Recycle(ReqStream rs)
     {
         // A streamed body's request stays in _requests until its stream ends; only the reactor rents.
         if (_streamBodies || _reqPool.Count >= MaxPooledRequests || OffReactor || !rs.Request.IsSmall)
         {
             return;
-        }
-
-        // A handler may send this response object again later, so an arena its body points into goes with it.
-        if (response is not null
-            && MemoryMarshal.TryGetArray(response.Body, out ArraySegment<byte> body)
-            && ReferenceEquals(body.Array, rs.Request.Arena))
-        {
-            rs.Request.Arena = [];
         }
 
         ReleaseParseBuffers(rs);

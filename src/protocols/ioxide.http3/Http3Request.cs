@@ -134,6 +134,7 @@ public sealed class Http3Request
 /// <summary>
 /// One HTTP/3 response: status, headers, in-memory body - bytes throughout. Everything is encoded
 /// and handed to the QUIC engine synchronously at submit, so the memories can be pooled or static.
+/// A response kept past its handler has to own them: a request's are reused for a later stream.
 /// </summary>
 public sealed class Http3Response
 {
