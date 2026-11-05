@@ -1,4 +1,5 @@
 using System.Collections;
+using System.IO.Pipelines;
 using System.Reflection;
 using ioxide.nghttp2;
 
@@ -37,6 +38,45 @@ internal static class Nghttp2StreamCloseTests
                 client.Drain();
                 Assert.Equal(1, served);
 
+                client.Close(run);
+                connection.Dispose();
+            });
+        }
+
+        // Its handler is dispatched and parked, with no headers out, so nothing it could send would ever call back.
+        foreach (int staged in new[] { 128 * 1024, 0 })
+        {
+            int bytes = staged;
+            runner.Test($"nghttp2: a streamed response its peer resets with NO_ERROR hears the peer gone at a flush of {bytes} B", () =>
+            {
+                using var client = new StrictClient();
+                var connection = new Nghttp2Connection(client);
+
+                var go = new TaskCompletionSource();
+                var outcome = new TaskCompletionSource<string>();
+                Task run = connection.RunAsync(async (_, writer) =>
+                {
+                    await go.Task;
+                    if (bytes > 0)                       // past the 64 KiB a flush may run ahead of nghttp2
+                    {
+                        writer.GetSpan(bytes)[..bytes].Fill((byte)'x');
+                        writer.Advance(bytes);
+                    }
+                    FlushResult flushed = await writer.FlushAsync();
+                    outcome.SetResult(flushed.IsCompleted ? "peer gone" : "flushed");
+                });
+
+                client.SendRequests();                   // preface and SETTINGS
+                client.Drain();
+                client.Feed(Headers(1, post: false, endStream: true));
+                client.Drain();
+                client.Feed(Http2FlowControlTests.RstStream(1, 0));
+                client.Drain();
+                go.SetResult();
+                client.Drain();
+
+                Assert.True(outcome.Task.IsCompleted, "the flush of a stream its peer reset never returned");
+                Assert.Equal("peer gone", outcome.Task.Result);
                 client.Close(run);
                 connection.Dispose();
             });
