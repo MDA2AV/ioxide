@@ -148,6 +148,33 @@ internal static class Http2TrailerTests
             peer.Close(run);
         });
 
+        runner.Test("h2 request: a buffered request's trailers split over HEADERS and CONTINUATION merge into it, and the connection serves on", () =>
+        {
+            var served = new List<string>();
+
+            using var peer = new Peer(new Http2Options());
+            Task run = peer.Connection.RunAsync(request =>
+            {
+                request.TryGetHeader("x-checksum"u8, out ReadOnlyMemory<byte> checksum);
+                request.TryGetHeader("x-digest"u8, out ReadOnlyMemory<byte> digest);
+                served.Add($"{request.StreamId} '{Ascii(request.Path)}' {request.Body.Length} x-checksum '{Ascii(checksum)}' x-digest '{Ascii(digest)}'");
+                return Http2Response.Text("done");
+            });
+
+            peer.Open();
+            peer.Headers(1, Request("/upload"), endStream: false);
+            peer.Data(1, 400, endStream: false);
+            peer.HeadersOpen(1, Field("x-checksum", "abc"), endStream: true);   // END_STREAM, with the block still open
+            peer.Continuation(1, Field("x-digest", "def"));                    // END_HEADERS
+            peer.Headers(3, Request("/next"), endStream: true);
+
+            Assert.True(served.SequenceEqual(["1 '/upload' 400 x-checksum 'abc' x-digest 'def'", "3 '/next' 0 x-checksum '' x-digest ''"]),
+                $"the handler was handed: {string.Join(", ", served)}");
+            Assert.Equal("", GoAways(peer));
+
+            peer.Close(run);
+        });
+
         runner.Test("h2 request: a stream refused past MaxConcurrentStreams still gets REFUSED_STREAM, and its id opens nothing later", () =>
         {
             var served = new List<string>();
@@ -342,6 +369,10 @@ internal static class Http2TrailerTests
             => Feed(FrameBytes(0x1, (byte)(0x4 | (endStream ? 0x1 : 0)), streamId, block));
 
         public void Continuation(int streamId, byte[] block) => Feed(FrameBytes(0x9, 0x4, streamId, block));
+
+        /// <summary>A HEADERS frame without END_HEADERS: a CONTINUATION ends its block.</summary>
+        public void HeadersOpen(int streamId, byte[] block, bool endStream)
+            => Feed(FrameBytes(0x1, (byte)(endStream ? 0x1 : 0), streamId, block));
 
         public void Data(int streamId, int bytes, bool endStream)
             => Feed(FrameBytes(0x0, (byte)(endStream ? 0x1 : 0), streamId, Enumerable.Repeat((byte)'z', bytes).ToArray()));
