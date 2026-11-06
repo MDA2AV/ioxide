@@ -19,9 +19,8 @@ public sealed class AssetCache : IDisposable
 
     private readonly Dictionary<string, Asset> _assets;
     private readonly SafeFileHandle[] _handles;
-    // The live reference counts as 2^30, so lease releases alone, even a double one, never reach 0.
-    private const int LiveRef = 1 << 30;
-    private int _refs = LiveRef;   // plus one per lease
+    private const long LiveRef = 1L << 48;   // extra releases or leaked leases need years at 1M/s to drain or overflow it
+    private long _refs = LiveRef;   // plus one per lease
 
     /// <summary>The absolute root directory the cache was built over.</summary>
     public string RootDir { get; }
@@ -97,13 +96,13 @@ public sealed class AssetCache : IDisposable
     /// </summary>
     internal bool TryAddRef()
     {
-        int r;
+        long r;
         do
         {
             r = Volatile.Read(ref _refs);
             if (r <= 0)
             {
-                return false;   // freed, or below zero after a second Dispose - don't resurrect
+                return false;   // freed, or below zero after extra lease releases - don't resurrect
             }
         }
         while (Interlocked.CompareExchange(ref _refs, r + 1, r) != r);

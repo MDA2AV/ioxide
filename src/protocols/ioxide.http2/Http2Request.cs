@@ -6,7 +6,8 @@ namespace ioxide.http2;
 /// most handlers only ever compare a path or read a header.
 ///
 /// The memories point into an arena owned by the connection and are valid for the duration of the
-/// handler call. Copy anything you keep past it.
+/// handler call. Copy anything you keep past it: the request itself is reused for a later stream on
+/// the same connection once its handler is done.
 /// </summary>
 public sealed class Http2Request
 {

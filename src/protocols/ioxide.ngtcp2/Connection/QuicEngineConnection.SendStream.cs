@@ -23,9 +23,20 @@ public unsafe partial class QuicEngineConnection
         public bool FinSent;
         public bool Dead;      // reset/refused: stop feeding; chunks freed at stream close
         public bool Pending;   // in the replay list
+
+        public void Reset()
+        {
+            Base = Sent = End = 0;
+            Fin = FinSent = Dead = Pending = false;
+        }
     }
 
     private readonly Dictionary<long, OutStream> _outStreams = new();
+
+    // Closed streams' send state, for the next stream that sends; capped, so a burst leaves little on an idle connection.
+    private readonly Stack<OutStream> _outStreamPool = new();
+    private const int MaxPooledStreams = 32;
+    private const int MaxPooledChunks = 64;   // slots a pooled queue keeps
     private readonly List<long> _outPending = [];
     private long _outRetained;
 
@@ -76,7 +87,7 @@ public unsafe partial class QuicEngineConnection
 
         if (!_outStreams.TryGetValue(streamId, out OutStream? os))
         {
-            os = new OutStream();
+            os = _outStreamPool.TryPop(out OutStream? pooled) ? pooled : new OutStream();
             _outStreams[streamId] = os;
         }
         if (os.Dead || (os.Fin && !fin && data.Length > 0))
@@ -354,5 +365,16 @@ public unsafe partial class QuicEngineConnection
             NativeMemory.Free((void*)p);
             _outRetained -= l;
         }
+
+        if (_outStreamPool.Count >= MaxPooledStreams)
+        {
+            return;
+        }
+        os.Reset();   // SendStream and ReplayOut can still hold it after PumpOut's purge; reset, it has nothing to send
+        if (os.Chunks.Capacity > MaxPooledChunks)
+        {
+            os.Chunks.TrimExcess(MaxPooledChunks);
+        }
+        _outStreamPool.Push(os);
     }
 }

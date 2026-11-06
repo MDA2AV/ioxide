@@ -42,7 +42,7 @@ public sealed partial class Nghttp2Connection
     /// </summary>
     private void DispatchStreamed(Func<Nghttp2Request, Nghttp2ResponseWriter, ValueTask> handler)
     {
-        foreach (PendingRequest pending in TakeReady())
+        while (_readyThisPass.TryDequeue(out PendingRequest? pending))
         {
             if (RefuseOverflowed(pending))
             {
@@ -92,7 +92,7 @@ public sealed partial class Nghttp2Connection
             // Nothing awaits this task, so the retirement the dispatch loop would have done has to
             // happen here - the arena backs the request's memories and the writer holds a pooled
             // staging buffer.
-            pending.Dispose();
+            Retire(pending);
             _writers.Remove(writer.StreamId);
             writer.Release();
             _writerPool.Push(writer);
@@ -110,11 +110,12 @@ public sealed partial class Nghttp2Connection
     }
 
     /// <summary>Headers of a streamed response - no END_STREAM, the body follows.</summary>
-    internal unsafe void SendStreamedHeaders(int streamId, Nghttp2Response response)
+    /// <returns>False when nghttp2 no longer knows the stream: the peer reset it.</returns>
+    internal unsafe bool SendStreamedHeaders(int streamId, Nghttp2Response response)
     {
         if (_handle == 0)
         {
-            return;
+            return true;
         }
 
         byte[] headers = PackHeaders(response, out int headersLength);
@@ -126,10 +127,15 @@ public sealed partial class Nghttp2Connection
                 result = Nghttp2.ih2_submit_response_stream(_handle, streamId, headerBytes, (nuint)headersLength);
             }
 
+            if (result == ErrStreamClosed)
+            {
+                return false;
+            }
             if (result != 0)
             {
                 _failed = true;
             }
+            return true;
         }
         finally
         {
