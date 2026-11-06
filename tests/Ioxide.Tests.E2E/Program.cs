@@ -57,6 +57,7 @@ internal static class Program
         H3BodyTruncationTests.Register(runner);
         H3HeldChunkTests.Register(runner);
         H3ErrorCodeTests.Register(runner);
+        Nghttp3ManyFieldsTests.Register(runner);
         H3CriticalStreamTests.Register(runner);
         H3AlpnTests.Register(runner);
         Http2BodyTests.Register(runner);
