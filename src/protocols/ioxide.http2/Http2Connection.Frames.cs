@@ -190,6 +190,14 @@ public sealed partial class Http2Connection
             }
             return;
         }
+        else if ((header.Flags & FrameFlags.EndStream) == 0)
+        {
+            // RFC 9113 8.1: after the block that opens a request come only trailers, which end its stream.
+            _discardBlock.StreamId = header.StreamId;
+            DiscardHeaderBlock(header, block);
+            ResetStream(header.StreamId, Http2Error.ProtocolError);
+            return;
+        }
 
         // A header block can span HEADERS + CONTINUATION frames, and HPACK cannot be decoded
         // piecewise - the whole block has to be in hand first.
