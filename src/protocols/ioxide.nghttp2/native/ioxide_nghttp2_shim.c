@@ -163,13 +163,12 @@ static int on_data_chunk_recv(nghttp2_session *session, uint8_t flags, int32_t s
 static int on_stream_close(nghttp2_session *session, int32_t stream_id, uint32_t error_code,
                            void *user_data)
 {
-    (void)session;
     ih2_conn *c = user_data;
 
-    /* NO_ERROR here is the normal end of a stream whose response already completed, so only a
-     * real error is worth waking the managed side for - unless it reads request bodies itself:
-     * a peer's RST_STREAM(NO_ERROR) ends one of those too. */
-    if ((error_code != NGHTTP2_NO_ERROR || c->manual_flow) && c->cbs.on_stream_error != NULL) {
+    /* NO_ERROR before our END_STREAM went out is a peer's reset, not the normal end; manual flow hears every close. */
+    if ((error_code != NGHTTP2_NO_ERROR || c->manual_flow ||
+         nghttp2_session_get_stream_local_close(session, stream_id) == 0) &&
+        c->cbs.on_stream_error != NULL) {
         c->cbs.on_stream_error(c->user, stream_id, error_code);
     }
 
