@@ -47,7 +47,7 @@ public sealed partial class Nghttp2Connection
             // the request we have rather than replacing it and losing everything accumulated.
             if (!connection._pending.ContainsKey(streamId))
             {
-                connection._pending[streamId] = new PendingRequest { StreamId = streamId };
+                connection._pending[streamId] = connection.RentPending(streamId);
             }
         }
         catch (Exception e)
@@ -108,7 +108,7 @@ public sealed partial class Nghttp2Connection
                 connection._pending.TryGetValue(streamId, out PendingRequest? pending) && pending.BodyReader is null)
             {
                 pending.BodyReader = new Nghttp2BodyReader(connection, streamId);
-                connection._readyThisPass.Add(pending);
+                connection._readyThisPass.Enqueue(pending);
             }
         }
         catch (Exception e)
@@ -141,7 +141,7 @@ public sealed partial class Nghttp2Connection
                 {
                     // Left pending, so a trailer later in this read cannot start a fresh request on the stream.
                     pending.Overflowed = true;
-                    connection._readyThisPass.Add(pending);
+                    connection._readyThisPass.Enqueue(pending);
                     return;
                 }
                 pending.AppendBody(new ReadOnlySpan<byte>(data, (int)dataLength));
@@ -170,7 +170,7 @@ public sealed partial class Nghttp2Connection
                 }
                 else if (!pending.Overflowed)
                 {
-                    connection._readyThisPass.Add(pending);
+                    connection._readyThisPass.Enqueue(pending);
                 }
             }
         }

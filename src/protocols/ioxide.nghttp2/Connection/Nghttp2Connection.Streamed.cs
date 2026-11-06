@@ -42,7 +42,7 @@ public sealed partial class Nghttp2Connection
     /// </summary>
     private void DispatchStreamed(Func<Nghttp2Request, Nghttp2ResponseWriter, ValueTask> handler)
     {
-        foreach (PendingRequest pending in TakeReady())
+        while (_readyThisPass.TryDequeue(out PendingRequest? pending))
         {
             if (RefuseOverflowed(pending))
             {
@@ -92,7 +92,7 @@ public sealed partial class Nghttp2Connection
             // Nothing awaits this task, so the retirement the dispatch loop would have done has to
             // happen here - the arena backs the request's memories and the writer holds a pooled
             // staging buffer.
-            pending.Dispose();
+            Retire(pending);
             _writers.Remove(writer.StreamId);
             writer.Release();
             _writerPool.Push(writer);
