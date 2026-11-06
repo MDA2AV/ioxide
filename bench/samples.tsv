@@ -27,6 +27,13 @@ Tcp/Big                       h1      8080  /           -                   PLAY
 Tcp/Hop                       h1      8080  /           -                   -
 Tcp/TaskRun                   h1      8080  /           -                   -
 
+# epoxide: ioxide samples on epoll instead of io_uring - Raw/Pipe are Tcp/Raw and Tcp/Pipe, TlsPipes Tls/OpenSslPipes, KtlsPipes Tls/KtlsPipes
+Epoxide/Raw                   h1      8080  /           -                   -
+Epoxide/Pipe                  h1      8080  /           -                   -
+Epoxide/ThreadPool            h1      8080  /           -                   -
+Epoxide/TlsPipes              h1s     8443  /           -                   -
+Epoxide/KtlsPipes             h1s     8443  /           -                   -
+
 # tls over tcp
 Tls/OpenSsl                   h1s     8443  /           -                   -
 Tls/KtlsTx                    h1s     8443  /           -                   -
