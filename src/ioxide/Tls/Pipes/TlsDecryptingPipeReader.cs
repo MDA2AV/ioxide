@@ -18,7 +18,7 @@ namespace ioxide.tls;
 /// consumed/examined bookkeeping a PipeReader owes its caller. The caller's read IS that Pipe's
 /// read; this class only feeds it.
 /// </summary>
-/// <remarks>Reads and disposal from another thread run on the connection's reactor.</remarks>
+/// <remarks>A read from another thread takes what is already decrypted there; decrypting and disposal run on the connection's reactor.</remarks>
 public sealed class TlsDecryptingPipeReader : PipeReader, IAsyncDisposable, IRecvListener
 {
     private readonly TcpConnection _conn;
@@ -63,23 +63,24 @@ public sealed class TlsDecryptingPipeReader : PipeReader, IAsyncDisposable, IRec
     // thread, where disposing frees the session under a decrypt still running on the reactor.
     public override ValueTask<ReadResult> ReadAsync(CancellationToken cancellationToken = default)
     {
-        if (!_conn.Reactor.OnReactorThread)
-        {
-            return ReadOnReactor();
-        }
-
         if (_cancelRequested)
         {
             _cancelRequested = false;
             _plain.Reader.CancelPendingRead();   // nothing is waiting, so the read below returns canceled
         }
 
+        // On any thread: the Pipe takes its reader beside the reactor's writer.
         ValueTask<ReadResult> read = _plain.Reader.ReadAsync();
 
         // Everything decrypted so far has been examined: decrypt more. The read completes inside
         // the flush that delivers, which may already have happened by the time this returns.
         if (!read.IsCompleted)
         {
+            if (!_conn.Reactor.OnReactorThread)
+            {
+                return FillOnReactor(read);
+            }
+
             Fill();
         }
 
@@ -88,10 +89,16 @@ public sealed class TlsDecryptingPipeReader : PipeReader, IAsyncDisposable, IRec
 
     // Decrypting is the reactor's: SSL_read must not overlap its SSL_write (#249), and the parked read is its own.
     [MethodImpl(MethodImplOptions.NoInlining)]
-    private async ValueTask<ReadResult> ReadOnReactor()
+    private async ValueTask<ReadResult> FillOnReactor(ValueTask<ReadResult> read)
     {
         await new ReactorSwitch(_conn.Reactor);
-        return await ReadAsync();
+
+        if (!read.IsCompleted)
+        {
+            Fill();
+        }
+
+        return await read;
     }
 
     /// <remarks>
