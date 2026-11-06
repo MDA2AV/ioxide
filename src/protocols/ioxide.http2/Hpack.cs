@@ -20,10 +20,10 @@ internal sealed class HpackDecoder
     internal sealed class HpackException(string message) : Exception(message);
 
     /// <summary>
-    /// Decode one header block, invoking <paramref name="onHeader"/> per field. Names and values
-    /// point into <paramref name="scratch"/> or into the tables, and are valid until the next call.
+    /// Decode one header block, invoking <paramref name="onHeader"/> with <paramref name="state"/> per field.
+    /// Names and values point into <paramref name="scratch"/> or into the tables, and are valid until the next call.
     /// </summary>
-    internal void Decode(ReadOnlySpan<byte> block, Span<byte> scratch, HeaderSink onHeader)
+    internal void Decode<TState>(ReadOnlySpan<byte> block, Span<byte> scratch, TState state, HeaderSink<TState> onHeader)
     {
         int position = 0;
         int scratchUsed = 0;
@@ -37,7 +37,7 @@ internal sealed class HpackDecoder
                 // 1xxxxxxx - fully indexed: both name and value come from a table.
                 int index = (int)ReadInteger(block, ref position, 7);
                 Lookup(index, out ReadOnlySpan<byte> name, out ReadOnlySpan<byte> value);
-                onHeader(name, value);
+                onHeader(state, name, value);
                 continue;
             }
 
@@ -72,11 +72,11 @@ internal sealed class HpackDecoder
                 _table.Add(headerName, headerValue);
             }
 
-            onHeader(headerName, headerValue);
+            onHeader(state, headerName, headerValue);
         }
     }
 
-    internal delegate void HeaderSink(ReadOnlySpan<byte> name, ReadOnlySpan<byte> value);
+    internal delegate void HeaderSink<in TState>(TState state, ReadOnlySpan<byte> name, ReadOnlySpan<byte> value);
 
     // out parameters rather than a tuple: a tuple cannot hold ref structs, and these have to stay
     // spans so a table hit costs no copy.

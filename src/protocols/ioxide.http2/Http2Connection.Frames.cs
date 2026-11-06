@@ -165,15 +165,7 @@ public sealed partial class Http2Connection
                 return;
             }
 
-            // Opens at what the peer's SETTINGS advertised, not at the RFC default. Streams are
-            // created long after those SETTINGS arrive, so starting at 65535 and waiting for a
-            // WINDOW_UPDATE means waiting for one the peer has no reason to send - it believes we
-            // still have its whole window. That stalls any response longer than 65535 bytes.
-            pending = new PendingRequest
-            {
-                StreamId = header.StreamId,
-                SendWindow = _peerInitialStreamWindow,
-            };
+            pending = RentPending(header.StreamId);
             _streams[header.StreamId] = pending;
             _highestStream = header.StreamId;
         }
@@ -273,7 +265,7 @@ public sealed partial class Http2Connection
 
         pending.BodyReader = new Http2BodyReader(this, pending.StreamId, ended);
         _responseWindows[pending.StreamId] = pending.SendWindow;
-        _ready.Add(pending);
+        _ready.Enqueue(pending);
     }
 
     private void HandleContinuation(in FrameHeader header, ReadOnlySpan<byte> payload)
@@ -324,9 +316,9 @@ public sealed partial class Http2Connection
                 _headerScratch = new byte[needed];
             }
 
-            PendingRequest target = pending;
-            _decoder.Decode(block, _headerScratch,
-                discard ? static (_, _) => { } : (name, value) => target.AddHeader(name, value));
+            // The request rides as state, so the sink is a static lambda and no closure is made per block.
+            _decoder.Decode(block, _headerScratch, pending,
+                discard ? static (_, _, _) => { } : static (target, name, value) => target.AddHeader(name, value));
             pending.ClearHeaderBlock();
             pending.HeadersDone = true;
             return true;
@@ -425,7 +417,7 @@ public sealed partial class Http2Connection
         // Its window moves with it: a WINDOW_UPDATE finds a stream by _streams only until here.
         _streams.Remove(pending.StreamId);
         _responseWindows[pending.StreamId] = pending.SendWindow;
-        _ready.Add(pending);
+        _ready.Enqueue(pending);
     }
 
     private void HandleSettings(in FrameHeader header, ReadOnlySpan<byte> payload)
@@ -571,7 +563,7 @@ public sealed partial class Http2Connection
     {
         if (_streams.Remove(header.StreamId, out PendingRequest? pending))
         {
-            pending.Abort();   // the peer gave up; there is nobody to answer
+            Discard(pending);   // the peer gave up; there is nobody to answer
         }
 
         // A response in flight may send nothing more on the stream (RFC 9113 5.1), and a writer parked
@@ -584,7 +576,8 @@ public sealed partial class Http2Connection
 
     /// <summary>
     /// One request being assembled: the raw header block until it is complete, then decoded fields
-    /// and body bytes in a pooled arena described by ranges.
+    /// and body bytes in a pooled arena described by ranges. Reused for later streams once retired,
+    /// with its request, header list and field ranges.
     /// </summary>
     private sealed class PendingRequest : IDisposable
     {
@@ -594,6 +587,7 @@ public sealed partial class Http2Connection
         private int _blockUsed;
         private readonly List<(int NameOffset, int NameLength, int ValueOffset, int ValueLength)> _fields = [];
         private (int Offset, int Length) _body;
+        private readonly Http2Request _request = new();
 
         public int StreamId;
         public bool HeadersDone;
@@ -606,6 +600,9 @@ public sealed partial class Http2Connection
         public int SendWindow = 65535;
 
         public int BodyLength => _body.Length;
+
+        // Grew nothing a pooled request should keep: a field list past this was a peer's thousands of header lines.
+        public bool IsSmall => _fields.Capacity <= 64;
 
         public (int Offset, int Length) Method;
         public (int Offset, int Length) Path;
@@ -696,16 +693,14 @@ public sealed partial class Http2Connection
 
         public Http2Request Freeze()
         {
-            var request = new Http2Request
-            {
-                StreamId   = StreamId,
-                Method     = Slice(Method),
-                Path       = Slice(Path),
-                Scheme     = Slice(Scheme),
-                Authority  = Slice(Authority),
-                Body       = Slice(_body),
-                BodyReader = BodyReader,
-            };
+            Http2Request request = _request;
+            request.StreamId   = StreamId;
+            request.Method     = Slice(Method);
+            request.Path       = Slice(Path);
+            request.Scheme     = Slice(Scheme);
+            request.Authority  = Slice(Authority);
+            request.Body       = Slice(_body);
+            request.BodyReader = BodyReader;
 
             foreach ((int nameOffset, int nameLength, int valueOffset, int valueLength) in _fields)
             {
@@ -750,6 +745,17 @@ public sealed partial class Http2Connection
                 _arena = [];
             }
             _used = 0;
+
+            // Its request still points into the arena that just went back, which the pool must not pin.
+            _request.Headers.Clear();
+            _request.Method = _request.Path = _request.Scheme = _request.Authority = _request.Body = default;
+            _request.BodyReader = null;
+
+            StreamId = 0;
+            HeadersDone = false;
+            RequestEnded = false;
+            SendWindow = 65535;
+            Method = Path = Scheme = Authority = _body = default;
         }
     }
 }
