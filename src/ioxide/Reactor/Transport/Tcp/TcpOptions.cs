@@ -28,6 +28,24 @@ public sealed record TcpOptions
     /// <summary>listen() backlog per SO_REUSEPORT listener - the accept-queue depth for connection bursts.</summary>
     public int ListenBacklog { get; init; } = 1024;
 
+    /// <summary>
+    /// Shed an accepted connection whose descriptor number is this or higher: it is closed at once,
+    /// unanswered, and no handler sees it. 0 (the default) sheds nothing.
+    /// </summary>
+    /// <remarks>
+    /// accept() takes the lowest free descriptor number, so a number this high means every number
+    /// below it is open. That makes this a ceiling on the PROCESS's open descriptors - accepted
+    /// sockets on every reactor, listeners, rings, eventfds, files, outbound sockets all count - not
+    /// a count of connections, and every reactor sheds against the same one. Set below
+    /// RLIMIT_NOFILE, it keeps the numbers above it for whatever is not an accept, where without
+    /// it the accepts take them all and every other open fails with EMFILE.
+    ///
+    /// Not <see cref="IncrementalOptions.MaxConnections"/>, which counts live connections per
+    /// reactor (a buffer-ring group id each) and applies in incremental mode only. With both set, an
+    /// accept is shed by whichever it reaches first.
+    /// </remarks>
+    public int MaxConnections { get; init; } = 0;
+
     // Per-connection write slab + connection pool cap.
     public int WriteSlabSize { get; init; } = 16 * 1024;
     public int PoolMax       { get; init; } = 1024;
