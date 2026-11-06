@@ -42,7 +42,11 @@ public sealed partial class Http2Connection : IDisposable
     private byte[] _headerScratch = new byte[16 * 1024];
 
     private readonly Dictionary<int, PendingRequest> _streams = new();
-    private readonly List<PendingRequest> _ready = [];
+    private readonly Queue<PendingRequest> _ready = new();
+
+    // Retired requests, kept for the next stream; capped, so a burst leaves little on an idle connection.
+    private readonly Stack<PendingRequest> _pendingPool = new();
+    private const int MaxPooledRequests = 32;
 
     // Readers whose parked ReadAsync has something to hand over. Collected during parsing and
     // fired once it has unwound, so a resumed handler cannot re-enter the parser mid-frame.
@@ -134,10 +138,7 @@ public sealed partial class Http2Connection : IDisposable
 
         // A writer parked on its turn of the write pump has to wake into IsBroken, not hang: the
         // flush that would have completed its turn is never coming.
-        foreach (TaskCompletionSource waiter in TakeTurn())
-        {
-            waiter.TrySetResult();
-        }
+        Wake(TakeTurn(), PeerGone);
 
         // Last: a handler parked on its body resumes into its end once everything above is released.
         FireBodyWakes();
@@ -288,22 +289,9 @@ public sealed partial class Http2Connection : IDisposable
         _inboundUsed += data.Length;
     }
 
-    // Snapshot and clear first: the list must not be mutated while it is walked.
-    private PendingRequest[] TakeReady()
-    {
-        if (_ready.Count == 0)
-        {
-            return [];
-        }
-
-        PendingRequest[] ready = _ready.ToArray();
-        _ready.Clear();
-        return ready;
-    }
-
     private void DispatchBuffered(Func<Http2Request, ValueTask<Http2Response>> handler)
     {
-        foreach (PendingRequest pending in TakeReady())
+        while (_ready.TryDequeue(out PendingRequest? pending))
         {
             ValueTask<Http2Response> inFlight;
 
@@ -379,12 +367,47 @@ public sealed partial class Http2Connection : IDisposable
     /// <summary>
     /// Done with a stream. The buffered path already took it out of <c>_streams</c> when it became
     /// ready; a streamed request is still in there, because DATA frames were arriving the whole
-    /// time the handler ran.
+    /// time the handler ran. Once per dispatched request: it goes back for the next stream.
     /// </summary>
     private void RetireStream(PendingRequest pending)
     {
         _streams.Remove(pending.StreamId);
+        Recycle(pending);
+    }
+
+    // Kept unless the pool is full or a peer's header lines grew its lists; only the reactor rents.
+    private void Recycle(PendingRequest pending)
+    {
         pending.Dispose();
+        if (_pendingPool.Count < MaxPooledRequests && pending.IsSmall && !OffReactor)
+        {
+            _pendingPool.Push(pending);
+        }
+    }
+
+    // Ended before its request did: without a body reader it was never dispatched; with one, its handler retires it.
+    private void Discard(PendingRequest pending)
+    {
+        if (pending.BodyReader is null)
+        {
+            Recycle(pending);
+        }
+        else
+        {
+            pending.Abort();
+        }
+    }
+
+    // Opens at what the peer's SETTINGS advertised, not at the RFC default. Streams are created
+    // long after those SETTINGS arrive, so starting at 65535 and waiting for a WINDOW_UPDATE means
+    // waiting for one the peer has no reason to send - it believes we still have its whole window.
+    // That stalls any response longer than 65535 bytes.
+    private PendingRequest RentPending(int streamId)
+    {
+        PendingRequest pending = _pendingPool.TryPop(out PendingRequest? pooled) ? pooled : new PendingRequest();
+        pending.StreamId = streamId;
+        pending.SendWindow = _peerInitialStreamWindow;
+        return pending;
     }
 
     /// <summary>Return a consumed chunk's credit to the peer, on both windows it was charged to.</summary>

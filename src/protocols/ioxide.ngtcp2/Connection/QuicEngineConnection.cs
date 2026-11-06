@@ -449,6 +449,7 @@ public unsafe partial class QuicEngineConnection : QuicConnection
             }
         }
         _outStreams.Clear();
+        _outStreamPool.Clear();
         _outPending.Clear();
         if (_conn != 0)
         {

@@ -19,7 +19,8 @@ public sealed class AssetCache : IDisposable
 
     private readonly Dictionary<string, Asset> _assets;
     private readonly SafeFileHandle[] _handles;
-    private int _refs = 1;   // the "live" reference held by StaticAssets; leases add/drop more
+    private const long LiveRef = 1L << 48;   // extra releases or leaked leases need years at 1M/s to drain or overflow it
+    private long _refs = LiveRef;   // plus one per lease
 
     /// <summary>The absolute root directory the cache was built over.</summary>
     public string RootDir { get; }
@@ -95,13 +96,13 @@ public sealed class AssetCache : IDisposable
     /// </summary>
     internal bool TryAddRef()
     {
-        int r;
+        long r;
         do
         {
             r = Volatile.Read(ref _refs);
-            if (r == 0)
+            if (r <= 0)
             {
-                return false;   // already releasing - don't resurrect
+                return false;   // freed, or below zero after extra lease releases - don't resurrect
             }
         }
         while (Interlocked.CompareExchange(ref _refs, r + 1, r) != r);
@@ -118,7 +119,13 @@ public sealed class AssetCache : IDisposable
     }
 
     /// <summary>Drops the "live" reference; the snapshot frees once all outstanding leases release too.</summary>
-    public void Dispose() => Release();
+    public void Dispose()
+    {
+        if (Interlocked.Add(ref _refs, -LiveRef) == 0)
+        {
+            DisposeCore();
+        }
+    }
 
     private void DisposeCore()
     {

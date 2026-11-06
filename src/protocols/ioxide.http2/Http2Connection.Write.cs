@@ -28,10 +28,15 @@ public sealed partial class Http2Connection
     private byte[] _queued = [];
     private int _queuedUsed;
 
-    // Completed when the flush AFTER the current one finishes - the one that carries the queue.
-    // Callers who staged into the queue await this, which keeps the two things a real flush
-    // provided: backpressure, and the yield that hands the reactor back.
-    private readonly List<TaskCompletionSource> _turnWaiters = [];
+    // Callers parked on the pump's next turn, in the order they parked: woken when the flush AFTER the
+    // current one finishes - the one that carries the queue. Callers who staged into the queue wait for
+    // it, which keeps the two things a real flush provided: backpressure, and the yield that hands the
+    // reactor back. Linked through the waiters themselves, so parking allocates nothing.
+    private TurnWaiter? _turnHead;
+    private TurnWaiter? _turnTail;
+
+    // What a waiter woken by a turn that will never carry its bytes is told: as a TCP pipe writer reports a closed peer.
+    private static readonly FlushResult PeerGone = new(isCanceled: false, isCompleted: true);
 
     private void Stage(ReadOnlySpan<byte> bytes)
     {
@@ -51,56 +56,52 @@ public sealed partial class Http2Connection
         }
     }
 
-    private async ValueTask FlushAsync()
+    // Not async: a wait for the pump's next turn is returned as it is, on the caller's own waiter if it keeps one.
+    private ValueTask<FlushResult> FlushAsync(TurnWaiter? waiter = null)
     {
         if (_disposed || _writeDead)
         {
-            return;
+            return default;
         }
 
         if (_flushing)
         {
             // The pump owns the pipe. If this caller queued bytes they leave on the pump's next
-            // turn - await it, so the caller keeps real backpressure. With nothing queued there
+            // turn - wait for it, so the caller keeps real backpressure. With nothing queued there
             // is nothing to wait for.
-            if (_queuedUsed > 0)
-            {
-                await TurnAsync();
-            }
-            return;
+            return _queuedUsed > 0 ? AwaitTurn(waiter ?? new TurnWaiter()) : default;
         }
 
-        if (!_staged)
-        {
-            return;
-        }
+        return _staged ? PumpAsync() : default;
+    }
 
-        // This caller becomes the pump: it drives turn after turn until a flush completes with
-        // the queue empty. Everyone else who staged meanwhile is parked on TurnAsync.
+    // This caller becomes the pump: it drives turn after turn until a flush completes with the
+    // queue empty. Everyone else who staged meanwhile waits for their turn.
+    private async ValueTask<FlushResult> PumpAsync()
+    {
         _flushing = true;
+        TurnWaiter? turn = null;
         try
         {
             while (true)
             {
                 _staged = false;
 
-                // Waiters captured BEFORE the flush are the ones whose bytes are in it; anyone
-                // arriving during the await parks a fresh waiter for the turn after.
-                TaskCompletionSource[] turn = TakeTurn();
+                // Waiters taken BEFORE the flush are the ones whose bytes are in it; anyone
+                // arriving during the await parks for the turn after.
+                turn = TakeTurn();
 
                 await _pipe.Output.FlushAsync();
                 await new ReactorSwitch(_reactor);   // a pipe may complete its flush elsewhere: a default Pipe on the thread pool
 
                 // May resume writers inline; _flushing is still true, so anything they stage
                 // lands in the queue and is picked up by the check just below.
-                foreach (TaskCompletionSource waiter in turn)
-                {
-                    waiter.TrySetResult();
-                }
+                Wake(turn, default);
+                turn = null;
 
                 if (_queuedUsed == 0 || _disposed)
                 {
-                    return;
+                    return default;
                 }
 
                 _pipe.Output.Write(_queued.AsSpan(0, _queuedUsed));
@@ -119,29 +120,32 @@ public sealed partial class Http2Connection
         {
             if (_writeDead && OffReactor)
             {
-                _ = EndTurnOnReactorAsync();   // a faulted flush can end the pump on the thread that completed it
+                _ = EndTurnOnReactorAsync(turn);   // a faulted flush can end the pump on the thread that completed it
             }
             else
             {
-                EndTurn();
+                EndTurn(turn);
             }
         }
     }
 
     // Never strand a waiter: on a fault the turn it is waiting for will not come, and it has to wake to see
-    // the connection is broken rather than hang forever. Out of line: a loop in a hot async method's finally
-    // costs it its optimized code.
+    // the connection is broken rather than hang forever - the turn whose own flush faulted included. Out of
+    // line: a loop in a hot async method's finally costs it its optimized code.
     [MethodImpl(MethodImplOptions.NoInlining)]
-    private void EndTurn()
+    private void EndTurn(TurnWaiter? faulted)
     {
         _flushing = false;
-        foreach (TaskCompletionSource waiter in TakeTurn())
+        FlushResult result = _writeDead || _disposed ? PeerGone : default;
+        Wake(faulted, result);
+        Wake(TakeTurn(), result);
+        if (_writeDead)
         {
-            waiter.TrySetResult();
+            ReleaseAllCreditWaiters();   // the fault reached a writer, so no teardown is on its way to them
         }
     }
 
-    private async Task EndTurnOnReactorAsync()
+    private async Task EndTurnOnReactorAsync(TurnWaiter? faulted)
     {
         try
         {
@@ -151,29 +155,48 @@ public sealed partial class Http2Connection
         {
             // The reactor has stopped, so nothing races the wake: it goes on here.
         }
-        EndTurn();
+        EndTurn(faulted);
     }
 
-    // One completion per waiter: a task awaited by several resumes only the first inline and sends
-    // the rest to the thread pool.
-    private Task TurnAsync()
+    private ValueTask<FlushResult> AwaitTurn(TurnWaiter waiter)
     {
-        var waiter = new TaskCompletionSource();
-        _turnWaiters.Add(waiter);
-        return waiter.Task;
+        ValueTask<FlushResult> turn = waiter.Arm();
+        if (!waiter.Enlisted)
+        {
+            waiter.Enlisted = true;
+            if (_turnTail is null)
+            {
+                _turnHead = waiter;
+            }
+            else
+            {
+                _turnTail.Next = waiter;
+            }
+            _turnTail = waiter;
+        }
+        return turn;
     }
 
     // Taken out before any is woken: one resumed inline that parks again belongs to the next turn.
-    private TaskCompletionSource[] TakeTurn()
+    private TurnWaiter? TakeTurn()
     {
-        if (_turnWaiters.Count == 0)
-        {
-            return [];
-        }
-
-        TaskCompletionSource[] turn = [.. _turnWaiters];
-        _turnWaiters.Clear();
+        TurnWaiter? turn = _turnHead;
+        _turnHead = null;
+        _turnTail = null;
         return turn;
+    }
+
+    // Each link is read before its waiter wakes: one resumed inline may park again, relinking itself.
+    private static void Wake(TurnWaiter? turn, FlushResult result)
+    {
+        while (turn is not null)
+        {
+            TurnWaiter? next = turn.Next;
+            turn.Next = null;
+            turn.Enlisted = false;
+            turn.Release(result);
+            turn = next;
+        }
     }
 
     private void Enqueue(ReadOnlySpan<byte> bytes)
@@ -238,7 +261,7 @@ public sealed partial class Http2Connection
     {
         if (_streams.Remove(streamId, out PendingRequest? pending))
         {
-            pending.Abort();
+            Discard(pending);
         }
 
         Span<byte> frame = stackalloc byte[FrameHeader.Size + 4];
