@@ -193,6 +193,7 @@ public sealed partial class Http2Connection
 
         // A header block can span HEADERS + CONTINUATION frames, and HPACK cannot be decoded
         // piecewise - the whole block has to be in hand first.
+        pending.HeadersDone = false;   // trailers open a block of their own, and the request waits for its END_HEADERS
         pending.AppendHeaderBlock(block);
 
         if (pending.HeaderBlock.Length > _options.MaxHeaderListSize)
