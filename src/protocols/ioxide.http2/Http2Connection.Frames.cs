@@ -317,8 +317,16 @@ public sealed partial class Http2Connection
             }
 
             // The request rides as state, so the sink is a static lambda and no closure is made per block.
-            _decoder.Decode(block, _headerScratch, pending,
-                discard ? static (_, _, _) => { } : static (target, name, value) => target.AddHeader(name, value));
+            int limit = _options.MaxHeaderListSize;
+            _decoder.Decode(block, _headerScratch, (Pending: pending, Limit: limit),
+                discard ? static (_, _, _) => { } : static (state, name, value) => state.Pending.AddHeader(name, value, state.Limit));
+
+            if (pending.HeaderListSize > limit)
+            {
+                ResetStream(pending.StreamId, Http2Error.EnhanceYourCalm);   // decoded whole, so HPACK is in step and only this request ends
+                return false;
+            }
+
             pending.ClearHeaderBlock();
             pending.HeadersDone = true;
             pending.ClosePseudoHeaders();
@@ -600,6 +608,9 @@ public sealed partial class Http2Connection
         public bool HeadersDone;
         public bool RequestEnded;
 
+        // What this request's header blocks have decoded to so far.
+        public long HeaderListSize;
+
         /// <summary>Set only when the body is being streamed; the arena stays empty then.</summary>
         public Http2BodyReader? BodyReader;
 
@@ -651,8 +662,14 @@ public sealed partial class Http2Connection
             _blockUsed = 0;
         }
 
-        public void AddHeader(ReadOnlySpan<byte> name, ReadOnlySpan<byte> value)
+        public void AddHeader(ReadOnlySpan<byte> name, ReadOnlySpan<byte> value, int limit)
         {
+            HeaderListSize += name.Length + value.Length + 32;   // RFC 9113 6.5.2's measure
+            if (HeaderListSize > limit)
+            {
+                return;   // the stream is reset once the block is decoded, so there is nothing to keep it for
+            }
+
             if (name.Length > 0 && name[0] == (byte)':')
             {
                 if (name.SequenceEqual(":method"u8))         Method = Pseudo(1, value);
@@ -766,6 +783,7 @@ public sealed partial class Http2Connection
             _pseudoSeen = 0;
             ClearHeaderBlock();
             _fields.Clear();
+            HeaderListSize = 0;
             if (_arena.Length > 0)
             {
                 ArrayPool<byte>.Shared.Return(_arena);
