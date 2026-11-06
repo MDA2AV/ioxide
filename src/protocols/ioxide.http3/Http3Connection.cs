@@ -56,6 +56,10 @@ public sealed partial class Http3Connection
     // client uni (id % 4 == 2) = control / QPACK / push streams.
     private readonly Dictionary<long, ReqStream> _requests = new();
     private readonly Dictionary<long, UniStream> _unis = new();
+
+    // Request streams whose body arrived whole, kept for the next stream; capped, so a burst leaves little behind.
+    private readonly Stack<ReqStream> _reqPool = new();
+    private const int MaxPooledRequests = 32;
     private readonly List<long> _ready = [];
     private readonly List<Http3BodyReader> _bodyWakes = [];
 
@@ -93,6 +97,20 @@ public sealed partial class Http3Connection
         // RetireBody unpaced the stream, because bytes delivered while it was still paced can be
         // in the ring then - over-crediting the ones that arrived after is harmless.
         public bool Paced;
+
+        /// <summary>Fresh for the next stream, after <see cref="ReleaseParseBuffers"/>.</summary>
+        public void Reset()
+        {
+            Request.Reset();
+            Sink = null;
+            State = ParseState.FrameHeader;
+            CarryLen = 0;
+            Remaining = 0;
+            HeadersLen = 0;
+            HeadersDone = false;
+            Finished = false;
+            Paced = false;
+        }
     }
 
     private sealed class UniStream
@@ -294,7 +312,7 @@ public sealed partial class Http3Connection
                 _quicConnection.ResetStream(item.StreamId, H3RequestIncomplete);
                 return;
             }
-            rs = new ReqStream();
+            rs = _reqPool.TryPop(out ReqStream? pooled) ? pooled : new ReqStream();
             rs.Request.StreamId = item.StreamId;
             _requests[item.StreamId] = rs;
         }
@@ -657,6 +675,7 @@ public sealed partial class Http3Connection
             }
 
             Submit(rs.Request.StreamId, resp);
+            Recycle(rs);
         }
         _ready.Clear();
     }
@@ -687,13 +706,16 @@ public sealed partial class Http3Connection
                 Console.Error.WriteLine($"[ioxide.http3] request handler faulted: {e.GetBaseException().Message}");
                 RetireBody(rs);
                 Submit(sid, new Http3Response { Status = 500 });
+                Recycle(rs);
                 continue;
             }
 
             if (pending.IsCompletedSuccessfully)
             {
                 RetireBody(rs);
-                Submit(sid, pending.Result);
+                Http3Response response = pending.Result;   // once: a ValueTask is consumed by reading it
+                Submit(sid, response);
+                Recycle(rs);
             }
             else
             {
@@ -723,6 +745,21 @@ public sealed partial class Http3Connection
             return;
         }
         Submit(rs.Request.StreamId, resp);
+        Recycle(rs);
+    }
+
+    /// <summary>Back for the next stream once the handler is done and the response submitted.</summary>
+    private void Recycle(ReqStream rs)
+    {
+        // A streamed body's request stays in _requests until its stream ends; only the reactor rents.
+        if (_streamBodies || _reqPool.Count >= MaxPooledRequests || OffReactor || !rs.Request.IsSmall)
+        {
+            return;
+        }
+
+        ReleaseParseBuffers(rs);
+        rs.Reset();
+        _reqPool.Push(rs);
     }
 
     // The handler is done with the body: credit what it left unread and let the engine credit the

@@ -5,7 +5,8 @@ namespace ioxide.http3;
 /// <summary>
 /// One HTTP/3 request - post-QPACK BYTES throughout, mirroring the ioxide.nghttp3 surface: route
 /// by byte compare (<c>req.Path.Span.SequenceEqual("/x"u8)</c>) or decode at the edge. Every
-/// memory slices a per-request buffer valid only until the handler returns.
+/// memory slices a per-request buffer valid only until the handler returns, and a request whose
+/// body arrived whole is itself reused for a later stream on the same connection after that.
 /// </summary>
 public sealed class Http3Request
 {
@@ -103,11 +104,37 @@ public sealed class Http3Request
     }
 
     private ReadOnlyMemory<byte> Slice((int Off, int Len) r) => r.Len < 0 ? default : Arena.AsMemory(r.Off, r.Len);
+
+    // Not above the inline-body limit, so a response body that waits for send capacity never points into a kept arena.
+    internal const int MaxPooledArena = 4 * 1024;
+
+    // Grew nothing a pooled request should keep: lists past this were a peer's thousands of header lines.
+    internal bool IsSmall => Headers.Capacity <= 64 && HeaderRanges.Capacity <= 64;
+
+    /// <summary>Fresh for the next stream, keeping the arena and both lists' capacity.</summary>
+    internal void Reset()
+    {
+        StreamId = 0;
+        Method = Path = Scheme = Authority = Body = default;
+        Headers.Clear();
+        BodyReader = null;
+
+        if (Arena.Length > MaxPooledArena)
+        {
+            Arena = [];
+        }
+        ArenaUsed = 0;
+        MethodR = PathR = SchemeR = AuthorityR = (0, -1);
+        HeaderRanges.Clear();
+        BodyBuffer = null;
+        ContentLengthLeft = -1;
+    }
 }
 
 /// <summary>
 /// One HTTP/3 response: status, headers, in-memory body - bytes throughout. Everything is encoded
 /// and handed to the QUIC engine synchronously at submit, so the memories can be pooled or static.
+/// A response kept past its handler has to own them: a request's are reused for a later stream.
 /// </summary>
 public sealed class Http3Response
 {
