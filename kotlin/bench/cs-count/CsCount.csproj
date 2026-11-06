@@ -1,0 +1,15 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!-- The C# twin of the Kotlin playground's tcp-count, built against a C# ioxide checkout (IoxideRoot). -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net11.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <ServerGarbageCollection>false</ServerGarbageCollection>
+    <IoxideRoot Condition="'$(IoxideRoot)' == ''">/home/diogo/Desktop/Socket/ioxide/.claude/worktrees/bench-wake-a</IoxideRoot>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="$(IoxideRoot)/src/ioxide/ioxide.csproj" />
+  </ItemGroup>
+</Project>
