@@ -45,6 +45,7 @@ public sealed partial class Nghttp2Connection : IDisposable
     // RFC 9113 ENHANCE_YOUR_CALM: a request body past MaxRequestBytes, as the managed stack resets it.
     private const uint EnhanceYourCalm = 0xb;
     private const int  ErrInvalidArgument = -501;   // NGHTTP2_ERR_INVALID_ARGUMENT
+    private const int  ErrStreamClosed = -510;      // NGHTTP2_ERR_STREAM_CLOSED
 
     private readonly IDuplexPipe _pipe;
     private readonly Nghttp2Options _options;
@@ -71,7 +72,31 @@ public sealed partial class Nghttp2Connection : IDisposable
 
     // Requests whose streams ended during the current ih2_read. The callbacks only record them;
     // the loop dispatches after mem_recv returns.
-    private readonly List<PendingRequest> _readyThisPass = [];
+    private readonly Queue<PendingRequest> _readyThisPass = new();
+
+    // Retired buffered requests, kept for the next stream; capped, so a burst leaves little on an idle connection.
+    private readonly Stack<PendingRequest> _pendingPool = new();
+    private const int MaxPooledRequests = 32;
+
+    private PendingRequest RentPending(int streamId)
+    {
+        PendingRequest pending = _pendingPool.TryPop(out PendingRequest? pooled) ? pooled : new PendingRequest();
+        pending.StreamId = streamId;
+        return pending;
+    }
+
+    /// <summary>Done with a dispatched request once its handler has returned; a streamed body's stays in _pending.</summary>
+    private void Retire(PendingRequest pending)
+    {
+        pending.Dispose();
+
+        // Only the reactor rents, and a field list a peer's header lines grew would stay that size.
+        if (pending.BodyReader is null && _pendingPool.Count < MaxPooledRequests && !OffReactor && pending.IsSmall)
+        {
+            pending.Reset();
+            _pendingPool.Push(pending);
+        }
+    }
 
     /// <summary>
     /// Serve over an already-chosen transport. The pipe is the caller's to dispose - it may be a
@@ -163,6 +188,7 @@ public sealed partial class Nghttp2Connection : IDisposable
         private int _used;
         private readonly List<(int NameOffset, int NameLength, int ValueOffset, int ValueLength)> _fields = [];
         private (int Offset, int Length) _body = (0, 0);
+        private readonly Nghttp2Request _request = new();
 
         public int StreamId;
 
@@ -231,19 +257,17 @@ public sealed partial class Nghttp2Connection : IDisposable
             }
         }
 
-        /// <summary>Materialize the public request. Valid until <see cref="Dispose"/>.</summary>
+        /// <summary>Materialize the public request, this one's own and reused. Valid until <see cref="Dispose"/>.</summary>
         public Nghttp2Request Freeze()
         {
-            var request = new Nghttp2Request
-            {
-                StreamId   = StreamId,
-                Method     = Slice(Method),
-                Path       = Slice(Path),
-                Scheme     = Slice(Scheme),
-                Authority  = Slice(Authority),
-                Body       = Slice(_body),
-                BodyReader = BodyReader,
-            };
+            Nghttp2Request request = _request;
+            request.StreamId   = StreamId;
+            request.Method     = Slice(Method);
+            request.Path       = Slice(Path);
+            request.Scheme     = Slice(Scheme);
+            request.Authority  = Slice(Authority);
+            request.Body       = Slice(_body);
+            request.BodyReader = BodyReader;
 
             foreach ((int nameOffset, int nameLength, int valueOffset, int valueLength) in _fields)
             {
@@ -270,5 +294,20 @@ public sealed partial class Nghttp2Connection : IDisposable
             _used = 0;
             HeaderListSize = 0;
         }
+
+        /// <summary>Fresh for the next stream that rents it, after <see cref="Dispose"/>.</summary>
+        public void Reset()
+        {
+            StreamId = 0;
+            Overflowed = false;
+            Method = Path = Scheme = Authority = _body = default;
+
+            // Its request still points into the arena Dispose returned, which the pool must not pin.
+            _request.Headers.Clear();
+            _request.Method = _request.Path = _request.Scheme = _request.Authority = _request.Body = default;
+            _request.BodyReader = null;
+        }
+
+        public bool IsSmall => _fields.Capacity <= 64;
     }
 }

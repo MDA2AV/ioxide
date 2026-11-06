@@ -28,11 +28,17 @@ internal static class Program
         Http2OutputQueueTests.Register(runner);
         Http2StreamedRequestTests.Register(runner);
         Http2TrailerTests.Register(runner);
+        Http2PseudoHeaderTests.Register(runner);
+        Nghttp2StreamCloseTests.Register(runner);
+        Http2HeaderListTests.Register(runner);
         Nghttp2HeaderListTests.Register(runner);
         Http2RequestHeaderTests.Register(runner);
+        Http2RequestReuseTests.Register(runner);
+        Nghttp2RequestReuseTests.Register(runner);
         Http2StreamedBodyTests.Register(runner);
         Http2FlowControlTests.Register(runner);
         Http2BufferedCreditTests.Register(runner);
+        Nghttp2ResetResponseTests.Register(runner);
         HpackEncodeTests.Register(runner);
         QpackStaticEncodeTests.Register(runner);
         AlpnSelectTests.Register(runner);

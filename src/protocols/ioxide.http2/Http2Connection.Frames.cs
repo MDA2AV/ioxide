@@ -165,15 +165,7 @@ public sealed partial class Http2Connection
                 return;
             }
 
-            // Opens at what the peer's SETTINGS advertised, not at the RFC default. Streams are
-            // created long after those SETTINGS arrive, so starting at 65535 and waiting for a
-            // WINDOW_UPDATE means waiting for one the peer has no reason to send - it believes we
-            // still have its whole window. That stalls any response longer than 65535 bytes.
-            pending = new PendingRequest
-            {
-                StreamId = header.StreamId,
-                SendWindow = _peerInitialStreamWindow,
-            };
+            pending = RentPending(header.StreamId);
             _streams[header.StreamId] = pending;
             _highestStream = header.StreamId;
         }
@@ -190,9 +182,18 @@ public sealed partial class Http2Connection
             }
             return;
         }
+        else if ((header.Flags & FrameFlags.EndStream) == 0)
+        {
+            // RFC 9113 8.1: after the block that opens a request come only trailers, which end its stream.
+            _discardBlock.StreamId = header.StreamId;
+            DiscardHeaderBlock(header, block);
+            ResetStream(header.StreamId, Http2Error.ProtocolError);
+            return;
+        }
 
         // A header block can span HEADERS + CONTINUATION frames, and HPACK cannot be decoded
         // piecewise - the whole block has to be in hand first.
+        pending.HeadersDone = false;   // trailers open a block of their own, and the request waits for its END_HEADERS
         pending.AppendHeaderBlock(block);
 
         if (pending.HeaderBlock.Length > _options.MaxHeaderListSize)
@@ -264,7 +265,7 @@ public sealed partial class Http2Connection
 
         pending.BodyReader = new Http2BodyReader(this, pending.StreamId, ended);
         _responseWindows[pending.StreamId] = pending.SendWindow;
-        _ready.Add(pending);
+        _ready.Enqueue(pending);
     }
 
     private void HandleContinuation(in FrameHeader header, ReadOnlySpan<byte> payload)
@@ -315,11 +316,26 @@ public sealed partial class Http2Connection
                 _headerScratch = new byte[needed];
             }
 
-            PendingRequest target = pending;
-            _decoder.Decode(block, _headerScratch,
-                discard ? static (_, _) => { } : (name, value) => target.AddHeader(name, value));
+            // The request rides as state, so the sink is a static lambda and no closure is made per block.
+            int limit = _options.MaxHeaderListSize;
+            _decoder.Decode(block, _headerScratch, (Pending: pending, Limit: limit),
+                discard ? static (_, _, _) => { } : static (state, name, value) => state.Pending.AddHeader(name, value, state.Limit));
+
+            if (pending.HeaderListSize > limit)
+            {
+                ResetStream(pending.StreamId, Http2Error.EnhanceYourCalm);   // decoded whole, so HPACK is in step and only this request ends
+                return false;
+            }
+
             pending.ClearHeaderBlock();
             pending.HeadersDone = true;
+            pending.ClosePseudoHeaders();
+
+            if (pending.Malformed)
+            {
+                ResetStream(pending.StreamId, Http2Error.ProtocolError);   // decoded whole, so HPACK is in step and only this request ends
+                return false;
+            }
             return true;
         }
         catch (HpackDecoder.HpackException)
@@ -416,7 +432,7 @@ public sealed partial class Http2Connection
         // Its window moves with it: a WINDOW_UPDATE finds a stream by _streams only until here.
         _streams.Remove(pending.StreamId);
         _responseWindows[pending.StreamId] = pending.SendWindow;
-        _ready.Add(pending);
+        _ready.Enqueue(pending);
     }
 
     private void HandleSettings(in FrameHeader header, ReadOnlySpan<byte> payload)
@@ -562,7 +578,7 @@ public sealed partial class Http2Connection
     {
         if (_streams.Remove(header.StreamId, out PendingRequest? pending))
         {
-            pending.Abort();   // the peer gave up; there is nobody to answer
+            Discard(pending);   // the peer gave up; there is nobody to answer
         }
 
         // A response in flight may send nothing more on the stream (RFC 9113 5.1), and a writer parked
@@ -575,7 +591,8 @@ public sealed partial class Http2Connection
 
     /// <summary>
     /// One request being assembled: the raw header block until it is complete, then decoded fields
-    /// and body bytes in a pooled arena described by ranges.
+    /// and body bytes in a pooled arena described by ranges. Reused for later streams once retired,
+    /// with its request, header list and field ranges.
     /// </summary>
     private sealed class PendingRequest : IDisposable
     {
@@ -585,10 +602,14 @@ public sealed partial class Http2Connection
         private int _blockUsed;
         private readonly List<(int NameOffset, int NameLength, int ValueOffset, int ValueLength)> _fields = [];
         private (int Offset, int Length) _body;
+        private readonly Http2Request _request = new();
 
         public int StreamId;
         public bool HeadersDone;
         public bool RequestEnded;
+
+        // What this request's header blocks have decoded to so far.
+        public long HeaderListSize;
 
         /// <summary>Set only when the body is being streamed; the arena stays empty then.</summary>
         public Http2BodyReader? BodyReader;
@@ -598,10 +619,20 @@ public sealed partial class Http2Connection
 
         public int BodyLength => _body.Length;
 
+        // Grew nothing a pooled request should keep: a field list past this was a peer's thousands of header lines.
+        public bool IsSmall => _fields.Capacity <= 64;
+
         public (int Offset, int Length) Method;
         public (int Offset, int Length) Path;
         public (int Offset, int Length) Scheme;
         public (int Offset, int Length) Authority;
+
+        // A pseudo-header out of place: the stream is reset once the block is decoded, never dispatched.
+        public bool Malformed;
+
+        // One bit for each pseudo-header seen, and one once a regular field or the end of a block closes them.
+        private int _pseudoSeen;
+        private const int PseudoClosed = 16;
 
         public ReadOnlySpan<byte> HeaderBlock => _block.AsSpan(0, _blockUsed);
 
@@ -631,22 +662,39 @@ public sealed partial class Http2Connection
             _blockUsed = 0;
         }
 
-        public void AddHeader(ReadOnlySpan<byte> name, ReadOnlySpan<byte> value)
+        public void AddHeader(ReadOnlySpan<byte> name, ReadOnlySpan<byte> value, int limit)
         {
+            HeaderListSize += name.Length + value.Length + 32;   // RFC 9113 6.5.2's measure
+            if (HeaderListSize > limit)
+            {
+                return;   // the stream is reset once the block is decoded, so there is nothing to keep it for
+            }
+
             if (name.Length > 0 && name[0] == (byte)':')
             {
-                (int Offset, int Length) pseudo = Append(value);
-                if (name.SequenceEqual(":method"u8))         Method = pseudo;
-                else if (name.SequenceEqual(":path"u8))      Path = pseudo;
-                else if (name.SequenceEqual(":scheme"u8))    Scheme = pseudo;
-                else if (name.SequenceEqual(":authority"u8)) Authority = pseudo;
+                if (name.SequenceEqual(":method"u8))         Method = Pseudo(1, value);
+                else if (name.SequenceEqual(":path"u8))      Path = Pseudo(2, value);
+                else if (name.SequenceEqual(":scheme"u8))    Scheme = Pseudo(4, value);
+                else if (name.SequenceEqual(":authority"u8)) Authority = Pseudo(8, value);
+                else Malformed = true;
                 return;
             }
 
+            ClosePseudoHeaders();
             (int Offset, int Length) nameRange = Append(name);
             (int Offset, int Length) valueRange = Append(value);
             _fields.Add((nameRange.Offset, nameRange.Length, valueRange.Offset, valueRange.Length));
         }
+
+        // RFC 9113 8.3: each at most once and ahead of every regular field; 8.1: none in trailers.
+        private (int Offset, int Length) Pseudo(int seen, ReadOnlySpan<byte> value)
+        {
+            Malformed |= (_pseudoSeen & (seen | PseudoClosed)) != 0;
+            _pseudoSeen |= seen;
+            return Append(value);
+        }
+
+        public void ClosePseudoHeaders() => _pseudoSeen |= PseudoClosed;
 
         public void AppendBody(ReadOnlySpan<byte> data)
         {
@@ -687,16 +735,14 @@ public sealed partial class Http2Connection
 
         public Http2Request Freeze()
         {
-            var request = new Http2Request
-            {
-                StreamId   = StreamId,
-                Method     = Slice(Method),
-                Path       = Slice(Path),
-                Scheme     = Slice(Scheme),
-                Authority  = Slice(Authority),
-                Body       = Slice(_body),
-                BodyReader = BodyReader,
-            };
+            Http2Request request = _request;
+            request.StreamId   = StreamId;
+            request.Method     = Slice(Method);
+            request.Path       = Slice(Path);
+            request.Scheme     = Slice(Scheme);
+            request.Authority  = Slice(Authority);
+            request.Body       = Slice(_body);
+            request.BodyReader = BodyReader;
 
             foreach ((int nameOffset, int nameLength, int valueOffset, int valueLength) in _fields)
             {
@@ -733,14 +779,28 @@ public sealed partial class Http2Connection
             BodyReader?.Drop();
             BodyReader = null;
 
+            Malformed = false;
+            _pseudoSeen = 0;
             ClearHeaderBlock();
             _fields.Clear();
+            HeaderListSize = 0;
             if (_arena.Length > 0)
             {
                 ArrayPool<byte>.Shared.Return(_arena);
                 _arena = [];
             }
             _used = 0;
+
+            // Its request still points into the arena that just went back, which the pool must not pin.
+            _request.Headers.Clear();
+            _request.Method = _request.Path = _request.Scheme = _request.Authority = _request.Body = default;
+            _request.BodyReader = null;
+
+            StreamId = 0;
+            HeadersDone = false;
+            RequestEnded = false;
+            SendWindow = 65535;
+            Method = Path = Scheme = Authority = _body = default;
         }
     }
 }

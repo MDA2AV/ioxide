@@ -40,7 +40,7 @@ public sealed partial class Nghttp2Connection
     private void Overflow(PendingRequest pending)
     {
         pending.Overflowed = true;
-        _readyThisPass.Add(pending);
+        _readyThisPass.Enqueue(pending);
     }
 
     [UnmanagedCallersOnly]
@@ -54,7 +54,7 @@ public sealed partial class Nghttp2Connection
             // the request we have rather than replacing it and losing everything accumulated.
             if (!connection._pending.ContainsKey(streamId))
             {
-                connection._pending[streamId] = new PendingRequest { StreamId = streamId };
+                connection._pending[streamId] = connection.RentPending(streamId);
             }
         }
         catch (Exception e)
@@ -123,7 +123,7 @@ public sealed partial class Nghttp2Connection
                 connection._pending.TryGetValue(streamId, out PendingRequest? pending) && pending.BodyReader is null)
             {
                 pending.BodyReader = new Nghttp2BodyReader(connection, streamId);
-                connection._readyThisPass.Add(pending);
+                connection._readyThisPass.Enqueue(pending);
             }
         }
         catch (Exception e)
@@ -183,7 +183,7 @@ public sealed partial class Nghttp2Connection
                 }
                 else if (!pending.Overflowed)
                 {
-                    connection._readyThisPass.Add(pending);
+                    connection._readyThisPass.Enqueue(pending);
                 }
             }
         }

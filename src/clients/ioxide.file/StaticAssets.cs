@@ -7,15 +7,17 @@ namespace ioxide.file;
 /// </summary>
 /// <remarks>
 /// To serve safely across a reload, take a <see cref="Lease"/> with <see cref="Acquire"/> and hold
-/// it for the whole request (lookup → ring read → send): the old snapshot's descriptors are freed
-/// only once every lease on it is released, so an in-flight read can never hit a closed fd.
+/// it for the whole request (lookup → ring read → send), and dispose it once: the old snapshot's
+/// descriptors are freed only once every lease on it is released, so an in-flight read never hits a
+/// closed fd. After <see cref="Dispose"/>, <see cref="Acquire"/>, <see cref="Count"/> and <see cref="RootDir"/>
+/// throw and <see cref="Reload"/> does nothing; leases already out keep the last snapshot open until they are released.
 /// </remarks>
 public sealed class StaticAssets : IDisposable
 {
     private readonly string _root;
     private readonly object _reloadLock = new();
 
-    private AssetCache _cache;   // swapped atomically by Reload(), read with Volatile
+    private AssetCache? _cache;   // swapped atomically by Reload(), read with Volatile; null once disposed
 
     public StaticAssets(string rootDir)
     {
@@ -23,41 +25,49 @@ public sealed class StaticAssets : IDisposable
         _cache = new AssetCache(rootDir);
     }
 
-    public int Count => Volatile.Read(ref _cache).Count;
+    public int Count => Live.Count;
 
-    public string RootDir => Volatile.Read(ref _cache).RootDir;
+    public string RootDir => Live.RootDir;
+
+    private AssetCache Live => Volatile.Read(ref _cache) ?? throw new ObjectDisposedException(nameof(StaticAssets));
 
     /// <summary>
     /// Lease the live snapshot for the duration of a request. The snapshot it points at stays alive
-    /// (descriptors open) until the lease is disposed, even across a concurrent <see cref="Reload"/>.
-    /// Dispose it when the response has been fully sent.
+    /// (descriptors open) until the lease is disposed, even across a concurrent <see cref="Reload"/>,
+    /// as long as every lease is disposed once. Dispose it when the response has been fully sent.
     /// </summary>
-    /// <exception cref="ObjectDisposedException">This was disposed and its snapshot freed.</exception>
+    /// <exception cref="ObjectDisposedException">This was disposed.</exception>
     public Lease Acquire()
     {
         while (true)
         {
-            AssetCache cache = Volatile.Read(ref _cache);
+            AssetCache? cache = Volatile.Read(ref _cache);
+            ObjectDisposedException.ThrowIf(cache is null, this);
             if (cache.TryAddRef())
             {
                 return new Lease(cache);
             }
 
-            // Refused. A Reload swaps the live snapshot before releasing the old one, so a refusal from the
-            // one still live means Dispose freed it and nothing will replace it; otherwise re-read the live one.
+            // A Reload swaps before it releases, so only the snapshot still live can refuse for good.
             ObjectDisposedException.ThrowIf(cache == Volatile.Read(ref _cache), this);
         }
     }
 
     /// <summary>
     /// Rebuild the snapshot from disk and swap it in atomically, then release the old one (it frees
-    /// once all leases on it are dropped). If the rebuild fails, the current snapshot is kept.
-    /// Thread-safe.
+    /// once all leases on it are dropped). If the rebuild fails, the current snapshot is kept. After
+    /// <see cref="Dispose"/> it does nothing, so a reload signalled during shutdown cannot bring the
+    /// assets back. Thread-safe.
     /// </summary>
     public void Reload()
     {
         lock (_reloadLock)
         {
+            if (_cache is null)
+            {
+                return;
+            }
+
             AssetCache fresh;
             try
             {
@@ -69,12 +79,22 @@ public sealed class StaticAssets : IDisposable
                 return;
             }
 
-            AssetCache old = Interlocked.Exchange(ref _cache, fresh);
+            AssetCache old = Interlocked.Exchange(ref _cache, fresh)!;
             old.Dispose();   // drops the live reference; old frees when outstanding leases release
         }
     }
 
-    public void Dispose() => Volatile.Read(ref _cache).Dispose();
+    /// <summary>
+    /// Drop the live snapshot, which frees once the leases on it are released. Idempotent; under the reload lock,
+    /// so a reload in progress finishes first and its snapshot is the one dropped.
+    /// </summary>
+    public void Dispose()
+    {
+        lock (_reloadLock)
+        {
+            Interlocked.Exchange(ref _cache, null)?.Dispose();
+        }
+    }
 
     /// <summary>
     /// A reference-counted hold on an <see cref="AssetCache"/> snapshot. Look up assets through it

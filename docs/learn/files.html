@@ -99,7 +99,8 @@ if (lease.TryGet(pathBytes, out var asset))
     <p>Snapshots are immutable; deploys swap them whole. <code>StaticAssets.Reload()</code>
     builds a fresh <code>AssetCache</code>, swaps it in atomically, and drops its reference to
     the old one, whose descriptors close when the last lease on it is disposed - a request always
-    sees one whole snapshot, and a read in flight never meets a closed descriptor. If the rebuild
+    sees one whole snapshot, and with each lease disposed once, a read in flight never meets a closed
+    descriptor. If the rebuild
     fails, the current snapshot stays. Wire it to SIGHUP and a deploy is
     <code>kill&nbsp;-HUP&nbsp;$(pidof&nbsp;server)</code>:</p>
 <pre><code class="language-csharp">PosixSignalRegistration.Create(PosixSignal.SIGHUP, ctx =&gt;
