@@ -66,6 +66,8 @@ typedef struct ih2_conn {
     void            *user;
     ih2_stream      *streams;
     int              manual_flow;   /* DATA is credited through ih2_consume, not by nghttp2 */
+    nghttp2_nv      *nv;            /* the fields of the response being submitted; keeps its size */
+    size_t           nv_cap;
 } ih2_conn;
 
 static ih2_stream *ih2_stream_find(ih2_conn *c, int32_t stream_id)
@@ -176,6 +178,17 @@ static int on_stream_close(nghttp2_session *session, int32_t stream_id, uint32_t
     return 0;
 }
 
+/* nghttp2 drops a response whose header block is past its limit (64 KiB) with no frame on the wire, which would leave
+ * the stream open for good. Only that error: a stream already gone is not to be reset again (RFC 9113 5.4.2). */
+static int on_frame_not_send(nghttp2_session *session, const nghttp2_frame *frame, int lib_error_code, void *user_data)
+{
+    (void)user_data;
+    if (frame->hd.type == NGHTTP2_HEADERS && lib_error_code == NGHTTP2_ERR_FRAME_SIZE_ERROR) {
+        return nghttp2_submit_rst_stream(session, NGHTTP2_FLAG_NONE, frame->hd.stream_id, NGHTTP2_INTERNAL_ERROR);
+    }
+    return 0;
+}
+
 /* Copy the next slice of the request body into nghttp2's buffer.
  *
  * Deliberately NOT NGHTTP2_DATA_FLAG_NO_COPY. With NO_COPY nghttp2 hands the frame to
@@ -257,6 +270,7 @@ static ih2_conn *ih2_new(ih2_callbacks cbs, void *user, int server, int manual_f
     nghttp2_session_callbacks_set_on_frame_recv_callback(callbacks, on_frame_recv);
     nghttp2_session_callbacks_set_on_data_chunk_recv_callback(callbacks, on_data_chunk_recv);
     nghttp2_session_callbacks_set_on_stream_close_callback(callbacks, on_stream_close);
+    nghttp2_session_callbacks_set_on_frame_not_send_callback(callbacks, on_frame_not_send);
 
     int rv;
     if (manual_flow) {
@@ -312,18 +326,21 @@ ih2_conn *ih2_client_new(ih2_callbacks cbs, void *user)
 /* Headers arrive packed as [u16 namelen][name][u16 valuelen][value]... - the same format the
  * nghttp3 shim takes, so the managed packing code is shared in shape.
  *
- * Returns the count, or a negative nghttp2 error. Truncating on overflow would silently DROP
- * headers, and an omitted authorization is worse than a failed request, so it refuses instead. */
-#define IH2_MAX_HEADERS 64
-
-static int ih2_unpack_headers(const uint8_t *headers, size_t headers_len, nghttp2_nv *nv)
+ * Unpacks into c->nv, which nghttp2 copies out of during submit. Returns the count, or a negative nghttp2 error. */
+static int ih2_unpack_headers(ih2_conn *c, const uint8_t *headers, size_t headers_len)
 {
     size_t count = 0;
     size_t off = 0;
 
     while (off + 2 <= headers_len) {
-        if (count == IH2_MAX_HEADERS) {
-            return NGHTTP2_ERR_INVALID_ARGUMENT;
+        if (count == c->nv_cap) {
+            size_t cap = c->nv_cap == 0 ? 64 : c->nv_cap * 2;
+            nghttp2_nv *grown = realloc(c->nv, cap * sizeof(*grown));
+            if (grown == NULL) {
+                return NGHTTP2_ERR_NOMEM;
+            }
+            c->nv = grown;
+            c->nv_cap = cap;
         }
 
         uint16_t namelen;
@@ -344,11 +361,11 @@ static int ih2_unpack_headers(const uint8_t *headers, size_t headers_len, nghttp
         const uint8_t *value = headers + off;
         off += valuelen;
 
-        nv[count].name     = (uint8_t *)name;
-        nv[count].namelen  = namelen;
-        nv[count].value    = (uint8_t *)value;
-        nv[count].valuelen = valuelen;
-        nv[count].flags    = NGHTTP2_NV_FLAG_NONE;   /* nghttp2 copies during submit */
+        c->nv[count].name     = (uint8_t *)name;
+        c->nv[count].namelen  = namelen;
+        c->nv[count].value    = (uint8_t *)value;
+        c->nv[count].valuelen = valuelen;
+        c->nv[count].flags    = NGHTTP2_NV_FLAG_NONE;   /* nghttp2 copies during submit */
         count++;
     }
 
@@ -398,8 +415,7 @@ int ih2_submit_response_stream(ih2_conn *c, int32_t stream_id,
         return NGHTTP2_ERR_STREAM_CLOSED;   /* the peer reset it: no callback would ever free a stream attached now */
     }
 
-    nghttp2_nv nv[IH2_MAX_HEADERS];
-    int count = ih2_unpack_headers(headers, headers_len, nv);
+    int count = ih2_unpack_headers(c, headers, headers_len);
     if (count < 0) {
         return count;
     }
@@ -420,7 +436,7 @@ int ih2_submit_response_stream(ih2_conn *c, int32_t stream_id,
     provider.source.ptr = s;
     provider.read_callback = read_body;
 
-    int rv = nghttp2_submit_response(c->session, stream_id, nv, (size_t)count, &provider);
+    int rv = nghttp2_submit_response(c->session, stream_id, c->nv, (size_t)count, &provider);
     if (rv != 0) {
         ih2_stream_drop(c, stream_id);
     }
@@ -522,8 +538,7 @@ int ih2_submit_response(ih2_conn *c, int32_t stream_id,
         return 0;   /* the peer reset it: no callback would ever free a body attached now, and an error fails the connection */
     }
 
-    nghttp2_nv nv[IH2_MAX_HEADERS];
-    int count = ih2_unpack_headers(headers, headers_len, nv);
+    int count = ih2_unpack_headers(c, headers, headers_len);
     if (count < 0) {
         return count;
     }
@@ -548,7 +563,7 @@ int ih2_submit_response(ih2_conn *c, int32_t stream_id,
         provider_ptr = &provider;
     }
 
-    int rv = nghttp2_submit_response(c->session, stream_id, nv, (size_t)count, provider_ptr);
+    int rv = nghttp2_submit_response(c->session, stream_id, c->nv, (size_t)count, provider_ptr);
     if (rv != 0 && s != NULL) {
         ih2_stream_drop(c, stream_id);
     }
@@ -563,8 +578,7 @@ int32_t ih2_submit_request(ih2_conn *c, const uint8_t *headers, size_t headers_l
         return NGHTTP2_ERR_INVALID_STATE;
     }
 
-    nghttp2_nv nv[IH2_MAX_HEADERS];
-    int count = ih2_unpack_headers(headers, headers_len, nv);
+    int count = ih2_unpack_headers(c, headers, headers_len);
     if (count < 0) {
         return count;
     }
@@ -585,7 +599,7 @@ int32_t ih2_submit_request(ih2_conn *c, const uint8_t *headers, size_t headers_l
 
     /* Unlike a response, the stream id is not known until submit returns - so the body is
      * registered after, and read_body cannot run before then (nghttp2 has no stream to read for). */
-    int32_t stream_id = nghttp2_submit_request(c->session, NULL, nv, (size_t)count, provider_ptr, NULL);
+    int32_t stream_id = nghttp2_submit_request(c->session, NULL, c->nv, (size_t)count, provider_ptr, NULL);
     if (stream_id < 0) {
         if (s != NULL) {
             free(s->body);
@@ -678,6 +692,7 @@ void ih2_free(ih2_conn *c)
         ih2_stream_drop(c, c->streams->stream_id);
     }
     nghttp2_session_del(c->session);
+    free(c->nv);
     free(c);
 }
 
