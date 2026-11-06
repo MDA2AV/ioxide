@@ -38,16 +38,19 @@ public sealed class Http3Request
     // The DATA payload content-length still owes: -1 without one, -2 for an invalid or repeated one.
     internal long ContentLengthLeft = -1;
 
+    // A pseudo-header out of place: the stream is refused once the section is decoded, never dispatched.
+    internal bool Malformed;
+
     // The QPACK decoder lands every decoded field here; pseudo-headers route by byte compare.
     internal void AddField(ReadOnlySpan<byte> name, ReadOnlySpan<byte> value)
     {
         if (name.Length > 0 && name[0] == (byte)':')
         {
-            (int Off, int Len) r = Append(value);
-            if      (name.SequenceEqual(":method"u8))    MethodR = r;
-            else if (name.SequenceEqual(":path"u8))      PathR = r;
-            else if (name.SequenceEqual(":scheme"u8))    SchemeR = r;
-            else if (name.SequenceEqual(":authority"u8)) AuthorityR = r;
+            if      (name.SequenceEqual(":method"u8))    Pseudo(ref MethodR, value);
+            else if (name.SequenceEqual(":path"u8))      Pseudo(ref PathR, value);
+            else if (name.SequenceEqual(":scheme"u8))    Pseudo(ref SchemeR, value);
+            else if (name.SequenceEqual(":authority"u8)) Pseudo(ref AuthorityR, value);
+            else Malformed = true;
             return;
         }
 
@@ -63,6 +66,13 @@ public sealed class Http3Request
                     ? length
                     : -2;
         }
+    }
+
+    // RFC 9114 4.3: each at most once, and ahead of every regular field.
+    private void Pseudo(ref (int Off, int Len) range, ReadOnlySpan<byte> value)
+    {
+        Malformed |= range.Len >= 0 || HeaderRanges.Count > 0;
+        range = Append(value);
     }
 
     private (int Off, int Len) Append(ReadOnlySpan<byte> data)

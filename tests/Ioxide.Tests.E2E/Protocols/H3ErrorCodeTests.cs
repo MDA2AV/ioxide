@@ -39,6 +39,7 @@ internal static class H3ErrorCodeTests
     private const ulong H3FrameError             = 0x0106;
     private const ulong H3ExcessiveLoad          = 0x0107;
     private const ulong H3RequestIncomplete      = 0x010d;
+    private const ulong H3MessageError           = 0x010e;
     private const ulong QpackDecompressionFailed = 0x0200;
 
     // A GET framed by hand: HEADERS(len 6), field-section prefix 00 00 (Required Insert Count 0,
@@ -62,6 +63,52 @@ internal static class H3ErrorCodeTests
 
     private static void RegisterCodeSeam(Runner runner)
     {
+        // RFC 9114 4.3. Hand-framed like WellFormedGet: 0xD1 :method GET, 0xD7 :scheme https, 0xC1 :path /, 0xC0 :authority "".
+        byte[] field = [0x23, (byte)'x', (byte)'-', (byte)'a', 0x01, (byte)'v'];
+        byte[] admin = [0x51, 6, .. "/admin"u8.ToArray()];   // :path, as a literal on its static name
+        foreach ((string name, byte[] fields) in new[]
+        {
+            ("a repeated :method", (byte[])[0xD1, 0xD7, 0xC1, 0xC0, 0xD1]),
+            ("a repeated :scheme", (byte[])[0xD1, 0xD7, 0xC1, 0xC0, 0xD7]),
+            ("a repeated :path", (byte[])[0xD1, 0xD7, 0xC1, 0xC0, .. admin]),
+            ("a repeated :authority", (byte[])[0xD1, 0xD7, 0xC1, 0xC0, 0xC0]),
+            ("a pseudo-header after a regular field", (byte[])[0xD1, 0xD7, 0xC1, .. field, 0xC0]),
+            ("an unknown pseudo-header", (byte[])[0xD1, 0xD7, 0xC1, 0xC0, 0x22, (byte)':', (byte)'x', 0x01, (byte)'v']),
+        })
+        {
+            string shape = name;
+            byte[] headers = [0x01, (byte)(fields.Length + 2), 0x00, 0x00, .. fields];
+
+            runner.Test($"http3/codes: {shape} is H3_MESSAGE_ERROR on its stream, which no handler sees", () =>
+            {
+                var quic = new RecordingQuic();
+                Task run = StartPure(quic, out Served served, closeTransport: true, (0, headers, true), (4, WellFormedGet, true));
+
+                Assert.True(run.IsCompleted, "the run loop should complete inline once the transport closes");
+                Assert.True(quic.Resets.SequenceEqual([(0L, H3MessageError)]),
+                    $"expected stream 0 reset with H3_MESSAGE_ERROR and nothing else, got [{string.Join(", ", quic.Resets)}]");
+                Assert.Equal(1, served.Count);           // stream 4 alone
+                Assert.True(quic.ClosedWith is null, "one malformed request closed the connection");
+            });
+
+            runner.Test($"http3/codes: {shape} never reaches a handler taking a body reader", () =>
+            {
+                var quic = new RecordingQuic();
+                Assert.True(quic.EnqueueStreamData(0, headers, true), "the recv ring rejected the item");
+                quic.MarkClosed();
+
+                int served = 0;
+                Task run = new Http3Connection(quic).RunAsync((_, _) =>
+                {
+                    served++;
+                    return new ValueTask<Http3Response>(Http3Response.Text("ok"));
+                });
+
+                Assert.True(run.IsCompleted, "the run loop should complete inline once the transport closes");
+                Assert.Equal(0, served);
+            });
+        }
+
         runner.Test("http3/codes: control - a hand-framed GET is served through the recording transport", () =>
         {
             var quic = new RecordingQuic();
