@@ -219,13 +219,12 @@ public sealed unsafe class H3TestClient : IDisposable
             PumpIn();
         }
 
-        var headerList = new List<(string, string)>
+        var headerList = new List<(string, string)> { (":method", method), (":scheme", "https") };
+        if (extraHeaders?.Any(h => h.Name == "host") != true)
         {
-            (":method", method),
-            (":scheme", "https"),
-            (":authority", "localhost"),
-            (":path", path),
-        };
+            headerList.Add((":authority", "localhost"));   // a request carrying host sends no :authority (RFC 9114 4.3.1)
+        }
+        headerList.Add((":path", path));
         if (extraHeaders is not null)
         {
             headerList.AddRange(extraHeaders.Select(h => (h.Name, h.Value)));

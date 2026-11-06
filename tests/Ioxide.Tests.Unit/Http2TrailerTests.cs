@@ -148,6 +148,33 @@ internal static class Http2TrailerTests
             peer.Close(run);
         });
 
+        runner.Test("h2 request: a buffered request's trailers split over HEADERS and CONTINUATION merge into it, and the connection serves on", () =>
+        {
+            var served = new List<string>();
+
+            using var peer = new Peer(new Http2Options());
+            Task run = peer.Connection.RunAsync(request =>
+            {
+                request.TryGetHeader("x-checksum"u8, out ReadOnlyMemory<byte> checksum);
+                request.TryGetHeader("x-digest"u8, out ReadOnlyMemory<byte> digest);
+                served.Add($"{request.StreamId} '{Ascii(request.Path)}' {request.Body.Length} x-checksum '{Ascii(checksum)}' x-digest '{Ascii(digest)}'");
+                return Http2Response.Text("done");
+            });
+
+            peer.Open();
+            peer.Headers(1, Request("/upload"), endStream: false);
+            peer.Data(1, 400, endStream: false);
+            peer.HeadersOpen(1, Field("x-checksum", "abc"), endStream: true);   // END_STREAM, with the block still open
+            peer.Continuation(1, Field("x-digest", "def"));                    // END_HEADERS
+            peer.Headers(3, Request("/next"), endStream: true);
+
+            Assert.True(served.SequenceEqual(["1 '/upload' 400 x-checksum 'abc' x-digest 'def'", "3 '/next' 0 x-checksum '' x-digest ''"]),
+                $"the handler was handed: {string.Join(", ", served)}");
+            Assert.Equal("", GoAways(peer));
+
+            peer.Close(run);
+        });
+
         runner.Test("h2 request: a stream refused past MaxConcurrentStreams still gets REFUSED_STREAM, and its id opens nothing later", () =>
         {
             var served = new List<string>();
@@ -195,6 +222,56 @@ internal static class Http2TrailerTests
             gate.SetResult();
             peer.Close(run);
         });
+
+        // RFC 9113 8.1. Its fields landed in the arena the body was being appended to, and the body's range ran across them.
+        runner.Test("h2 buffered request: HEADERS without END_STREAM after the opening block resets the stream, and its body never reaches a handler", () =>
+        {
+            var served = new List<string>();
+
+            using var peer = new Peer(new Http2Options());
+            Task run = peer.Connection.RunAsync(request =>
+            {
+                served.Add($"{Ascii(request.Path)} {Fields(request)}");
+                return Http2Response.Text("ok");
+            });
+
+            peer.Open();
+            peer.Headers(1, Request("/up"), endStream: false);
+            peer.Data(1, 400, endStream: false);
+            peer.Headers(1, Field("x-a", "abc", index: true), endStream: false);
+            peer.Data(1, 400, endStream: true);
+            peer.Headers(3, [.. Request("/next"), 0xBE], endStream: true);   // the block was decoded, so x-a is at index 62
+            peer.Close(run);
+
+            Assert.Equal("1 PROTOCOL_ERROR", Resets(peer));
+            Assert.Equal("", GoAways(peer));
+            Assert.True(served.SequenceEqual(["/next x-a: abc"]), $"the handler was handed: {string.Join(", ", served)}");
+        });
+
+        // The block's CONTINUATION is still owed after the reset, and has to reach the decoder, not end the connection.
+        runner.Test("h2 buffered request: HEADERS without END_STREAM split over CONTINUATION still keeps HPACK in step", () =>
+        {
+            var served = new List<string>();
+
+            using var peer = new Peer(new Http2Options());
+            Task run = peer.Connection.RunAsync(request =>
+            {
+                served.Add($"{Ascii(request.Path)} {Fields(request)}");
+                return Http2Response.Text("ok");
+            });
+
+            peer.Open();
+            peer.Headers(1, Request("/up"), endStream: false);
+            byte[] block = Field("x-a", "abc", index: true);
+            peer.HeadersOpen(1, block[..3], endStream: false);
+            peer.Continuation(1, block[3..]);
+            peer.Headers(3, [.. Request("/next"), 0xBE], endStream: true);
+            peer.Close(run);
+
+            Assert.Equal("1 PROTOCOL_ERROR", Resets(peer));
+            Assert.Equal("", GoAways(peer));
+            Assert.True(served.SequenceEqual(["/next x-a: abc"]), $"the handler was handed: {string.Join(", ", served)}");
+        });
     }
 
     // :method POST and :scheme http from the static table, and :path as a literal on its static
@@ -209,7 +286,7 @@ internal static class Http2TrailerTests
 
     // A literal with a new name: without indexing, or with incremental indexing, which inserts it
     // into the dynamic table at index 62.
-    private static byte[] Field(string name, string value, bool index = false)
+    internal static byte[] Field(string name, string value, bool index = false)
     {
         var block = new List<byte> { (byte)(index ? 0x40 : 0x00) };
         Literal(block, name);
@@ -342,6 +419,10 @@ internal static class Http2TrailerTests
             => Feed(FrameBytes(0x1, (byte)(0x4 | (endStream ? 0x1 : 0)), streamId, block));
 
         public void Continuation(int streamId, byte[] block) => Feed(FrameBytes(0x9, 0x4, streamId, block));
+
+        /// <summary>A HEADERS frame without END_HEADERS: a CONTINUATION ends its block.</summary>
+        public void HeadersOpen(int streamId, byte[] block, bool endStream)
+            => Feed(FrameBytes(0x1, (byte)(endStream ? 0x1 : 0), streamId, block));
 
         public void Data(int streamId, int bytes, bool endStream)
             => Feed(FrameBytes(0x0, (byte)(endStream ? 0x1 : 0), streamId, Enumerable.Repeat((byte)'z', bytes).ToArray()));
