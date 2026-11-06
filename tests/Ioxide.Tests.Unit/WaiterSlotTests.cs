@@ -347,7 +347,7 @@ internal static unsafe class WaiterSlotTests
     /// test's own, once per round, the two sides skewed differently each time; <paramref name="setup"/>
     /// before and <paramref name="check"/> after, both here, with the other side done.
     /// </summary>
-    private static void Race(Action<int> setup, Action<int> here, Action<int> there, Action<int> check)
+    internal static void Race(Action<int> setup, Action<int> here, Action<int> there, Action<int> check)
     {
         int go = 0, done = 0, skew = 0;
         Exception? fault = null;   // the other side's, which would otherwise end the process
@@ -429,7 +429,7 @@ internal static unsafe class WaiterSlotTests
         }
     }
 
-    private static Reactor NeverRunning() => new(0, new ServerConfig { ReactorCount = 1, Tcp = null, Udp = null });
+    internal static Reactor NeverRunning() => new(0, new ServerConfig { ReactorCount = 1, Tcp = null, Udp = null });
 
     // fd -1, so a flush queued to the reactor finds no table entry when it is drained.
     private static TcpConnection Connection(Reactor reactor) => new(reactor, -1, 64, 8);
