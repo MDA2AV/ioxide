@@ -45,17 +45,19 @@ internal static unsafe partial class Nghttp2
 
     /// <summary>Answer the request on <paramref name="streamId"/>. Headers are packed
     /// [u16 namelen][name][u16 valuelen][value]..., <c>:status</c> first. The body is copied
-    /// natively and freed on stream close. Returns 0, or a negative nghttp2 error.</summary>
+    /// natively and freed on stream close; for a stream the peer already reset, nothing is kept and
+    /// the result is still 0. Returns 0, or a negative nghttp2 error.</summary>
     [DllImport(Lib)] internal static extern int ih2_submit_response(nint connection, int streamId,
         byte* headers, nuint headersLen, byte* body, nuint bodyLen);
 
     /// <summary>
-    /// Open a response whose body arrives over time. Headers go out at once; the body follows
-    /// through <see cref="ih2_stream_write"/> until <see cref="ih2_stream_close"/> ends it.
+    /// Open a response whose body arrives over time. Headers are queued for the next drain; the body
+    /// follows through <see cref="ih2_stream_write"/> until <see cref="ih2_stream_close"/> ends it.
     ///
     /// nghttp2 PULLS: it asks for body bytes when it is ready to frame them, and its read callback
     /// defers whenever nothing is buffered - which is what holds the stream open through a slow
-    /// producer rather than ending it early. Returns 0, or a negative nghttp2 error.
+    /// producer rather than ending it early. Returns 0, NGHTTP2_ERR_STREAM_CLOSED for a stream the peer
+    /// already reset, or another negative nghttp2 error.
     /// </summary>
     [DllImport(Lib)] internal static extern int ih2_submit_response_stream(nint connection,
         int streamId, byte* headers, nuint headersLen);

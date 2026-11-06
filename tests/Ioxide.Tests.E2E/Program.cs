@@ -47,6 +47,7 @@ internal static class Program
         QuicUnansweredStreamTests.Register(runner);
         QuicDeferredFaultTests.Register(runner);
         QuicStreamAllowanceTests.Register(runner);
+        QuicSendStreamTests.Register(runner);
         QuicTimerTests.Register(runner);
         QuicSniHostileTests.Register(runner);
         QuicDemuxRoutingTests.Register(runner);
@@ -56,6 +57,7 @@ internal static class Program
         H3BodyTruncationTests.Register(runner);
         H3HeldChunkTests.Register(runner);
         H3ErrorCodeTests.Register(runner);
+        Nghttp3ManyFieldsTests.Register(runner);
         H3CriticalStreamTests.Register(runner);
         H3AlpnTests.Register(runner);
         Http2BodyTests.Register(runner);
@@ -64,6 +66,7 @@ internal static class Program
         StreamedPeerGoneTests.Register(runner);
         QuicStreamingCreditTests.Register(runner);
         Http3BodyTests.Register(runner);
+        Http3RequestReuseTests.Register(runner);
         H3BodyModeTests.Register(runner);
         H3BufferedFaultTests.Register(runner);
         H3BodyLimitTests.Register(runner);
