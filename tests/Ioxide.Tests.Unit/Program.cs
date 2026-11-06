@@ -31,6 +31,7 @@ internal static class Program
         Http2PseudoHeaderTests.Register(runner);
         Nghttp2StreamCloseTests.Register(runner);
         Http2HeaderListTests.Register(runner);
+        Nghttp2HeaderListTests.Register(runner);
         Http2RequestHeaderTests.Register(runner);
         Http2RequestReuseTests.Register(runner);
         Nghttp2RequestReuseTests.Register(runner);
