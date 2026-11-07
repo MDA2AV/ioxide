@@ -649,6 +649,14 @@ internal sealed unsafe class RawH3Client : IDisposable
         FlushOut();
     }
 
+    /// <summary>Ask the server to stop sending on the request stream, and nothing else: the upload stays open.</summary>
+    public void StopSending(ulong appErrorCode)
+    {
+        // The shim only has the call that does both directions, and an iq_conn starts with its ngtcp2_conn.
+        Assert.True(ngtcp2_conn_shutdown_stream_read(*(nint*)_conn, 0, _streamId, appErrorCode) == 0, "shutdown_stream_read failed");
+        FlushOut();
+    }
+
     /// <summary>
     /// Pump the wire until <paramref name="signal"/> completes or the deadline passes. The signal
     /// is set on the reactor, so this is a bound on a wait, not a measurement of one.
@@ -778,5 +786,6 @@ internal sealed unsafe class RawH3Client : IDisposable
     [DllImport(Lib)] private static extern int  iq_conn_read(nint conn, void* remoteSa, nuint remoteLen, byte* pkt, nuint pktLen, byte ecn, ulong ts);
     [DllImport(Lib)] private static extern int  iq_conn_is_established(nint conn);
     [DllImport(Lib)] private static extern int  iq_conn_shutdown_stream(nint conn, long streamId, ulong appErrorCode);
+    [DllImport(Lib)] private static extern int  ngtcp2_conn_shutdown_stream_read(nint conn, uint flags, long streamId, ulong appErrorCode);
     [DllImport(Lib)] private static extern void iq_conn_free(nint conn);
 }
