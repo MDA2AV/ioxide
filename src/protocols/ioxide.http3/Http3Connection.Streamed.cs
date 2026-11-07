@@ -10,7 +10,7 @@ public sealed partial class Http3Connection
 {
     private readonly Stack<Http3ResponseWriter> _writerPool = new();
 
-    // Streamed responses in flight, so a STOP_SENDING from the peer can reach the one it ends.
+    // Streamed responses in flight, so whatever ends one can reach it.
     private readonly Dictionary<long, Http3ResponseWriter> _writers = new();
     private readonly List<TaskCompletionSource> _capacityWaiters = [];
 
@@ -43,6 +43,7 @@ public sealed partial class Http3Connection
     private async Task RunStreamedAsync(Func<Http3Request, Http3ResponseWriter, ValueTask> handler)
     {
         _quicConnection.OnSendCapacityAvailable = ReleaseCapacityWaiters;
+        _quicConnection.OnSendRefused = ResponseRefused;
 
         try
         {
@@ -144,6 +145,21 @@ public sealed partial class Http3Connection
         var waiter = new TaskCompletionSource();
         _capacityWaiters.Add(waiter);
         return waiter.Task;
+    }
+
+    // A flush that told nobody would return at once and not completed, for a handler that writes until it is told.
+    private void ResponseRefused(long streamId)
+    {
+        if (!_writers.TryGetValue(streamId, out Http3ResponseWriter? writer))
+        {
+            return;
+        }
+
+        writer.OnPeerGone();
+        if (_capacityWaiters.Count > 0)
+        {
+            Reactor.ScheduleOnReactor(static connection => ((Http3Connection)connection!).ReleaseCapacityWaiters(), this);
+        }
     }
 
     private void ReleaseCapacityWaiters()

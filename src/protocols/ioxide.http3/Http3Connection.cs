@@ -283,7 +283,7 @@ public sealed partial class Http3Connection
                 Fatal("critical stream closed", H3ClosedCriticalStream);
             }
 
-            // A response in flight whose peer will read no more of it: its handler learns at the next
+            // A response in flight that nothing more of will be sent: its handler learns at the next
             // flush, and one parked on send capacity wakes to find that out.
             if (item.Kind is QuicStreamEvent.StopSending or QuicStreamEvent.Closed
                 && _writers.TryGetValue(item.StreamId, out Http3ResponseWriter? stopped))

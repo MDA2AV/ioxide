@@ -77,6 +77,22 @@ public sealed partial class Nghttp3Connection
         }, TearDownStreamed);
     }
 
+    // A flush that told nobody would return at once and not completed, for a handler that writes until it is told.
+    private void ResponseRefused(long streamId)
+    {
+        if (_nghttp3Handle == 0)
+        {
+            return;
+        }
+
+        Nghttp3.ih3_shutdown_stream_write(_nghttp3Handle, streamId);
+        if (_writers.TryGetValue(streamId, out Nghttp3ResponseWriter? writer))
+        {
+            writer.OnPeerGone();
+            Reactor.ScheduleOnReactor(static connection => ((Nghttp3Connection)connection!).DrainStreamed(), this);   // a parked flush learns on a drain
+        }
+    }
+
     // The writers' share of the teardown, ahead of the close.
     private void TearDownStreamed()
     {

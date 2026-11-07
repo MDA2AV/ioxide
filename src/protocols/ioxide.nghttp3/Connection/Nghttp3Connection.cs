@@ -124,6 +124,7 @@ public sealed partial class Nghttp3Connection : IDisposable
         // backpressure (it stops at the high-water); this resumes it as acks free retention, since
         // the run loop only wakes on inbound request data - not on the acks of a download.
         _quicConnection.OnSendCapacityAvailable = () => PumpEgress();
+        _quicConnection.OnSendRefused = ResponseRefused;
     }
 
     /// <summary>

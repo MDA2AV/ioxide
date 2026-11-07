@@ -189,8 +189,8 @@ public unsafe partial class QuicEngineConnection : QuicConnection
         }
     }
 
-    // The peer refuses our response (STOP_SENDING): stop feeding the stream. Retained chunks are
-    // NOT freed here - ngtcp2 may still hold references until the stream closes.
+    // We shut this stream ourselves: stop feeding it. Retained chunks are NOT freed here - ngtcp2 may
+    // still hold references until the stream closes.
     private void MarkOutStreamDead(long streamId)
     {
         if (_outStreams.TryGetValue(streamId, out OutStream? os))
