@@ -347,8 +347,9 @@ public sealed unsafe class TcpConnectionPipeReader : PipeReader, IValueTaskSourc
     /// Hand every held slice's buffer back to the ring and forget the chain.
     /// </summary>
     /// <remarks>
-    /// Called by <see cref="Complete"/>, and by the reactor at recycle for a reader whose caller
-    /// never completed it (<see cref="TcpConnection.ReleaseHeldRecvBuffers"/>). Idempotent: once the
+    /// Called by <see cref="Complete"/>, and by the reactor for a reader whose caller never completed
+    /// it: at recycle (<see cref="TcpConnection.ReleaseHeldRecvBuffers"/>), or sooner once its handler
+    /// has let go and a recv needs the buffers. Idempotent: once the
     /// chain is empty it does nothing, so the ordinary path of Complete-then-recycle returns each
     /// buffer exactly once.
     /// </remarks>

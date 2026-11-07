@@ -103,8 +103,7 @@ public sealed unsafe partial class Reactor
             // return to the group.
             if (conn != null)
             {
-                conn.ReadParkedMs = NowMs;   // the peer sent; the wait is ours, so the clock restarts
-                _recvStarved.Add(((ulong)gen << 32) | (uint)fd);
+                ParkStarvedRecv(conn, fd, gen);
             }
             return;
         }
@@ -165,8 +164,7 @@ public sealed unsafe partial class Reactor
             // still holds buffers (#93). Park; the loop re-arms once a buffer recycles.
             if (conn != null)
             {
-                conn.ReadParkedMs = NowMs;   // the peer sent; the wait is ours, so the clock restarts
-                _recvStarved.Add(((ulong)gen << 32) | (uint)fd);
+                ParkStarvedRecv(conn, fd, gen);
             }
             return;
         }
@@ -307,6 +305,25 @@ public sealed unsafe partial class Reactor
     {
         SubmitCancel(Tag(KindTcpRecv, gen, fd));
         CloseFromRecv(conn, fd);
+    }
+
+    private void ParkStarvedRecv(TcpConnection conn, int fd, ushort gen)
+    {
+        conn.ReadParkedMs = NowMs;   // the peer sent; the wait is ours, so the clock restarts
+        if (conn.HandlerReleased)
+        {
+            ReturnReleasedBuffers(conn);
+        }
+        _recvStarved.Add(((ulong)gen << 32) | (uint)fd);
+    }
+
+    // Nobody will read a connection its handler let go, and its recv needs a buffer to reach the peer's close, which
+    // is what tears it down. So what it holds goes back.
+    private void ReturnReleasedBuffers(TcpConnection conn)
+    {
+        // Not claimed the way recycle claims it: a read left parked can still take more, for recycle to ask back.
+        conn.BufferHolder?.ReleaseHeldBuffers();
+        conn.DrainRecv();
     }
 
     // Re-arm every recv parked on -ENOBUFS (#93). Runs once per loop iteration, but only when a

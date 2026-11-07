@@ -17,7 +17,8 @@ internal interface IRecvBufferHolder
 {
     /// <summary>
     /// Hand every held buffer back to its ring. Must be idempotent: the ordinary path releases on
-    /// completion and recycle asks again afterwards, and each buffer may be returned only once.
+    /// completion, the reactor can ask once the handler has let go, and recycle asks again afterwards,
+    /// and each buffer may be returned only once.
     /// </summary>
     void ReleaseHeldBuffers();
 }
