@@ -323,17 +323,20 @@ public sealed unsafe partial class Reactor
     {
         // Not claimed the way recycle claims it: a read left parked can still take more, for recycle to ask back.
         conn.BufferHolder?.ReleaseHeldBuffers();
-        conn.DrainRecv();
 
-        if (_incremental)
+        if (!_incremental)
         {
-            // By id, whatever the counts say: no reader is left to bring them down.
-            for (int bid = 0; bid < conn.KernelDone!.Length; bid++)
+            conn.DrainRecv();
+            return;
+        }
+
+        // By id, whatever the counts say: no reader is left to bring them down.
+        conn.DropQueuedRecv();
+        for (int bid = 0; bid < conn.KernelDone!.Length; bid++)
+        {
+            if (conn.KernelDone[bid])
             {
-                if (conn.KernelDone[bid])
-                {
-                    ReturnConnectionBuffer(conn, (ushort)bid);
-                }
+                ReturnConnectionBuffer(conn, (ushort)bid);
             }
         }
     }

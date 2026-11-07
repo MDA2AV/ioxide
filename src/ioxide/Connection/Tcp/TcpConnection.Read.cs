@@ -297,12 +297,15 @@ public sealed unsafe partial class TcpConnection : IValueTaskSource<RecvSnapshot
         // Return buffer IDs still sitting in the SPSC ring, for a handler that won't read them.
         while (_recv.TryDequeue(out SpscRecvRing.Item item))
         {
-            if (item.HasBuffer && !IncrementalMode)
+            if (item.HasBuffer)
             {
                 _reactor.ReturnBufferDirect(item.Bid);
             }
         }
     }
+
+    // Incremental mode, for a handler that won't read them: the reactor tracks these buffers by id.
+    internal void DropQueuedRecv() => _recv.Reset();
 
     // IVTS: token = generation snapshot (cross-life guard); the core's own Version is
     // passed through for the mid-life dispatch.
