@@ -23,7 +23,7 @@ public sealed record ServerConfig
     /// <summary>
     /// Bind listeners as dual-stack IPv6 (AF_INET6 on :: with IPV6_V6ONLY=0) so one socket accepts both
     /// IPv6 and IPv4-mapped clients. When false (default) listeners are IPv4-only (AF_INET on 0.0.0.0).
-    /// Applies to TCP listeners and UDP sockets alike.
+    /// Applies to TCP listeners and UDP sockets alike, except TCP listeners given a <see cref="TcpOptions.Address"/>.
     /// </summary>
     public bool DualStack { get; init; } = false;
 

@@ -13,6 +13,7 @@ internal static class Program
 
         CoreTests.Register(runner);
         ListenerReleaseTests.Register(runner);
+        ListenerAddressTests.Register(runner);
         TimerTests.Register(runner);
         AffinityTests.Register(runner);
         KestrelTests.Register(runner);

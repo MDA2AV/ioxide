@@ -1,4 +1,5 @@
 using System.Net;
+using System.Net.Sockets;
 using System.Threading.Channels;
 using Microsoft.AspNetCore.Connections;
 using Microsoft.Extensions.Logging;
@@ -21,14 +22,17 @@ internal sealed class IoxideConnectionListener : IConnectionListener
     private readonly Reactor[] _reactors;
     private readonly Thread[] _threads;
     private readonly TlsOptions? _tlsOptions;
+    private readonly Socket _portHold;
     private long _connectionCounter;
     private int _stopped;
 
     public EndPoint EndPoint { get; }
 
-    public IoxideConnectionListener(IPEndPoint endpoint, IoxideTransportOptions options, TlsOptions? tlsOptions, ILogger<IoxideConnectionListener> logger)
+    /// <param name="portHold">Bound to <paramref name="endpoint"/>, held for as long as this listener runs.</param>
+    public IoxideConnectionListener(IPEndPoint endpoint, Socket portHold, IoxideTransportOptions options, TlsOptions? tlsOptions, ILogger<IoxideConnectionListener> logger)
     {
         EndPoint = endpoint;
+        _portHold = portHold;
         _logger = logger;
         _tlsOptions = tlsOptions;
 
@@ -41,7 +45,7 @@ internal sealed class IoxideConnectionListener : IConnectionListener
 
         var reactorCount = Math.Max(1, options.ReactorCount);
 
-        var cfg = new ServerConfig { ReactorCount = reactorCount, Tcp = new TcpOptions { Port = (ushort)endpoint.Port } };
+        var cfg = new ServerConfig { ReactorCount = reactorCount, Tcp = new TcpOptions { Port = (ushort)endpoint.Port, Address = endpoint.Address } };
         if (options.ConfigureServer is not null)
         {
             cfg = options.ConfigureServer(cfg);
@@ -50,7 +54,7 @@ internal sealed class IoxideConnectionListener : IConnectionListener
         // one rather than silently binding nothing.
         cfg = cfg with
         {
-            Tcp = (cfg.Tcp ?? new TcpOptions()) with { Port = (ushort)endpoint.Port },
+            Tcp = (cfg.Tcp ?? new TcpOptions()) with { Port = (ushort)endpoint.Port, Address = endpoint.Address },
             ReactorCount = reactorCount,
         };
 
@@ -178,6 +182,8 @@ internal sealed class IoxideConnectionListener : IConnectionListener
                 thread.Join(TimeSpan.FromSeconds(5));
             }
         }).ConfigureAwait(false);
+
+        _portHold.Dispose();
 
         _logger.LogInformation("[ioxide] Stopped {ReactorCount} reactor(s) on {Endpoint}", _reactors.Length, EndPoint);
     }

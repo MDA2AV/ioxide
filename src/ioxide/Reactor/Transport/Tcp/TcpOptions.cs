@@ -1,3 +1,5 @@
+using System.Net;
+
 namespace ioxide;
 
 /// <summary>
@@ -24,6 +26,13 @@ public sealed record TcpOptions
     /// entry points (e.g. plaintext + TLS).
     /// </summary>
     public ushort[] ExtraPorts { get; init; } = [];
+
+    /// <summary>
+    /// The address the listeners bind, for <see cref="Port"/> and <see cref="ExtraPorts"/> alike. Null, the default, is
+    /// every interface: 0.0.0.0, or :: under <see cref="ServerConfig.DualStack"/>. An address decides the family itself
+    /// and DualStack doesn't apply; :: also takes IPv4-mapped peers.
+    /// </summary>
+    public IPAddress? Address { get; init; }
 
     /// <summary>listen() backlog per SO_REUSEPORT listener - the accept-queue depth for connection bursts.</summary>
     public int ListenBacklog { get; init; } = 1024;
