@@ -21,7 +21,7 @@ internal sealed class IoxideTransportFactory : IConnectionListenerFactory
         _loggerFactory = loggerFactory;
     }
 
-    public ValueTask<IConnectionListener> BindAsync(EndPoint endpoint, CancellationToken cancellationToken = default)
+    public async ValueTask<IConnectionListener> BindAsync(EndPoint endpoint, CancellationToken cancellationToken = default)
     {
         if (endpoint is not IPEndPoint ipEndpoint)
         {
@@ -42,27 +42,38 @@ internal sealed class IoxideTransportFactory : IConnectionListenerFactory
         }
 
         Socket portHold = HoldPort(ipEndpoint);
+        IoxideConnectionListener listener;
         try
         {
             var logger = _loggerFactory.CreateLogger<IoxideConnectionListener>();
-            IConnectionListener listener = new IoxideConnectionListener((IPEndPoint)portHold.LocalEndPoint!, portHold, _options, tlsOptions, logger);
-            return ValueTask.FromResult(listener);
+            listener = new IoxideConnectionListener((IPEndPoint)portHold.LocalEndPoint!, portHold, _options, tlsOptions, logger);
         }
         catch
         {
             portHold.Dispose();
             throw;
         }
+
+        try
+        {
+            await listener.StartedAsync(cancellationToken).ConfigureAwait(false);
+        }
+        catch
+        {
+            await listener.DisposeAsync().ConfigureAwait(false);
+            throw;
+        }
+
+        return listener;
     }
 
     // Linux's values, on every architecture this runs on.
     private const int SolSocket = 1;
     private const int SoReusePort = 15;
 
-    // The reactors bind on their own threads, too late to fail this call, and Kestrel goes by what this call throws: a
-    // port in use stops the host, while a family the machine lacks falls back to IPv4. So the address is bound here
-    // first, the way they will bind it. Kept bound, it settles a port of 0 for all of them; it doesn't listen, so it
-    // takes no connections.
+    // Kestrel goes by what this call throws: a port in use stops the host, while a family the machine lacks falls back to
+    // IPv4. The reactors' own binds would only tell it as a start failure, so the address is bound here first, the way
+    // they will bind it. Kept bound, it settles a port of 0 for all of them; it doesn't listen, so it takes no connections.
     private static Socket HoldPort(IPEndPoint endpoint)
     {
         var socket = new Socket(endpoint.AddressFamily, SocketType.Stream, ProtocolType.Tcp);
@@ -72,7 +83,7 @@ internal sealed class IoxideTransportFactory : IConnectionListenerFactory
             socket.SetRawSocketOption(SolSocket, SoReusePort, BitConverter.GetBytes(1));
             if (endpoint.AddressFamily == AddressFamily.InterNetworkV6)
             {
-                socket.DualMode = true;
+                socket.DualMode = endpoint.Address.Equals(IPAddress.IPv6Any);   // as stock: :: takes IPv4 too, and nothing else does
             }
 
             socket.Bind(endpoint);

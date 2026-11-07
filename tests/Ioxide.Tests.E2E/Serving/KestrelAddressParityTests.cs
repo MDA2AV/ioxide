@@ -32,6 +32,7 @@ internal static class KestrelAddressParityTests
             ("Listen(IPv6Loopback)", (b, p) => b.WebHost.ConfigureKestrel(k => k.Listen(IPAddress.IPv6Loopback, p))),
             ("Listen(Any)", (b, p) => b.WebHost.ConfigureKestrel(k => k.Listen(IPAddress.Any, p))),
             ("Listen(IPv6Any)", (b, p) => b.WebHost.ConfigureKestrel(k => k.Listen(IPAddress.IPv6Any, p))),
+            ("Listen(an IPv4-mapped address)", (b, p) => b.WebHost.ConfigureKestrel(k => k.Listen(IPAddress.Parse("::ffff:127.0.0.1"), p))),
             ("ListenLocalhost", (b, p) => b.WebHost.ConfigureKestrel(k => k.ListenLocalhost(p))),
             ("ListenAnyIP", (b, p) => b.WebHost.ConfigureKestrel(k => k.ListenAnyIP(p))),
             ("the URL http://127.0.0.1", (b, p) => b.WebHost.UseUrls($"http://127.0.0.1:{p}")),
@@ -68,9 +69,47 @@ internal static class KestrelAddressParityTests
             int port = new Uri(address).Port;
             Assert.True(port != 0, $"it reports {address}");
 
-            Assert.True(LetGoDriver.Eventually(() => host.ReactorsUp), "the reactors never came up");
             Assert.Equal("tcp 0100007F", string.Join(", ", Listening(port)));
+            Assert.Equal(2, Sockets(port));   // one per reactor, not just one between them
             Assert.Equal(200, Client.Get(port, "/").Status);
+        });
+
+        runner.Test("kestrel: once StartAsync returns, every reactor is listening, so the port is no one else's", () =>
+        {
+            int port = TestServer.NextPort();
+            using Host host = Started((b, p) => b.WebHost.ConfigureKestrel(k => k.Listen(IPAddress.Loopback, p)), port, ioxide: true);
+
+            // At once: a listener of our own, as anything else on the machine could open.
+            using var other = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp);
+            Assert.Throws<SocketException>(() =>
+            {
+                other.Bind(new IPEndPoint(IPAddress.Loopback, port));
+                other.Listen(8);
+            });
+            Assert.Equal(2, Sockets(port));
+        });
+
+        runner.Test("kestrel: a reactor whose start hook throws fails the host's start, and the others stop", () =>
+        {
+            int port = TestServer.NextPort();
+            Thread.Sleep(150);
+            int before = LetGoDriver.OpenSockets();
+
+            Assert.Throws<Exception>(() => Started((b, p) => b.WebHost.ConfigureKestrel(k => k.Listen(IPAddress.Loopback, p)), port, ioxide: true,
+                onReactorStart: r => { if (r.ShardIndex == 1) { throw new InvalidOperationException("the hook failed, for the test"); } }).Dispose(), "the hook failed");
+
+            Assert.Equal(0, Sockets(port));
+            Assert.True(LetGoDriver.Eventually(() => LetGoDriver.OpenSockets() <= before),
+                $"{LetGoDriver.OpenSockets() - before} sockets still open after the start failed");
+        });
+
+        runner.Test("kestrel: a certificate it can't read fails the host's start", () =>
+        {
+            int port = TestServer.NextPort();
+            Assert.Throws<Exception>(() => Started((b, p) =>
+            {
+                b.WebHost.ConfigureKestrel(k => k.Listen(IPAddress.Loopback, p));
+            }, port, ioxide: true, tls: ("/nonexistent/server.crt", "/nonexistent/server.key")).Dispose(), "failed to start");
         });
 
         runner.Test("kestrel: control: the stock transport, told port 0, reports the port it got", () =>
@@ -207,7 +246,8 @@ internal static class KestrelAddressParityTests
         }
     }
 
-    private static Host Started(Action<WebApplicationBuilder, int> ask, int port, bool ioxide)
+    private static Host Started(Action<WebApplicationBuilder, int> ask, int port, bool ioxide,
+        Action<ioxide.Reactor>? onReactorStart = null, (string Cert, string Key)? tls = null)
     {
         int started = 0;
 
@@ -219,7 +259,15 @@ internal static class KestrelAddressParityTests
             builder.WebHost.UseIoxide(o =>
             {
                 o.ReactorCount = 2;
-                o.OnReactorStart = _ => Interlocked.Increment(ref started);
+                o.OnReactorStart = r =>
+                {
+                    onReactorStart?.Invoke(r);
+                    Interlocked.Increment(ref started);
+                };
+                if (tls is { } pair)
+                {
+                    o.UseTls(pair.Cert, pair.Key, [port]);
+                }
             });
         }
 
@@ -234,6 +282,24 @@ internal static class KestrelAddressParityTests
 
         string[] reported = app.Services.GetRequiredService<IServer>().Features.Get<IServerAddressesFeature>()!.Addresses.Order().ToArray();
         return new Host(app, reported, () => Volatile.Read(ref started) >= 2);
+    }
+
+    // How many sockets listen on the port, whatever their addresses.
+    private static int Sockets(int port)
+    {
+        int count = 0;
+        foreach (string family in new[] { "tcp", "tcp6" })
+        {
+            string path = $"/proc/net/{family}";
+            if (File.Exists(path))
+            {
+                count += File.ReadLines(path).Skip(1)
+                    .Select(line => line.Split(' ', StringSplitOptions.RemoveEmptyEntries))
+                    .Count(row => row[3] == "0A" && Convert.ToInt32(row[1][(row[1].IndexOf(':') + 1)..], 16) == port);
+            }
+        }
+
+        return count;
     }
 
     // The sockets listening on the port, as /proc prints their addresses. A set, since reactors share them.

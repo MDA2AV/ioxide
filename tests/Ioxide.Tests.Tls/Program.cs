@@ -47,6 +47,7 @@ internal static class Program
         RotationIntegrityTests.Register(runner);
         AlpnNegotiationTests.Register(runner);
         ContextBuildTests.Register(runner);
+        DualStackTlsTests.Register(runner, ktls);
         TlsLetGoBufferTests.Register(runner, ktls);
 
         return runner.Summary();
