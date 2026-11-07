@@ -3,6 +3,7 @@ using System.Collections.Concurrent;
 using System.IO.Pipelines;
 using System.Net.Security;
 using System.Net.Sockets;
+using System.Runtime.CompilerServices;
 using ioxide;
 using ioxide.tls;
 
@@ -14,6 +15,8 @@ namespace Ioxide.Tests;
 /// </summary>
 internal static class OffReactorFlushTests
 {
+    private const int ReadyReads = 8;
+
     public static void Register(Runner runner)
     {
         runner.Test("tls pipe: a flush from another thread while the reactor decrypts keeps the session intact", () =>
@@ -215,10 +218,8 @@ internal static class OffReactorFlushTests
                 $"{wrong.Length} of {Clients} clients: {string.Join(" | ", wrong.Distinct())}; server: {string.Join(" | ", faults)}");
         });
 
-        runner.Test("tls pipe: a read from another thread resumes the handler on the reactor", () =>
+        runner.Test("tls pipe: a read from another thread of what is already decrypted completes there, without the reactor", () =>
         {
-            // With the request already decrypted the read completed at once, so the caller stayed on its
-            // thread and the next read decrypted there, beside the reactor's SSL_write.
             (string certPath, string keyPath) = TestCert.Ensure();
             var options = new TlsOptions { CertificatePath = certPath, KeyPath = keyPath };
 
@@ -226,9 +227,189 @@ internal static class OffReactorFlushTests
 
             (int status, string body) = Client.GetTls(port, "/");
             Assert.Equal(200, status);
-            Assert.Equal("on-reactor", body);
+            Assert.Equal($"{ReadyReads} of {ReadyReads}", body);
+        });
+
+        runner.Test("tls pipe: a read from another thread that has to decrypt does so on the reactor", () =>
+        {
+            (string certPath, string keyPath) = TestCert.Ensure();
+            var options = new TlsOptions { CertificatePath = certPath, KeyPath = keyPath };
+
+            const int Rounds = 32;
+            using var send = new SemaphoreSlim(0);
+            var outcome = new TaskCompletionSource<int>(TaskCreationOptions.RunContinuationsAsynchronously);
+
+            int port = TestServer.Start(DecryptOffReactorHandler(send, Rounds, outcome), r => TlsService.Start(r, options));
+
+            using var tcp = new TcpClient();
+            tcp.Connect("127.0.0.1", port);
+            using var ssl = new SslStream(tcp.GetStream(), leaveInnerStreamOpen: false, (_, _, _, _) => true);
+            ssl.AuthenticateAsClient(new SslClientAuthenticationOptions { TargetHost = "localhost" });
+
+            byte[] one = [1];
+            ssl.Write(one);   // read on the reactor, taking whatever the handshake left on the connection
+            for (int round = 0; round < Rounds; round++)
+            {
+                Assert.True(send.Wait(10_000), "the handler stopped asking for bytes");
+                ssl.Write(one);
+            }
+
+            Assert.True(outcome.Task.Wait(10_000), "the handler never finished");
+
+            // Where the handler lands isn't promised, since the reactor can finish before it awaits. But a decrypt
+            // on its own thread, beside the reactor's SSL_write, completes the read there, so it never lands on the reactor.
+            Assert.True(outcome.Task.Result >= Rounds / 2, $"the handler resumed on the reactor after {outcome.Task.Result} of {Rounds} decrypts");
+        });
+
+        runner.Test("tls pipe: a read from another thread that has to decrypt fails once the reactor has stopped, instead of waiting forever", () =>
+        {
+            (string certPath, string keyPath) = TestCert.Ensure();
+            var options = new TlsOptions { CertificatePath = certPath, KeyPath = keyPath };
+
+            var offReactor = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            using var stopped = new ManualResetEventSlim();
+            var outcome = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
+
+            (int port, Reactor reactor, Thread thread) = TestServer.StartConfigured(
+                StoppedReadHandler(offReactor, stopped, outcome),
+                new ServerConfig
+                {
+                    RecvBufferSize = 4096, RecvSlots = 256,
+                    Tcp = new TcpOptions { WriteSlabSize = 16 * 1024, PoolMax = 64, RecvQueueEntries = 64 },
+                },
+                r => TlsService.Start(r, options));
+
+            using var tcp = new TcpClient();
+            tcp.Connect("127.0.0.1", port);
+            using var ssl = new SslStream(tcp.GetStream(), leaveInnerStreamOpen: false, (_, _, _, _) => true);
+            ssl.AuthenticateAsClient(new SslClientAuthenticationOptions { TargetHost = "localhost" });
+            ssl.Write(new byte[] { 1 });
+
+            Assert.True(offReactor.Task.Wait(10_000), "the handler never left the reactor");
+            reactor.Stop();
+            Assert.True(thread.Join(TimeSpan.FromSeconds(10)), "the reactor did not stop");
+            stopped.Set();
+
+            Assert.True(outcome.Task.Wait(10_000), "the read never finished, and nothing will ever run it now");
+            Assert.Equal("ObjectDisposedException", outcome.Task.Result);
         });
     }
+
+    // With nothing parked, what a recv brought waits on the connection and this says so.
+    [UnsafeAccessor(UnsafeAccessorKind.Field, Name = "_pending")]
+    private static extern ref int PendingOf(TcpConnection connection);
+
+    private static Func<Reactor, TcpConnection, Task> DecryptOffReactorHandler(SemaphoreSlim send, int rounds, TaskCompletionSource<int> outcome)
+        => async (reactor, connection) =>
+        {
+            TlsSession? session = null;
+            TlsConnectionDualPipe? pipe = null;
+            try
+            {
+                try
+                {
+                    session = await reactor.GetService<TlsService>()!.AcceptAsync(connection);
+                }
+                catch
+                {
+                    return;   // the harness's readiness probe never completes a handshake
+                }
+
+                pipe = new TlsConnectionDualPipe(connection, session);
+
+                ReadResult first = await pipe.Input.ReadAsync();
+                pipe.Input.AdvanceTo(first.Buffer.End);
+
+                int onReactor = 0;
+                for (int round = 0; round < rounds; round++)
+                {
+                    await Task.Yield();   // leaves the reactor: nothing brings it back
+
+                    send.Release();
+                    if (!SpinWait.SpinUntil(() => Volatile.Read(ref PendingOf(connection)) == 1, 10_000))
+                    {
+                        throw new TimeoutException($"round {round}: the client's bytes never reached the connection");
+                    }
+
+                    // Nothing decrypted to take, and the next record on the connection.
+                    ReadResult read = await pipe.Input.ReadAsync();
+                    onReactor += reactor.OnReactorThread ? 1 : 0;
+                    pipe.Input.AdvanceTo(read.Buffer.End);
+                }
+
+                outcome.TrySetResult(onReactor);
+            }
+            catch (Exception e)
+            {
+                outcome.TrySetException(e);
+            }
+            finally
+            {
+                if (pipe is not null)
+                {
+                    await pipe.DisposeAsync();
+                }
+                else
+                {
+                    session?.Dispose();
+                }
+                connection.DecRef();
+            }
+        };
+
+    private static Func<Reactor, TcpConnection, Task> StoppedReadHandler(
+        TaskCompletionSource offReactor, ManualResetEventSlim stopped, TaskCompletionSource<string> outcome)
+        => async (reactor, connection) =>
+        {
+            TlsSession? session = null;
+            TlsConnectionDualPipe? pipe = null;
+            try
+            {
+                try
+                {
+                    session = await reactor.GetService<TlsService>()!.AcceptAsync(connection);
+                }
+                catch
+                {
+                    return;   // the harness's readiness probe never completes a handshake
+                }
+
+                pipe = new TlsConnectionDualPipe(connection, session);
+
+                ReadResult first = await pipe.Input.ReadAsync();
+                pipe.Input.AdvanceTo(first.Buffer.End);
+
+                await Task.Yield();   // leaves the reactor: nothing brings it back
+                offReactor.TrySetResult();
+                stopped.Wait();
+
+                try
+                {
+                    await pipe.Input.ReadAsync();
+                    outcome.TrySetResult("the read returned");
+                }
+                catch (Exception e)
+                {
+                    outcome.TrySetResult(e.GetType().Name);
+                }
+            }
+            catch (Exception e)
+            {
+                outcome.TrySetResult(e.GetType().Name);
+            }
+            finally
+            {
+                if (pipe is not null)
+                {
+                    await pipe.DisposeAsync();
+                }
+                else
+                {
+                    session?.Dispose();
+                }
+                connection.DecRef();
+            }
+        };
 
     private static Func<Reactor, TcpConnection, Task> DisposeOffReactorHandler(byte[] payload, ConcurrentQueue<string> faults)
         => async (reactor, connection) =>
@@ -311,10 +492,18 @@ internal static class OffReactorFlushTests
                 }
             }
 
-            await Task.Yield();   // leaves the reactor: nothing brings it back
-            ReadResult again = await pipe.Input.ReadAsync();
-            string verdict = reactor.OnReactorThread ? "on-reactor" : "off-reactor";
-            pipe.Input.AdvanceTo(again.Buffer.End);
+            // More than once: a read that goes to the reactor can still look done, when the reactor beats its caller.
+            int atOnceHere = 0;
+            for (int i = 0; i < ReadyReads; i++)
+            {
+                await Task.Yield();   // leaves the reactor: nothing brings it back
+                ValueTask<ReadResult> pending = pipe.Input.ReadAsync();
+                bool atOnce = pending.IsCompleted;
+                ReadResult again = await pending;
+                atOnceHere += atOnce && !reactor.OnReactorThread ? 1 : 0;
+                pipe.Input.AdvanceTo(again.Buffer.Start);
+            }
+            string verdict = $"{atOnceHere} of {ReadyReads}";
 
             pipe.Output.Write(System.Text.Encoding.ASCII.GetBytes(
                 $"HTTP/1.1 200 OK\r\nContent-Length: {verdict.Length}\r\n\r\n{verdict}"));
