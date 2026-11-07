@@ -323,22 +323,7 @@ public sealed unsafe partial class Reactor
     {
         // Not claimed the way recycle claims it: a read left parked can still take more, for recycle to ask back.
         conn.BufferHolder?.ReleaseHeldBuffers();
-
-        if (!_incremental)
-        {
-            conn.DrainRecv();
-            return;
-        }
-
-        // By id, whatever the counts say: no reader is left to bring them down.
-        conn.DropQueuedRecv();
-        for (int bid = 0; bid < conn.KernelDone!.Length; bid++)
-        {
-            if (conn.KernelDone[bid])
-            {
-                ReturnConnectionBuffer(conn, (ushort)bid);
-            }
-        }
+        conn.DrainRecv();
     }
 
     // Re-arm every recv parked on -ENOBUFS (#93). Runs once per loop iteration, but only when a

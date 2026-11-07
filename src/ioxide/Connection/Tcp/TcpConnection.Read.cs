@@ -299,13 +299,10 @@ public sealed unsafe partial class TcpConnection : IValueTaskSource<RecvSnapshot
         {
             if (item.HasBuffer)
             {
-                _reactor.ReturnBufferDirect(item.Bid);
+                ReturnBuffer(in item);
             }
         }
     }
-
-    // Incremental mode, for a handler that won't read them: the reactor tracks these buffers by id.
-    internal void DropQueuedRecv() => _recv.Reset();
 
     // IVTS: token = generation snapshot (cross-life guard); the core's own Version is
     // passed through for the mid-life dispatch.

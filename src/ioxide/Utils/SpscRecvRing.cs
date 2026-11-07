@@ -151,9 +151,9 @@ public sealed unsafe class SpscRecvRing
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public bool IsEmpty() => Volatile.Read(ref _head) >= Volatile.Read(ref _tail);
 
-    // Reactor-thread-only, when no handler is consuming: at connection teardown
-    // (Clear), so the recycled connection starts empty, or once its handler has
-    // let go. Discards any leftover items.
+    // Reactor-thread-only, called during connection teardown (Clear) when no
+    // handler is consuming. Discards any leftover items so the recycled
+    // connection starts empty.
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public void Reset()
     {

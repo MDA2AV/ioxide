@@ -42,7 +42,7 @@ internal static class IncrementalDryRingTests
 
         runner.Test("incremental: a connection whose handler let go holding a dry ring is closed when its client leaves, with no read timeout", () =>
         {
-            Assert.True(ClosedAfterLettingGoOfADryRing(readTimeoutMs: 0),
+            Assert.True(ClosedAfterLettingGoOfADryRing(readTimeoutMs: 0, throughAReader: true),
                 "its descriptor is still open, long after the client left");
         }, skip: unsupported);
 
@@ -103,7 +103,9 @@ internal static class IncrementalDryRingTests
         return Eventually(() => LinkOf(fd) != link);
     }
 
-    private static bool ClosedAfterLettingGoOfADryRing(int readTimeoutMs)
+    // A raw handler taking items and never returning them breaks TryGetItem's contract, and only the read timeout
+    // ends that. Through a reader the holding is allowed, and the reactor can ask for what it holds.
+    private static bool ClosedAfterLettingGoOfADryRing(int readTimeoutMs, bool throughAReader = false)
     {
         const int Slots = 2;
         const int BufferBytes = 1024;
@@ -115,14 +117,21 @@ internal static class IncrementalDryRingTests
             {
                 // Busy for as long as the peer's bytes take to fill the ring, then gone with every one of them unread.
                 await new RingTimer(reactor).DelayAsync(400);
-                RecvSnapshot snapshot = await conn.ReadAsync();
 
                 int held = 0;
-                while (conn.TryGetItem(snapshot, out SpscRecvRing.Item item))
+                if (throughAReader)
                 {
-                    if (item.HasBuffer)
+                    held = (int)(await new TcpConnectionPipeReader(conn).ReadAsync()).Buffer.Length;
+                }
+                else
+                {
+                    RecvSnapshot snapshot = await conn.ReadAsync();
+                    while (conn.TryGetItem(snapshot, out SpscRecvRing.Item item))
                     {
-                        held += item.Len;
+                        if (item.HasBuffer)
+                        {
+                            held += item.Len;
+                        }
                     }
                 }
 
