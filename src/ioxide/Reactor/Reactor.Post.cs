@@ -64,6 +64,9 @@ public sealed unsafe partial class Reactor
     [MethodImpl(MethodImplOptions.NoInlining)]
     private void DrainStoppedPosts()
     {
+        // Teardown's volatile write may not be visible yet when the queue reads empty, stranding a post that saw it open.
+        Interlocked.MemoryBarrier();
+
         while (_postQ.TryDequeue(out PostItem item))
         {
             if (item.Callback == ReactorSwitch.Resume)

@@ -48,6 +48,7 @@ internal static class Program
         WaiterSlotTests.Register(runner);
         SpillSegmentTests.Register(runner);
         RecvQueueExtendTests.Register(runner);
+        StoppedPostTests.Register(runner);
 
         return runner.Summary();
     }
