@@ -82,18 +82,76 @@ internal static class KestrelAddressParityTests
             Assert.Equal(200, Client.Get(port, "/").Status);
         });
 
-        runner.Test("kestrel: stopping the host gives the port back", () =>
+        runner.Test("kestrel: stopping the host leaves no socket of its own behind", () =>
         {
             int port = TestServer.NextPort();
-            using (Host host = Started((b, p) => b.WebHost.ConfigureKestrel(k => k.Listen(IPAddress.Loopback, p)), port, ioxide: true))
-            {
-                Assert.True(LetGoDriver.Eventually(() => host.ReactorsUp), "the reactors never came up");
-                Assert.Equal(200, Client.Get(port, "/").Status);
-            }
+            Thread.Sleep(150);   // what the last test left behind has gone
+            GC.Collect();
+            GC.WaitForPendingFinalizers();
+            int before = LetGoDriver.OpenSockets();
 
-            using var plain = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp);
-            plain.Bind(new IPEndPoint(IPAddress.Loopback, port));   // no SO_REUSEPORT: anything still bound refuses this
+            Host host = Started((b, p) => b.WebHost.ConfigureKestrel(k => k.Listen(IPAddress.Loopback, p)), port, ioxide: true);
+            Assert.True(LetGoDriver.Eventually(() => host.ReactorsUp), "the reactors never came up");
+            Assert.Equal(200, Client.Get(port, "/").Status);
+
+            // A socket left open also closes when its finalizer runs, so no collection may run while this looks.
+            Assert.True(GC.TryStartNoGCRegion(64 * 1024 * 1024), "no room for a region without collections");
+            try
+            {
+                host.Dispose();
+                Assert.True(LetGoDriver.Eventually(() => LetGoDriver.OpenSockets() <= before),
+                    $"{LetGoDriver.OpenSockets() - before} sockets still open after the host stopped");
+            }
+            finally
+            {
+                if (System.Runtime.GCSettings.LatencyMode == System.Runtime.GCLatencyMode.NoGCRegion)
+                {
+                    GC.EndNoGCRegion();
+                }
+            }
         });
+
+        runner.Test("kestrel: a ConfigureServer that replaces the TCP options still listens where the host asked", () =>
+        {
+            int port = TestServer.NextPort();
+
+            WebApplicationBuilder builder = WebApplication.CreateSlimBuilder();
+            builder.Logging.ClearProviders();
+            builder.WebHost.ConfigureKestrel(k => k.Listen(IPAddress.Loopback, port));
+
+            var started = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            builder.WebHost.UseIoxide(o =>
+            {
+                o.ReactorCount = 1;
+                o.ConfigureServer = config => config with { Tcp = new ioxide.TcpOptions { ReadTimeoutMs = 1_000 } };
+                o.OnReactorStart = _ => started.TrySetResult();
+            });
+
+            WebApplication app = builder.Build();
+            app.Run(context => context.Response.WriteAsync("ok"));
+            app.StartAsync().GetAwaiter().GetResult();
+            try
+            {
+                Assert.True(started.Task.Wait(5_000), "the reactor never came up");
+                Assert.Equal("tcp 0100007F", string.Join(", ", Listening(port)));
+            }
+            finally
+            {
+                using var stopping = new CancellationTokenSource(3_000);
+                app.StopAsync(stopping.Token).GetAwaiter().GetResult();
+            }
+        });
+
+        runner.Test("kestrel: told :: with IPv4's wildcard taken, the host's start fails, as on the stock transport", () =>
+        {
+            using var taken = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp);
+            taken.Bind(new IPEndPoint(IPAddress.Any, 0));
+            taken.Listen(8);
+            int port = ((IPEndPoint)taken.LocalEndPoint!).Port;
+
+            Assert.Throws<Exception>(() => Started((b, p) => b.WebHost.ConfigureKestrel(k => k.Listen(IPAddress.IPv6Any, p)), port, ioxide: false).Dispose());
+            Assert.Throws<Exception>(() => Started((b, p) => b.WebHost.ConfigureKestrel(k => k.Listen(IPAddress.IPv6Any, p)), port, ioxide: true).Dispose());
+        }, skip: !Socket.OSSupportsIPv6);
     }
 
     private static void SameAsStock(Action<WebApplicationBuilder, int> ask)
