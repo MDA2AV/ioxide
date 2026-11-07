@@ -74,6 +74,7 @@ internal sealed class StrictClient : IDuplexPipe, IDisposable
     public int PendingFlushes => _writer.PendingFlushes;
     public byte[] ReleaseFlush() => _writer.ReleaseFlush();
     public void FaultFlush() => _writer.FaultFlush();
+    public void ReportPeerClosed() => _writer.ReportPeerClosed();
 
     /// <summary>Release every flush the server has in flight, returning all frames they carried.</summary>
     public List<Frame> Drain(int maxFlushes = 512)
@@ -202,6 +203,15 @@ internal sealed class StrictWriter : PipeWriter
         (TaskCompletionSource<FlushResult> signal, _) = _inFlight.Dequeue();
         _flushing = false;
         signal.SetException(new IOException("transport torn down"));
+    }
+
+    /// <summary>Complete the oldest in-flight flush as a closed peer does over TCP: no throw, its bytes dropped, IsCompleted.</summary>
+    public void ReportPeerClosed()
+    {
+        Assert.True(_inFlight.Count > 0, "a flush was expected to be in flight");
+        (TaskCompletionSource<FlushResult> signal, _) = _inFlight.Dequeue();
+        _flushing = false;
+        signal.SetResult(new FlushResult(isCanceled: false, isCompleted: true));
     }
 
     public override void Complete(Exception? exception = null)
