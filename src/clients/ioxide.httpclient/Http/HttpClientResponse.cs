@@ -52,6 +52,11 @@ public sealed class HttpClientResponse : IDisposable
             // In long and clamped to Array.MaxLength, so doubling past 1 GiB never overflows int.
             long size = Math.Max(4096, (long)_arena.Length * 2);
             long needed = (long)_arenaUsed + data.Length;
+            if (needed > Array.MaxLength)
+            {
+                throw new HttpClientException("response is too large for one array");
+            }
+
             while (size < needed)
             {
                 size *= 2;

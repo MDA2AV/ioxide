@@ -20,7 +20,8 @@ public sealed record HttpClientOptions
     public int PoolSize { get; init; } = 4;
 
     /// <summary>Per-request ceiling for headers + body; a bigger response fails the request
-    /// instead of growing the buffer without bound.</summary>
+    /// instead of growing the buffer without bound. A response must also fit one array, so past
+    /// about 2 GiB it fails whatever this is set to.</summary>
     public int MaxResponseBytes { get; init; } = 8 * 1024 * 1024;
 
     /// <summary>Per-connection send buffer; larger request bodies are sent straight from the
