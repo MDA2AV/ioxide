@@ -21,7 +21,7 @@ public sealed partial class Http2Connection
 {
     private bool _staged;      // bytes sit in the pipe writer, awaiting a flush
     private bool _flushing;    // a transport flush is in flight; the pipe writer is untouchable
-    private bool _writeDead;   // a flush faulted; the transport takes no more bytes, ever
+    private bool _writeDead;   // a flush faulted or reported the peer closed; the transport takes no more bytes, ever
 
     // Frames produced while a flush was in flight, in stage order. Drained into the pipe the
     // moment the flush completes, so wire order is exactly stage order.
@@ -91,8 +91,17 @@ public sealed partial class Http2Connection
                 // arriving during the await parks for the turn after.
                 turn = TakeTurn();
 
-                await _pipe.Output.FlushAsync();
+                FlushResult flushed = await _pipe.Output.FlushAsync();
                 await new ReactorSwitch(_reactor);   // a pipe may complete its flush elsewhere: a default Pipe on the thread pool
+
+                // Over TCP a dead peer never makes a flush throw: this is the only word of it before the read sees the
+                // close. Everyone waiting is told as the turn ends.
+                if (flushed.IsCompleted)
+                {
+                    _writeDead = true;
+                    _failed = true;
+                    return PeerGone;
+                }
 
                 // May resume writers inline; _flushing is still true, so anything they stage
                 // lands in the queue and is picked up by the check just below.

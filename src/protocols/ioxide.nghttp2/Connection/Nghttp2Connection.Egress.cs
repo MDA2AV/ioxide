@@ -134,8 +134,14 @@ public sealed partial class Nghttp2Connection
 
                 if (staged)
                 {
-                    await _pipe.Output.FlushAsync();
+                    FlushResult flushed = await _pipe.Output.FlushAsync();
                     await new ReactorSwitch(_reactor);   // a pipe may complete its flush elsewhere: a default Pipe on the thread pool
+
+                    // Over TCP a dead peer never makes a flush throw: this is the only word of it before the read sees the close.
+                    if (flushed.IsCompleted)
+                    {
+                        _failed = true;
+                    }
                 }
             }
             while (_drainAgain && _handle != 0);
