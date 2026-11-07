@@ -221,9 +221,9 @@ internal static class ListenerAddressTests
 
     private static bool Accepts(IPAddress address, int port)
     {
-        using var client = new Socket(address.AddressFamily, SocketType.Stream, ProtocolType.Tcp);
         try
         {
+            using var client = new Socket(address.AddressFamily, SocketType.Stream, ProtocolType.Tcp);
             client.Connect(address, port);
             return true;
         }

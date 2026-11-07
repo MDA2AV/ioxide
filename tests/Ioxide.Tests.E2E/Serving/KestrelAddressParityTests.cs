@@ -101,9 +101,16 @@ internal static class KestrelAddressParityTests
         int port = TestServer.NextPort();
 
         Seen stock;
-        using (Host host = Started(ask, port, ioxide: false))
+        try
         {
+            using Host host = Started(ask, port, ioxide: false);
             stock = host.See(port);
+        }
+        catch (Exception e) when (e is IOException or SocketException)
+        {
+            // This machine can't do what was asked, such as IPv6 loopback with IPv6 off: neither transport should start.
+            Assert.Throws<Exception>(() => Started(ask, port, ioxide: true).Dispose());
+            return;
         }
 
         using (Host host = Started(ask, port, ioxide: true))
@@ -199,9 +206,9 @@ internal static class KestrelAddressParityTests
 
     private static bool Accepts(IPAddress address, int port)
     {
-        using var client = new Socket(address.AddressFamily, SocketType.Stream, ProtocolType.Tcp);
         try
         {
+            using var client = new Socket(address.AddressFamily, SocketType.Stream, ProtocolType.Tcp);
             client.Connect(address, port);
             return true;
         }
