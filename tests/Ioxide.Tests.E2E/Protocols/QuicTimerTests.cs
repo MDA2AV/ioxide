@@ -254,6 +254,26 @@ internal static class QuicTimerTests
 
     // --- a timer that faults ----------------------------------------------------------------
 
+    // A connection with everything acknowledged has no engine deadline at all, so once the handshake is done a
+    // fire can't be left to chance: an answer the client never acknowledges keeps one armed until it is due.
+    private static void WaitForTimerFault(LossyQuicClient client)
+    {
+        bool established = client.CompleteHandshake(5_000);   // false if the timer faulted first, which is what is awaited
+        if (established)
+        {
+            client.SendRequest("unacknowledged"u8.ToArray());
+        }
+
+        long deadline = Environment.TickCount64 + 20_000;
+        while (Environment.TickCount64 < deadline && Volatile.Read(ref TimerFaultConnection.Fired) == 0)
+        {
+            client.Blackout(100);
+        }
+
+        Assert.True(Volatile.Read(ref TimerFaultConnection.Fired) >= 1,
+            $"the engine deadline was never dispatched, so nothing faulted (handshake established: {established})");
+    }
+
     private static void RegisterTimerFaults(Runner runner)
     {
         runner.Test("quic/timer: a connection whose timer throws fires once and the reactor keeps serving", () =>
@@ -280,16 +300,7 @@ internal static class QuicTimerTests
             using (var doomed = new LossyQuicClient(udpPort))
             {
                 doomed.Connect();
-                doomed.CompleteHandshake(5_000);   // may or may not finish before the timer faults
-
-                long deadline = Environment.TickCount64 + 20_000;
-                while (Environment.TickCount64 < deadline && Volatile.Read(ref TimerFaultConnection.Fired) == 0)
-                {
-                    doomed.Pump(100);
-                }
-
-                Assert.True(Volatile.Read(ref TimerFaultConnection.Fired) >= 1,
-                    "the engine deadline was never dispatched, so nothing faulted and this test proves nothing");
+                WaitForTimerFault(doomed);
             }
 
             // The faulted connection is out of the transport's set, so its deadline - still in the
@@ -331,16 +342,7 @@ internal static class QuicTimerTests
 
             using var client = new LossyQuicClient(udpPort);
             client.Connect();
-            client.CompleteHandshake(5_000);
-
-            long deadline = Environment.TickCount64 + 20_000;
-            while (Environment.TickCount64 < deadline && Volatile.Read(ref TimerFaultConnection.Fired) == 0)
-            {
-                client.Pump(100);
-            }
-
-            Assert.True(Volatile.Read(ref TimerFaultConnection.Fired) >= 1,
-                "the engine deadline was never dispatched, so the connection was never dropped for a fault");
+            WaitForTimerFault(client);
 
             // Generous: eviction would be synchronous inside the same catch that drops it.
             Thread.Sleep(1_000);
