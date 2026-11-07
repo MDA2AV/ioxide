@@ -21,6 +21,8 @@ internal static class Program
         RecvBufferReclaimTests.Register(runner);
         IncrementalDryRingTests.Register(runner);
         LetGoBufferTests.Register(runner);
+        LetGoHandlerStyleTests.Register(runner);
+        KestrelLetGoTests.Register(runner);
         SendInFlightRecycleTests.Register(runner);
         PipeReaderContractTests.Register(runner);
         WriteContractTests.Register(runner);

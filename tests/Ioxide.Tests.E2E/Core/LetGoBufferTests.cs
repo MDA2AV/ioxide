@@ -192,6 +192,71 @@ internal static class LetGoBufferTests
             }
         });
 
+        foreach (LetGoDriver.Mode mode in new[] { LetGoDriver.Shared, LetGoDriver.Incremental })
+        {
+            bool skip = noIncremental && mode == LetGoDriver.Incremental;
+
+            foreach (bool zeroCopy in new[] { false, true })
+            {
+                string send = zeroCopy ? "a zero-copy flush" : "a flush";
+                runner.Test($"{mode.Name}: a handler that let go with {send} in flight is ended by the send timeout, with its recv parked", () =>
+                {
+                    ServerConfig config = LetGoDriver.Configure(mode, LetGoDriver.TheyStayNoTimeout);
+                    config = config with { Tcp = config.Tcp! with { ZeroCopySend = zeroCopy } };
+
+                    var letGo = new ConcurrentQueue<LetGo>();
+                    int port = TestServer.StartConfigured((_, conn) => Handle(conn, letGo), config).Port;
+
+                    LetGoDriver.Check(() => Asking(port, "F"u8), () => AskedOn(port), mode, EndedBySendTimeout);
+                }, skip: skip);
+            }
+
+            runner.Test($"{mode.Name}: a handler the send timeout wakes, and that returns with its input unread, gives it all back", () =>
+            {
+                var letGo = new ConcurrentQueue<LetGo>();
+                int port = TestServer.StartConfigured((_, conn) => Handle(conn, letGo), LetGoDriver.Configure(mode, LetGoDriver.TheyStayNoTimeout)).Port;
+
+                LetGoDriver.Check(() => Asking(port, "G"u8), () => AskedOn(port), mode, EndedBySendTimeout);
+            }, skip: skip);
+
+            runner.Test($"{mode.Name}: after let-go connections gave their buffers back, connections on them are served intact", () =>
+            {
+                const int Slots = 16;
+                ServerConfig config = mode == LetGoDriver.Shared
+                    ? new ServerConfig { RecvBufferSize = 4096, RecvSlots = Slots }
+                    : new ServerConfig { Incremental = new IncrementalOptions { MaxConnections = 32, RecvSlots = 4, RecvBufferSize = 4096 } };
+
+                var letGo = new ConcurrentQueue<LetGo>();
+                int port = Start(letGo, config, readTimeoutMs: 300);
+
+                // Round after round, with what the last one left, so anything lost or returned twice shows.
+                for (int round = 0; round < 3; round++)
+                {
+                    using (var peers = new SocketList())
+                    {
+                        if (mode == LetGoDriver.Shared)
+                        {
+                            DryTheRing(port, letGo, Slots, peers.Sockets);
+                        }
+                        else
+                        {
+                            peers.Sockets.Add(LetGoPeer(port));
+                            peers.Sockets[0].Send(new byte[256 * 1024]);
+                        }
+
+                        using Socket next = Connect(port);
+                        Assert.True(Asked(next), $"round {round}: the new client was never answered");
+                    }
+
+                    Assert.True(Eventually(() => letGo.All(gone => LinkOf(gone.Fd) != gone.Link)),
+                        $"round {round}: a let-go connection is still open after its client left");
+                    letGo.Clear();
+
+                    EchoesIntact(port);
+                }
+            }, skip: skip);
+        }
+
         runner.Test("incremental: a client that keeps uploading after its handler let go is read to its close, not reset", () =>
         {
             var letGo = new ConcurrentQueue<LetGo>();
@@ -211,6 +276,81 @@ internal static class LetGoBufferTests
             Assert.True(letGo.TryPeek(out LetGo? gone), "the handler never let go");
             Assert.True(Eventually(() => LinkOf(gone!.Fd) != gone.Link), "its descriptor is still open after its client left");
         }, skip: noIncremental);
+    }
+
+    // The handlers that end this way have no read clock running: their flush holds it off.
+    private static readonly LetGoDriver.Ending EndedBySendTimeout = LetGoDriver.TheyStayNoTimeout with { Ends = true };
+
+    private sealed class SocketList : IDisposable
+    {
+        public List<Socket> Sockets { get; } = [];
+
+        public void Dispose() => Sockets.ForEach(socket => socket.Dispose());
+    }
+
+    // Asks for an answer too big for a client that isn't reading, and doesn't wait: no FIN comes while it is flushing.
+    private static Socket Asking(int port, ReadOnlySpan<byte> marker)
+    {
+        Socket client = LetGoDriver.Connect(port, receiveBuffer: 4096);
+        client.Send(marker);
+        Thread.Sleep(50);
+        return client;
+    }
+
+    private static bool AskedOn(int port) => LetGoDriver.Answers(() =>
+    {
+        using Socket next = Connect(port);
+        return Asked(next);
+    });
+
+    // Several clients at once, each checking its own bytes come back: a buffer in the ring twice would mix them.
+    private static void EchoesIntact(int port)
+    {
+        const int Clients = 4;
+        var failures = new ConcurrentQueue<string>();
+
+        var threads = new Thread[Clients];
+        for (int c = 0; c < Clients; c++)
+        {
+            byte fill = (byte)('a' + c);
+            threads[c] = new Thread(() =>
+            {
+                try
+                {
+                    using Socket client = Connect(port);
+                    client.Send("E"u8);
+                    Assert.Equal(1, client.Receive(new byte[1]));   // the echo of the marker: this handler echoes now
+
+                    byte[] sent = new byte[512];
+                    sent.AsSpan().Fill(fill);
+                    byte[] got = new byte[512];
+                    for (int i = 0; i < 200; i++)
+                    {
+                        client.Send(sent);
+                        for (int at = 0; at < got.Length;)
+                        {
+                            int n = client.Receive(got, at, got.Length - at, SocketFlags.None);
+                            Assert.True(n > 0, "the echo ended early");
+                            at += n;
+                        }
+
+                        Assert.True(got.AsSpan().SequenceEqual(sent), $"round {i} came back with another client's bytes");
+                    }
+                }
+                catch (Exception e)
+                {
+                    failures.Enqueue(e.Message);
+                }
+            });
+            threads[c].Start();
+        }
+
+        foreach (Thread thread in threads)
+        {
+            Assert.True(thread.Join(30_000), "an echo client did not finish");
+        }
+
+        Assert.True(failures.IsEmpty, string.Join("; ", failures));
     }
 
     private static (bool Served, int Open, int Total) ThenLeave(int sendsEach)
@@ -253,9 +393,11 @@ internal static class LetGoBufferTests
         Tcp = new TcpOptions { RecvQueueEntries = 64, ReadTimeoutMs = readTimeoutMs, SendTimeoutMs = 0 },
     };
 
-    // 'R' lets go, 'W' lets go with a read left parked, 'P' answers, and 'B' parks in a flush its peer won't drain.
+    // 'R' lets go, 'W' lets go with a read left parked, 'P' answers, 'E' echoes from here on, 'B' parks in a flush its
+    // peer won't drain, 'F' lets go with that flush in flight, and 'G' waits it out and returns with its input unread.
     private static async Task Handle(TcpConnection conn, ConcurrentQueue<LetGo> letGo)
     {
+        bool echoing = false;
         try
         {
             while (true)
@@ -268,12 +410,39 @@ internal static class LetGoBufferTests
                     if (item.HasBuffer)
                     {
                         marker = item.AsSpan()[0];
+                        echoing |= marker == 'E';
+                        if (echoing)
+                        {
+                            conn.Write(item.AsSpan());
+                        }
+
                         conn.ReturnBuffer(in item);
                     }
                 }
 
+                if (echoing)
+                {
+                    await conn.FlushAsync();
+                    if (snapshot.IsClosed)
+                    {
+                        return;
+                    }
+
+                    continue;
+                }
+
                 switch (marker)
                 {
+                    case 'F':
+                        conn.Write(Big);
+                        _ = conn.FlushAsync();
+                        return;
+
+                    case 'G':
+                        conn.Write(Big);
+                        await conn.FlushAsync();
+                        return;
+
                     case 'R':
                         letGo.Enqueue(new LetGo(conn, conn.ClientFd, LinkOf(conn.ClientFd)));
                         return;
