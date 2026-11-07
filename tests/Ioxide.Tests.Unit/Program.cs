@@ -50,6 +50,7 @@ internal static class Program
         SpillSegmentTests.Register(runner);
         RecvQueueExtendTests.Register(runner);
         StoppedPostTests.Register(runner);
+        HttpClientGrowthTests.Register(runner);
 
         return runner.Summary();
     }
