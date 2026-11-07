@@ -104,18 +104,25 @@ internal sealed class HopDuplexPipe : IDuplexPipe, IAsyncDisposable
 
                 while (_conn.TryGetItem(snap, out SpscRecvRing.Item item))
                 {
-                    if (item.HasBuffer && item.Len > 0)
+                    // Whatever happens: a decrypt that throws must not strand the kernel's buffer.
+                    try
                     {
-                        if (_tls is null)
+                        if (item.HasBuffer && item.Len > 0)
                         {
-                            CopySlice(in item, writer);
-                        }
-                        else
-                        {
-                            DecryptSlice(in item, writer, _tls);
+                            if (_tls is null)
+                            {
+                                CopySlice(in item, writer);
+                            }
+                            else
+                            {
+                                DecryptSlice(in item, writer, _tls);
+                            }
                         }
                     }
-                    _conn.ReturnBuffer(in item);
+                    finally
+                    {
+                        _conn.ReturnBuffer(in item);
+                    }
                 }
 
                 // Peer close: a TCP FIN, or (TLS) a clean close_notify decoded by the session.
