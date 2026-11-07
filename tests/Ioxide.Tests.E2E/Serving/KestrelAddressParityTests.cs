@@ -124,22 +124,19 @@ internal static class KestrelAddressParityTests
         runner.Test("kestrel: stopping the host leaves no socket of its own behind", () =>
         {
             int port = TestServer.NextPort();
-            Thread.Sleep(150);   // what the last test left behind has gone
-            GC.Collect();
-            GC.WaitForPendingFinalizers();
-            int before = LetGoDriver.OpenSockets();
 
             Host host = Started((b, p) => b.WebHost.ConfigureKestrel(k => k.Listen(IPAddress.Loopback, p)), port, ioxide: true);
             Assert.True(LetGoDriver.Eventually(() => host.ReactorsUp), "the reactors never came up");
             Assert.Equal(200, Client.Get(port, "/").Status);
+            Assert.True(OnPort(port) > 0, "no socket of the host's was found on its port, so this would prove nothing");
 
             // A socket left open also closes when its finalizer runs, so no collection may run while this looks.
             Assert.True(GC.TryStartNoGCRegion(64 * 1024 * 1024), "no room for a region without collections");
             try
             {
                 host.Dispose();
-                Assert.True(LetGoDriver.Eventually(() => LetGoDriver.OpenSockets() <= before),
-                    $"{LetGoDriver.OpenSockets() - before} sockets still open after the host stopped");
+                Assert.True(LetGoDriver.Eventually(() => OnPort(port) == 0),
+                    $"{OnPort(port)} sockets bound to port {port} still open after the host stopped");
             }
             finally
             {
@@ -282,6 +279,35 @@ internal static class KestrelAddressParityTests
 
         string[] reported = app.Services.GetRequiredService<IServer>().Features.Get<IServerAddressesFeature>()!.Addresses.Order().ToArray();
         return new Host(app, reported, () => Volatile.Read(ref started) >= 2);
+    }
+
+    // This process's sockets bound to the port, whatever their state: listening, accepted, or only bound.
+    private static int OnPort(int port)
+    {
+        int count = 0;
+        foreach (string fd in Directory.GetFiles("/proc/self/fd"))
+        {
+            if (new FileInfo(fd).LinkTarget?.StartsWith("socket:", StringComparison.Ordinal) != true
+                || !int.TryParse(Path.GetFileName(fd), out int number))
+            {
+                continue;
+            }
+
+            try
+            {
+                using var socket = new Socket(new SafeSocketHandle(number, ownsHandle: false));
+                if (socket.LocalEndPoint is IPEndPoint { } local && local.Port == port)
+                {
+                    count++;
+                }
+            }
+            catch (Exception e) when (e is SocketException or ArgumentException)
+            {
+                // Closed meanwhile, or not an IP socket.
+            }
+        }
+
+        return count;
     }
 
     // How many sockets listen on the port, whatever their addresses.
