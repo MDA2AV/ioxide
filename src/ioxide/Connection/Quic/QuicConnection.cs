@@ -108,6 +108,13 @@ public abstract class QuicConnection : IValueTaskSource<QuicRecvSnapshot>
     public Action? OnSendCapacityAvailable { get; set; }
 
     /// <summary>
+    /// Invoked on the reactor thread with a stream whose sending side a write found shut, which is how a peer's
+    /// STOP_SENDING shows: the engine reports that frame to nobody. Only the response ends, as the peer may still
+    /// be sending its request. Runs inside the engine's write loop, so it must not send, or resume anything that does.
+    /// </summary>
+    public Action<long>? OnSendRefused { get; set; }
+
+    /// <summary>
     /// Open a server-initiated unidirectional stream (H3 control / QPACK); returns its id, or a
     /// negative value if the engine can't (peer allowance exhausted, or no engine). Reactor thread
     /// only.

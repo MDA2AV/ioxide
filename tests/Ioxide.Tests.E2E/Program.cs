@@ -55,6 +55,7 @@ internal static class Program
         QuicFleetJoinTests.Register(runner);
         QuicClientCertTimingTests.Register(runner);
         H3BodyTruncationTests.Register(runner);
+        H3StopSendingTests.Register(runner);
         H3HeldChunkTests.Register(runner);
         H3ErrorCodeTests.Register(runner);
         Nghttp3ManyFieldsTests.Register(runner);

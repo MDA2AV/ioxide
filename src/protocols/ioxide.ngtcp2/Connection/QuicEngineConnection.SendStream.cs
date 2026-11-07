@@ -289,6 +289,7 @@ public unsafe partial class QuicEngineConnection
                 if (code == Ngtcp2.NGTCP2_ERR_STREAM_SHUT_WR)
                 {
                     os.Dead = true;   // write side closed - chunks are freed at stream close
+                    OnSendRefused?.Invoke(sid);
                     return;
                 }
                 if (code == Ngtcp2.NGTCP2_ERR_STREAM_NOT_FOUND)

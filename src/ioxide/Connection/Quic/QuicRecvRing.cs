@@ -12,7 +12,7 @@ public enum QuicStreamEvent : byte
     Data        = 0,
     Closed      = 1,   // stream fully closed (normal end or after abort)
     Reset       = 2,   // peer aborted its sending side (RESET_STREAM)
-    StopSending = 3,   // peer asked us to stop sending (STOP_SENDING)
+    StopSending = 3,   // we stopped reading this stream; a peer's STOP_SENDING is not this, see OnSendRefused
 }
 
 /// <summary>
