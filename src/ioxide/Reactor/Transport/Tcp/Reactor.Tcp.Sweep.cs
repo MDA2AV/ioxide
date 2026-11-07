@@ -40,11 +40,23 @@ public sealed unsafe partial class Reactor
 
         long now = Native.MonotonicMs;
         TcpConnection?[] conns = _connections;
+        bool starved = _recvStarved.Count > 0;
 
         for (int fd = 0; fd < conns.Length; fd++)
         {
             TcpConnection? conn = conns[fd];
-            if (conn is null || conn.SweepClosed)
+            if (conn is null)
+            {
+                continue;
+            }
+
+            // A recv is waiting for a buffer, maybe its own, and this connection holds some for nobody.
+            if (starved && conn.HandlerReleased)
+            {
+                ReturnReleasedBuffers(conn);
+            }
+
+            if (conn.SweepClosed)
             {
                 continue;
             }
@@ -72,6 +84,18 @@ public sealed unsafe partial class Reactor
                 TcpSweepClose(conn);
             }
         }
+
+        // A condemned connection whose recv is parked has no completion coming for its shutdown to end.
+        for (int i = _recvStarved.Count - 1; i >= 0; i--)
+        {
+            ulong parked = _recvStarved[i];
+            int fd = (int)(uint)parked;
+            if (ConnAt(fd, (ushort)(parked >> 32)) is { SweepClosed: true } conn)
+            {
+                _recvStarved.RemoveAt(i);
+                CloseFromRecv(conn, fd);
+            }
+        }
     }
 
     /// <summary>
@@ -95,6 +119,9 @@ public sealed unsafe partial class Reactor
     /// connection's slab. Releasing the reactor's ref here instead would let the connection reach
     /// zero - and be recycled, with its slab freed or resized - while a SEND the kernel has not
     /// given back still points into it.
+    ///
+    /// A recv parked on -ENOBUFS has no completion to wait for, so <see cref="TcpSweep"/> runs that
+    /// teardown itself.
     /// </remarks>
     private void TcpSweepClose(TcpConnection conn)
     {

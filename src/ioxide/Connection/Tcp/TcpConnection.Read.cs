@@ -294,10 +294,10 @@ public sealed unsafe partial class TcpConnection : IValueTaskSource<RecvSnapshot
 
     internal void DrainRecv()
     {
-        // Return buffer IDs still sitting in the SPSC ring at teardown.
+        // Return buffer IDs still sitting in the SPSC ring, for a handler that won't read them.
         while (_recv.TryDequeue(out SpscRecvRing.Item item))
         {
-            if (item.HasBuffer)
+            if (item.HasBuffer && !IncrementalMode)
             {
                 _reactor.ReturnBufferDirect(item.Bid);
             }
