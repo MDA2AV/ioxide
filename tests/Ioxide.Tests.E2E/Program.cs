@@ -77,6 +77,7 @@ internal static class Program
         OffReactorH2FixTests.Register(runner);
         OffReactorH3FixTests.Register(runner);
         KestrelTlsTests.Register(runner);
+        KestrelBadRecordTests.Register(runner);
 
         return runner.Summary();
     }
