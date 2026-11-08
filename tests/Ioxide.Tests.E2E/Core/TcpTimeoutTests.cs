@@ -1,8 +1,10 @@
+using System.Diagnostics;
 using System.Net;
 using System.Net.Sockets;
 using System.Runtime.InteropServices;
 using System.Text;
 using ioxide;
+using ioxide.timer;
 using ioxide.utils;
 
 namespace Ioxide.Tests;
@@ -519,6 +521,125 @@ internal static class TcpTimeoutTests
 
         runner.Test("tcp/send: control: the same stall with plain sends is released, with no TCP_USER_TIMEOUT",
             () => StalledResponse(zeroCopy: false));
+
+        // Each small flush fits in the send buffer and completes, so no flush is ever in flight for the sweep to time
+        // out: only the kernel can tell that the client stopped taking the data.
+        runner.Test("tcp/send: a stream of small flushes to a client that stopped reading is cut once its window has been shut for the send timeout", () =>
+        {
+            Streamed result = Stream(clientReads: false, sendMs: 1_000, runMs: 15_000);
+            Assert.True(result.Closed, $"still open after {result.ElapsedMs} ms and {result.Flushed} bytes flushed");
+        });
+
+        runner.Test("tcp/send: control: a client that keeps reading the same stream is left alone", () =>
+        {
+            Streamed result = Stream(clientReads: true, sendMs: 1_000, runMs: 6_000);
+            Assert.True(!result.Closed, $"closed after {result.ElapsedMs} ms and {result.Flushed} bytes flushed");
+            Assert.Equal(result.Flushed, result.ClientRead);
+        });
+
+        runner.Test("tcp/send: 0 leaves a stream to a client that stopped reading open", () =>
+        {
+            Streamed result = Stream(clientReads: false, sendMs: 0, runMs: 6_000);
+            Assert.Equal(0, result.UserTimeout);
+            Assert.True(!result.Closed, $"closed after {result.ElapsedMs} ms, with no send timeout configured");
+        });
+    }
+
+    private readonly record struct Streamed(int UserTimeout, bool Closed, long ElapsedMs, long Flushed, long ClientRead);
+
+    /// <summary>
+    /// 100 bytes every 25 ms from the handler, for up to <paramref name="runMs"/> or until the connection closes, to a
+    /// client with a small receive buffer that reads all of it or none.
+    /// </summary>
+    private static Streamed Stream(bool clientReads, int sendMs, int runMs)
+    {
+        var accepted = new TaskCompletionSource<int>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var ended = new TaskCompletionSource<(bool Closed, long ElapsedMs, long Flushed)>(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        int port = TestServer.StartConfigured(async (reactor, conn) =>
+        {
+            var clock = new Stopwatch();
+            long flushed = 0;
+            try
+            {
+                if (!await IsThisTestsConnection(conn))
+                {
+                    return;
+                }
+
+                int length = sizeof(int);
+                int got = getsockopt(conn.ClientFd, Native.IPPROTO_TCP, Native.TCP_USER_TIMEOUT, out int userTimeout, ref length);
+                accepted.TrySetResult(got == 0 ? userTimeout : -1);
+
+                var timer = new RingTimer(reactor);
+                var chunk = new byte[100];
+                clock.Start();
+                while (!conn.IsClosed && clock.ElapsedMilliseconds < runMs)
+                {
+                    conn.Write(chunk);
+                    await conn.FlushAsync();
+                    flushed += chunk.Length;
+                    await timer.DelayAsync(25);
+                }
+
+                ended.TrySetResult((conn.IsClosed, clock.ElapsedMilliseconds, flushed));
+            }
+            catch (Exception)
+            {
+                ended.TrySetResult((true, clock.ElapsedMilliseconds, flushed));   // a flush the connection's end cut short
+            }
+            finally
+            {
+                conn.DecRef();
+            }
+        }, new ServerConfig
+        {
+            RecvBufferSize = 4096,
+            RecvSlots = 256,
+            Tcp = new TcpOptions
+            {
+                WriteSlabSize = 256 * 1024,
+                PoolMax = 64,
+                RecvQueueEntries = 64,
+                ReadTimeoutMs = 0,
+                SendTimeoutMs = sendMs,
+            },
+        }).Port;
+
+        using var client = new TcpClient();
+        client.ReceiveBufferSize = 4096;   // before the connect, so the window the server sees is small
+        client.Connect("127.0.0.1", port);
+        NetworkStream stream = client.GetStream();
+        stream.Write("hi"u8);
+
+        long read = 0;
+        Thread? reader = null;
+        if (clientReads)
+        {
+            reader = new Thread(() =>
+            {
+                var buffer = new byte[4096];
+                try
+                {
+                    int n;
+                    while ((n = stream.Read(buffer, 0, buffer.Length)) > 0)
+                    {
+                        Interlocked.Add(ref read, n);
+                    }
+                }
+                catch (IOException)
+                {
+                    // the server going away ends the read
+                }
+            }) { IsBackground = true };
+            reader.Start();
+        }
+
+        Assert.True(accepted.Task.Wait(5_000), "the handler never saw the test's connection");
+        Assert.True(ended.Task.Wait(runMs + 10_000), "the handler never finished");
+        Assert.True(reader is null || reader.Join(10_000), "the client never saw the stream end");
+        (bool closed, long elapsedMs, long flushed) = ended.Task.Result;
+        return new Streamed(accepted.Task.Result, closed, elapsedMs, flushed, Interlocked.Read(ref read));
     }
 
     /// <summary>
