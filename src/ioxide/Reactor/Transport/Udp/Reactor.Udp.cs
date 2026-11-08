@@ -308,9 +308,9 @@ public sealed unsafe partial class Reactor
         }
 
         int one = 1;
-        if (port != 0)   // with either option a port-0 bind can be handed a port another socket holds
+        // SO_REUSEPORT alone shares the port; UDP has no TIME_WAIT for SO_REUSEADDR to help with.
+        if (port != 0)   // with it a port-0 bind can be handed a port another socket holds
         {
-            setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(int));
             setsockopt(fd, SOL_SOCKET, SO_REUSEPORT, &one, sizeof(int));
         }
         if (gro)

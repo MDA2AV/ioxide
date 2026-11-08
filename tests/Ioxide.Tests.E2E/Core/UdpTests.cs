@@ -37,6 +37,31 @@ internal static class UdpTests
         runner.Test("core: a dual-stack udp socket takes datagrams over IPv6", () => DualStackEcho(IPAddress.IPv6Loopback),
             skip: !Ipv6LoopbackUp());
 
+        // SO_REUSEPORT is how the port is shared: between the reactors, a migrated peer's claim, and other processes of
+        // the same user. A socket that doesn't set it gets no share.
+        runner.Test("core: a socket that doesn't set SO_REUSEPORT can't bind a reactor's udp port", () =>
+        {
+            (_, int udpPort) = TestServer.StartDatagram(
+                static (Reactor r, in UdpDatagram d) => r.UdpSendTo(d.SocketFd, d.PeerAddr, d.PeerAddrLen, d.Payload));
+            RefusedWithoutReusePort(udpPort);
+        });
+
+        runner.Test("core: a socket that doesn't set SO_REUSEPORT can't bind a reactor's quic port", () =>
+        {
+            (_, int quicPort) = TestServer.StartDatagram(onDatagram: null,
+                quicFactory: static (Reactor _, in UdpDatagram _, in QuicCid _) => null);
+            RefusedWithoutReusePort(quicPort);
+        });
+
+        runner.Test("core: control: a socket that sets SO_REUSEPORT still shares a reactor's udp port", () =>
+        {
+            (_, int udpPort) = TestServer.StartDatagram(
+                static (Reactor r, in UdpDatagram d) => r.UdpSendTo(d.SocketFd, d.PeerAddr, d.PeerAddrLen, d.Payload));
+            using var other = new Socket(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp);
+            other.SetRawSocketOption(SolSocket, SoReusePort, BitConverter.GetBytes(1));
+            other.Bind(new IPEndPoint(IPAddress.Any, udpPort));
+        });
+
         runner.Test("core: udp 8 KiB payload + two clients (per-datagram addressing)", () =>
         {
             (_, int udpPort) = TestServer.StartDatagram(
@@ -195,6 +220,21 @@ internal static class UdpTests
     [UnsafeAccessor(UnsafeAccessorKind.StaticMethod, Name = "OpenUdpSocket")]
     private static extern int OpenUdpSocket(Reactor? type, ushort port, IPAddress? address, bool dualStack, bool gro,
         int socketBufferBytes, nint connectTo, int connectLen);
+
+    private const int SolSocket = 1;
+    private const int SoReuseAddr = 2;
+    private const int SoReusePort = 15;
+
+    // The port's own address, and a narrower one.
+    private static void RefusedWithoutReusePort(int port)
+    {
+        foreach (IPAddress address in new[] { IPAddress.Any, IPAddress.Loopback })
+        {
+            using var other = new Socket(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp);
+            other.SetRawSocketOption(SolSocket, SoReuseAddr, BitConverter.GetBytes(1));   // raw: on Linux, .NET's ReuseAddress sets SO_REUSEPORT too
+            Assert.Throws<SocketException>(() => other.Bind(new IPEndPoint(address, port)), "Address already in use");
+        }
+    }
 
     private static void DualStackEcho(IPAddress peer)
     {
