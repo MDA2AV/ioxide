@@ -153,6 +153,11 @@
     work), reset state, and push to the pool (capped by <code>PoolMax</code>; beyond it, native
     memory is freed). Pooled connections keep their slab and buffer-ring allocations across
     lives.</p>
+    <p>So <code>DecRef</code> ends the handler's use of the connection. Once it's recycled, the same
+    object is the next client's connection, and a reference kept past it, in a background task or a
+    broadcast loop, reads and writes that client's data. A <code>TcpConnectionPipeWriter</code> or
+    <code>TcpConnectionStream</code> refuses to write once its connection's life has ended; the
+    connection's own methods can't tell.</p>
 
     <h2>Wiring and services</h2>
     <p>Three seams connect an application: <code>TcpHandle</code> (the per-connection loop, with

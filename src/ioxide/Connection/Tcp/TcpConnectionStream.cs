@@ -12,6 +12,8 @@ namespace ioxide;
 /// value-task sources instead of an async state machine, preserving inline resume. The one cost
 /// the <see cref="Stream"/> contract forces is a copy into the caller's buffer (the raw API and
 /// the pipe adapter expose ring memory directly). Single reader, single writer, reactor-thread.
+/// Once the connection's life it was made for has ended, when the pooled connection is the next
+/// client's, reads end and writes throw.
 /// </summary>
 public sealed class TcpConnectionStream : Stream, IValueTaskSource<int>, IValueTaskSource, IRecvBufferHolder
 {
@@ -41,6 +43,7 @@ public sealed class TcpConnectionStream : Stream, IValueTaskSource<int>, IValueT
     public TcpConnectionStream(TcpConnection connection)
     {
         _conn = connection ?? throw new ArgumentNullException(nameof(connection));
+        _generation = connection.Generation;
 
         // The slice being copied out is held across calls and returned only once drained, so a
         // caller that stops mid-buffer strands it. Registering lets the reactor reclaim it at
@@ -204,9 +207,16 @@ public sealed class TcpConnectionStream : Stream, IValueTaskSource<int>, IValueT
         }
     }
 
+    // The connection's life this stream belongs to; after it, the connection is the next client's.
+    private readonly int _generation;
+
+    private TcpConnection Live => _conn.Generation == _generation
+        ? _conn
+        : throw new IOException("The connection this stream was made for has ended.");
+
     public override ValueTask WriteAsync(ReadOnlyMemory<byte> buffer, CancellationToken cancellationToken = default)
     {
-        Span<byte> destination = _conn.GetSpan(1);   // full slab when empty
+        Span<byte> destination = Live.GetSpan(1);   // full slab when empty
         if (buffer.Length > destination.Length)
         {
             return WriteMultiAsync(buffer);          // record larger than the slab - rare
@@ -239,12 +249,12 @@ public sealed class TcpConnectionStream : Stream, IValueTaskSource<int>, IValueT
         ReadOnlyMemory<byte> remaining = buffer;
         while (!remaining.IsEmpty)
         {
-            Span<byte> destination = _conn.GetSpan(1);
+            Span<byte> destination = Live.GetSpan(1);
             int n = Math.Min(destination.Length, remaining.Length);
             remaining.Span.Slice(0, n).CopyTo(destination);
             _conn.Advance(n);
             remaining = remaining.Slice(n);
-            await _conn.FlushAsync();
+            await Live.FlushAsync();
         }
     }
 
@@ -254,7 +264,7 @@ public sealed class TcpConnectionStream : Stream, IValueTaskSource<int>, IValueT
     public override Task WriteAsync(byte[] buffer, int offset, int count, CancellationToken cancellationToken) =>
         WriteAsync(buffer.AsMemory(offset, count), cancellationToken).AsTask();
 
-    public override Task FlushAsync(CancellationToken cancellationToken) => _conn.FlushAsync().AsTask();
+    public override Task FlushAsync(CancellationToken cancellationToken) => Live.FlushAsync().AsTask();
 
     public override void Flush() { }
 

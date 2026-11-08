@@ -131,6 +131,12 @@ public sealed unsafe partial class TcpConnection
     /// The handler's release. A peer still connected gets a FIN; the read side stays open until
     /// it closes, bounded by <see cref="TcpOptions.ReadTimeoutMs"/>.
     /// </summary>
+    /// <remarks>
+    /// It ends the handler's use of the connection. Connections are pooled, so once the reactor lets
+    /// go too, this object is the next client's connection, and a reference kept past it reads and
+    /// writes that client's data. A <see cref="TcpConnectionPipeWriter"/> or <see cref="TcpConnectionStream"/>
+    /// refuses to write once the life it was made for has ended; the connection's own methods can't tell.
+    /// </remarks>
     public void DecRef()
     {
         // Once per life: a handler that lets go and then throws would otherwise be let go again by the
