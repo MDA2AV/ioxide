@@ -49,8 +49,7 @@ public sealed record TcpOptions
     // Trades the in-kernel payload copy for page-pinning plus a second (F_NOTIF) completion per send,
     // so it only pays off for large responses - leave off for small-payload workloads. The sender is
     // chosen once per connection at accept; kTLS connections always fall back to plain SEND (the
-    // kernel re-buffers to encrypt, so zero-copy buys nothing there). With SendTimeoutMs above 0 it
-    // also puts TCP_USER_TIMEOUT on the listeners - see SendTimeoutMs.
+    // kernel re-buffers to encrypt, so zero-copy buys nothing there).
     public bool ZeroCopySend { get; init; } = false;
 
     /// <summary>
@@ -92,7 +91,8 @@ public sealed record TcpOptions
     public int ReadTimeoutMs { get; init; } = 60_000;
 
     /// <summary>
-    /// Close a connection whose flush has been in flight for this long. 0 disables.
+    /// Close a connection whose flush has been in flight for this long, or whose peer has left sent data
+    /// unacknowledged, or its window shut, for this long. 0 disables both.
     ///
     /// What it defends: a peer that stops reading. Its window shuts, the socket send buffer fills,
     /// and the SEND never completes - so <c>FlushAsync</c> parks forever, holding the connection,
@@ -116,12 +116,15 @@ public sealed record TcpOptions
     /// It also bounds a flush still draining when the peer closes: that connection is held, fd and
     /// slab, until its send completes, exactly like a live one - so with 0 nothing bounds that either.
     ///
-    /// With <see cref="ZeroCopySend"/> a send completes only once the kernel lets go of the slab, and
-    /// the sweep's shutdown does not make it: data queued behind a shut window stays queued for as
-    /// long as the peer answers the window probes, which TCP allows forever. So with ZeroCopySend on,
-    /// the listeners also carry this value as TCP_USER_TIMEOUT, which accepted connections inherit:
-    /// the kernel aborts a connection whose peer has kept its window shut, or left sent data
-    /// unacknowledged, for that long, and that frees the slab.
+    /// The listeners also carry this value as TCP_USER_TIMEOUT, which accepted connections inherit: the
+    /// kernel aborts a connection whose peer has left sent data unacknowledged, or kept its window shut
+    /// with data waiting, for that long. That covers two cases the flush deadline can't see. A stream of
+    /// small flushes completes every one of them into the send buffer, so a peer that stopped reading,
+    /// or vanished, would hold the connection until that buffer filled, or for TCP's own retries, about
+    /// 15 minutes. And with <see cref="ZeroCopySend"/> a send completes only once the kernel lets go of
+    /// the slab, which the sweep's shutdown doesn't make it do. The cost: a peer whose network drops for
+    /// longer than this while data is in flight is cut, and what was flushed but not yet sent is lost,
+    /// as when the flush deadline cuts a connection.
     /// </remarks>
     public int SendTimeoutMs { get; init; } = 60_000;
 }
