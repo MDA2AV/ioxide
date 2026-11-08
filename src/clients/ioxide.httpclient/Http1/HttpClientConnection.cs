@@ -585,7 +585,7 @@ internal sealed class HttpClientConnection : IDisposable
         {
             throw new HttpClientException("response exceeds MaxResponseBytes");
         }
-        _receiveCapacity = Math.Min(_receiveCapacity * 2, _options.MaxResponseBytes);
+        _receiveCapacity = (int)Math.Min(_receiveCapacity * 2L, _options.MaxResponseBytes);
         _receive = (nint)NativeMemory.Realloc((void*)_receive, (nuint)_receiveCapacity);
 
         // Realloc can move the block, so the view handed to the parser has to be rebuilt. Reset is
