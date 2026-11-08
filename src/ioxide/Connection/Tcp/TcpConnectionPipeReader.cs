@@ -42,6 +42,7 @@ public sealed unsafe class TcpConnectionPipeReader : PipeReader, IValueTaskSourc
     }
 
     private readonly TcpConnection _conn;
+    private readonly int _generation;
 
     // Held slices, oldest first. _headConsumed is the consumed prefix of the
     // head slice; consumption never mutates segments, it moves the sequence start.
@@ -71,10 +72,17 @@ public sealed unsafe class TcpConnectionPipeReader : PipeReader, IValueTaskSourc
     public TcpConnectionPipeReader(TcpConnection connection)
     {
         _conn = connection ?? throw new ArgumentNullException(nameof(connection));
+        _generation = connection.Generation;
 
         // So the reactor can reclaim at recycle what this reader dequeued and never gave back.
         _conn.BufferHolder = this;
     }
+
+    /// <summary>
+    /// Whether the connection is still in the life this reader was made for. Connections are pooled: once this is
+    /// false, the connection has ended and may already be serving another client.
+    /// </summary>
+    public bool IsValid() => _conn.Generation == _generation;
 
     public override ValueTask<ReadResult> ReadAsync(CancellationToken cancellationToken = default)
     {

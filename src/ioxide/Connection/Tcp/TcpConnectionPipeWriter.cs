@@ -13,6 +13,7 @@ namespace ioxide;
 public sealed class TcpConnectionPipeWriter : PipeWriter, IValueTaskSource<FlushResult>, IFlushListener
 {
     private readonly TcpConnection _conn;
+    private readonly int _generation;
 
     private ManualResetValueTaskSourceCore<FlushResult> _core = new()
     {
@@ -26,7 +27,14 @@ public sealed class TcpConnectionPipeWriter : PipeWriter, IValueTaskSource<Flush
     public TcpConnectionPipeWriter(TcpConnection connection)
     {
         _conn = connection ?? throw new ArgumentNullException(nameof(connection));
+        _generation = connection.Generation;
     }
+
+    /// <summary>
+    /// Whether the connection is still in the life this writer was made for. Connections are pooled: once this is
+    /// false, the connection has ended and may already be serving another client.
+    /// </summary>
+    public bool IsValid() => _conn.Generation == _generation;
 
     public override bool CanGetUnflushedBytes => true;
     public override long UnflushedBytes => _unflushed;
