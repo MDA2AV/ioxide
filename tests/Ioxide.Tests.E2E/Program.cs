@@ -29,6 +29,7 @@ internal static class Program
         WriteContractTests.Register(runner);
         StreamContractTests.Register(runner);
         TcpTimeoutTests.Register(runner);
+        StaleConnectionTests.Register(runner);
         AcceptExhaustionTests.Register(runner);
         ExecInheritanceTests.Register(runner);
         ReactorSetupTeardownTests.Register(runner);
