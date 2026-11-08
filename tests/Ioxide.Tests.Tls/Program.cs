@@ -43,6 +43,7 @@ internal static class Program
         TlsIncrementalTests.Register(runner);
         WriterContractTests.Register(runner);
         SessionLifetimeTests.Register(runner);
+        TlsPipeValidityTests.Register(runner);
         AnchorSourceTests.Register(runner);
         RotationIntegrityTests.Register(runner);
         AlpnNegotiationTests.Register(runner);

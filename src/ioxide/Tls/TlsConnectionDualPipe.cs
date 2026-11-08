@@ -82,6 +82,12 @@ public sealed class TlsConnectionDualPipe : IDuplexPipe, IAsyncDisposable
     /// <summary>Response bytes. Plaintext under kTLS TX; encrypted here otherwise.</summary>
     public PipeWriter Output => _writer;
 
+    /// <summary>
+    /// Whether the connection is still in the life this pipe was made for. Connections are pooled: once this is
+    /// false, the connection has ended and may already be serving another client.
+    /// </summary>
+    public bool IsValid() => _tls.IsCurrentLife;
+
     public async ValueTask DisposeAsync()
     {
         // The session and the reader are the reactor's: freeing them under its SSL_write is a use after free.
