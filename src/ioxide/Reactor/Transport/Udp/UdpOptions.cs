@@ -1,3 +1,5 @@
+using System.Net;
+
 namespace ioxide;
 
 /// <summary>The UDP side of <see cref="ServerConfig"/>: raw datagram sockets (QUIC binds its own
@@ -10,6 +12,14 @@ public sealed record UdpOptions
     /// (default) means no UDP sockets are opened.
     /// </summary>
     public ushort[] Ports { get; init; } = [];
+
+    /// <summary>
+    /// The address the sockets for <see cref="Ports"/> bind, as <see cref="TcpOptions.Address"/> is for TCP. Null, the
+    /// default, is every interface: 0.0.0.0, or :: under <see cref="ServerConfig.DualStack"/>. An address decides the
+    /// family itself and DualStack doesn't apply; :: also takes IPv4-mapped peers. A port that is also the QUIC port
+    /// is QUIC's socket, and binds <see cref="QuicOptions.Address"/>.
+    /// </summary>
+    public IPAddress? Address { get; init; }
 
     /// <summary>
     /// Depth of the shared UDP provided-buffer ring (rounded up to a power of two). One multishot
