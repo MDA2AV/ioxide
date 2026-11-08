@@ -8,11 +8,13 @@ namespace ioxide;
 /// Adapts the <see cref="TcpConnection"/> write API to a <see cref="PipeWriter"/>. Writes go straight
 /// into the connection's slab; a parked flush is the connection's own flush listener instead of an
 /// async state machine or a second value-task source (see <see cref="IFlushListener"/>), so the
-/// adapter allocates nothing at steady state.
+/// adapter allocates nothing at steady state. It refuses to write once completed, or once the
+/// connection's life it was made for has ended, when the pooled connection is the next client's.
 /// </summary>
 public sealed class TcpConnectionPipeWriter : PipeWriter, IValueTaskSource<FlushResult>, IFlushListener
 {
     private readonly TcpConnection _conn;
+    private readonly int _generation;   // the connection's life this writer belongs to; after it, the next client's
 
     private ManualResetValueTaskSourceCore<FlushResult> _core = new()
     {
@@ -26,18 +28,23 @@ public sealed class TcpConnectionPipeWriter : PipeWriter, IValueTaskSource<Flush
     public TcpConnectionPipeWriter(TcpConnection connection)
     {
         _conn = connection ?? throw new ArgumentNullException(nameof(connection));
+        _generation = connection.Generation;
     }
+
+    private TcpConnection Live => !_completed && _conn.Generation == _generation
+        ? _conn
+        : throw new InvalidOperationException("Writing is not allowed after the writer was completed, or its connection ended.");
 
     public override bool CanGetUnflushedBytes => true;
     public override long UnflushedBytes => _unflushed;
 
-    public override Memory<byte> GetMemory(int sizeHint = 0) => _conn.GetMemory(sizeHint);
+    public override Memory<byte> GetMemory(int sizeHint = 0) => Live.GetMemory(sizeHint);
 
-    public override Span<byte> GetSpan(int sizeHint = 0) => _conn.GetSpan(sizeHint);
+    public override Span<byte> GetSpan(int sizeHint = 0) => Live.GetSpan(sizeHint);
 
     public override void Advance(int bytes)
     {
-        _conn.Advance(bytes);   // first: a count it refuses is not counted
+        Live.Advance(bytes);   // first: a count it refuses is not counted
         _unflushed += bytes;
     }
 
@@ -51,7 +58,7 @@ public sealed class TcpConnectionPipeWriter : PipeWriter, IValueTaskSource<Flush
 
         _unflushed = 0;
 
-        if (_conn.TryFlushOrPark(this))
+        if (Live.TryFlushOrPark(this))
         {
             return new ValueTask<FlushResult>(new FlushResult(isCanceled: false, isCompleted: _completed || _conn.IsClosed));
         }
