@@ -519,7 +519,7 @@ internal static class TcpTimeoutTests
         runner.Test("tcp/send: a zero-copy flush the peer stopped draining is released, and its descriptor closed (#245)",
             () => StalledResponse(zeroCopy: true));
 
-        runner.Test("tcp/send: control: the same stall with plain sends is released, with no TCP_USER_TIMEOUT",
+        runner.Test("tcp/send: the same stall with plain sends is released, and its socket carries TCP_USER_TIMEOUT too",
             () => StalledResponse(zeroCopy: false));
 
         // Each small flush fits in the send buffer and completes, so no flush is ever in flight for the sweep to time
@@ -527,6 +527,7 @@ internal static class TcpTimeoutTests
         runner.Test("tcp/send: a stream of small flushes to a client that stopped reading is cut once its window has been shut for the send timeout", () =>
         {
             Streamed result = Stream(clientReads: false, sendMs: 1_000, runMs: 15_000);
+            Assert.Equal(1_000, result.UserTimeout);
             Assert.True(result.Closed, $"still open after {result.ElapsedMs} ms and {result.Flushed} bytes flushed");
         });
 
@@ -708,7 +709,7 @@ internal static class TcpTimeoutTests
         Assert.True(SpinWait.SpinUntil(() => !IsOpen(fd), 5_000), $"the connection's descriptor {fd} was never closed");
 
         // The bound comes from the listener, so it is on the accepted socket without a setsockopt per accept.
-        Assert.Equal(zeroCopy ? SendMs : 0, userTimeout);
+        Assert.Equal(SendMs, userTimeout);
     }
 
     [DllImport("libc", SetLastError = true)]

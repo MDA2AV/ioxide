@@ -394,7 +394,7 @@ public sealed unsafe partial class Reactor
         for (int i = 0; i < _listenFds.Length; i++)
         {
             _listenFds[i] = OpenReusePortListener(_listenPorts[i], _tcp.ListenBacklog, _tcp.Address, _config.DualStack,
-                _zeroCopySend ? _sendTimeoutMs : 0);
+                _sendTimeoutMs);
         }
     }
 
@@ -442,8 +442,9 @@ public sealed unsafe partial class Reactor
         setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(int));   // accepted sockets inherit it
         if (userTimeoutMs > 0)
         {
-            // Inherited too: a zero-copy send ends only when its pages are freed, which a peer acking
-            // zero-window probes would put off forever; the kernel aborts that connection instead (#245).
+            // Inherited too. The kernel aborts a connection whose peer leaves data unacknowledged, or its
+            // window shut, this long: a stream of small flushes never shows that to the flush deadline, and a
+            // zero-copy send needs it to get its pages back (#245).
             setsockopt(fd, IPPROTO_TCP, TCP_USER_TIMEOUT, &userTimeoutMs, sizeof(int));
         }
 
