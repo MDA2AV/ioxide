@@ -108,10 +108,17 @@ public sealed unsafe partial class Reactor
     private void AnnounceListening()
     {
         Console.WriteLine($"[r{_id}] listening on " +
-                          (_listenPorts.Length > 0 ? $"0.0.0.0:{string.Join(",", _listenPorts)}" : "(no tcp)") +
+                          (_listenPorts.Length > 0 ? $"{ListenHost()}:{string.Join(",", _listenPorts)}" : "(no tcp)") +
                           (_udpFds.Length > 0 ? $" udp:{string.Join(",", _udpFdPorts)}" : "") +
                           $" (incremental={_incremental})");
     }
+
+    private string ListenHost() => _tcp.Address switch
+    {
+        null => _config.DualStack ? "[::]" : "0.0.0.0",
+        { AddressFamily: System.Net.Sockets.AddressFamily.InterNetworkV6 } address => $"[{address}]",
+        { } address => address.ToString(),
+    };
 
     // Still on the reactor thread, in dependency order: sockets close while the ring is alive
     // (in-flight ops surface as errors/cancels and are dropped), the ring fd goes next, and native

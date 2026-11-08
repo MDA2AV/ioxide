@@ -151,7 +151,7 @@ public sealed unsafe partial class Reactor
     }
 
     // The port the kernel assigned to a bind(:0) - ngtcp2 needs the real local address for its
-    // path, so 0 will not do. Closes fd on failure, as BindAny does: the caller has not stored it yet.
+    // path, so 0 will not do. Closes fd on failure, as BindTo does: the caller has not stored it yet.
     private static ushort BoundPort(int fd, bool dualStack)
     {
         if (dualStack)
@@ -325,7 +325,7 @@ public sealed unsafe partial class Reactor
         }
         setsockopt(fd, IPPROTO_IP, IP_RECVTOS, &one, sizeof(int));
 
-        BindAny(fd, port, dualStack, "udp");
+        BindTo(fd, port, address: null, dualStack, "udp");
 
         // A pinned socket: same address as its siblings but naming ONE peer, so it outranks the
         // wildcard binds and the reuseport hash is never consulted for that peer. Measured: no

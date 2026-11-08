@@ -1,4 +1,5 @@
 using System.Net;
+using System.Net.Sockets;
 using System.Threading.Channels;
 using Microsoft.AspNetCore.Connections;
 using Microsoft.Extensions.Logging;
@@ -21,14 +22,18 @@ internal sealed class IoxideConnectionListener : IConnectionListener
     private readonly Reactor[] _reactors;
     private readonly Thread[] _threads;
     private readonly TlsOptions? _tlsOptions;
+    private readonly Socket _portHold;
+    private readonly TaskCompletionSource[] _started;
     private long _connectionCounter;
     private int _stopped;
 
     public EndPoint EndPoint { get; }
 
-    public IoxideConnectionListener(IPEndPoint endpoint, IoxideTransportOptions options, TlsOptions? tlsOptions, ILogger<IoxideConnectionListener> logger)
+    /// <param name="portHold">Bound to <paramref name="endpoint"/>, held for as long as this listener runs.</param>
+    public IoxideConnectionListener(IPEndPoint endpoint, Socket portHold, IoxideTransportOptions options, TlsOptions? tlsOptions, ILogger<IoxideConnectionListener> logger)
     {
         EndPoint = endpoint;
+        _portHold = portHold;
         _logger = logger;
         _tlsOptions = tlsOptions;
 
@@ -41,7 +46,7 @@ internal sealed class IoxideConnectionListener : IConnectionListener
 
         var reactorCount = Math.Max(1, options.ReactorCount);
 
-        var cfg = new ServerConfig { ReactorCount = reactorCount, Tcp = new TcpOptions { Port = (ushort)endpoint.Port } };
+        var cfg = new ServerConfig { ReactorCount = reactorCount, Tcp = new TcpOptions { Port = (ushort)endpoint.Port, Address = endpoint.Address } };
         if (options.ConfigureServer is not null)
         {
             cfg = options.ConfigureServer(cfg);
@@ -50,12 +55,13 @@ internal sealed class IoxideConnectionListener : IConnectionListener
         // one rather than silently binding nothing.
         cfg = cfg with
         {
-            Tcp = (cfg.Tcp ?? new TcpOptions()) with { Port = (ushort)endpoint.Port },
+            Tcp = (cfg.Tcp ?? new TcpOptions()) with { Port = (ushort)endpoint.Port, Address = endpoint.Address },
             ReactorCount = reactorCount,
         };
 
         _reactors = new Reactor[reactorCount];
         _threads = new Thread[reactorCount];
+        _started = new TaskCompletionSource[reactorCount];
 
         for (var i = 0; i < reactorCount; i++)
         {
@@ -67,6 +73,8 @@ internal sealed class IoxideConnectionListener : IConnectionListener
             // run the user's hook (PgPool.Start, AssetReader.CreatePool, ...).
             var tls = _tlsOptions;
             var onReactorStart = options.OnReactorStart;
+            var started = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            _started[i] = started;
             reactor.OnStart = r =>
             {
                 if (tls is not null)
@@ -74,11 +82,15 @@ internal sealed class IoxideConnectionListener : IConnectionListener
                     TlsService.Start(r, tls);
                 }
                 onReactorStart?.Invoke(r);
+                started.TrySetResult();   // its listener has been open since before OnStart
             };
-            // One shard of N: losing it should not end the process, but it must not be silent
-            // either. Without this a fatal errno propagates off a bare Thread and aborts the host.
+            // One shard of N: losing it once running should not end the process, but it must not be
+            // silent either. Without this a fatal errno propagates off a bare Thread and aborts the host.
             reactor.OnFault = (r, e) =>
+            {
                 Console.Error.WriteLine($"[ioxide] reactor {r.ShardIndex} stopped: {e.Message}");
+                started.TrySetException(e);   // a no-op once it has started
+            };
 
             _reactors[i] = reactor;
             _threads[i] = new Thread(reactor.Run)
@@ -92,8 +104,28 @@ internal sealed class IoxideConnectionListener : IConnectionListener
         {
             thread.Start();
         }
+    }
 
-        _logger.LogInformation("[ioxide] Bound {Endpoint} with {ReactorCount} reactor(s)", endpoint, reactorCount);
+    /// <summary>
+    /// Completes once every reactor has its listener open, as a stock listener is once its bind returns. A reactor that
+    /// fails to start, in its bind or its start hook, fails this, and with it the host's start.
+    /// </summary>
+    internal async Task StartedAsync(CancellationToken cancellationToken)
+    {
+        foreach (TaskCompletionSource started in _started)
+        {
+            try
+            {
+                await started.Task.WaitAsync(cancellationToken).ConfigureAwait(false);
+            }
+            catch (Exception e) when (e is not OperationCanceledException)
+            {
+                // An IOException, which Kestrel treats as fatal: the bind before this worked, so there's no family to fall back from.
+                throw new IOException($"A reactor for {EndPoint} failed to start: {e.Message}", e);
+            }
+        }
+
+        _logger.LogInformation("[ioxide] Bound {Endpoint} with {ReactorCount} reactor(s)", EndPoint, _reactors.Length);
     }
 
     // Runs on the reactor thread, fire-and-forget, once per accepted connection.
@@ -178,6 +210,8 @@ internal sealed class IoxideConnectionListener : IConnectionListener
                 thread.Join(TimeSpan.FromSeconds(5));
             }
         }).ConfigureAwait(false);
+
+        _portHold.Dispose();
 
         _logger.LogInformation("[ioxide] Stopped {ReactorCount} reactor(s) on {Endpoint}", _reactors.Length, EndPoint);
     }

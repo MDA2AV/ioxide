@@ -89,7 +89,7 @@ internal static class ReactorSetupTeardownTests
                 for (int i = 0; i < attempts; i++)
                 {
                     Assert.Throws<InvalidOperationException>(
-                        () => OpenReusePortListener(null, port, backlog: 16, dualStack, userTimeoutMs: 0), "bind failed");
+                        () => OpenReusePortListener(null, port, backlog: 16, address: null, dualStack, userTimeoutMs: 0), "bind failed");
                 }
             }
 
@@ -213,7 +213,7 @@ internal static class ReactorSetupTeardownTests
             {
                 while (group.Count < ReuseportGroupCap)
                 {
-                    group.Add(OpenReusePortListener(null, port, backlog: 1, dualStack: false, userTimeoutMs: 0));
+                    group.Add(OpenReusePortListener(null, port, backlog: 1, address: null, dualStack: false, userTimeoutMs: 0));
                 }
 
                 const int attempts = 16;
@@ -222,7 +222,7 @@ internal static class ReactorSetupTeardownTests
                 for (int i = 0; i < attempts; i++)
                 {
                     Assert.Throws<InvalidOperationException>(
-                        () => OpenReusePortListener(null, port, backlog: 1, dualStack: false, userTimeoutMs: 0), "listen failed");
+                        () => OpenReusePortListener(null, port, backlog: 1, address: null, dualStack: false, userTimeoutMs: 0), "listen failed");
                 }
 
                 int leaked = FdCount.Stable() - before;
@@ -359,7 +359,7 @@ internal static class ReactorSetupTeardownTests
     private static extern unsafe ref byte* BufSlabOf(TcpConnection connection);
 
     [UnsafeAccessor(UnsafeAccessorKind.StaticMethod, Name = "OpenReusePortListener")]
-    private static extern int OpenReusePortListener(Reactor? type, ushort port, int backlog, bool dualStack, int userTimeoutMs);
+    private static extern int OpenReusePortListener(Reactor? type, ushort port, int backlog, IPAddress? address, bool dualStack, int userTimeoutMs);
 
     [UnsafeAccessor(UnsafeAccessorKind.Field, Name = "_ring")]
     private static extern ref Ring RingOf(Reactor reactor);

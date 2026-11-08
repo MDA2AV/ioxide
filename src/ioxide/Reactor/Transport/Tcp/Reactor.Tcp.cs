@@ -1,4 +1,6 @@
-﻿using System.Runtime.CompilerServices;
+﻿using System.Net;
+using System.Net.Sockets;
+using System.Runtime.CompilerServices;
 using static ioxide.Native;
 
 namespace ioxide;
@@ -391,7 +393,7 @@ public sealed unsafe partial class Reactor
         }
         for (int i = 0; i < _listenFds.Length; i++)
         {
-            _listenFds[i] = OpenReusePortListener(_listenPorts[i], _tcp.ListenBacklog, _config.DualStack,
+            _listenFds[i] = OpenReusePortListener(_listenPorts[i], _tcp.ListenBacklog, _tcp.Address, _config.DualStack,
                 _zeroCopySend ? _sendTimeoutMs : 0);
         }
     }
@@ -426,9 +428,9 @@ public sealed unsafe partial class Reactor
         }
     }
 
-    private static int OpenReusePortListener(ushort port, int backlog, bool dualStack, int userTimeoutMs)
+    private static int OpenReusePortListener(ushort port, int backlog, IPAddress? address, bool dualStack, int userTimeoutMs)
     {
-        int fd = socket(dualStack ? AF_INET6 : AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0);
+        int fd = socket(IsIpv6(address, dualStack) ? AF_INET6 : AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0);
         if (fd < 0)
         {
             throw new InvalidOperationException($"socket failed: {fd}");
@@ -445,7 +447,7 @@ public sealed unsafe partial class Reactor
             setsockopt(fd, IPPROTO_TCP, TCP_USER_TIMEOUT, &userTimeoutMs, sizeof(int));
         }
 
-        BindAny(fd, port, dualStack, "tcp");
+        BindTo(fd, port, address, dualStack, "tcp");
 
         if (listen(fd, backlog) < 0)
         {
@@ -456,11 +458,14 @@ public sealed unsafe partial class Reactor
         return fd;
     }
 
-    // Closes fd on failure: the caller has not stored it anywhere yet.
-    private static void BindAny(int fd, ushort port, bool dualStack, string transport)
+    private static bool IsIpv6(IPAddress? address, bool dualStack)
+        => address is null ? dualStack : address.AddressFamily == AddressFamily.InterNetworkV6;
+
+    // Closes fd on failure: the caller has not stored it anywhere yet. No address is every interface.
+    private static void BindTo(int fd, ushort port, IPAddress? address, bool dualStack, string transport)
     {
         int rc;
-        if (dualStack)
+        if (IsIpv6(address, dualStack))
         {
             // :: with IPV6_V6ONLY=0 also takes IPv4-mapped peers, so one socket serves both families.
             int v6only = 0;
@@ -469,16 +474,25 @@ public sealed unsafe partial class Reactor
             sockaddr_in6 addr6 = default;
             addr6.sin6_family = AF_INET6;
             addr6.sin6_port   = Htons(port);
-            // sin6_addr left zero == in6addr_any (::)
+            if (address is not null)
+            {
+                address.TryWriteBytes(new Span<byte>(addr6.sin6_addr, 16), out _);
+                addr6.sin6_scope_id = (uint)address.ScopeId;
+            }
+            // Otherwise sin6_addr left zero == in6addr_any (::)
 
             rc = bind(fd, &addr6, (uint)sizeof(sockaddr_in6));
         }
         else
         {
             sockaddr_in addr = default;
-            addr.sin_family      = AF_INET;
-            addr.sin_port        = Htons(port);
-            addr.sin_addr.s_addr = 0; // 0.0.0.0
+            addr.sin_family = AF_INET;
+            addr.sin_port   = Htons(port);
+            if (address is not null)
+            {
+                address.TryWriteBytes(new Span<byte>(&addr.sin_addr, sizeof(uint)), out _);   // already network byte order
+            }
+            // Otherwise s_addr left zero == 0.0.0.0
 
             rc = bind(fd, &addr, (uint)sizeof(sockaddr_in));
         }
@@ -486,7 +500,7 @@ public sealed unsafe partial class Reactor
         if (rc < 0)
         {
             close(fd);
-            throw new InvalidOperationException($"{transport} bind failed on port {port}");
+            throw new InvalidOperationException($"{transport} bind failed on port {port}{(address is null ? "" : $" of {address}")}");
         }
     }
 }

@@ -13,6 +13,7 @@ internal static class Program
 
         CoreTests.Register(runner);
         ListenerReleaseTests.Register(runner);
+        ListenerAddressTests.Register(runner);
         TimerTests.Register(runner);
         AffinityTests.Register(runner);
         KestrelTests.Register(runner);
@@ -81,6 +82,9 @@ internal static class Program
         OffReactorH2FixTests.Register(runner);
         OffReactorH3FixTests.Register(runner);
         KestrelTlsTests.Register(runner);
+        KestrelListenAddressTests.Register(runner);
+        KestrelBindFailureTests.Register(runner);
+        KestrelAddressParityTests.Register(runner);
         KestrelBadRecordTests.Register(runner);
 
         return runner.Summary();

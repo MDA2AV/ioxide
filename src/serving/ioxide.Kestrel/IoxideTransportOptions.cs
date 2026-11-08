@@ -13,8 +13,8 @@ public sealed class IoxideTransportOptions
 
     /// <summary>
     /// Optional hook to customize the ioxide <see cref="ServerConfig"/> (ring depth, recv buffer ring,
-    /// write slab, zero-copy send, incremental mode, ...). The listen port and reactor count are always
-    /// overridden afterwards by the bound endpoint and <see cref="ReactorCount"/>.
+    /// write slab, zero-copy send, incremental mode, ...). The listen address, port and reactor count are
+    /// always overridden afterwards by the bound endpoint and <see cref="ReactorCount"/>.
     /// </summary>
     public Func<ServerConfig, ServerConfig>? ConfigureServer { get; set; }
 
