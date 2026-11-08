@@ -182,7 +182,7 @@ internal static class UdpTests
                 {
                     // 64 KiB: small enough that no buffer-clamp warning is printed.
                     Assert.Throws<InvalidOperationException>(
-                        () => OpenUdpSocket(null, port, dualStack, gro: false, socketBufferBytes: 64 * 1024, connectTo: 0, connectLen: 0),
+                        () => OpenUdpSocket(null, port, address: null, dualStack, gro: false, socketBufferBytes: 64 * 1024, connectTo: 0, connectLen: 0),
                         "udp bind");
                 }
             }
@@ -193,8 +193,8 @@ internal static class UdpTests
     }
 
     [UnsafeAccessor(UnsafeAccessorKind.StaticMethod, Name = "OpenUdpSocket")]
-    private static extern int OpenUdpSocket(Reactor? type, ushort port, bool dualStack, bool gro, int socketBufferBytes,
-        nint connectTo, int connectLen);
+    private static extern int OpenUdpSocket(Reactor? type, ushort port, IPAddress? address, bool dualStack, bool gro,
+        int socketBufferBytes, nint connectTo, int connectLen);
 
     private static void DualStackEcho(IPAddress peer)
     {

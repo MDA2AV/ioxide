@@ -1,3 +1,4 @@
+using System.Net;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using static ioxide.Native;
@@ -114,7 +115,9 @@ public sealed unsafe partial class Reactor
             for (int i = 0; i < ports; i++)
             {
                 ushort port = udpPorts[i];
-                _udpFds[i]     = OpenUdpSocket(port, _config.DualStack, _udp.Gro, _udp.SocketBufferBytes);
+                // A raw port that is also QUIC's is QUIC's socket, as the dispatch treats it, so it binds QUIC's address.
+                IPAddress? address = _config.Quic is { } quicOptions && port == quicOptions.Port ? quicOptions.Address : _udp.Address;
+                _udpFds[i]     = OpenUdpSocket(port, address, _config.DualStack, _udp.Gro, _udp.SocketBufferBytes);
                 _udpFdPorts[i] = port;
                 ArmUdpRecv(i);   // one multishot per socket, all sharing the ring
 
@@ -146,7 +149,8 @@ public sealed unsafe partial class Reactor
             InitUdpBufRing();   // no UDP/QUIC in config, so startup skipped it
         }
 
-        int fd = OpenUdpSocket(0, _config.DualStack, _udp.Gro, _udp.SocketBufferBytes);   // port 0: the kernel picks
+        // Port 0: the kernel picks. Outbound, so on every interface, whatever address the server binds.
+        int fd = OpenUdpSocket(0, address: null, _config.DualStack, _udp.Gro, _udp.SocketBufferBytes);
         return UdpAdoptSocket(fd, BoundPort(fd, _config.DualStack));
     }
 
@@ -285,7 +289,7 @@ public sealed unsafe partial class Reactor
         Volatile.Write(ref *(ushort*)(_udpBufRing + 14), _udpBufRingTail);
     }
 
-    private static int OpenUdpSocket(ushort port, bool dualStack, bool gro, int socketBufferBytes,
+    private static int OpenUdpSocket(ushort port, IPAddress? address, bool dualStack, bool gro, int socketBufferBytes,
         nint connectTo = 0, int connectLen = 0)
     {
         // Refused rather than clamped: a zero or negative request would leave the socket on the
@@ -296,7 +300,8 @@ public sealed unsafe partial class Reactor
                 $"UdpOptions.SocketBufferBytes must be positive, got {socketBufferBytes}.");
         }
 
-        int fd = socket(dualStack ? AF_INET6 : AF_INET, SOCK_DGRAM | SOCK_CLOEXEC, 0);
+        bool ipv6 = IsIpv6(address, dualStack);
+        int fd = socket(ipv6 ? AF_INET6 : AF_INET, SOCK_DGRAM | SOCK_CLOEXEC, 0);
         if (fd < 0)
         {
             throw new InvalidOperationException($"udp socket failed: {fd}");
@@ -319,17 +324,17 @@ public sealed unsafe partial class Reactor
         ReportBufferClamp(fd, socketBufferBytes);
 
         // TCLASS covers native IPv6; RECVTOS covers IPv4-mapped peers on the same socket.
-        if (dualStack)
+        if (ipv6)
         {
             setsockopt(fd, IPPROTO_IPV6, IPV6_RECVTCLASS, &one, sizeof(int));
         }
         setsockopt(fd, IPPROTO_IP, IP_RECVTOS, &one, sizeof(int));
 
-        BindTo(fd, port, address: null, dualStack, "udp");
+        BindTo(fd, port, address, dualStack, "udp");
 
-        // A pinned socket: same address as its siblings but naming ONE peer, so it outranks the
-        // wildcard binds and the reuseport hash is never consulted for that peer. Measured: no
-        // other peer moves. connect() on a datagram socket sends nothing.
+        // A pinned socket: same address as its siblings but naming ONE peer, so it outranks their
+        // binds and the reuseport hash is never consulted for that peer. Measured: no other peer
+        // moves. connect() on a datagram socket sends nothing.
         if (connectTo != 0 && connect(fd, (void*)connectTo, (uint)connectLen) < 0)
         {
             close(fd);

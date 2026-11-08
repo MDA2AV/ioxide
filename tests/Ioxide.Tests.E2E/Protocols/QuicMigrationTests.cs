@@ -188,76 +188,13 @@ internal static class QuicMigrationTests
                 $"after {Forwarded()} forwards, still counted in flight toward each reactor: [{string.Join(", ", outstanding)}]");
         });
 
-        runner.Test("quic/migration: claiming the new address stops the forwarding", () =>
-        {
-            // Forwarding alone is permanent: the address does not change back, so every later
-            // datagram pays a hop. The claim ends that. This asserts the forwarding STOPS, not that
-            // a claim was made - a claim that never receives anything would satisfy that.
-            (string certPath, string keyPath) = TestCert.Ensure();
-            var engine = TestServer.Own(new QuicEngine(certPath, keyPath, cidLength: 8, alpn: ["h3"]));
+        runner.Test("quic/migration: claiming the new address stops the forwarding", () => ClaimStopsForwarding(address: null));
 
-            (int serverPort, Reactor[] fleet) = TestServer.StartQuicSharded(4,
-                engine.CreateFactory(),
-                quicHandle: static (_, conn) => new Nghttp3Connection(conn).RunAsync(
-                    static _ => Nghttp3Response.Text("migrated-ok")),
-                routing: QuicRouting.Forward);
-
-            long Forwarded()
-            {
-                long n = 0;
-                foreach (Reactor reactor in fleet) { n += reactor.QuicForwardsSent; }
-                return n;
-            }
-
-            long Pins()
-            {
-                long n = 0;
-                foreach (Reactor reactor in fleet) { n += reactor.QuicPinsCreated; }
-                return n;
-            }
-
-            using var forwarder = new UdpForwarder(serverPort);
-            using var client = new H3TestClient("127.0.0.1", forwarder.Port);
-
-            client.Connect();
-            Assert.True(client.CompleteHandshake(10_000), "the handshake through the forwarder did not complete");
-            Assert.Equal(200, client.Request("GET", "/before", null, 10_000).Status);
-
-            // Move until the datagrams genuinely land on another reactor, which is what makes a
-            // claim necessary at all.
-            int swaps = 0;
-            while (Forwarded() == 0 && swaps < 8)
-            {
-                swaps++;
-                forwarder.SwapUpstream();
-                Assert.Equal(200, client.Request("GET", $"/after-{swaps}", null, 15_000).Status);
-            }
-
-            Assert.True(Forwarded() > 0,
-                $"after {swaps} address changes nothing was forwarded, so no claim was needed and "
-                + "this test proved nothing");
-
-            // ngtcp2 only reports the new path once it has probed it, so give the claim a request
-            // to be made in, then measure from there.
-            Assert.Equal(200, client.Request("GET", "/settle", null, 15_000).Status);
-            Assert.True(Pins() > 0, "the new address was never claimed");
-
-            long settled = Forwarded();
-            for (int i = 0; i < 5; i++)
-            {
-                Assert.Equal(200, client.Request("GET", $"/steady-{i}", null, 15_000).Status);
-            }
-
-            Assert.Equal(settled, Forwarded());
-
-            // One claim per address, not per report: ngtcp2 announces a path several times while
-            // probing, and rebuilding on each closes a socket with datagrams queued on it. At most
-            // `swaps` distinct addresses, plus the one it started on.
-            Console.Error.WriteLine($"pins created: {Pins()} across {swaps} address change(s)");
-            Assert.True(Pins() <= swaps + 1,
-                $"{Pins()} claims for {swaps} address change(s): the same address is being "
-                + "re-claimed on every path report");
-        });
+        // A claim binds next to the serving sockets: on another address it would be in a lookup the kernel never reaches.
+        // 127.0.0.2, while the peer is on 127.0.0.1: a claim on the wildcard takes the route's source address when it
+        // connects, which on 127.0.0.1 would be the server's by luck.
+        runner.Test("quic/migration: on a server given an address, claiming the new address stops the forwarding",
+            () => ClaimStopsForwarding(IPAddress.Parse("127.0.0.2")));
 
         runner.Test("quic/migration: kernel steering delivers a migrated client without any forwarding", () =>
         {
@@ -656,6 +593,78 @@ internal static class QuicMigrationTests
     /// server to come from the same (swappable) source address. Each client's ngtcp2 drops the
     /// datagrams whose connection id is not its own, so the broadcast is harmless.
     /// </summary>
+    // Forwarding alone is permanent: the address does not change back, so every later datagram pays a hop. The claim
+    // ends that. This asserts the forwarding STOPS, not that a claim was made - a claim that never receives anything
+    // would satisfy that.
+    private static void ClaimStopsForwarding(IPAddress? address)
+    {
+        (string certPath, string keyPath) = TestCert.Ensure();
+        var engine = TestServer.Own(new QuicEngine(certPath, keyPath, cidLength: 8, alpn: ["h3"]));
+
+        (int serverPort, Reactor[] fleet) = TestServer.StartQuicSharded(4,
+            engine.CreateFactory(),
+            quicHandle: static (_, conn) => new Nghttp3Connection(conn).RunAsync(
+                static _ => Nghttp3Response.Text("migrated-ok")),
+            routing: QuicRouting.Forward, quicAddress: address);
+
+        long Forwarded()
+        {
+            long n = 0;
+            foreach (Reactor reactor in fleet) { n += reactor.QuicForwardsSent; }
+            return n;
+        }
+
+        long Pins()
+        {
+            long n = 0;
+            foreach (Reactor reactor in fleet) { n += reactor.QuicPinsCreated; }
+            return n;
+        }
+
+        using var forwarder = new UdpForwarder(serverPort, address);
+        using var client = new H3TestClient("127.0.0.1", forwarder.Port);
+
+        client.Connect();
+        Assert.True(client.CompleteHandshake(10_000), "the handshake through the forwarder did not complete");
+        Assert.Equal(200, client.Request("GET", "/before", null, 10_000).Status);
+
+        // Move until the datagrams genuinely land on another reactor, which is what makes a
+        // claim necessary at all.
+        int swaps = 0;
+        while (Forwarded() == 0 && swaps < 8)
+        {
+            swaps++;
+            forwarder.SwapUpstream();
+            Assert.Equal(200, client.Request("GET", $"/after-{swaps}", null, 15_000).Status);
+        }
+
+        Assert.True(Forwarded() > 0,
+            $"after {swaps} address changes nothing was forwarded, so no claim was needed and "
+            + "this test proved nothing");
+
+        // ngtcp2 only reports the new path once it has probed it, so give the claim a request
+        // to be made in, then measure from there.
+        Assert.Equal(200, client.Request("GET", "/settle", null, 15_000).Status);
+        Assert.True(Pins() > 0, "the new address was never claimed");
+
+        long settled = Forwarded();
+        for (int i = 0; i < 5; i++)
+        {
+            Assert.Equal(200, client.Request("GET", $"/steady-{i}", null, 15_000).Status);
+        }
+
+        Assert.Equal(settled, Forwarded());
+
+        // One claim per address, not per report: ngtcp2 announces a path several times while
+        // probing, and rebuilding on each closes a socket with datagrams queued on it. At most
+        // `swaps` distinct addresses, plus the one it started on.
+        Console.Error.WriteLine($"pins created: {Pins()} across {swaps} address change(s)");
+        Assert.True(Pins() <= swaps + 1,
+            $"{Pins()} claims for {swaps} address change(s): the same address is being "
+            + "re-claimed on every path report");
+
+    }
+
     private sealed class FanInForwarder : IDisposable
     {
         private readonly Socket _front;
@@ -830,9 +839,9 @@ internal static class QuicMigrationTests
         public int RelayedAfterSwap { get; private set; }
         public int FromServerAfterSwap => _fromServerAfterSwap;
 
-        public UdpForwarder(int serverPort)
+        public UdpForwarder(int serverPort, IPAddress? server = null)
         {
-            _server = new IPEndPoint(IPAddress.Loopback, serverPort);
+            _server = new IPEndPoint(server ?? IPAddress.Loopback, serverPort);
 
             _front = new Socket(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp);
             _front.Bind(new IPEndPoint(IPAddress.Loopback, 0));

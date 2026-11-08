@@ -5,7 +5,7 @@ namespace ioxide;
 /// <summary>
 /// Ends the cross-reactor forwarding a migrated client would otherwise pay forever: the owning
 /// reactor claims the peer's new address with a socket <c>connect()</c>ed to it, which outranks the
-/// wildcard binds in the kernel's lookup, so the datagrams arrive here directly.
+/// serving sockets' binds in the kernel's lookup, so the datagrams arrive here directly.
 ///
 /// <c>connect()</c> on a datagram socket sends nothing - it is a local declaration - and a connected
 /// socket takes no part in reuseport selection, so no other peer moves (measured: eight, none did).
@@ -21,7 +21,7 @@ public sealed unsafe partial class Reactor
     /// </summary>
     private const int QuicMaxPinnedPeers = 512;
 
-    private int  _quicServingFd = -1;   // the wildcard QUIC socket; pins are only made against it
+    private int  _quicServingFd = -1;   // the serving QUIC socket; pins are only made against it
     private int  _quicPinsOpen;
     private long _quicPinsCreated;
 
@@ -74,7 +74,8 @@ public sealed unsafe partial class Reactor
         int fd;
         try
         {
-            fd = OpenUdpSocket(options.Port, _config.DualStack, _udp.Gro, _udp.SocketBufferBytes,
+            // Its siblings' address: a pin on any other is in another lookup, which the kernel never reaches.
+            fd = OpenUdpSocket(options.Port, options.Address, _config.DualStack, _udp.Gro, _udp.SocketBufferBytes,
                                conn.PeerAddr, conn.PeerAddrLen);
         }
         catch (InvalidOperationException)

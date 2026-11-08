@@ -168,7 +168,7 @@
       <tr><th>Option</th><th>Default</th><th>Meaning</th></tr>
       <tr><td><code>ReactorCount</code></td><td>12</td><td>reactors = threads; run one per core</td></tr>
       <tr><td><code>RingEntries</code></td><td>8192</td><td>io_uring SQ/CQ depth</td></tr>
-      <tr><td><code>DualStack</code></td><td>false</td><td>bind listeners (TCP and UDP) as dual-stack IPv6; a TCP listener given an address (<code>Tcp.Address</code>) takes that address's family instead</td></tr>
+      <tr><td><code>DualStack</code></td><td>false</td><td>bind listeners (TCP and UDP) as dual-stack IPv6; a socket given an address (<code>Tcp.Address</code>, <code>Udp.Address</code>, <code>Quic.Address</code>) takes that address's family instead</td></tr>
       <tr><td><code>RecvBufferSize</code></td><td>32 KB</td><td>shared mode: bytes per recv buffer</td></tr>
       <tr><td><code>RecvSlots</code></td><td>4096</td><td>shared mode: buffers per reactor (power of two)</td></tr>
       <tr><td><code>Incremental</code></td><td>null</td><td>per-connection buffer rings (kernel 6.12+); null = shared ring</td></tr>
@@ -176,12 +176,14 @@
       <tr><td><code>Incremental.RecvSlots</code></td><td>16</td><td>incremental: buffers per connection ring</td></tr>
       <tr><td><code>Incremental.RecvBufferSize</code></td><td>4 KB</td><td>incremental: bytes per buffer (kernel appends into it)</td></tr>
       <tr><td><code>Tcp.Port</code></td><td>8080</td><td>SO_REUSEPORT listener port (every reactor binds it)</td></tr>
+      <tr><td><code>Tcp.Address</code></td><td>null</td><td>the address every TCP port binds; null = every interface</td></tr>
       <tr><td><code>Tcp.ExtraPorts</code></td><td>[]</td><td>additional listener ports; <code>conn.ListenerPort</code> says which one a connection used</td></tr>
       <tr><td><code>Tcp.ListenBacklog</code></td><td>1024</td><td>accept-queue depth per listener</td></tr>
       <tr><td><code>Tcp.WriteSlabSize</code></td><td>16 KB</td><td>per-connection write buffer</td></tr>
       <tr><td><code>Tcp.PoolMax</code></td><td>1024</td><td>pooled connection objects per reactor (bounds native memory)</td></tr>
       <tr><td><code>Tcp.RecvQueueEntries</code></td><td>64</td><td>per-connection slice queue depth; each queued slice holds a recv buffer; overflow closes the connection and readers see an error</td></tr>
       <tr><td><code>Udp.Ports</code></td><td>[]</td><td>raw UDP sockets; datagrams reach <code>Reactor.OnDatagram</code></td></tr>
+      <tr><td><code>Udp.Address</code></td><td>null</td><td>the address the UDP ports bind; null = every interface</td></tr>
       <tr><td><code>Udp.RecvSlots</code></td><td>16</td><td>shared UDP provided-buffer ring depth (in-flight datagrams)</td></tr>
       <tr><td><code>Udp.Gro</code></td><td>true</td><td>UDP_GRO: coalesce equal-size datagram bursts into one completion</td></tr>
       <tr><td><code>Quic</code></td><td>null</td><td>enable the QUIC transport - see <a href="../how-ioxide-does-h3.html">QUIC &amp; HTTP/3</a></td></tr>

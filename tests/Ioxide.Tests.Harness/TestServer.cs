@@ -425,7 +425,7 @@ public static class TestServer
         QuicConnectionFactory quicFactory,
         Func<Reactor, QuicConnection, Task>? quicHandle = null, int quicReadMs = 60_000,
         QuicRouting routing = QuicRouting.Forward,
-        ManualResetEventSlim? holdLast = null, ManualResetEventSlim? lastStarted = null)
+        ManualResetEventSlim? holdLast = null, ManualResetEventSlim? lastStarted = null, IPAddress? quicAddress = null)
     {
         // holdLast keeps the last reactor from starting until it is set, so it binds the port after
         // the others are already serving; lastStarted is set once it has.
@@ -448,6 +448,7 @@ public static class TestServer
             Quic = new QuicOptions
             {
                 Port = (ushort)udpPort,
+                Address = quicAddress,
                 LocalCidLength = 8,
                 ConnectionFactory = quicFactory,
                 ReadTimeoutMs = quicReadMs,

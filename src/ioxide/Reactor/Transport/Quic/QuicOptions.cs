@@ -1,8 +1,18 @@
+using System.Net;
+
 namespace ioxide;
 
 public sealed record QuicOptions
 {
     public ushort Port { get; init; } = 443;
+
+    /// <summary>
+    /// The address the QUIC socket binds, as <see cref="TcpOptions.Address"/> is for TCP. Null, the default, is every
+    /// interface: 0.0.0.0, or :: under <see cref="ServerConfig.DualStack"/>. An address decides the family itself and
+    /// DualStack doesn't apply; :: also takes IPv4-mapped peers. Outbound connections still send from a socket of
+    /// their own, on every interface.
+    /// </summary>
+    public IPAddress? Address { get; init; }
 
     /// <summary>
     /// Length of the CIDs this endpoint mints. Short-header packets carry no CID length on the

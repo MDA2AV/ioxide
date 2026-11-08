@@ -64,9 +64,9 @@ public sealed unsafe class H3TestClient : IDisposable
 
     public H3TestClient(string host, int port)
     {
-        _udp = new UdpClient();
-        _udp.Client.ReceiveTimeout = 250;
         _server = new IPEndPoint(IPAddress.Parse(host), port);
+        _udp = new UdpClient(_server.AddressFamily);
+        _udp.Client.ReceiveTimeout = 250;
         _udp.Connect(_server);
     }
 
