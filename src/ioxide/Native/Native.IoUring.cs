@@ -47,6 +47,7 @@ public static unsafe partial class Native {
     public const int    IORING_CQE_BUFFER_SHIFT = 16;
     public const uint   IORING_REGISTER_PBUF_RING   = 22;
     public const uint   IORING_UNREGISTER_PBUF_RING = 23;
+    public const uint   IORING_REGISTER_SYNC_CANCEL = 24;
     public const uint   IORING_REGISTER_RING_FDS    = 20;
     public const uint   IORING_UNREGISTER_RING_FDS  = 21;
     public const uint   IORING_POLL_ADD_MULTI   = 1u << 0;
@@ -192,6 +193,16 @@ public static unsafe partial class Native {
         public uint  offset;
         public uint  resv;
         public ulong data;
+    }
+
+    // Argument struct for IORING_REGISTER_SYNC_CANCEL; the rest stays zero.
+    [StructLayout(LayoutKind.Sequential)]
+    public struct io_uring_sync_cancel_reg {
+        public ulong             addr;
+        public int               fd;
+        public uint              flags;
+        public __kernel_timespec timeout;
+        public ulong             pad0, pad1, pad2, pad3;
     }
 
     // include/uapi/linux/time_types.h - the timespec IORING_OP_TIMEOUT reads.

@@ -146,6 +146,14 @@ public sealed unsafe partial class Reactor
             }
             close(wakeFd);
         }
+
+        // While the ring is still mapped, so a waiter that submits again only queues an SQE nothing sends.
+        ReleaseAcceptedTcpConnections(canCancel: !startFailed);
+        if (!startFailed)
+        {
+            CompleteParkedOps();
+        }
+
         if (_opTimespecs != null)
         {
             NativeMemory.Free(_opTimespecs);
@@ -187,6 +195,22 @@ public sealed unsafe partial class Reactor
         // Last, so what is still queued, or posted from here on, fails its switch rather than waiting forever.
         _postsClosed = true;
         DrainStoppedPosts();
+        DrainStoppedOps();
+    }
+
+    // True once the kernel is done with the request this tag names: cancelled, finished, or never submitted. A
+    // request running in an io-wq worker is waited for, 1 s at most.
+    private bool CancelAndWait(ulong userData)
+    {
+        var reg = new io_uring_sync_cancel_reg
+        {
+            addr    = userData,
+            fd      = -1,
+            timeout = new __kernel_timespec { tv_sec = 1 },
+        };
+        int result = io_uring_register(_ring.Fd, IORING_REGISTER_SYNC_CANCEL, &reg, 1);
+
+        return result == 0 || result == -ENOENT;
     }
 
     // Both are no-ops unless that ring was registered: incremental mode leaves _bufRing null (one

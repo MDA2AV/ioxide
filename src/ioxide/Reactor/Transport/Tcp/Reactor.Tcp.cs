@@ -418,11 +418,30 @@ public sealed unsafe partial class Reactor
     {
         for (int fd = 0; fd < _connections.Length; fd++)
         {
-            if (_connections[fd] != null)
+            if (_connections[fd] is { } conn)
             {
                 // A handler letting go later must not shut down whatever socket gets the number next.
-                _connections[fd]!.SuppressFin();
+                conn.SuppressFin();
                 close(fd);
+
+                // A parked read, or a flush the kernel doesn't have, resumes now; later calls find it closed (#531).
+                conn.MarkClosed();
+            }
+        }
+    }
+
+    // A flush the kernel had ends only once the kernel is done with its send (#221).
+    private void ReleaseAcceptedTcpConnections(bool canCancel)
+    {
+        for (int fd = 0; fd < _connections.Length; fd++)
+        {
+            if (_connections[fd] is { } conn)
+            {
+                if (canCancel && conn.FlushSubmitted && CancelAndWait(Tag(KindTcpSend, (ushort)conn.Generation, fd)))
+                {
+                    conn.CompleteFlush();
+                }
+
                 _connections[fd] = null;
             }
         }
