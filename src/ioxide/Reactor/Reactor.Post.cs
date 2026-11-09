@@ -76,9 +76,12 @@ public sealed unsafe partial class Reactor
         }
     }
 
+    // Past this, the rest waits for the next pass, so a callback that keeps posting leaves the ring its turn (#532).
+    private const int MaxPostsPerPass = 1024;
+
     private void DrainPostQ()
     {
-        while (_postQ.TryDequeue(out PostItem item))
+        for (int i = 0; i < MaxPostsPerPass && _postQ.TryDequeue(out PostItem item); i++)
         {
             // A callback that throws must not unwind the loop and kill the reactor.
             try

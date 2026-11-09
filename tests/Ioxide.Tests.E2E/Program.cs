@@ -36,6 +36,7 @@ internal static class Program
         PostTests.Register(runner);
         GcTests.Register(runner);
         RingTimerTests.Register(runner);
+        PostStarvationTests.Register(runner);
         UdpTests.Register(runner);
         QuicTests.Register(runner);
         QuicEngineTests.Register(runner);
