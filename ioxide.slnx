@@ -47,6 +47,7 @@
     <Project Path="Playground/Tcp/TaskRun/Playground.Tcp.TaskRun.csproj" />
     <Project Path="Playground/Tcp/Incremental/Playground.Tcp.Incremental.csproj" />
     <Project Path="Playground/Tcp/Big/Playground.Tcp.Big.csproj" />
+    <Project Path="Playground/Tcp/Feed/Playground.Tcp.Feed.csproj" />
   </Folder>
 
   <Folder Name="/apps/playground/tls/">

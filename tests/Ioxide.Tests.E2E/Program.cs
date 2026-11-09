@@ -28,6 +28,7 @@ internal static class Program
         PipeReaderContractTests.Register(runner);
         WriteContractTests.Register(runner);
         StreamContractTests.Register(runner);
+        PipeValidityTests.Register(runner);
         TcpTimeoutTests.Register(runner);
         AcceptExhaustionTests.Register(runner);
         ExecInheritanceTests.Register(runner);

@@ -62,6 +62,8 @@ public sealed unsafe class TlsSession : IDisposable
     private bool _alertPeeked;
     private readonly int _generation;   // the connection's life this session belongs to; _fd is someone else's after it
 
+    internal bool IsCurrentLife => _conn.Generation == _generation;
+
     private bool PeekKernelCloseNotify()
     {
         if (_alertPeeked || _conn is not { IsClosed: true } conn || conn.Generation != _generation)

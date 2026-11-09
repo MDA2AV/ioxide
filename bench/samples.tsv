@@ -26,6 +26,7 @@ Tcp/Incremental               h1      8080  /           -                   -
 Tcp/Big                       h1      8080  /           -                   PLAYGROUND_BODY=65536
 Tcp/Hop                       h1      8080  /           -                   -
 Tcp/TaskRun                   h1      8080  /           -                   -
+Tcp/Feed                      none    -     -           -                   -
 
 # tls over tcp
 Tls/OpenSsl                   h1s     8443  /           -                   -
