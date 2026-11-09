@@ -412,9 +412,9 @@ public sealed unsafe partial class Reactor
         }
     }
 
-    // Close any still-open accepted sockets (the connection table is indexed by fd) so they don't
-    // leak when a host is disposed and recreated many times in one process - e.g. across a test run.
-    private void CloseAcceptedTcpSockets()
+    // Before any socket closes (#531): a parked read, or a flush the kernel doesn't have, resumes while the number is
+    // still its own, and a flush started after it, on any connection, sends nothing.
+    private void MarkAcceptedTcpConnectionsClosed()
     {
         for (int fd = 0; fd < _connections.Length; fd++)
         {
@@ -422,10 +422,20 @@ public sealed unsafe partial class Reactor
             {
                 // A handler letting go later must not shut down whatever socket gets the number next.
                 conn.SuppressFin();
-                close(fd);
-
-                // A parked read, or a flush the kernel doesn't have, resumes now; later calls find it closed (#531).
                 conn.MarkClosed();
+            }
+        }
+    }
+
+    // Close any still-open accepted sockets (the connection table is indexed by fd) so they don't
+    // leak when a host is disposed and recreated many times in one process - e.g. across a test run.
+    private void CloseAcceptedTcpSockets()
+    {
+        for (int fd = 0; fd < _connections.Length; fd++)
+        {
+            if (_connections[fd] != null)
+            {
+                close(fd);
             }
         }
     }

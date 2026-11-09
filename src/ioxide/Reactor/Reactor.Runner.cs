@@ -125,8 +125,13 @@ public sealed unsafe partial class Reactor
     // memory the kernel could reference is freed only after that.
     private void Teardown(bool startFailed)
     {
-        // A faulted loop never set it: UdpSendTo sends directly from here, as nothing submits the ring again.
+        // A faulted loop never set it: UdpSendTo sends directly from here, as the ring may never be submitted again.
         _stopRequested = true;
+
+        // Every connection closed to its handler first, then the queue sent while each socket it names is still its
+        // own: left queued, a later submit would send it to whatever took the number (#531).
+        MarkAcceptedTcpConnectionsClosed();
+        bool submitted = !startFailed && SubmitQueued();
 
         CloseTcpListeners();
         TeardownQuic();
@@ -147,9 +152,10 @@ public sealed unsafe partial class Reactor
             close(wakeFd);
         }
 
-        // While the ring is still mapped, so a waiter that submits again only queues an SQE nothing sends.
-        ReleaseAcceptedTcpConnections(canCancel: !startFailed);
-        if (!startFailed)
+        // While the ring is still mapped; what a waiter submits again can't name a socket this stop closed. With the SQ
+        // not emptied nothing is cancelled: the kernel may still take what is left there.
+        ReleaseAcceptedTcpConnections(canCancel: submitted);
+        if (submitted)
         {
             CompleteParkedOps();
         }
@@ -196,6 +202,17 @@ public sealed unsafe partial class Reactor
         _postsClosed = true;
         DrainStoppedPosts();
         DrainStoppedOps();
+    }
+
+    // True once the kernel has taken everything queued, a few tries allowed: a cancel can't find what never reached it.
+    private bool SubmitQueued()
+    {
+        for (int attempt = 0; attempt < 16 && _ring.SqPending > 0; attempt++)
+        {
+            _ring.SubmitAndWait(0);
+        }
+
+        return _ring.SqPending == 0;
     }
 
     // True once the kernel is done with the request this tag names: cancelled, finished, or never submitted. A
