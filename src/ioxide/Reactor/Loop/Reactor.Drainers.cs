@@ -152,7 +152,12 @@ public sealed unsafe partial class Reactor
         }
         close(fd);
         conn.Clear();
+        ReturnToPool(conn);
+    }
 
+    // A cleared connection: kept for the next accept, or its memory freed right here once the pool is full.
+    private void ReturnToPool(TcpConnection conn)
+    {
         if (_pool.Count < _poolMax)
         {
             _pool.Push(conn);

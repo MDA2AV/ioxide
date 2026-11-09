@@ -440,19 +440,46 @@ public sealed unsafe partial class Reactor
         }
     }
 
-    // A flush the kernel had ends only once the kernel is done with its send (#221).
+    // A flush the kernel had ends only once the kernel is done with its send (#221). A zero-copy one may still have its
+    // pages held until a notification nothing will read, so that connection leaves the table here and keeps its slab.
     private void ReleaseAcceptedTcpConnections(bool canCancel)
     {
         for (int fd = 0; fd < _connections.Length; fd++)
         {
-            if (_connections[fd] is { } conn)
+            if (_connections[fd] is { } conn && canCancel && conn.FlushSubmitted
+                && CancelAndWait(Tag(KindTcpSend, (ushort)conn.Generation, fd)))
             {
-                if (canCancel && conn.FlushSubmitted && CancelAndWait(Tag(KindTcpSend, (ushort)conn.Generation, fd)))
+                conn.CompleteFlush();
+                if (conn.UseZc)
                 {
-                    conn.CompleteFlush();
+                    _connections[fd] = null;
+                }
+            }
+        }
+    }
+
+    // Once every wake is done, while the ring is open: a connection its handler let go of goes back to the pool as a
+    // recycle would, and the teardown's last step frees it. One a handler still holds, or whose send the kernel may
+    // still be reading, keeps its memory, as a write into it would land in freed memory (#223).
+    private void ReturnReleasedTcpConnections()
+    {
+        for (int fd = 0; fd < _connections.Length; fd++)
+        {
+            if (_connections[fd] is not { } conn)
+            {
+                continue;
+            }
+
+            _connections[fd] = null;
+            if (conn.HandlerReleased && !conn.FlushSubmitted)
+            {
+                if (_incremental)
+                {
+                    TeardownConnectionBufRing(conn);
                 }
 
-                _connections[fd] = null;
+                conn.Clear();
+                ReturnToPool(conn);
             }
         }
     }

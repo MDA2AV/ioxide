@@ -159,6 +159,7 @@ public sealed unsafe partial class Reactor
         {
             CompleteParkedOps();
         }
+        ReturnReleasedTcpConnections();
 
         if (_opTimespecs != null)
         {
@@ -179,7 +180,7 @@ public sealed unsafe partial class Reactor
         _ring.Dispose(closeFd: !startFailed);
 
         // Pooled connections are past their last send (#250) and their incremental ring is unregistered,
-        // so their slabs can go. A live one's handler may still write to it, so live ones stay (#223).
+        // so their slabs can go, the ones the stop returned included. One a handler still holds stays (#223).
         while (_pool.TryPop(out TcpConnection? pooled))
         {
             pooled.Dispose();
