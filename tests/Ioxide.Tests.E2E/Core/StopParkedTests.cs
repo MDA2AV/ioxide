@@ -219,6 +219,114 @@ internal static class StopParkedTests
             Assert.True(received.AsSpan().SequenceEqual(Queued), $"the clients received '{Encoding.ASCII.GetString(received)}'");
         });
 
+        foreach (bool incremental in new[] { false, true })
+        {
+            string mode = incremental ? "incremental" : "shared ring";
+
+            runner.Test($"stop: a connection its handler let go of has its memory freed, one a handler still holds keeps it ({mode})", () =>
+            {
+                var conns = new System.Collections.Concurrent.ConcurrentDictionary<char, TcpConnection>();
+                using var parked = new CountdownEvent(Roles.Length);
+                var held = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+                var heldFinished = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+                byte[] response = new byte[16 << 20];   // more than both sockets' buffers hold
+
+                var config = new ServerConfig
+                {
+                    Incremental = incremental ? new IncrementalOptions { MaxConnections = 16, RecvSlots = 4 } : null,
+                    Tcp = new TcpOptions(),
+                };
+
+                (int port, Reactor reactor, Thread thread) = TestServer.StartConfigured(async (r, conn) =>
+                {
+                    int role = await ReadRole(conn);
+                    if (role < 0)
+                    {
+                        conn.DecRef();
+                        return;
+                    }
+
+                    conns[(char)role] = conn;
+                    try
+                    {
+                        switch ((char)role)
+                        {
+                            case 'r':
+                                parked.Signal();
+                                await conn.ReadAsync();
+                                break;
+                            case 'f':
+                                conn.Write(response);
+                                ValueTask flush = conn.FlushAsync();
+                                parked.Signal();
+                                await flush;
+                                break;
+                            case 't':
+                                parked.Signal();
+                                await new RingTimer(r).DelayAsync(600_000);
+                                break;
+                            case 'l':
+                                parked.Signal();   // lets go at once, its client still connected
+                                break;
+                            case 'h':
+                                parked.Signal();
+                                await held.Task;   // busy outside ioxide when the stop comes
+                                conn.Write("late"u8);
+                                await conn.FlushAsync();
+                                heldFinished.TrySetResult();
+                                break;
+                        }
+                    }
+                    finally
+                    {
+                        conn.DecRef();
+                    }
+                }, config);
+
+                var clients = new List<Socket>();
+                try
+                {
+                    foreach (char role in Roles)
+                    {
+                        var client = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp);
+                        if (role == 'f')
+                        {
+                            client.ReceiveBufferSize = 64 * 1024;   // never reads, and takes little
+                        }
+                        client.Connect(IPAddress.Loopback, port);
+                        client.Send([(byte)role]);
+                        clients.Add(client);
+                    }
+
+                    Assert.True(parked.Wait(5_000), "the handlers never parked");
+                    Thread.Sleep(200);   // the reactor hands the flush's send to the kernel
+
+                    StopAndJoin(reactor, thread);
+
+                    foreach (char role in "rftl")
+                    {
+                        Assert.True(!HasWriteBuffer(conns[role]), $"the write slab of the '{role}' connection outlived its reactor");
+                        if (incremental)
+                        {
+                            Assert.True(!HasRing(conns[role]), $"the buffer ring of the '{role}' connection outlived its reactor");
+                        }
+                    }
+
+                    Assert.True(HasWriteBuffer(conns['h']), "the write slab of a connection its handler still holds was freed under it");
+                    held.TrySetResult();
+                    Assert.True(heldFinished.Task.Wait(ReturnsWithinMs), "the held handler never finished");
+                }
+                finally
+                {
+                    held.TrySetResult();
+                    foreach (Socket client in clients)
+                    {
+                        client.Dispose();
+                    }
+                }
+            }, skip: incremental && !TestServer.KernelAtLeast(6, 12));
+        }
+
         runner.Test("stop: a flush from another thread after the reactor stopped returns", () =>
         {
             AfterTheStop((conn, _) =>
@@ -332,6 +440,50 @@ internal static class StopParkedTests
         [DllImport("libc")]
         private static extern int close(int fd);
     }
+
+    // A read, a flush its client holds up, a RingTimer wait, a handler that let go, one held outside ioxide.
+    private const string Roles = "rftlh";
+
+    // The one byte a test client sends, or -1 for the harness's listen probe, which sends nothing.
+    private static async Task<int> ReadRole(TcpConnection conn)
+    {
+        while (true)
+        {
+            RecvSnapshot snapshot = await conn.ReadAsync();
+
+            int role = -1;
+            while (conn.TryGetItem(snapshot, out SpscRecvRing.Item item))
+            {
+                if (item.HasBuffer)
+                {
+                    role = role < 0 ? item.AsSpan()[0] : role;
+                    conn.ReturnBuffer(in item);
+                }
+            }
+
+            if (role >= 0)
+            {
+                return role;
+            }
+            if (snapshot.IsClosed)
+            {
+                return -1;
+            }
+        }
+    }
+
+    private static unsafe bool HasWriteBuffer(TcpConnection connection) => WriteBufferOf(connection) != null;
+
+    private static unsafe bool HasRing(TcpConnection connection) => BufRingOf(connection) != null && BufSlabOf(connection) != null;
+
+    [System.Runtime.CompilerServices.UnsafeAccessor(System.Runtime.CompilerServices.UnsafeAccessorKind.Field, Name = "WriteBuffer")]
+    private static extern unsafe ref byte* WriteBufferOf(TcpConnection connection);
+
+    [System.Runtime.CompilerServices.UnsafeAccessor(System.Runtime.CompilerServices.UnsafeAccessorKind.Field, Name = "BufRing")]
+    private static extern unsafe ref byte* BufRingOf(TcpConnection connection);
+
+    [System.Runtime.CompilerServices.UnsafeAccessor(System.Runtime.CompilerServices.UnsafeAccessorKind.Field, Name = "BufSlab")]
+    private static extern unsafe ref byte* BufSlabOf(TcpConnection connection);
 
     private static async Task SwitchTo(Reactor reactor) => await new ReactorSwitch(reactor);
 
