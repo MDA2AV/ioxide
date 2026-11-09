@@ -57,7 +57,9 @@ public sealed unsafe partial class Reactor
         // Not NowMs: that was read before this pass's work, and the wait would oversleep by all of it.
         long now = Native.MonotonicMs;
 
-        // +1: the ms clock can read just short of the deadline when the kernel's timer wakes us.
-        return _ring.SubmitAndWait(1, Math.Max(0, wakeAt - now) + 1);
+        // +1: the ms clock can read just short of the deadline when the kernel's timer wakes us. With posts left
+        // over, which wake nothing from this thread, only look: a zero timeout, still an enter with GETEVENTS,
+        // which is what runs a DEFER_TASKRUN ring's completions.
+        return _ring.SubmitAndWait(1, _postQ.IsEmpty ? Math.Max(0, wakeAt - now) + 1 : 0);
     }
 }
