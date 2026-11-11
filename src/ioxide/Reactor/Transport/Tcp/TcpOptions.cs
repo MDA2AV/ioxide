@@ -18,6 +18,12 @@ public enum WriteOverflowStrategy
 /// (recv buffering is reactor machinery - see the buffer-ring knobs on <see cref="ServerConfig"/>).</summary>
 public sealed record TcpOptions
 {
+    /// <summary>
+    /// The port every reactor listens on. Each listener sets SO_REUSEPORT so the reactors can share it, and the kernel
+    /// can't tell them from another process: a second server of the same user on this port, or on one of
+    /// <see cref="ExtraPorts"/>, starts without an error and takes a share of the new connections. A restart with no
+    /// downtime relies on that; a deploy that must not overlap stops the old process first. Another user is refused.
+    /// </summary>
     public ushort Port { get; init; } = 8080;
 
     /// <summary>
