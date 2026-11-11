@@ -222,17 +222,11 @@ internal static class RotationLifecycleTests
 
     private static void RegisterFleet(Runner runner)
     {
-        runner.Test("rotate: a rotation that reaches only some reactors serves two certificates at once", () =>
+        runner.Test("rotate: one call on any reactor's service rotates every reactor that shares its options", () =>
         {
-            // A TlsService belongs to ONE reactor, so a server with N of them holds N services and
-            // a renewal has to visit every one. They share a port through SO_REUSEPORT, so which
-            // reactor a client lands on is the kernel's choice - and a rotation that missed some
-            // means the SAME name answers with two different certificates depending on where the
-            // connection landed, with nothing to tell the operator.
-            //
-            // This is the production shape, and until now no TLS test ran more than one reactor:
-            // every entry point in the harness pinned ReactorCount = 1. What is asserted is the
-            // consequence rather than the mechanism - both certificates observed on one port.
+            // The reactors of one server share their contexts (#536), so a renewal no longer has to visit every one: a
+            // rotation that reached only some of them used to answer one name with two certificates, depending on where
+            // the kernel put the connection, with nothing to tell the operator.
             const int reactors = 4;
 
             (string cert, string key) = TestCert.Ensure();
@@ -245,7 +239,35 @@ internal static class RotationLifecycleTests
                 (_, r, conn) => Handlers.TlsSendFirst(r, conn),
                 (shard, r) => services[shard] = TlsService.Start(r, options));
 
-            // Rotate ONE of the four, as a renewal script that iterated the wrong collection would.
+            services[0].ReplaceCertificates(new TlsCertificate
+            {
+                CertificatePath = renewed,
+                KeyPath = renewedKey,
+            });
+
+            for (int i = 0; i < 40; i++)
+            {
+                string subject = Client.ServerCertificateSubject(port, null);
+                Assert.True(subject.Length == 0 || subject.Contains("fleet-rotate.test"),
+                    $"connection {i} was served the old certificate after one reactor's service rotated: {subject}");
+            }
+        });
+
+        runner.Test("rotate: reactors started with options of their own rotate alone, so rotating some serves two certificates", () =>
+        {
+            // The other way to start a fleet, an options instance per reactor, shares nothing, and a renewal still has
+            // to visit every one of them. What is asserted is the consequence: both certificates on one port.
+            const int reactors = 4;
+
+            (string cert, string key) = TestCert.Ensure();
+            (_, string renewed, string renewedKey) = TestCert.EnsureRenewedFromCa("fleet-rotate.test");
+
+            var services = new TlsService[reactors];
+
+            int port = TestServer.StartSharded(reactors,
+                (_, r, conn) => Handlers.TlsSendFirst(r, conn),
+                (shard, r) => services[shard] = TlsService.Start(r, new TlsOptions { CertificatePath = cert, KeyPath = key }));
+
             services[0].ReplaceCertificates(new TlsCertificate
             {
                 CertificatePath = renewed,
@@ -263,15 +285,13 @@ internal static class RotationLifecycleTests
             }
 
             Assert.True(seen.Contains("original") && seen.Contains("renewed"),
-                "one port served only " + string.Join("/", seen) + " across 60 connections: a "
-                + "partial rotation should be observable as two certificates on one name, and if "
-                + "this stops being true the per-reactor model has changed");
+                "one port served only " + string.Join("/", seen) + " across 60 connections, with each reactor's "
+                + "options its own and one of four rotated");
         });
 
         runner.Test("control: rotating every reactor leaves only the new certificate", () =>
         {
-            // The other half. Without this, the test above is satisfied by a fleet that always
-            // serves two certificates - which would be a far worse bug and a green test.
+            // Rotating each reactor's service still works: each call builds the same set again.
             const int reactors = 4;
 
             (string cert, string key) = TestCert.Ensure();
