@@ -98,6 +98,7 @@ public sealed unsafe partial class Reactor
     private const int EAGAIN = 11;
     private const int EBUSY  = 16;
     private const int ETIME  = 62;
+    private const int ENOENT = 2;
 
     public Reactor(int id, ServerConfig config)
     {

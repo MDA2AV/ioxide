@@ -159,8 +159,45 @@ public sealed unsafe partial class Reactor : IRingHost
     [MethodImpl(MethodImplOptions.NoInlining)]
     private void HandOff(byte opcode, int fd, nint buffer, int length, long offset, IRingCompletion completion)
     {
+        // Nothing submits it after a stop. Throwing, as a ReactorSwitch does, also ends a loop that ignores an error result.
+        ObjectDisposedException.ThrowIf(_postsClosed, this);
+
         _remoteOps.Enqueue(new RemoteOp(opcode, fd, buffer, length, offset, completion));
         Wake();
+
+        if (_postsClosed)
+        {
+            DrainStoppedOps();   // stopped while it was queued
+        }
+    }
+
+    // Ops a stopped reactor never took complete as cancelled, on the thread pool: inline at the end of Teardown, a
+    // continuation that submits again would reach a ring that is gone.
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private void DrainStoppedOps()
+    {
+        // As in DrainStoppedPosts: an op that saw the queue open must not be stranded.
+        Interlocked.MemoryBarrier();
+
+        while (_remoteOps.TryDequeue(out RemoteOp op))
+        {
+            ThreadPool.UnsafeQueueUserWorkItem(static completion => completion.Complete(-ECANCELED), op.Completion, preferLocal: false);
+        }
+    }
+
+    // At stop, each once the kernel is done with it. A waiter that submits again reuses its slot, past this loop.
+    private void CompleteParkedOps()
+    {
+        int slots = _opTargets.Length;
+        for (int slot = 0; slot < slots; slot++)
+        {
+            if (_opTargets[slot] is { } target && CancelAndWait(Tag(KindClient, 0, slot)))
+            {
+                _opTargets[slot] = null;
+                _opFree[_opFreeTop++] = slot;
+                target.Complete(-ECANCELED);
+            }
+        }
     }
 
     private void SubmitClientOpCore(byte opcode, int fd, nint buffer, int length, long offset, IRingCompletion completion)

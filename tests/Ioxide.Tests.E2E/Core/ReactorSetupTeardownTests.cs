@@ -238,6 +238,7 @@ internal static class ReactorSetupTeardownTests
         }, skip: OpenFileLimit() < ReuseportGroupCap + 4096);
 
         RegisterStopFrees(runner);
+        RegisterFullPoolFrees(runner);
     }
 
     private const int SlabSize = 4096;
@@ -337,6 +338,62 @@ internal static class ReactorSetupTeardownTests
                 }
             }, skip: incremental && !TestServer.KernelAtLeast(6, 12));
         }
+    }
+
+    // With the pool full, a recycled connection's memory goes right there rather than waiting for the stop.
+    private static void RegisterFullPoolFrees(Runner runner)
+    {
+        runner.Test("reactor: a connection recycled into a full pool has its write slab freed right there", () =>
+        {
+            var conns = new System.Collections.Concurrent.ConcurrentBag<TcpConnection>();
+            using var released = new CountdownEvent(2);
+            using var bothIn = new CountdownEvent(2);
+
+            (int port, Reactor reactor, Thread thread) = TestServer.StartConfigured(async (_, conn) =>
+            {
+                RecvSnapshot snapshot = await conn.ReadAsync();
+                Wire.ReadPath(conn, snapshot);
+                if (snapshot.IsClosed)
+                {
+                    conn.DecRef();   // the harness's readiness probe, which sends no request
+                    return;
+                }
+
+                conns.Add(conn);
+                bothIn.Signal();
+                while (!(snapshot = await conn.ReadAsync()).IsClosed)
+                {
+                    Wire.ReadPath(conn, snapshot);
+                }
+
+                conn.DecRef();   // the reactor already let go: this recycles it, here
+                released.Signal();
+            }, new ServerConfig { Tcp = new TcpOptions { PoolMax = 1 } });
+
+            try
+            {
+                using (var first = new TcpClient())
+                using (var second = new TcpClient())
+                {
+                    first.Connect(IPAddress.Loopback, port);
+                    second.Connect(IPAddress.Loopback, port);
+                    first.GetStream().Write("a"u8);
+                    second.GetStream().Write("b"u8);
+                    Assert.True(bothIn.Wait(5_000), "the two handlers never ran");
+                }
+
+                Assert.True(released.Wait(5_000), "the handlers never saw their clients close");
+
+                // Both recycled while the reactor runs: the pool takes one, so the other was freed on the spot.
+                int freed = conns.Count(conn => !HasWriteBuffer(conn));
+                Assert.True(freed >= 1, $"{freed} of the two recycled connections had their slab freed with the pool full");
+            }
+            finally
+            {
+                reactor.Stop();
+                Assert.True(thread.Join(TimeSpan.FromSeconds(10)), "the reactor did not stop");
+            }
+        });
     }
 
     private static unsafe bool HasWriteBuffer(TcpConnection connection) => WriteBufferOf(connection) != null;

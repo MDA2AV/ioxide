@@ -412,6 +412,21 @@ public sealed unsafe partial class Reactor
         }
     }
 
+    // Before any socket closes (#531): a parked read, or a flush the kernel doesn't have, resumes while the number is
+    // still its own, and a flush started after it, on any connection, sends nothing.
+    private void MarkAcceptedTcpConnectionsClosed()
+    {
+        for (int fd = 0; fd < _connections.Length; fd++)
+        {
+            if (_connections[fd] is { } conn)
+            {
+                // A handler letting go later must not shut down whatever socket gets the number next.
+                conn.SuppressFin();
+                conn.MarkClosed();
+            }
+        }
+    }
+
     // Close any still-open accepted sockets (the connection table is indexed by fd) so they don't
     // leak when a host is disposed and recreated many times in one process - e.g. across a test run.
     private void CloseAcceptedTcpSockets()
@@ -420,10 +435,51 @@ public sealed unsafe partial class Reactor
         {
             if (_connections[fd] != null)
             {
-                // A handler letting go later must not shut down whatever socket gets the number next.
-                _connections[fd]!.SuppressFin();
                 close(fd);
-                _connections[fd] = null;
+            }
+        }
+    }
+
+    // A flush the kernel had ends only once the kernel is done with its send (#221). A zero-copy one may still have its
+    // pages held until a notification nothing will read, so that connection leaves the table here and keeps its slab.
+    private void ReleaseAcceptedTcpConnections(bool canCancel)
+    {
+        for (int fd = 0; fd < _connections.Length; fd++)
+        {
+            if (_connections[fd] is { } conn && canCancel && conn.FlushSubmitted
+                && CancelAndWait(Tag(KindTcpSend, (ushort)conn.Generation, fd)))
+            {
+                conn.CompleteFlush();
+                if (conn.UseZc)
+                {
+                    _connections[fd] = null;
+                }
+            }
+        }
+    }
+
+    // Once every wake is done, while the ring is open: a connection its handler let go of goes back to the pool as a
+    // recycle would, and the teardown's last step frees it. One a handler still holds, or whose send the kernel may
+    // still be reading, keeps its memory, as a write into it would land in freed memory (#223).
+    private void ReturnReleasedTcpConnections()
+    {
+        for (int fd = 0; fd < _connections.Length; fd++)
+        {
+            if (_connections[fd] is not { } conn)
+            {
+                continue;
+            }
+
+            _connections[fd] = null;
+            if (conn.HandlerReleased && !conn.FlushSubmitted)
+            {
+                if (_incremental)
+                {
+                    TeardownConnectionBufRing(conn);
+                }
+
+                conn.Clear();
+                ReturnToPool(conn);
             }
         }
     }

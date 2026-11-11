@@ -125,8 +125,13 @@ public sealed unsafe partial class Reactor
     // memory the kernel could reference is freed only after that.
     private void Teardown(bool startFailed)
     {
-        // A faulted loop never set it: UdpSendTo sends directly from here, as nothing submits the ring again.
+        // A faulted loop never set it: UdpSendTo sends directly from here, as the ring may never be submitted again.
         _stopRequested = true;
+
+        // Every connection closed to its handler first, then the queue sent while each socket it names is still its
+        // own: left queued, a later submit would send it to whatever took the number (#531).
+        MarkAcceptedTcpConnectionsClosed();
+        bool submitted = !startFailed && SubmitQueued();
 
         CloseTcpListeners();
         TeardownQuic();
@@ -146,6 +151,16 @@ public sealed unsafe partial class Reactor
             }
             close(wakeFd);
         }
+
+        // While the ring is still mapped; what a waiter submits again can't name a socket this stop closed. With the SQ
+        // not emptied nothing is cancelled: the kernel may still take what is left there.
+        ReleaseAcceptedTcpConnections(canCancel: submitted);
+        if (submitted)
+        {
+            CompleteParkedOps();
+        }
+        ReturnReleasedTcpConnections();
+
         if (_opTimespecs != null)
         {
             NativeMemory.Free(_opTimespecs);
@@ -165,7 +180,7 @@ public sealed unsafe partial class Reactor
         _ring.Dispose(closeFd: !startFailed);
 
         // Pooled connections are past their last send (#250) and their incremental ring is unregistered,
-        // so their slabs can go. A live one's handler may still write to it, so live ones stay (#223).
+        // so their slabs can go, the ones the stop returned included. One a handler still holds stays (#223).
         while (_pool.TryPop(out TcpConnection? pooled))
         {
             pooled.Dispose();
@@ -187,6 +202,33 @@ public sealed unsafe partial class Reactor
         // Last, so what is still queued, or posted from here on, fails its switch rather than waiting forever.
         _postsClosed = true;
         DrainStoppedPosts();
+        DrainStoppedOps();
+    }
+
+    // True once the kernel has taken everything queued, a few tries allowed: a cancel can't find what never reached it.
+    private bool SubmitQueued()
+    {
+        for (int attempt = 0; attempt < 16 && _ring.SqPending > 0; attempt++)
+        {
+            _ring.SubmitAndWait(0);
+        }
+
+        return _ring.SqPending == 0;
+    }
+
+    // True once the kernel is done with the request this tag names: cancelled, finished, or never submitted. A
+    // request running in an io-wq worker is waited for, 1 s at most.
+    private bool CancelAndWait(ulong userData)
+    {
+        var reg = new io_uring_sync_cancel_reg
+        {
+            addr    = userData,
+            fd      = -1,
+            timeout = new __kernel_timespec { tv_sec = 1 },
+        };
+        int result = io_uring_register(_ring.Fd, IORING_REGISTER_SYNC_CANCEL, &reg, 1);
+
+        return result == 0 || result == -ENOENT;
     }
 
     // Both are no-ops unless that ring was registered: incremental mode leaves _bufRing null (one
