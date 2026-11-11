@@ -176,7 +176,8 @@ internal static class PostureTests
             // agrees with the mode - it does not contradict it. Refusing it, which this used to do,
             // rejected a configuration that works, and rejected it for saying out loud the thing an
             // operator pinning a posture is supposed to say. Only a list asking for something else
-            // is a real contradiction, which the next test pins.
+            // is a real contradiction, which the next test pins. Without the kernel's tls module the start is refused for
+            // that instead, which is not what this pins.
             (string certPath, string keyPath) = TestCert.Ensure();
 
             Assert.True(!StartFails(new TlsOptions
@@ -185,7 +186,7 @@ internal static class PostureTests
                 KeyPath = keyPath,
                 KernelTx = true,
                 CipherSuites = "TLS_AES_128_GCM_SHA256",
-            }, ""), "kTLS with a list naming the suite it pins should start, not be refused");
+            }, "CipherSuites"), "kTLS with a list naming the suite it pins should start, not be refused");
         });
 
         runner.Test("posture: kTLS refuses a CipherSuites list asking for a suite it cannot use", () =>
