@@ -1,4 +1,5 @@
 using System.Runtime.InteropServices;
+using ioxide.tls;
 using static ioxide.Native;
 
 namespace ioxide;
@@ -203,6 +204,12 @@ public sealed unsafe partial class Reactor
         _postsClosed = true;
         DrainStoppedPosts();
         DrainStoppedOps();
+
+        // After all that could still run here, since until then a handshake may read a TLS service's contexts (#543).
+        foreach (TlsService service in _tlsServices ?? [])
+        {
+            service.Free();
+        }
     }
 
     // True once the kernel has taken everything queued, a few tries allowed: a cancel can't find what never reached it.

@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using ioxide.tls;
 using System.Runtime.InteropServices;
 using System.Runtime.CompilerServices;
 using static ioxide.Native;
@@ -46,6 +47,11 @@ public sealed unsafe partial class Reactor : IRingHost
             : throw new InvalidOperationException(
                 $"No {typeof(T).Name} registered on reactor {_id}. Register it from OnStart with AddService.");
     }
+
+    // Every TLS service started on this reactor, registered or not: Teardown frees them last.
+    private List<TlsService>? _tlsServices;
+
+    internal void OwnTlsService(TlsService service) => (_tlsServices ??= []).Add(service);
 
     /// <summary>
     /// Runs on the reactor thread before the loop starts - open ring-native clients here.

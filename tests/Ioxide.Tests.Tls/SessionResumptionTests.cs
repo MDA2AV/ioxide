@@ -128,6 +128,59 @@ internal static class SessionResumptionTests
             Assert.True(resumed == returns, $"{resumed} of {returns} returns to a {reactors}-reactor port resumed");
         });
 
+        // #543: the reactors started with one options instance share its contexts, so one stopping must not free them
+        // under the rest, one started later takes them too, and only the last to stop frees them, so the next start
+        // builds its own. On one port, as a server's reactors are: with one of them left, it is the one that answers.
+        runner.Test("resume: on one port, a stopped reactor leaves its tickets to the rest, a later one shares them, and after the last stops a new one builds its own", () =>
+        {
+            (_, string cert, string key) = TestCert.EnsureNamedFromCa("resume-restart.test");
+            var options = new TlsOptions { CertificatePath = cert, KeyPath = key };
+            int port = TestServer.NextPort();
+            var reactors = new List<(Reactor Reactor, Thread Thread)>();
+
+            Handshake Return() => Connect(port, "resume-restart.test", null, null);
+            void Start() => reactors.Add(StartOn(port, options));
+            void Stop(int i)
+            {
+                reactors[i].Reactor.Stop();
+                Assert.True(reactors[i].Thread.Join(5000), $"reactor {i} did not stop");
+            }
+
+            try
+            {
+                Start();
+                Start();
+                Handshake issued = Return();
+                Assert.True(issued.Result == Outcome.Served && !issued.AcceptedPsk, $"the first connection was no full handshake: {issued.Detail}");
+
+                Stop(0);
+                Handshake left = Return();
+                Assert.True(left.Result == Outcome.Served, $"the reactor left was not served: {left.Detail}");
+                Assert.True(left.AcceptedPsk, "the reactor left did not resume the ticket, so it lost the contexts it shared");
+
+                Start();
+                Stop(1);
+                Handshake later = Return();
+                Assert.True(later.Result == Outcome.Served, $"a reactor started later was not served: {later.Detail}");
+                Assert.True(later.AcceptedPsk, "a reactor started later did not resume the ticket, so it did not share the contexts");
+
+                Stop(2);
+                Start();
+                Handshake rebuilt = Return();
+                Assert.True(rebuilt.Result == Outcome.Served, $"a reactor started after the last had stopped was not served: {rebuilt.Detail}");
+                Assert.True(rebuilt.OfferedPsk && !rebuilt.AcceptedPsk,
+                    "a ticket from contexts their last reactor freed resumed, so they were never rebuilt");
+            }
+            finally
+            {
+                foreach ((Reactor reactor, Thread thread) in reactors)
+                {
+                    reactor.Stop();
+                    thread.Join(5000);
+                }
+            }
+        });
+
         runner.Test("resume: a ticket issued before a rotation is refused after it, and the client is still served", () =>
         {
             (_, string first, string firstKey) = TestCert.EnsureNamedFromCa("resume-rotate.test");
@@ -255,6 +308,31 @@ internal static class SessionResumptionTests
         Refused,
         TimedOut,
         Dropped,
+    }
+
+    // One reactor on a port it shares with any other started on it, serving TLS with options it shares with them too.
+    private static (Reactor Reactor, Thread Thread) StartOn(int port, TlsOptions options)
+    {
+        using var started = new ManualResetEventSlim();
+        var reactor = new Reactor(0, new ServerConfig
+        {
+            RecvBufferSize = 4096,
+            RecvSlots = 256,
+            Tcp = new TcpOptions { Port = (ushort)port, WriteSlabSize = 16 * 1024, PoolMax = 64 },
+        })
+        {
+            TcpHandle = Handlers.TlsIdentity,
+            OnStart = r =>
+            {
+                TlsService.Start(r, options);
+                started.Set();
+            },
+        };
+
+        var thread = new Thread(reactor.Run) { IsBackground = true };
+        thread.Start();
+        Assert.True(started.Wait(10_000), "a reactor never started");
+        return (reactor, thread);
     }
 
     /// <param name="OfferedPsk">The ClientHello carried a pre_shared_key: the client offered a ticket.</param>
