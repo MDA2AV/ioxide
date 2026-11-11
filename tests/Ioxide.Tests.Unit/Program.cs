@@ -44,6 +44,7 @@ internal static class Program
         HpackEncodeTests.Register(runner);
         QpackStaticEncodeTests.Register(runner);
         AlpnSelectTests.Register(runner);
+        KeylogSecretTests.Register(runner);
         SendWaitAllTests.Register(runner);
         AdapterParkTests.Register(runner);
         WaiterSlotTests.Register(runner);
