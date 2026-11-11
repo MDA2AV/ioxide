@@ -8,7 +8,12 @@ namespace ioxide;
 /// </summary>
 public sealed record ServerConfig
 {
-    public int ReactorCount { get; init; } = 12;
+    /// <summary>
+    /// How many reactors the server runs, each a thread with a ring and receive buffers of its own: by default
+    /// <see cref="RecvSlots"/> x <see cref="RecvBufferSize"/>, 128 MiB, which even a few connections come to touch.
+    /// Defaults to one; set it for more, to <see cref="Environment.ProcessorCount"/> for one per CPU the process may use.
+    /// </summary>
+    public int ReactorCount { get; init; } = 1;
 
     // io_uring SQ/CQ depth.
     public uint RingEntries { get; init; } = 8192;

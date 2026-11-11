@@ -346,9 +346,8 @@ public static class TestServer
     /// </summary>
     /// <param name="onStart">
     /// Run on each reactor's own thread before that shard reports ready, and handed the shard
-    /// index so a caller can keep the per-reactor object it creates. A TlsService belongs to ONE
-    /// reactor, so a test that wants to rotate certificates the way a real server must - every
-    /// reactor separately - has no other way to hold all N of them.
+    /// index so a caller can keep the per-reactor object it creates, such as each reactor's
+    /// TlsService.
     /// </param>
     public static int StartSharded(int reactorCount, Func<int, Reactor, TcpConnection, Task> handle,
         Action<int, Reactor>? onStart = null)

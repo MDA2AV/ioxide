@@ -1,3 +1,4 @@
+using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using ioxide.utils;
@@ -5,7 +6,9 @@ using ioxide.utils;
 namespace ioxide.tls;
 
 /// <summary>
-/// Per-reactor TLS termination. <see cref="AcceptAsync"/> drives the TLS 1.3 handshake through
+/// TLS termination for one reactor, over contexts shared by every reactor started with the same
+/// <see cref="TlsOptions"/> instance, so a session ticket one of them issued resumes on any other.
+/// <see cref="AcceptAsync"/> drives the TLS 1.3 handshake through
 /// BoringSSL memory BIOs - handshake bytes ride the same ring recv/send as everything else - and
 /// hands back the <see cref="TlsSession"/> that carries the connection from there. By default
 /// BoringSSL owns both directions: the handler writes through <see cref="TlsSession.Write"/> and
@@ -26,7 +29,7 @@ public sealed class TlsService
     private readonly TlsOptions _options;
 
     // Serialises rotations against each other. Readers never take it - they read one reference.
-    private readonly Lock _rotation = new();
+    private readonly Lock _rotation;
 
     /// <summary>
     /// Handshakes still running, oldest first. A queue rather than a set because every entry gets
@@ -98,13 +101,33 @@ public sealed class TlsService
 
     private static readonly int SslSessionIndex = BoringSsl.SSL_get_ex_new_index(0, 0, 0, 0, 0);
 
-    private TlsService(CertificateSlot slot, GCHandle slotHandle, GCHandle alpnHandle, TlsOptions options)
+    private TlsService(Shared shared, TlsOptions options)
     {
-        _slot = slot;
-        _slotHandle = slotHandle;
-        _alpnHandle = alpnHandle;
+        _slot = shared.Slot;
+        _slotHandle = shared.SlotHandle;
+        _alpnHandle = shared.AlpnHandle;
+        _rotation = shared.Rotation;
         _options = options;
     }
+
+    /// <summary>
+    /// What every reactor started with one options instance shares: the contexts, behind the slot a rotation publishes
+    /// to, and the handles their callbacks read (#536).
+    /// </summary>
+    private sealed class Shared
+    {
+        public required CertificateSlot Slot { get; init; }
+        public required GCHandle SlotHandle { get; init; }
+        public required GCHandle AlpnHandle { get; init; }
+        public Lock Rotation { get; } = new();
+
+        // The services sharing them, so the last reactor of those to stop frees them (#543). Under SharedBuild.
+        public int Services;
+    }
+
+    // Keyed by the options instance, which is what a server hands each of its reactors. Taken at a start and a stop.
+    private static readonly ConditionalWeakTable<TlsOptions, Shared> SharedByOptions = new();
+    private static readonly Lock SharedBuild = new();
 
     /// <summary>The SNI names this service answers for, beside its default certificate.</summary>
     public IReadOnlyCollection<string> ServerNames => _slot.Current?.ByHost?.Names ?? [];
@@ -118,7 +141,7 @@ public sealed class TlsService
         public required nint Default { get; init; }
         public required HostTable? ByHost { get; init; }
 
-        // The set this one replaced, which a handshake may still read until the reactor stops: its teardown frees it.
+        // The set this one replaced, which a handshake may still read until the last reactor sharing it stops.
         public Certificates? Replaced { get; set; }
     }
 
@@ -300,6 +323,34 @@ public sealed class TlsService
                 "RequireClientCertificate needs trust anchors: set ClientCaPath or ClientCaPem.", nameof(options));
         }
 
+        // The first reactor to start builds them, the rest take what it built, and the last to stop frees them.
+        Shared shared;
+        lock (SharedBuild)
+        {
+            if (!SharedByOptions.TryGetValue(options, out shared!))
+            {
+                shared = BuildShared(options, defaultCertificate);
+                SharedByOptions.Add(options, shared);
+            }
+
+            shared.Services++;
+        }
+
+        var service = new TlsService(shared, options);
+        reactor.OwnTlsService(service);
+        if (options.HandshakeTimeoutMs > 0)
+        {
+            reactor.AddTicker(service.SweepHandshakes);
+        }
+        if (register)
+        {
+            reactor.AddService(service);
+        }
+        return service;
+    }
+
+    private static Shared BuildShared(TlsOptions options, TlsCertificate defaultCertificate)
+    {
         byte[] alpnWire = BuildAlpnWire(options.Alpn);
         GCHandle alpnHandle = GCHandle.Alloc(alpnWire);
 
@@ -320,17 +371,7 @@ public sealed class TlsService
             throw;
         }
 
-        var service = new TlsService(slot, slotHandle, alpnHandle, options);
-        reactor.OwnTlsService(service);
-        if (options.HandshakeTimeoutMs > 0)
-        {
-            reactor.AddTicker(service.SweepHandshakes);
-        }
-        if (register)
-        {
-            reactor.AddService(service);
-        }
-        return service;
+        return new Shared { Slot = slot, SlotHandle = slotHandle, AlpnHandle = alpnHandle };
     }
 
     /// <summary>
@@ -358,10 +399,10 @@ public sealed class TlsService
     /// and so break clients that hold several certificates and pick by it. Anchors given as
     /// <see cref="TlsOptions.ClientCaPem"/> are data, and do not move.
     ///
-    /// This service belongs to ONE reactor. A server with several rotates each of them, and a
-    /// reactor that is missed keeps serving the old certificate on its share of the connections -
-    /// they all listen on the same port through SO_REUSEPORT, so which one a client reaches is not
-    /// something the client chooses.
+    /// The contexts are shared by every reactor started with the same <see cref="TlsOptions"/>
+    /// instance, so this rotates all of them at once: one call, on any of their services, is
+    /// enough, and a call on each builds the same set again. A reactor started with options of its
+    /// own rotates alone.
     ///
     /// Everything is built before anything is published, so a bad path or an unreadable key throws
     /// and LEAVES THE SERVICE SERVING WHAT IT WAS. A failed rotation is a server that kept working.
@@ -375,8 +416,8 @@ public sealed class TlsService
     ///
     /// The contexts it replaces are kept, not freed. A handshake may be between reading the table
     /// and using what it found, and BoringSSL gives no way to wait that out - so they are retained
-    /// until the reactor stops, with the ones in force. A rotation is an operational event, not a
-    /// hot path; rotating a handful of names a few times a year costs kilobytes.
+    /// until the last reactor sharing them stops, with the ones in force. A rotation is an operational
+    /// event, not a hot path; rotating a handful of names a few times a year costs kilobytes.
     /// </remarks>
     public void ReplaceCertificates(TlsCertificate defaultCertificate,
         IReadOnlyDictionary<string, TlsCertificate>? certificatesByHost = null)
@@ -395,20 +436,26 @@ public sealed class TlsService
     }
 
     /// <summary>
-    /// Frees the contexts, those a rotation replaced included, and the handles. The reactor the service started on
-    /// calls it last in its teardown, as a handshake may read them until then. A session still open holds its own
+    /// Lets go of the contexts, called by the reactor the service started on, last in its teardown, as a handshake may
+    /// read them until then. The last service sharing them frees them, those a rotation replaced included, with the
+    /// handles, and a later start with the same options builds new ones. A session still open holds its own
     /// reference, so its context goes with the last of them.
     /// </summary>
     internal void Free()
     {
-        lock (_rotation)
+        lock (SharedBuild)
         {
-            Certificates? set = _slot.Current;
-            if (set is null)
+            if (!SharedByOptions.TryGetValue(_options, out Shared? shared) || --shared.Services > 0)
             {
                 return;
             }
 
+            SharedByOptions.Remove(_options);
+        }
+
+        lock (_rotation)
+        {
+            Certificates? set = _slot.Current;
             _slot.Current = null;
             for (; set is not null; set = set.Replaced)
             {

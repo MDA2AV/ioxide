@@ -12,7 +12,7 @@ internal static class ReactorStopTests
 {
     public static void Register(Runner runner)
     {
-        runner.Test("stop: a reactor started with a TLS service, rotated and stopped a hundred times leaves the native heap where it was", () =>
+        runner.Test("stop: pairs of reactors sharing a TLS service's options, started, rotated and stopped, leave the native heap where it was", () =>
         {
             (string cert, string key) = TestCert.Ensure();
             (string alphaCert, string alphaKey) = TestCert.EnsureNamed("alpha.test");
@@ -23,23 +23,38 @@ internal static class ReactorStopTests
             var options = new TlsOptions { CertificatePath = cert, KeyPath = key, CertificatesByHost = byHost, HandshakeTimeoutMs = 0 };
             TlsCertificate replacement = new() { CertificatePath = cert, KeyPath = key };
 
-            // As a host runs one, with nothing to listen on: only its life is under test. Unregistered, as a host
-            // serving several ports holds its services, and the reactor frees those too.
+            // Two reactors sharing one options instance, as a host runs them, with nothing to listen on: only their life
+            // is under test. Unregistered, as a host serving several ports holds its services, and the reactor frees
+            // those too. The contexts go with the second to stop.
             void Cycle()
             {
-                var reactor = new Reactor(0, new ServerConfig { ReactorCount = 1, Tcp = null, Udp = null });
-                using var started = new ManualResetEventSlim();
-                reactor.OnStart = r =>
+                var services = new TlsService[2];
+                var reactors = new Reactor[2];
+                var threads = new Thread[2];
+                for (int i = 0; i < 2; i++)
                 {
-                    TlsService.Start(r, options, register: false).ReplaceCertificates(replacement, byHost);
-                    started.Set();
-                };
+                    int index = i;
+                    using var started = new ManualResetEventSlim();
+                    reactors[i] = new Reactor(i, new ServerConfig { ReactorCount = 2, Tcp = null, Udp = null })
+                    {
+                        OnStart = r =>
+                        {
+                            services[index] = TlsService.Start(r, options, register: false);
+                            started.Set();
+                        },
+                    };
 
-                var thread = new Thread(reactor.Run);
-                thread.Start();
-                Assert.True(started.Wait(10_000), "the reactor never started");
-                reactor.Stop();
-                thread.Join();
+                    threads[i] = new Thread(reactors[i].Run);
+                    threads[i].Start();
+                    Assert.True(started.Wait(10_000), "a reactor never started");
+                }
+
+                services[0].ReplaceCertificates(replacement, byHost);
+                for (int i = 0; i < 2; i++)
+                {
+                    reactors[i].Stop();
+                    threads[i].Join();
+                }
             }
 
             for (int i = 0; i < 10; i++)
@@ -47,14 +62,22 @@ internal static class ReactorStopTests
                 Cycle();   // BoringSSL's and the runtime's one-time setup
             }
 
-            long before = SettledHeap();
-            for (int i = 0; i < 100; i++)
+            // Two windows: a leak grows the heap in both, while the JIT tiering up the hot paths grows it once, by some
+            // 500 KiB, in whichever window that lands.
+            long Window()
             {
-                Cycle();
+                long before = SettledHeap();
+                for (int i = 0; i < 50; i++)
+                {
+                    Cycle();
+                }
+                return SettledHeap() - before;
             }
-            long grown = SettledHeap() - before;
 
-            Assert.True(grown < 64 * 1024, $"a hundred reactors started with a TLS service, rotated and stopped left {grown / 1024} KiB behind");
+            long first = Window();
+            long second = Window();
+            Assert.True(Math.Min(first, second) < 64 * 1024,
+                $"fifty pairs of reactors sharing TLS options, started, rotated and stopped, left {first / 1024} KiB behind, and fifty more {second / 1024} KiB");
         });
 
         runner.Test("stop: once its reactor has stopped, a TLS service, registered or not, answers for no names and refuses a rotation", () =>
