@@ -703,11 +703,8 @@ public sealed class TlsService
 
         unsafe
         {
-            // Only the kernel path consumes these, and the callback necessarily materialises each
-            // traffic secret as an immutable managed string that nothing can scrub afterwards - it
-            // outlives the byte[] this code is careful to zero, and lands in any core dump. So it
-            // is registered where it is used rather than on every context. (KernelRx is refused
-            // without KernelTx, so this covers both.)
+            // Only the kernel path consumes these, so it is registered where it is used rather than
+            // on every context. (KernelRx is refused without KernelTx, so this covers both.)
             if (options.KernelTx)
             {
                 delegate* unmanaged<nint, nint, void> keylog = &KeylogCallback;
@@ -1460,7 +1457,7 @@ public sealed class TlsService
     {
         // Guarded for the same reason ServerNameCallback is: BoringSSL's C frame sits between here
         // and any managed caller, so an escaping exception aborts the PROCESS rather than faulting
-        // one connection - uncatchably, and with no stack to read. The body parses a string and
+        // one connection - uncatchably, and with no stack to read. The body decodes hex and
         // allocates, so it is not throw-free by inspection.
         try
         {
@@ -1472,16 +1469,13 @@ public sealed class TlsService
         }
     }
 
-    private static void KeylogCore(nint ssl, nint line)
+    private static unsafe void KeylogCore(nint ssl, nint line)
     {
-        string? text = Marshal.PtrToStringUTF8(line);
-        if (text == null)
-        {
-            return;
-        }
+        // Read in place: a string of the line would keep the secret, as hex, where nothing can zero it (#542).
+        ReadOnlySpan<byte> text = MemoryMarshal.CreateReadOnlySpanFromNullTerminated((byte*)line);
 
-        bool server = text.StartsWith("SERVER_TRAFFIC_SECRET_0 ", StringComparison.Ordinal);
-        bool client = text.StartsWith("CLIENT_TRAFFIC_SECRET_0 ", StringComparison.Ordinal);
+        bool server = text.StartsWith("SERVER_TRAFFIC_SECRET_0 "u8);
+        bool client = text.StartsWith("CLIENT_TRAFFIC_SECRET_0 "u8);
         if (!server && !client)
         {
             return;
@@ -1494,14 +1488,12 @@ public sealed class TlsService
             return;
         }
 
-        // "<SIDE>_TRAFFIC_SECRET_0 <client_random_hex> <secret_hex>"
-        int lastSpace = text.LastIndexOf(' ');
-        if (lastSpace <= 0)
+        byte[]? secret = TrafficSecret(text);
+        if (secret is null)
         {
             return;
         }
 
-        byte[] secret = Convert.FromHexString(text.AsSpan(lastSpace + 1).TrimEnd());
         if (server)
         {
             session.ServerSecret = secret;
@@ -1510,6 +1502,13 @@ public sealed class TlsService
         {
             session.ClientSecret = secret;   // the RX half; only used when TlsOptions.KernelRx is on
         }
+    }
+
+    // The secret ending a "<SIDE>_TRAFFIC_SECRET_0 <client_random_hex> <secret_hex>" line, decoded from its bytes.
+    internal static byte[]? TrafficSecret(ReadOnlySpan<byte> line)
+    {
+        int lastSpace = line.LastIndexOf((byte)' ');
+        return lastSpace <= 0 ? null : Convert.FromHexString(line[(lastSpace + 1)..].TrimEnd(" \r\n"u8));
     }
 
     [UnmanagedCallersOnly]
