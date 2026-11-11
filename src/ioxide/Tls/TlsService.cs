@@ -260,6 +260,13 @@ public sealed class TlsService
                 nameof(options));
         }
 
+        // The kernel too: without its tls module every connection would finish its handshake and only then fail to
+        // program kTLS, with nothing said until the first client (#533).
+        if (options.KernelTx)
+        {
+            Ktls.EnsureAvailable();
+        }
+
         // The certificate and key each come from exactly one place - a path or in-memory PEM.
         // Neither set (possible now that the path is not `required`) and both set are refused.
         TlsCertificate defaultCertificate = new()
