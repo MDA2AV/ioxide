@@ -1,5 +1,10 @@
 namespace ioxide.tls;
 
+/// <summary>
+/// How <see cref="TlsService"/> terminates TLS. Hand the same instance to every reactor's <see cref="TlsService.Start"/>:
+/// those reactors then share one set of contexts, so a session ticket resumes on any of them, and a certificate rotation
+/// on one reaches all of them.
+/// </summary>
 public sealed class TlsOptions
 {
     /// <summary>PEM certificate chain file. Exactly one of this and <see cref="CertificatePem"/>

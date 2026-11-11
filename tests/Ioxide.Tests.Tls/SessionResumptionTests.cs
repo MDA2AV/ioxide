@@ -98,6 +98,36 @@ internal static class SessionResumptionTests
                 $"the server refused a ticket it issued a moment earlier: {second.Detail}");
         });
 
+        // #536: each reactor had contexts of its own, so a ticket resumed only on the reactor that issued it, while the
+        // kernel picks the reactor by hashing the connection.
+        runner.Test("resume: a ticket resumes on any reactor of the port, not only the one that issued it", () =>
+        {
+            const int reactors = 4;
+            const int returns = 20;
+
+            (_, string cert, string key) = TestCert.EnsureNamedFromCa("resume-fleet.test");
+            var options = new TlsOptions { CertificatePath = cert, KeyPath = key };
+
+            int port = TestServer.StartSharded(reactors,
+                (_, r, conn) => Handlers.TlsIdentity(r, conn),
+                (_, r) => TlsService.Start(r, options));
+
+            Handshake first = Connect(port, "resume-fleet.test", null, null);
+            Assert.True(first.Result == Outcome.Served, $"the first connection was not served: {first.Detail}");
+
+            int resumed = 0;
+            for (int i = 0; i < returns; i++)
+            {
+                Handshake again = Connect(port, "resume-fleet.test", null, null);
+                Assert.True(again.Result == Outcome.Served, $"return {i} was not served: {again.Detail}");
+                Assert.True(again.OfferedPsk, $"return {i} offered no ticket, so no resumption was tried");
+                resumed += again.AcceptedPsk ? 1 : 0;
+            }
+
+            // A ticket good only where it was issued resumes about one return in four here.
+            Assert.True(resumed == returns, $"{resumed} of {returns} returns to a {reactors}-reactor port resumed");
+        });
+
         runner.Test("resume: a ticket issued before a rotation is refused after it, and the client is still served", () =>
         {
             (_, string first, string firstKey) = TestCert.EnsureNamedFromCa("resume-rotate.test");
