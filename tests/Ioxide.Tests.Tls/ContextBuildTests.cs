@@ -40,6 +40,26 @@ internal static class ContextBuildTests
 
     public static void Register(Runner runner)
     {
+        // #533: Start checked the options, not the kernel, so without the tls module every connection finished its
+        // handshake and was then closed with no answer.
+        runner.Test("ctx: KernelTx without the kernel's tls module is refused at startup, not after every handshake", () =>
+        {
+            (string cert, string key) = TestCert.Ensure();
+            Built built = Build(new TlsOptions { CertificatePath = cert, KeyPath = key, KernelTx = true });
+
+            if (built.Refusal is { } refusal)
+            {
+                // Read after the start, which loads the module for a caller allowed to.
+                Assert.True(!Sidecars.KtlsAvailable(), $"KernelTx was refused with the tls module loaded: {refusal}");
+                Assert.True(refusal.Contains("'tls' module"), $"startup was refused, but not for the tls module: {refusal}");
+            }
+            else
+            {
+                Assert.True(Answers(built.Port),
+                    "KernelTx was accepted at startup, and a client that completed its handshake then got no answer");
+            }
+        });
+
         // #348: OpenSSL resolved IANA names over its whole cipher table, so a TLS 1.2 name passed.
         runner.Test("ctx: a CipherSuites name that is not a TLS 1.3 suite is refused, not accepted into a port that serves nobody", () =>
         {
@@ -189,6 +209,28 @@ internal static class ContextBuildTests
         catch (Exception e)
         {
             return new Built(0, e.Message);
+        }
+    }
+
+    /// <summary>Whether a request after a TLS 1.3 handshake is answered; the end of the stream instead is false.</summary>
+    private static bool Answers(int port)
+    {
+        using var sock = new TcpClient();
+        sock.Connect("127.0.0.1", port);
+        sock.ReceiveTimeout = 6_000;
+        sock.SendTimeout = 6_000;
+
+        using var ssl = new SslStream(sock.GetStream(), false, (_, _, _, _) => true);
+        ssl.AuthenticateAsClient("localhost", null, SslProtocols.Tls13, false);
+        ssl.Write("GET / HTTP/1.1\r\nHost: localhost\r\n\r\n"u8);
+
+        try
+        {
+            return ssl.Read(new byte[256]) > 0;
+        }
+        catch (IOException e) when (!TimedOut(e))
+        {
+            return false;   // reset rather than closed: no answer either
         }
     }
 

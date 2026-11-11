@@ -25,6 +25,43 @@ internal static unsafe class Ktls
     [DllImport("libc", SetLastError = true)]
     private static extern int setsockopt(int fd, int level, int optname, void* optval, uint optlen);
 
+    private const int ENOTCONN = 107;
+
+    /// <summary>
+    /// Throws unless this process can put the kernel's tls ULP on a socket, as <see cref="EnableTx"/> does after each
+    /// handshake. TCP_ULP on an unconnected socket finds the module, loading it if the caller may, then refuses with
+    /// ENOTCONN; ENOENT means there is none.
+    /// </summary>
+    public static void EnsureAvailable()
+    {
+        int fd = Native.socket(Native.AF_INET, Native.SOCK_STREAM | Native.SOCK_CLOEXEC, 0);
+        if (fd < 0)
+        {
+            throw new IOException("kTLS: could not open a socket to check for the kernel's 'tls' module");
+        }
+
+        int errno;
+        try
+        {
+            ReadOnlySpan<byte> ulp = "tls"u8;
+            fixed (byte* p = ulp)
+            {
+                errno = setsockopt(fd, SOL_TCP, TCP_ULP, p, 3) == 0 ? 0 : Marshal.GetLastPInvokeError();
+            }
+        }
+        finally
+        {
+            Native.close(fd);
+        }
+
+        if (errno is not (0 or ENOTCONN))
+        {
+            throw new IOException(
+                $"KernelTx needs the kernel's 'tls' module, which this process cannot use (TCP_ULP: errno {errno}). "
+                + "Load it (modprobe tls), or turn KernelTx off.");
+        }
+    }
+
     /// <summary>tls12_crypto_info_aes_gcm_128 - the layout the kernel expects (40 bytes).</summary>
     [StructLayout(LayoutKind.Sequential, Pack = 1)]
     private struct CryptoInfoAesGcm128
