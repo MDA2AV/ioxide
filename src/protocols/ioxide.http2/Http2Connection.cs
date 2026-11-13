@@ -140,8 +140,10 @@ public sealed partial class Http2Connection : IDisposable
         // flush that would have completed its turn is never coming.
         Wake(TakeTurn(), PeerGone);
 
-        // Last: a handler parked on its body resumes into its end once everything above is released.
+        // Last, once everything above is released: a handler parked on its body resumes into its end,
+        // and the tokens still watched are cancelled.
         FireBodyWakes();
+        AbortWatched();
     }
 
     /// <summary>Serve until the peer goes away, answering each request with <paramref name="handler"/>

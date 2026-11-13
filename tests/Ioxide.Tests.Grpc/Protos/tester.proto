@@ -1,0 +1,48 @@
+syntax = "proto3";
+
+package ioxide.tests;
+
+option csharp_namespace = "Ioxide.Tests.Grpc";
+
+// What a test asks the service to do. Every field is optional.
+message Ask {
+  string text = 1;
+  bytes body = 2;
+  int32 status = 3;       // non-zero: end the call with this status code...
+  string detail = 4;      // ...and this status message
+  bool set_status = 5;    // through ServerCallContext.Status, rather than by throwing RpcException
+  bool fault = 6;         // throw an exception that is not an RpcException
+  int32 replies = 7;      // server streaming: how many replies to send
+  int32 reply_size = 8;   // bytes in each reply's body
+  int32 trailers = 9;     // unary: add this many x-t-N trailers
+  bool token_elsewhere = 10;   // hold: take the call's token on a thread that is not the reactor's
+  bool token_late = 11;        // hold: take the call's token only once the probe releases the method
+  bool take_token = 12;        // unary, replies: take the call's token as the method starts
+  bool fail_first = 13;        // unary: the probe's first call fails UNAVAILABLE
+  bool throw_cancelled = 14;   // unary: throw an OperationCanceledException of the method's own
+  string bad_trailer = 15;     // unary: a trailer with this value, and a good one beside it
+  bool wait_token = 16;        // replies: after the first reply, wait for the call's token, then write again
+}
+
+message Reply {
+  string text = 1;
+  bytes body = 2;
+  int32 index = 3;
+  int64 total = 4;        // client streaming: body bytes across every message
+  int32 count = 5;        // client streaming: messages received
+  string deadline = 6;    // ServerCallContext.Deadline as the method saw it, round-trip format; empty for none
+  string method = 7;      // ServerCallContext.Method
+}
+
+service Tester {
+  rpc Unary (Ask) returns (Reply);
+  rpc Replies (Ask) returns (stream Reply);
+  rpc Collect (stream Ask) returns (Reply);
+  rpc Echo (stream Ask) returns (stream Reply);
+  rpc Hold (Ask) returns (Reply);   // returns only once the call is cancelled
+}
+
+// Never bound on the server, so every call to it is UNIMPLEMENTED.
+service Unbound {
+  rpc Unary (Ask) returns (Reply);
+}

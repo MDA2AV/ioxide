@@ -585,6 +585,7 @@ public sealed partial class Http2Connection
         // on its credit has to wake to learn that - the WINDOW_UPDATE it waits for will never come.
         if (_responseWindows.Remove(header.StreamId))
         {
+            SignalAbort(header.StreamId);   // ahead of the credit wake, so a write that fails on the reset finds the token set
             ReleaseCreditWaiters(header.StreamId);
         }
     }

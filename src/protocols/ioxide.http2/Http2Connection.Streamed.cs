@@ -99,8 +99,10 @@ public sealed partial class Http2Connection
             // that path, so it has to do it here. Without this every response leaks its arena and
             // the connection grows without bound - 20 GB over eight seconds of load, measured.
             _creditWaiters.Remove(writer.StreamId);
+            UnwatchAbort(writer.StreamId);
             _responseWindows.Remove(writer.StreamId);
             RetireStream(pending);
+            writer.Release();
             _writerPool.Push(writer);
         }
     }
@@ -115,9 +117,97 @@ public sealed partial class Http2Connection
         return new Http2ResponseWriter(this, streamId);
     }
 
+    // The Aborted tokens handlers asked for, by stream: only these need cancelling when a stream goes.
+    private Dictionary<int, CancellationTokenSource>? _abortWatch;
+
+    /// <summary>Cancel <paramref name="aborted"/> once its stream goes, or now if it has. Any thread: the table is the reactor's.</summary>
+    internal void WatchAbort(int streamId, CancellationTokenSource aborted)
+    {
+        if (OffReactor)
+        {
+            _ = WatchAbortOnReactorAsync(streamId, aborted);
+            return;
+        }
+
+        if (IsResponseLive(streamId))
+        {
+            (_abortWatch ??= new())[streamId] = aborted;
+        }
+        else
+        {
+            Cancel(aborted);
+        }
+    }
+
+    // A switch, not a post: a stopped reactor fails it rather than dropping it, and has no live stream left to watch.
+    private async Task WatchAbortOnReactorAsync(int streamId, CancellationTokenSource aborted)
+    {
+        try
+        {
+            await new ReactorSwitch(_reactor);
+        }
+        catch (ObjectDisposedException)
+        {
+            Cancel(aborted);
+            return;
+        }
+        WatchAbort(streamId, aborted);
+    }
+
+    // Once the stream's own state is gone: a handler the cancel resumes inline finds it over.
+    private void SignalAbort(int streamId)
+    {
+        if (_abortWatch is not null && _abortWatch.Remove(streamId, out CancellationTokenSource? aborted))
+        {
+            Cancel(aborted);
+        }
+    }
+
+    // At retire, before its window goes: a handler that finished on hearing its stream go, ahead of the cancel, still owes it.
+    private void UnwatchAbort(int streamId)
+    {
+        if (_abortWatch is not null && _abortWatch.Remove(streamId, out CancellationTokenSource? aborted) && !IsResponseLive(streamId))
+        {
+            Cancel(aborted);
+        }
+    }
+
+    // The connection is gone, so every stream with it. Snapshot-and-clear: a handler resumed here can retire inline.
+    private void AbortWatched()
+    {
+        if (_abortWatch is not { Count: > 0 })
+        {
+            return;
+        }
+
+        CancellationTokenSource[] watched = [.. _abortWatch.Values];
+        _abortWatch.Clear();
+        foreach (CancellationTokenSource aborted in watched)
+        {
+            Cancel(aborted);
+        }
+    }
+
+    private static void Cancel(CancellationTokenSource aborted)
+    {
+        try
+        {
+            aborted.Cancel();
+        }
+        catch (AggregateException exception)
+        {
+            // A callback that throws is its handler's fault, not the connection's.
+            Console.Error.WriteLine($"[ioxide.http2] an Aborted callback threw: {exception.GetBaseException().Message}");
+        }
+    }
+
     /// <summary>Headers of a streamed response - no END_STREAM, the body follows.</summary>
     internal void SendStreamedHeaders(int streamId, Http2Response response)
         => WriteHeaders(streamId, response, endStream: false);
+
+    /// <summary>Headers that are the whole response: END_STREAM on them.</summary>
+    internal void SendHeadersOnly(int streamId, Http2Response response)
+        => WriteHeaders(streamId, response, endStream: true);
 
     /// <summary>False once the peer has reset this response's stream, or the connection is gone.</summary>
     internal bool IsResponseLive(int streamId) => !IsBroken && _responseWindows.ContainsKey(streamId);

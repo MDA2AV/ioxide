@@ -277,6 +277,8 @@ public sealed partial class Http2Connection
         new FrameHeader(4, FrameType.RstStream, FrameFlags.None, streamId).Write(frame);
         BinaryPrimitives.WriteUInt32BigEndian(frame[FrameHeader.Size..], errorCode);
         Stage(frame);
+
+        SignalAbort(streamId);
     }
 
     private void GoAway(uint errorCode)
@@ -308,9 +310,16 @@ public sealed partial class Http2Connection
     }
 
     private void WriteHeaders(int streamId, Http2Response response, bool endStream)
+        => WriteHeaderBlock(streamId, response.Status, response.Headers, endStream);
+
+    /// <summary>A trailer section: no :status (RFC 9113 8.3), and the end of the stream.</summary>
+    internal void SendTrailers(int streamId, KeyValueList trailers)
+        => WriteHeaderBlock(streamId, status: null, trailers, endStream: true);
+
+    private void WriteHeaderBlock(int streamId, int? status, KeyValueList fields, bool endStream)
     {
         int capacity = HpackEncoder.MaxEncodedLength(StatusName.Length, 3);
-        foreach (KeyValuePair<ReadOnlyMemory<byte>, ReadOnlyMemory<byte>> field in response.Headers.AsSpan())
+        foreach (KeyValuePair<ReadOnlyMemory<byte>, ReadOnlyMemory<byte>> field in fields.AsSpan())
         {
             capacity += HpackEncoder.MaxEncodedLength(field.Key.Length, field.Value.Length);
         }
@@ -320,11 +329,14 @@ public sealed partial class Http2Connection
         {
             int written = 0;
 
-            Span<byte> status = stackalloc byte[3];
-            WriteStatus(response.Status, status);
-            written += HpackEncoder.Encode(block.AsSpan(written), StatusName, status);
+            if (status is int code)
+            {
+                Span<byte> digits = stackalloc byte[3];
+                WriteStatus(code, digits);
+                written += HpackEncoder.Encode(block.AsSpan(written), StatusName, digits);
+            }
 
-            foreach (KeyValuePair<ReadOnlyMemory<byte>, ReadOnlyMemory<byte>> field in response.Headers.AsSpan())
+            foreach (KeyValuePair<ReadOnlyMemory<byte>, ReadOnlyMemory<byte>> field in fields.AsSpan())
             {
                 written += HpackEncoder.Encode(block.AsSpan(written), field.Key.Span, field.Value.Span);
             }
@@ -339,14 +351,15 @@ public sealed partial class Http2Connection
                 int chunk = Math.Min(_peerMaxFrameSize, written - offset);
                 bool last = offset + chunk >= written;
 
+                // END_STREAM belongs on the HEADERS frame: a CONTINUATION carries END_HEADERS alone (RFC 9113 6.10).
                 FrameFlags flags = FrameFlags.None;
+                if (first && endStream)
+                {
+                    flags |= FrameFlags.EndStream;
+                }
                 if (last)
                 {
                     flags |= FrameFlags.EndHeaders;
-                    if (endStream)
-                    {
-                        flags |= FrameFlags.EndStream;
-                    }
                 }
 
                 Span<byte> header = stackalloc byte[FrameHeader.Size];

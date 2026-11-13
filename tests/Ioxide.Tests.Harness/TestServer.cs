@@ -321,7 +321,7 @@ public static class TestServer
         return (port, reactor, thread);
     }
 
-    private static ServerConfig DefaultConfig() => new()
+    public static ServerConfig DefaultConfig() => new()
     {
         RecvBufferSize = 4096,
         RecvSlots = 256,

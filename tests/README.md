@@ -5,7 +5,7 @@ its own and a failure names the area immediately.
 
 ```bash
 dotnet build -c Release ioxide.slnx
-for s in Unit E2E Http Pg Redis Tls File Chaos; do
+for s in Unit E2E Http Pg Redis Tls File Chaos Grpc; do
   dotnet run --project tests/Ioxide.Tests.$s -c Release --no-build
 done
 ```
@@ -20,6 +20,7 @@ done
 | `Tls` | **TLS over TCP**: handshake, pipes, mutual TLS, SNI, rotation, posture, PEM formats | the `tls` kernel module for the kTLS cases (`sudo modprobe tls`) |
 | `File` | Static assets: cache, ring reads, revalidation | nothing |
 | `Chaos` | Malformed and hostile inputs across TCP, TLS, h2c and QUIC/HTTP/3 | nothing |
+| `Grpc` | gRPC on both HTTP/2 stacks, driven by Grpc.Net.Client: the four kinds of call, status, metadata, cancellation, TLS | nothing |
 
 Anything missing **skips** rather than fails, so every suite is safe to run anywhere.
 
