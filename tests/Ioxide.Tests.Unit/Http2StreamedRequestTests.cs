@@ -86,14 +86,50 @@ internal static class Http2StreamedRequestTests
             peer.Close(run);
         });
 
+        // Whether a body follows has to be known when the handler starts, before it reads: a host
+        // decides then whether to offer one at all. None of these requests carries a content-length,
+        // which HTTP/2 does not require, so that header cannot be what tells.
+        runner.Test("h2 streamed request: a request whose HEADERS ended the stream says it has no body", () =>
+        {
+            FirstLook look = LookAtDispatch(peer => peer.OpenRequest(streamId: 1, endStream: true));
+
+            Assert.True(look.HasBody == false && look.Read == 0, $"END_STREAM rode the HEADERS, and {look}");
+        });
+
+        runner.Test("h2 streamed request: an upload without content-length says it has a body before any of it arrives", () =>
+        {
+            FirstLook look = LookAtDispatch(peer =>
+            {
+                peer.OpenRequest(streamId: 1, endStream: false);   // dispatched here, with no DATA yet
+                peer.SendData(streamId: 1, bytes: 400, endStream: true);
+            });
+
+            Assert.True(look.Parked, $"the DATA came after the handler started, so a read had to wait, and {look}");
+            Assert.True(look.HasBody == true && look.Read == 400 && !look.ContentLength,
+                $"an upload of unknown length was on its way, and {look}");
+        });
+
+        runner.Test("h2 streamed request: a request whose body ended in the same read as its HEADERS still says it has one", () =>
+        {
+            // The body has ended before its handler runs, which a flag read off the reader's end
+            // would take for no body at all.
+            FirstLook look = LookAtDispatch(peer => peer.OpenRequest(streamId: 1, endStream: false, bodyBytes: 400));
+
+            Assert.True(!look.Parked, $"the DATA came in the same read as the HEADERS, so no read had to wait, and {look}");
+            Assert.True(look.HasBody == true && look.Read == 400 && !look.ContentLength,
+                $"a body arrived with its HEADERS, and {look}");
+        });
+
         runner.Test("h2 streamed request: buffered dispatch still assembles the body", () =>
         {
             int seen = -1;
+            bool? hasBody = null;
 
             using var peer = new Peer(new Http2Options());
             Task run = peer.Connection.RunAsync(request =>     // no body reader: the body comes whole
             {
                 seen = request.Body.Length;
+                hasBody = request.HasBody;
                 return Http2Response.Text("done");
             });
 
@@ -106,6 +142,7 @@ internal static class Http2StreamedRequestTests
             // the window was credited as it arrived rather than as it was read.
             Assert.Equal(1000, seen);
             Assert.Equal(1000, peer.CreditFor(streamId: 1));
+            Assert.True(hasBody == true, $"an assembled body came without a content-length, and the request said HasBody {hasBody}");
 
             peer.Close(run);
         });
@@ -254,10 +291,11 @@ internal static class Http2StreamedRequestTests
         }
 
         /// <summary>
-        /// Preface, an empty SETTINGS, then one indexed-HPACK POST that opens a stream - and with
-        /// <paramref name="resetWith"/>, the peer's RST_STREAM for it in the same read.
+        /// Preface, an empty SETTINGS, then one indexed-HPACK POST that opens a stream - and in the
+        /// same read, with <paramref name="bodyBytes"/>, a DATA frame of that many that ends it, and
+        /// with <paramref name="resetWith"/>, the peer's RST_STREAM for it.
         /// </summary>
-        public void OpenRequest(int streamId, bool endStream, uint? resetWith = null)
+        public void OpenRequest(int streamId, bool endStream, uint? resetWith = null, int bodyBytes = 0)
         {
             var bytes = new List<byte>("PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n"u8.ToArray());
             bytes.AddRange(Header(0, 0x4, 0, 0));
@@ -267,6 +305,10 @@ internal static class Http2StreamedRequestTests
             byte flags = (byte)(0x4 | (endStream ? 0x1 : 0));
             bytes.AddRange(Header(3, 0x1, flags, streamId));
             bytes.AddRange([0x83, 0x86, 0x84]);
+            if (bodyBytes > 0)
+            {
+                bytes.AddRange(Data(streamId, bodyBytes, endStream: true));
+            }
             if (resetWith is uint code)
             {
                 bytes.AddRange(Word(0x3, streamId, code));
@@ -274,12 +316,7 @@ internal static class Http2StreamedRequestTests
             Feed(bytes.ToArray());
         }
 
-        public void SendData(int streamId, int bytes, bool endStream)
-        {
-            var frame = new List<byte>(Header(bytes, 0x0, (byte)(endStream ? 0x1 : 0), streamId));
-            frame.AddRange(Enumerable.Repeat((byte)'z', bytes));
-            Feed(frame.ToArray());
-        }
+        public void SendData(int streamId, int bytes, bool endStream) => Feed(Data(streamId, bytes, endStream));
 
         /// <summary>Let the connection loop run whatever the last feed made possible.</summary>
         public void Pump() => Feed([]);
@@ -318,6 +355,9 @@ internal static class Http2StreamedRequestTests
         // A frame whose payload is one 32-bit word: RST_STREAM's error code, WINDOW_UPDATE's increment.
         private static byte[] Word(byte type, int streamId, uint word) =>
             [.. Header(4, type, 0, streamId), (byte)(word >> 24), (byte)(word >> 16), (byte)(word >> 8), (byte)word];
+
+        private static byte[] Data(int streamId, int bytes, bool endStream) =>
+            [.. Header(bytes, 0x0, (byte)(endStream ? 0x1 : 0), streamId), .. Enumerable.Repeat((byte)'z', bytes)];
     }
 
     /// <summary>Keeps every byte the server wrote, so the test can walk the frames afterwards.</summary>
@@ -441,6 +481,53 @@ internal static class Http2StreamedRequestTests
             End = await EndOf(body, chunk => Read += chunk.Length);
             return Http2Response.Text("done");
         }
+    }
+
+    /// <summary>
+    /// What a handler that takes a body reader is told about its body when it starts, before its
+    /// first read, then what reading it to the end found.
+    /// </summary>
+    private sealed class FirstLook
+    {
+        public bool? HasBody;         // null: the handler never ran
+        public bool ContentLength;
+        public bool Parked;           // a read had to wait: the handler ran before its body was in
+        public long Read;
+
+        public override string ToString()
+            => HasBody is null
+                ? "the handler never ran"
+                : $"the request said HasBody {HasBody}{(ContentLength ? " with a content-length" : "")}, "
+                  + $"then read {Read} bytes{(Parked ? ", waiting for some" : " without waiting")}";
+    }
+
+    private static FirstLook LookAtDispatch(Action<Peer> send)
+    {
+        var look = new FirstLook();
+
+        using var peer = new Peer(new Http2Options());
+        Task run = peer.Connection.RunAsync(async (request, body) =>
+        {
+            look.HasBody = request.HasBody;
+            look.ContentLength = request.TryGetHeader("content-length"u8, out _);
+
+            ReadOnlyMemory<byte> chunk;
+            do
+            {
+                ValueTask<ReadOnlyMemory<byte>> read = body.ReadAsync();
+                look.Parked |= !read.IsCompleted;
+                chunk = await read;
+                look.Read += chunk.Length;
+            }
+            while (!chunk.IsEmpty);
+
+            return Http2Response.Text("done");
+        });
+
+        send(peer);
+        peer.Pump();
+        peer.Close(run);
+        return look;
     }
 
     private const string Cut = "said the body was cut off";

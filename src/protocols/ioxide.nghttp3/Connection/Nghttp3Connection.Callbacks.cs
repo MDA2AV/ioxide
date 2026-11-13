@@ -105,6 +105,10 @@ public sealed partial class Nghttp3Connection
             }
             request.HeadersDone = true;
 
+            // Here, in either mode: an assembled request is dispatched at its end, where a fin that
+            // came with the HEADERS and one sent on its own after them can no longer be told apart.
+            request.HasBody = fin == 0;
+
             if (!connection._streamBodies)
             {
                 return;   // buffered: body (if any) follows via CallbackData; dispatch at CallbackEndStream

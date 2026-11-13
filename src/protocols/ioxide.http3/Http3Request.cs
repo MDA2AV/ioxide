@@ -23,6 +23,22 @@ public sealed class Http3Request
     /// <summary>Whole body, assembled before dispatch - empty when the handler takes a body reader.</summary>
     public ReadOnlyMemory<byte> Body { get; internal set; }
 
+    /// <summary>
+    /// False when the stream's fin came with its HEADERS frame, as a GET's does, so no body
+    /// follows. True when it did not: the body is the DATA up to the fin, whether or not a
+    /// <c>content-length</c> announced it, and it may still turn out empty.
+    /// </summary>
+    /// <remarks>
+    /// <c>content-length</c> cannot answer this. HTTP/3 does not require it, and a body of unknown
+    /// length - one <c>HttpClient</c> streams, or <c>fetch</c> sends from a <c>ReadableStream</c> -
+    /// arrives without one. This is decided at the end of the HEADERS, by the test nghttp3 makes
+    /// for ioxide.nghttp3 - did the fin come with them - so the two stacks agree. It is settled
+    /// before a handler that takes an <see cref="Http3BodyReader"/> is dispatched, never changes
+    /// while the body arrives, and means the same whether the body is streamed or assembled in
+    /// <see cref="Body"/>. A fin sent on its own after the HEADERS ends a body that is empty.
+    /// </remarks>
+    public bool HasBody { get; internal set; }
+
     // The body as it arrives, for a handler that takes a body reader - which is how it is handed one.
     internal Http3BodyReader? BodyReader { get; set; }
 
@@ -126,6 +142,7 @@ public sealed class Http3Request
     {
         StreamId = 0;
         Method = Path = Scheme = Authority = Body = default;
+        HasBody = false;
         Headers.Clear();
         BodyReader = null;
 
