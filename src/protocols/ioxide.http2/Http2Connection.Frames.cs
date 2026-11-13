@@ -168,6 +168,10 @@ public sealed partial class Http2Connection
             pending = RentPending(header.StreamId);
             _streams[header.StreamId] = pending;
             _highestStream = header.StreamId;
+
+            // Only the block that opens a stream can say there is no body. An END_STREAM on a later
+            // one ends trailers, which come after a body, empty or not.
+            pending.HasBody = (header.Flags & FrameFlags.EndStream) == 0;
         }
         else if (pending.BodyReader is { } reader)
         {
@@ -607,6 +611,7 @@ public sealed partial class Http2Connection
         public int StreamId;
         public bool HeadersDone;
         public bool RequestEnded;
+        public bool HasBody;   // what Http2Request.HasBody reports: the opening HEADERS did not end the stream
 
         // What this request's header blocks have decoded to so far.
         public long HeaderListSize;
@@ -742,6 +747,7 @@ public sealed partial class Http2Connection
             request.Scheme     = Slice(Scheme);
             request.Authority  = Slice(Authority);
             request.Body       = Slice(_body);
+            request.HasBody    = HasBody;
             request.BodyReader = BodyReader;
 
             foreach ((int nameOffset, int nameLength, int valueOffset, int valueLength) in _fields)
@@ -799,6 +805,7 @@ public sealed partial class Http2Connection
             StreamId = 0;
             HeadersDone = false;
             RequestEnded = false;
+            HasBody = false;
             SendWindow = 65535;
             Method = Path = Scheme = Authority = _body = default;
         }
