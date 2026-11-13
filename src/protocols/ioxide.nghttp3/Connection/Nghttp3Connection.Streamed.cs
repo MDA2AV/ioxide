@@ -228,7 +228,7 @@ public sealed partial class Nghttp3Connection
             }
             catch (Exception exception)
             {
-                Console.Error.WriteLine($"[ioxide.nghttp3] request handler faulted: {exception.GetBaseException().Message}");
+                ReportHandlerFault(request, exception);
                 RetireBody(request);
                 FailStreamed(streamId, writer, request);
                 HandlerExited(writer);
@@ -255,7 +255,7 @@ public sealed partial class Nghttp3Connection
         catch (Exception exception)
         {
             await new ReactorSwitch(Reactor);
-            Console.Error.WriteLine($"[ioxide.nghttp3] request handler faulted: {exception.GetBaseException().Message}");
+            ReportHandlerFault(request, exception);
             RetireBody(request);
             FailStreamed(writer.StreamId, writer, request);
             PumpIfOutsidePass();   // the 500: a handler that failed outside a pass has none coming to send it
@@ -312,19 +312,28 @@ public sealed partial class Nghttp3Connection
         if (writer.HeadersSent)
         {
             // Headers are on the wire: a 500 after a 200 would be a lie the peer cannot detect, and
-            // a clean end would pass a truncated body off as whole. Only a reset is honest. The
-            // writer stays until the stream closes - nghttp3 may still point into its chunk.
-            if (_nghttp3Handle != 0)
-            {
-                Nghttp3.ih3_shutdown_stream_write(_nghttp3Handle, streamId);
-            }
-            _quicConnection.ResetStream(streamId, H3InternalError);
+            // a clean end would pass a truncated body off as whole. Only a reset is honest.
+            writer.Abort(H3InternalError);
             return;
         }
 
         _writers.Remove(streamId);
         writer.Release();
         QueueResponse(streamId, new Nghttp3Response { Status = 500 });
+    }
+
+    /// <summary>
+    /// A streamed response that will not end whole: nghttp3 writes nothing more on the stream, and
+    /// the peer is told with RESET_STREAM rather than a FIN. The writer stays until the stream
+    /// closes - nghttp3 may still point into its chunk.
+    /// </summary>
+    internal void ResetStreamed(long streamId, ulong errorCode)
+    {
+        if (_nghttp3Handle != 0)
+        {
+            Nghttp3.ih3_shutdown_stream_write(_nghttp3Handle, streamId);
+        }
+        _quicConnection.ResetStream(streamId, errorCode);
     }
 
     /// <summary>Submit the headers of a streamed response; the body follows through the writer.</summary>

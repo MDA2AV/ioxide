@@ -34,4 +34,17 @@ public sealed record Nghttp3Options
     /// handler takes a body reader, where one flow-control window bounds the memory instead.
     /// </summary>
     public int MaxRequestBytes { get; init; } = 8 * 1024 * 1024;
+
+    /// <summary>
+    /// Told of each request whose handler throws, with the request and what it threw. The stack
+    /// still ends the request as it would without it: a 500 while its headers are unsent, a reset
+    /// stream once they are out. Without one, the fault is written to stderr, as it always was.
+    /// </summary>
+    /// <remarks>
+    /// It runs on the connection's reactor thread, so it must not block, and the request is valid
+    /// only until it returns, as it is for the handler. What it throws is dropped: the request
+    /// still has to be ended. A handler that cannot finish its response need not throw to have the
+    /// stream reset - <see cref="Nghttp3ResponseWriter.AbortAsync"/> does that, and is no fault.
+    /// </remarks>
+    public Action<Nghttp3Request, Exception>? OnHandlerFault { get; init; }
 }

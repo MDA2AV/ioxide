@@ -83,7 +83,7 @@ public sealed partial class Http2Connection
         catch (Exception exception)
         {
             await new ReactorSwitch(_reactor);
-            Console.Error.WriteLine($"[ioxide.http2] request handler faulted: {exception.GetBaseException().Message}");
+            ReportHandlerFault(request, exception);
             try
             {
                 await writer.FailAsync();
@@ -185,11 +185,26 @@ public sealed partial class Http2Connection
     /// <summary>A streamed writer's flush: out to the transport, or the write queue's next turn, waited for on the writer's own waiter.</summary>
     internal ValueTask<FlushResult> FlushOutboundAsync(TurnWaiter turn) => FlushAsync(turn);
 
-    /// <summary>A streamed response its handler could not finish: RST_STREAM, then out it goes.</summary>
-    internal ValueTask<FlushResult> ResetStreamedAsync(int streamId, TurnWaiter turn)
+    /// <summary>
+    /// A streamed response that will not end whole: RST_STREAM with the code, then out it goes.
+    /// Nothing may follow it on the stream (RFC 9113 5.1), so the stream's window goes with it, as
+    /// when the peer resets one: a handler still running is told by its next flush that the peer
+    /// is gone, and sends nothing.
+    /// </summary>
+    internal ValueTask<FlushResult> ResetStreamedAsync(int streamId, uint errorCode, TurnWaiter turn)
     {
-        ResetStream(streamId, Http2Error.InternalError);
-        return InDispatchPass ? default : FlushOutboundAsync(turn);
+        ResetStream(streamId, errorCode);
+        _responseWindows.Remove(streamId);
+
+        if (InDispatchPass)
+        {
+            return default;
+        }
+
+        // The reset ended the request's body reader, cut off, and a read parked on it is woken
+        // only by a read pass - which a peer told of the reset has no reason to start.
+        FireBodyWakes();
+        return FlushOutboundAsync(turn);
     }
 
     /// <summary>

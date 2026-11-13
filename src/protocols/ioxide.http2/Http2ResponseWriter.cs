@@ -55,7 +55,7 @@ public sealed class Http2ResponseWriter : IBufferWriter<byte>
     /// <summary>The stream this response belongs to.</summary>
     public int StreamId => _streamId;
 
-    /// <summary>True once the body has been finished and END_STREAM sent.</summary>
+    /// <summary>True once the response has ended: its body finished and END_STREAM sent, or its stream reset by <see cref="AbortAsync"/>.</summary>
     public bool IsCompleted => _completed;
 
     /// <summary>
@@ -193,18 +193,35 @@ public sealed class Http2ResponseWriter : IBufferWriter<byte>
     }
 
     /// <summary>
-    /// End a response its handler failed to finish. Before the headers a 500 is still an honest
-    /// answer; after them only RST_STREAM is - END_STREAM would pass a truncated body off as whole.
+    /// End the response with RST_STREAM instead of END_STREAM, for a handler that cannot finish it:
+    /// an upstream that dropped, a read that failed. A streamed response carries no content-length,
+    /// so completing it would pass the truncated body off as whole; reset, the peer knows it failed.
+    /// What is staged is dropped, and so are headers not sent yet.
     /// </summary>
-    internal async ValueTask FailAsync()
+    /// <param name="errorCode">
+    /// The RFC 9113 section 7 code the peer is told: INTERNAL_ERROR (0x2) unless another is given,
+    /// such as CANCEL (0x8) for a response that is no longer wanted rather than one that failed.
+    /// </param>
+    /// <remarks>
+    /// Once the response has completed, the peer has reset the stream or the connection is gone, it
+    /// sends nothing. Either way the response has ended: <see cref="IsCompleted"/> is true,
+    /// <see cref="FlushAsync"/> reports the peer gone, and nothing more is sent when the handler
+    /// returns. The request body ends with the stream: a read on it, parked or still to come, raises
+    /// as for a body cut off. Before the headers it resets the stream too; a handler that wants a
+    /// 500 writes one. Like <see cref="FlushAsync"/>, it may be called from any thread and runs on
+    /// the connection's reactor, once the call before it has completed.
+    /// </remarks>
+    public async ValueTask AbortAsync(uint errorCode = Http2Error.InternalError)
     {
-        if (_completed || !_headersSent)
+        if (_completed)
         {
-            await CompleteAsync();
             return;
         }
 
+        await new ReactorSwitch(_connection.Reactor);
+
         _completed = true;
+        _unsent = null;
         _staged = 0;
         if (_staging.Length > 0)
         {
@@ -213,11 +230,28 @@ public sealed class Http2ResponseWriter : IBufferWriter<byte>
         }
 
         // Not in answer to the peer's own reset (RFC 9113 5.4.2), and not on a connection that is gone.
-        if (_connection.IsResponseLive(_streamId))
+        if (!_connection.IsResponseLive(_streamId))
         {
-            await _connection.ResetStreamedAsync(_streamId, _turn);
+            return;
+        }
+
+        try
+        {
+            await _connection.ResetStreamedAsync(_streamId, errorCode, _turn);
+        }
+        catch
+        {
+            // The transport refused the write, which has marked the connection broken: the peer
+            // loses the stream with it, and the read loop sees it.
         }
     }
+
+    /// <summary>
+    /// End a response its handler failed to finish. Before the headers a 500 is still an honest
+    /// answer; after them only RST_STREAM is - END_STREAM would pass a truncated body off as whole.
+    /// </summary>
+    internal ValueTask FailAsync()
+        => _completed || !_headersSent ? CompleteAsync() : AbortAsync(Http2Error.InternalError);
 
     private static readonly FlushResult PeerGone = new(isCanceled: false, isCompleted: true);
 

@@ -140,6 +140,15 @@ internal static class OffReactorStreamTests
         runner.Test("h3 off-reactor (http3): a handler that throws from the thread pool is reset from the reactor, and the connection serves on", () =>
             AssertH3Throws((conn, calls) => new Http3Connection(conn).RunAsync((_, writer) =>
                 ThrowFirst(calls, status => writer.WriteHeaders(new Http3Response { Status = status })))));
+
+        // A handler can also reset its stream without throwing (#572): that reset is connection work too.
+        runner.Test("h2 off-reactor (http2): a stream aborted from the thread pool is reset from the reactor, and the connection serves on", () =>
+            AssertH2Throws((pipe, calls) => new Http2Connection(pipe).RunAsync((_, writer) =>
+                AbortFirst(calls, status => writer.WriteHeaders(new Http2Response { Status = status }), () => writer.AbortAsync()))));
+
+        runner.Test("h3 off-reactor (nghttp3): a stream aborted from the thread pool is reset from the reactor, and the connection serves on", () =>
+            AssertH3Throws((conn, calls) => new Nghttp3Connection(conn).RunAsync((_, writer) =>
+                AbortFirst(calls, status => writer.WriteHeaders(new Nghttp3Response { Status = status }), () => writer.AbortAsync()))));
     }
 
     /// <summary>
@@ -227,6 +236,20 @@ internal static class OffReactorStreamTests
         {
             writeHeaders(200);
             throw new InvalidOperationException("a handler failed off the reactor");
+        }
+        writeHeaders(202);
+    }
+
+    // The first request is aborted from the pool, after its headers; the next is answered normally.
+    private static async ValueTask AbortFirst(Calls calls, Action<int> writeHeaders, Func<ValueTask> abort)
+    {
+        await LeaveReactor();
+        calls.Note();
+        if (Interlocked.Increment(ref calls.Requests) == 1)
+        {
+            writeHeaders(200);
+            await abort();
+            return;
         }
         writeHeaders(202);
     }

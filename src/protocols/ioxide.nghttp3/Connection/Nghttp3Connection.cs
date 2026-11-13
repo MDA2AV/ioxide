@@ -45,7 +45,7 @@ public sealed partial class Nghttp3Connection : IDisposable
     private const ulong H3NoError = 0x100;
 
     // RFC 9114 H3_INTERNAL_ERROR: what a failure that cannot name itself closes with.
-    private const ulong H3InternalError = 0x102;
+    internal const ulong H3InternalError = 0x102;
 
     // RFC 9114 H3_GENERAL_PROTOCOL_ERROR: what a connection that did not negotiate h3 is refused with.
     private const ulong H3GeneralProtocolError = 0x101;
@@ -85,6 +85,31 @@ public sealed partial class Nghttp3Connection : IDisposable
     {
         _peerCode ??= H3InternalError;
         _protocolFailed = true;
+    }
+
+    /// <summary>
+    /// A handler threw: the host's <see cref="Nghttp3Options.OnHandlerFault"/> is told, or without
+    /// one stderr is, as it always was. On the reactor, before the request is ended. Unlike the
+    /// failures above, it fails nothing but its own request.
+    /// </summary>
+    private void ReportHandlerFault(Nghttp3Request request, Exception exception)
+    {
+        Action<Nghttp3Request, Exception>? onFault = _options.OnHandlerFault;
+        if (onFault is null)
+        {
+            Console.Error.WriteLine($"[ioxide.nghttp3] request handler faulted: {exception.GetBaseException().Message}");
+            return;
+        }
+
+        try
+        {
+            onFault(request, exception);
+        }
+        catch
+        {
+            // The host's own code, run where the stack is cleaning up after the handler: the
+            // request still has to be ended, so nothing the hook throws may get in the way.
+        }
     }
 
     /// <summary>
