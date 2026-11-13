@@ -23,11 +23,6 @@ namespace Ioxide.Tests;
 /// </summary>
 internal static class StreamAbortTests
 {
-    // RFC 9113 section 7, and RFC 9114 section 8.1.
-    private const uint Cancel = 0x8;
-    private const ulong H3InternalError = 0x102;
-    private const ulong H3RequestCancelled = 0x10c;
-
     private const byte DataFrame = 0x0, HeadersFrame = 0x1, RstStreamFrame = 0x3;
 
     private const int ExchangeMs = 10_000;
@@ -65,7 +60,7 @@ internal static class StreamAbortTests
             Assert.Equal("reset 0x8", Fetch(client, server.Port, "/cancel"));
         });
 
-        runner.Test("abort (ioxide.http2): a response aborted before its headers is reset, not answered", () =>
+        runner.Test("abort (ioxide.http2): a response aborted before its headers is reset, not answered, and a flush after it reports the peer gone", () =>
         {
             H2Server server = StartH2();
             using HttpClient client = H2Client();
@@ -118,7 +113,7 @@ internal static class StreamAbortTests
                     await new Http2Connection(conn).RunAsync(async (_, body, writer) =>
                     {
                         await body.ReadAsync();                // what the client sends at once
-                        Task<string> parked = ReadOn(body);    // the rest, which it holds back
+                        Task<string> parked = ReadOn(body.ReadAsync);   // the rest, which it holds back
                         await timer.DelayAsync(50);            // out of the read pass, as an upstream's failure would be
                         await writer.AbortAsync();
                         outcome.TrySetResult(await parked);
@@ -144,6 +139,38 @@ internal static class StreamAbortTests
             Assert.True(ended, "the body read stayed parked after its stream was reset");
             Assert.Equal("cut off", outcome.Task.Result);
         });
+
+        runner.Test("abort (ioxide.http2): an abort once the reactor has stopped returns, and the writer has ended", () =>
+        {
+            // An abort is usually made from a catch, where a throw would replace what the caller is handling.
+            var handed = new TaskCompletionSource<Http2ResponseWriter>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var never = new TaskCompletionSource();
+            int port = TestServer.Start(async (_, conn) =>
+            {
+                try
+                {
+                    await new Http2Connection(conn).RunAsync(async (_, writer) =>
+                    {
+                        writer.WriteHeaders(new Http2Response { Status = 200 });
+                        await writer.FlushAsync();
+                        handed.TrySetResult(writer);
+                        await never.Task;   // still running when its reactor stops
+                    });
+                }
+                finally
+                {
+                    conn.DecRef();
+                }
+            });
+
+            using HttpClient client = H2Client();
+            _ = client.GetAsync($"http://127.0.0.1:{port}/", HttpCompletionOption.ResponseHeadersRead);
+            Assert.True(handed.Task.Wait(ExchangeMs), "the handler never got its response under way");
+
+            TestServer.StopAll();
+            Http2ResponseWriter writer = handed.Task.Result;
+            Assert.Equal("ended", AbortAfterStop(() => writer.AbortAsync(), () => writer.IsCompleted, writer.FlushAsync));
+        });
     }
 
     private static void RegisterNghttp3(Runner runner)
@@ -154,7 +181,7 @@ internal static class StreamAbortTests
             using TeardownWireClient client = ConnectWire(server);
 
             long aborted = client.SendRequest(GetFor("/abort"));
-            AssertReset(client, aborted, H3InternalError);
+            AssertReset(client, aborted, Nghttp3ErrorCode.InternalError);
             Assert.Equal("ended", server.Seen("/abort"));
 
             long next = client.SendRequest(GetFor("/ok"));
@@ -167,16 +194,16 @@ internal static class StreamAbortTests
             H3Server server = StartH3();
             using TeardownWireClient client = ConnectWire(server);
 
-            AssertReset(client, client.SendRequest(GetFor("/cancel")), H3RequestCancelled);
+            AssertReset(client, client.SendRequest(GetFor("/cancel")), Nghttp3ErrorCode.RequestCancelled);
             Assert.Equal("ended", server.Seen("/cancel"));
         });
 
-        runner.Test("abort (nghttp3): a response aborted before its headers is reset, not answered", () =>
+        runner.Test("abort (nghttp3): a response aborted before its headers is reset, not answered, and a flush after it reports the peer gone", () =>
         {
             H3Server server = StartH3();
             using TeardownWireClient client = ConnectWire(server);
 
-            AssertReset(client, client.SendRequest(GetFor("/abort-early")), H3InternalError);
+            AssertReset(client, client.SendRequest(GetFor("/abort-early")), Nghttp3ErrorCode.InternalError);
             Assert.Equal("ended", server.Seen("/abort-early"));
 
             long next = client.SendRequest(GetFor("/ok"));
@@ -207,6 +234,110 @@ internal static class StreamAbortTests
             }
             Assert.Equal("aborted once the peer stopped it", server.Seen("/endless"));
             Assert.True(server.Resets.Count == 0, $"an abort after the peer stopped the stream reset it: {server.Resets}");
+        });
+
+        runner.Test("abort (nghttp3): a body read parked when its response is aborted ends there, cut off", () =>
+        {
+            // As on HTTP/2. The reset asks the peer to stop sending as well, and its answering reset would
+            // end the read too, so the client is not turned over after its request: it never answers.
+            var outcome = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
+            (string certPath, string keyPath) = TestCert.Ensure();
+            var engine = TestServer.Own(new QuicEngine(certPath, keyPath, cidLength: 8, alpn: ["h3"]));
+            (_, int port) = TestServer.StartDatagram(
+                onDatagram: null,
+                quicFactory: engine.CreateFactory(),
+                quicHandle: (reactor, conn) =>
+                {
+                    var timer = new RingTimer(reactor);
+                    return new Nghttp3Connection(conn).RunAsync(async (_, body, writer) =>
+                    {
+                        await body.ReadAsync();                // what the client sends at once
+                        Task<string> parked = ReadOn(body.ReadAsync);   // the rest, which it holds back
+                        await timer.DelayAsync(50);            // out of the read pass, as an upstream's failure would be
+                        await writer.AbortAsync();
+                        outcome.TrySetResult(await parked);
+                    });
+                });
+
+            using var client = new TeardownWireClient(port, alpn: "h3");
+            Assert.True(client.CompleteHandshake(ExchangeMs), "handshake did not complete");
+            client.SendRequest(PostFor("/upload", "first"u8.ToArray()), fin: false);
+
+            Assert.True(outcome.Task.Wait(ExchangeMs), "the body read stayed parked after its stream was reset");
+            Assert.Equal("cut off", outcome.Task.Result);
+        });
+
+        runner.Test("abort (nghttp3): a flush waiting on a silent peer when another task aborts returns, and reports the peer gone", () =>
+        {
+            // As on HTTP/2, from a timeout on a peer that stopped reading. A parked flush wakes on a pass,
+            // and a silent peer starts none, so the client sends nothing once the response is under way.
+            var outcome = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
+            (string certPath, string keyPath) = TestCert.Ensure();
+            var engine = TestServer.Own(new QuicEngine(certPath, keyPath, cidLength: 8, alpn: ["h3"]));
+            (_, int port) = TestServer.StartDatagram(
+                onDatagram: null,
+                quicFactory: engine.CreateFactory(),
+                quicHandle: (reactor, conn) =>
+                {
+                    var timer = new RingTimer(reactor);
+                    return new Nghttp3Connection(conn).RunAsync(async (_, writer) =>
+                    {
+                        writer.WriteHeaders(new Nghttp3Response { Status = 200 });
+                        long flushing = 0;   // when the flush under way began, or 0
+                        Task timeout = AbortOnceParkedAsync(timer, () => flushing, () => writer.AbortAsync());
+                        for (int i = 0; i < 4_096; i++)
+                        {
+                            writer.Write(BigChunk);
+                            flushing = Environment.TickCount64;
+                            FlushResult flushed = await writer.FlushAsync();
+                            flushing = 0;
+                            if (flushed.IsCompleted)
+                            {
+                                await timeout;
+                                outcome.TrySetResult(writer.IsCompleted ? "peer gone" : "the flush reported the peer gone, but the writer has not ended");
+                                return;
+                            }
+                        }
+                        outcome.TrySetResult("the peer took the whole response, so no flush waited on it");
+                    });
+                });
+
+            using var client = new TeardownWireClient(port, alpn: "h3");
+            Assert.True(client.CompleteHandshake(ExchangeMs), "handshake did not complete");
+            client.SendRequest(GetFor("/"));
+            client.Converse(200);   // the response under way; from here on the client is silent
+
+            Assert.True(outcome.Task.Wait(ExchangeMs), "the flush waiting on the silent peer slept through the abort");
+            Assert.Equal("peer gone", outcome.Task.Result);
+        });
+
+        runner.Test("abort (nghttp3): an abort once the reactor has stopped returns, and the writer has ended", () =>
+        {
+            var handed = new TaskCompletionSource<Nghttp3ResponseWriter>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var never = new TaskCompletionSource();
+            (string certPath, string keyPath) = TestCert.Ensure();
+            var engine = TestServer.Own(new QuicEngine(certPath, keyPath, cidLength: 8, alpn: ["h3"]));
+            (_, int port) = TestServer.StartDatagram(
+                onDatagram: null,
+                quicFactory: engine.CreateFactory(),
+                quicHandle: (_, conn) => new Nghttp3Connection(conn).RunAsync(async (_, writer) =>
+                {
+                    writer.WriteHeaders(new Nghttp3Response { Status = 200 });
+                    await writer.FlushAsync();
+                    handed.TrySetResult(writer);
+                    await never.Task;   // still running when its reactor stops
+                }));
+
+            using (var client = new TeardownWireClient(port, alpn: "h3"))
+            {
+                Assert.True(client.CompleteHandshake(ExchangeMs), "handshake did not complete");
+                client.SendRequest(GetFor("/"));
+                Assert.True(client.ConverseUntil(() => handed.Task.IsCompleted, ExchangeMs), "the handler never got its response under way");
+            }
+
+            TestServer.StopAll();
+            Nghttp3ResponseWriter writer = handed.Task.Result;
+            Assert.Equal("ended", AbortAfterStop(() => writer.AbortAsync(), () => writer.IsCompleted, writer.FlushAsync));
         });
     }
 
@@ -240,8 +371,8 @@ internal static class StreamAbortTests
 
     /// <summary>
     /// "/abort" and "/cancel" abort after part of the body, then write and flush again; "/abort-early"
-    /// aborts before its headers, "/complete" once it has completed, "/endless" once its peer has reset
-    /// it. Anything else is answered whole.
+    /// aborts before its headers, then flushes, "/complete" once it has completed, "/endless" once its
+    /// peer has reset it. Anything else is answered whole.
     /// </summary>
     private static Func<Http2Request, Http2ResponseWriter, ValueTask> Route(H2Server server, Reactor reactor)
     {
@@ -254,7 +385,7 @@ internal static class StreamAbortTests
             {
                 case "/abort-early":
                     await writer.AbortAsync();
-                    server.Saw(path, writer.IsCompleted ? "ended" : "the writer has not ended");
+                    server.Saw(path, await EndedAfter(writer.FlushAsync, () => writer.IsCompleted));
                     return;
 
                 case "/complete":
@@ -288,7 +419,7 @@ internal static class StreamAbortTests
 
             if (path is "/abort" or "/cancel")
             {
-                await (path == "/cancel" ? writer.AbortAsync(Cancel) : writer.AbortAsync());
+                await (path == "/cancel" ? writer.AbortAsync(Http2ErrorCode.Cancel) : writer.AbortAsync());
                 writer.Write(" more"u8);
                 FlushResult after = await writer.FlushAsync();
                 server.Saw(path, Ended(after, writer.IsCompleted));
@@ -305,7 +436,55 @@ internal static class StreamAbortTests
             ? "ended"
             : $"after the abort a flush reported IsCompleted={after.IsCompleted} and the writer IsCompleted={writerCompleted}";
 
+    // Ended, for a flush that may throw instead.
+    private static async Task<string> EndedAfter(Func<ValueTask<FlushResult>> flush, Func<bool> writerCompleted)
+    {
+        try
+        {
+            return Ended(await flush(), writerCompleted());
+        }
+        catch (Exception e)
+        {
+            return $"a flush after the abort threw {e.GetType().Name}: {e.Message}";
+        }
+    }
+
+    // Ended, for an abort made from the test once the server's reactor has stopped: the abort has to return, not throw.
+    private static string AbortAfterStop(Func<ValueTask> abort, Func<bool> writerCompleted, Func<ValueTask<FlushResult>> flush)
+    {
+        try
+        {
+            if (!abort().AsTask().Wait(ExchangeMs))
+            {
+                return "the abort never returned";
+            }
+        }
+        catch (AggregateException e)
+        {
+            return $"the abort threw {e.InnerException!.GetType().Name}: {e.InnerException.Message}";
+        }
+
+        Task<string> ended = EndedAfter(flush, writerCompleted);
+        return ended.Wait(ExchangeMs) ? ended.Result : "a flush after the abort never returned";
+    }
+
     private static readonly byte[] Chunk = new byte[1024];
+    private static readonly byte[] BigChunk = new byte[64 * 1024];
+
+    // The timeout: once a flush has waited on the peer for a while, the response is aborted from this other task.
+    private static async Task AbortOnceParkedAsync(RingTimer timer, Func<long> flushing, Func<ValueTask> abort)
+    {
+        while (true)
+        {
+            await timer.DelayAsync(50);
+            long since = flushing();
+            if (since != 0 && Environment.TickCount64 - since > 300)
+            {
+                await abort();
+                return;
+            }
+        }
+    }
 
     // Cleartext HTTP/2 with prior knowledge, one connection for every request of a test.
     private static HttpClient H2Client() => new(new SocketsHttpHandler())
@@ -338,11 +517,11 @@ internal static class StreamAbortTests
     }
 
     // The rest of the body after the first chunk, as the handler that parked on it saw it end.
-    private static async Task<string> ReadOn(Http2BodyReader body)
+    private static async Task<string> ReadOn(Func<ValueTask<ReadOnlyMemory<byte>>> read)
     {
         try
         {
-            ReadOnlyMemory<byte> chunk = await body.ReadAsync();
+            ReadOnlyMemory<byte> chunk = await read();
             return chunk.IsEmpty ? "ended whole" : $"read {chunk.Length} more bytes";
         }
         catch (IOException)
@@ -523,7 +702,7 @@ internal static class StreamAbortTests
             {
                 case "/abort-early":
                     await writer.AbortAsync();
-                    server.Saw(path, writer.IsCompleted ? "ended" : "the writer has not ended");
+                    server.Saw(path, await EndedAfter(writer.FlushAsync, () => writer.IsCompleted));
                     return;
 
                 case "/complete":
@@ -575,7 +754,7 @@ internal static class StreamAbortTests
                     refused = true;
                 }
 
-                await writer.AbortAsync(H3RequestCancelled);
+                await writer.AbortAsync(Nghttp3ErrorCode.RequestCancelled);
                 server.Saw(path, refused ? "ended" : "a code past 62 bits was taken");
                 return;
             }
@@ -607,6 +786,13 @@ internal static class StreamAbortTests
     {
         byte[] fields = [0x00, 0x00, 0xD1, 0xD7, 0x51, (byte)path.Length, .. Encoding.ASCII.GetBytes(path), 0x50, 0x09, .. "localhost"u8.ToArray()];
         return [0x01, (byte)fields.Length, .. fields];
+    }
+
+    // A POST framed the same way, :method POST being static entry 20, then one DATA frame of the body's first bytes.
+    private static byte[] PostFor(string path, byte[] first)
+    {
+        byte[] fields = [0x00, 0x00, 0xD4, 0xD7, 0x51, (byte)path.Length, .. Encoding.ASCII.GetBytes(path), 0x50, 0x09, .. "localhost"u8.ToArray()];
+        return [0x01, (byte)fields.Length, .. fields, 0x00, (byte)first.Length, .. first];
     }
 
     /// <summary>Every stream the stack reset, with its code: where the server makes the call, so a reset is seen whatever the peer makes of it.</summary>

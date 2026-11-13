@@ -45,7 +45,7 @@ public sealed partial class Nghttp3Connection : IDisposable
     private const ulong H3NoError = 0x100;
 
     // RFC 9114 H3_INTERNAL_ERROR: what a failure that cannot name itself closes with.
-    internal const ulong H3InternalError = 0x102;
+    private const ulong H3InternalError = 0x102;
 
     // RFC 9114 H3_GENERAL_PROTOCOL_ERROR: what a connection that did not negotiate h3 is refused with.
     private const ulong H3GeneralProtocolError = 0x101;

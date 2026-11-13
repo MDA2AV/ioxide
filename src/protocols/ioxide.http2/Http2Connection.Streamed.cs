@@ -187,14 +187,17 @@ public sealed partial class Http2Connection
 
     /// <summary>
     /// A streamed response that will not end whole: RST_STREAM with the code, then out it goes.
-    /// Nothing may follow it on the stream (RFC 9113 5.1), so the stream's window goes with it, as
-    /// when the peer resets one: a handler still running is told by its next flush that the peer
-    /// is gone, and sends nothing.
+    /// Nothing may follow it on the stream (RFC 9113 5.1), so the stream's window goes with it and
+    /// a flush waiting on its credit wakes, as when the peer resets one: a handler still running
+    /// is told by its next flush that the peer is gone, and sends nothing.
     /// </summary>
-    internal ValueTask<FlushResult> ResetStreamedAsync(int streamId, uint errorCode, TurnWaiter turn)
+    internal ValueTask<FlushResult> ResetStreamedAsync(int streamId, uint errorCode)
     {
         ResetStream(streamId, errorCode);
-        _responseWindows.Remove(streamId);
+        if (_responseWindows.Remove(streamId))
+        {
+            ReleaseCreditWaiters(streamId);
+        }
 
         if (InDispatchPass)
         {
@@ -204,7 +207,9 @@ public sealed partial class Http2Connection
         // The reset ended the request's body reader, cut off, and a read parked on it is woken
         // only by a read pass - which a peer told of the reset has no reason to start.
         FireBodyWakes();
-        return FlushOutboundAsync(turn);
+
+        // Not on the writer's own waiter: the read just woken can end the handler, and its writer go to the next stream.
+        return FlushAsync();
     }
 
     /// <summary>

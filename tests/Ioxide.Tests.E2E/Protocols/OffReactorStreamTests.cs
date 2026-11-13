@@ -264,6 +264,27 @@ internal static class OffReactorStreamTests
         public int QuicCallsOff;
         private int _on;
         private int _off;
+        private readonly List<string> _resets = [];
+
+        /// <summary>Every stream the server's QUIC connection was asked to reset, with its code.</summary>
+        public string Resets
+        {
+            get
+            {
+                lock (_resets)
+                {
+                    return string.Join(", ", _resets);
+                }
+            }
+        }
+
+        public void NoteReset(long streamId, ulong code)
+        {
+            lock (_resets)
+            {
+                _resets.Add($"stream {streamId} with 0x{code:x}");
+            }
+        }
 
         public void Note()
         {
@@ -488,6 +509,10 @@ internal static class OffReactorStreamTests
             (int failed, _) = client.Request("GET", "/", null, timeoutMs: 5_000);
             Assert.True(failed != 200, $"the failed request was reset rather than answered ({failed})");
 
+            // The client sees a reset as no answer at all, which a request that timed out looks like too.
+            Assert.True(SpinWait.SpinUntil(() => calls.Resets.Contains("stream 0 with 0x102"), 5_000),
+                $"the failed request's stream was reset with H3_INTERNAL_ERROR (resets: [{calls.Resets}])");
+
             (int status, string text) = client.Request("GET", "/", null, timeoutMs: 30_000);
             Assert.Equal(202, status);
             Assert.Equal(0, text.Length);
@@ -542,6 +567,7 @@ internal static class OffReactorStreamTests
         public override void ResetStream(long streamId, ulong applicationErrorCode)
         {
             Note();
+            calls.NoteReset(streamId, applicationErrorCode);
             base.ResetStream(streamId, applicationErrorCode);
         }
 

@@ -334,6 +334,9 @@ public sealed partial class Nghttp3Connection
             Nghttp3.ih3_shutdown_stream_write(_nghttp3Handle, streamId);
         }
         _quicConnection.ResetStream(streamId, errorCode);
+
+        // A flush parked on a pass learns of the reset on a drain, which a silent peer would never start.
+        Reactor.ScheduleOnReactor(static connection => ((Nghttp3Connection)connection!).DrainStreamed(), this);
     }
 
     /// <summary>Submit the headers of a streamed response; the body follows through the writer.</summary>

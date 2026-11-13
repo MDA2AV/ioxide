@@ -19,7 +19,7 @@ namespace ioxide.http2;
 /// response longer than the peer's window possible at all. The buffered path hands whatever its
 /// windows cannot take yet to one of these, so it waits the same way.
 /// </summary>
-/// <remarks>One caller at a time, on any thread: what reaches the connection runs on its reactor.</remarks>
+/// <remarks>One caller at a time, on any thread, though <see cref="AbortAsync"/> may cut in: what reaches the connection runs on its reactor.</remarks>
 public sealed class Http2ResponseWriter : IBufferWriter<byte>
 {
     private const int DefaultChunk = 16 * 1024;
@@ -199,8 +199,9 @@ public sealed class Http2ResponseWriter : IBufferWriter<byte>
     /// What is staged is dropped, and so are headers not sent yet.
     /// </summary>
     /// <param name="errorCode">
-    /// The RFC 9113 section 7 code the peer is told: INTERNAL_ERROR (0x2) unless another is given,
-    /// such as CANCEL (0x8) for a response that is no longer wanted rather than one that failed.
+    /// The RFC 9113 section 7 code the peer is told: <see cref="Http2ErrorCode.InternalError"/>
+    /// unless another is given, such as <see cref="Http2ErrorCode.Cancel"/> for a response that is
+    /// no longer wanted rather than one that failed.
     /// </param>
     /// <remarks>
     /// Once the response has completed, the peer has reset the stream or the connection is gone, it
@@ -209,25 +210,35 @@ public sealed class Http2ResponseWriter : IBufferWriter<byte>
     /// returns. The request body ends with the stream: a read on it, parked or still to come, raises
     /// as for a body cut off. Before the headers it resets the stream too; a handler that wants a
     /// 500 writes one. Like <see cref="FlushAsync"/>, it may be called from any thread and runs on
-    /// the connection's reactor, once the call before it has completed.
+    /// the connection's reactor, but unlike the writer's other calls it need not wait for the one
+    /// before it. Made while a flush waits for credit from a slow peer - from a timeout, say - it
+    /// wakes that flush, which reports the peer gone; a flush waiting only for its turn to write
+    /// returns as it would have, and the next reports the peer gone. The writer is the handler's
+    /// only until the handler returns, after which it can serve another stream, so a task the
+    /// handler started has to be done with it by then.
     /// </remarks>
-    public async ValueTask AbortAsync(uint errorCode = Http2Error.InternalError)
+    public async ValueTask AbortAsync(uint errorCode = Http2ErrorCode.InternalError)
     {
         if (_completed)
         {
             return;
         }
 
-        await new ReactorSwitch(_connection.Reactor);
+        try
+        {
+            await new ReactorSwitch(_connection.Reactor);
+        }
+        catch (ObjectDisposedException)
+        {
+            // The reactor stopped, and the connection with it: nothing to reset, and a cleanup call must not throw over its caller.
+            _completed = true;
+            return;
+        }
 
+        // The staging stays: a handler may still hold a GetMemory of it across an await.
         _completed = true;
         _unsent = null;
         _staged = 0;
-        if (_staging.Length > 0)
-        {
-            ArrayPool<byte>.Shared.Return(_staging);
-            _staging = [];
-        }
 
         // Not in answer to the peer's own reset (RFC 9113 5.4.2), and not on a connection that is gone.
         if (!_connection.IsResponseLive(_streamId))
@@ -237,7 +248,7 @@ public sealed class Http2ResponseWriter : IBufferWriter<byte>
 
         try
         {
-            await _connection.ResetStreamedAsync(_streamId, errorCode, _turn);
+            await _connection.ResetStreamedAsync(_streamId, errorCode);
         }
         catch
         {
@@ -278,6 +289,12 @@ public sealed class Http2ResponseWriter : IBufferWriter<byte>
 
     private async ValueTask<FlushResult> FlushCoreAsync(bool endStream)
     {
+        // Ahead of the headers check and the switch: an abort may have come before the headers, or after the reactor stopped.
+        if (_completed)
+        {
+            return PeerGone;
+        }
+
         if (!_headersSent)
         {
             throw new InvalidOperationException("Write the response headers before flushing a body chunk.");
@@ -395,6 +412,13 @@ public sealed class Http2ResponseWriter : IBufferWriter<byte>
             }
 
             await credited;
+
+            // An abort from another task drops what is staged, and SendStaged would report nothing left as sent.
+            if (!_connection.IsResponseLive(_streamId))
+            {
+                _staged = 0;
+                return PeerGone;
+            }
 
             Progress progress = SendStaged(endStream, ref sent);
             if (progress == Progress.Gone)

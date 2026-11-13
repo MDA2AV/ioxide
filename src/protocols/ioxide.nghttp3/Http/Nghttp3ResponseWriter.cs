@@ -19,7 +19,7 @@ namespace ioxide.nghttp3;
 /// blocks cannot. They are recycled as soon as nghttp3 reports them written, which is what keeps
 /// memory bounded by the flush size rather than by the response.
 /// </summary>
-/// <remarks>One caller at a time, on any thread: what reaches the connection runs on its reactor.</remarks>
+/// <remarks>One caller at a time, on any thread, though <see cref="AbortAsync"/> may cut in: what reaches the connection runs on its reactor.</remarks>
 public sealed class Nghttp3ResponseWriter : IBufferWriter<byte>
 {
     // One in-flight chunk is enough to keep the pump fed: nghttp3 copies a chunk out on the write
@@ -255,6 +255,12 @@ public sealed class Nghttp3ResponseWriter : IBufferWriter<byte>
     /// </returns>
     public async ValueTask<FlushResult> FlushAsync()
     {
+        // Ahead of the headers check and the switch: an abort may have come before the headers, or after the reactor stopped.
+        if (IsCompleted)
+        {
+            return PeerGone;
+        }
+
         if (!_headersSent)
         {
             throw new InvalidOperationException("Write the response headers before flushing a body chunk.");
@@ -345,9 +351,10 @@ public sealed class Nghttp3ResponseWriter : IBufferWriter<byte>
     /// What is staged is dropped, and so are headers not submitted yet.
     /// </summary>
     /// <param name="errorCode">
-    /// The RFC 9114 section 8.1 code the peer is told: H3_INTERNAL_ERROR (0x102) unless another is
-    /// given, such as H3_REQUEST_CANCELLED (0x10c) for a response that is no longer wanted rather
-    /// than one that failed. At most 2^62 - 1, which is all QUIC can carry.
+    /// The RFC 9114 section 8.1 code the peer is told: <see cref="Nghttp3ErrorCode.InternalError"/>
+    /// unless another is given, such as <see cref="Nghttp3ErrorCode.RequestCancelled"/> for a
+    /// response that is no longer wanted rather than one that failed. At most 2^62 - 1, which is
+    /// all QUIC can carry.
     /// </param>
     /// <remarks>
     /// Once the response has completed, the peer has stopped reading the stream or the connection
@@ -356,10 +363,14 @@ public sealed class Nghttp3ResponseWriter : IBufferWriter<byte>
     /// handler returns. The reset goes both ways, so the peer is asked to stop sending the request
     /// body as well. Before the headers it resets the stream too; a handler that wants a 500 writes
     /// one. Like <see cref="FlushAsync"/>, it may be called from any thread and runs on the
-    /// connection's reactor, once the call before it has completed.
+    /// connection's reactor, but unlike the writer's other calls it need not wait for the one
+    /// before it: made while a flush waits on a slow peer - from a timeout, say - it ends that
+    /// flush too, which reports the peer gone. The writer is the handler's only until the handler
+    /// returns, after which it can serve another stream, so a task the handler started has to be
+    /// done with it by then.
     /// </remarks>
     /// <exception cref="ArgumentOutOfRangeException"><paramref name="errorCode"/> is past 2^62 - 1.</exception>
-    public ValueTask AbortAsync(ulong errorCode = Nghttp3Connection.H3InternalError)
+    public ValueTask AbortAsync(ulong errorCode = Nghttp3ErrorCode.InternalError)
     {
         ArgumentOutOfRangeException.ThrowIfGreaterThan(errorCode, MaxErrorCode);
         return _completed || _aborted ? default : AbortOnReactorAsync(errorCode);
@@ -367,7 +378,16 @@ public sealed class Nghttp3ResponseWriter : IBufferWriter<byte>
 
     private async ValueTask AbortOnReactorAsync(ulong errorCode)
     {
-        await new ReactorSwitch(_connection.Reactor);
+        try
+        {
+            await new ReactorSwitch(_connection.Reactor);
+        }
+        catch (ObjectDisposedException)
+        {
+            // The reactor stopped, and the connection with it: nothing to reset, and a cleanup call must not throw over its caller.
+            _aborted = true;
+            return;
+        }
         Abort(errorCode);
     }
 

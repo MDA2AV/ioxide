@@ -43,8 +43,10 @@ public sealed record Nghttp3Options
     /// <remarks>
     /// It runs on the connection's reactor thread, so it must not block, and the request is valid
     /// only until it returns, as it is for the handler. What it throws is dropped: the request
-    /// still has to be ended. A handler that cannot finish its response need not throw to have the
-    /// stream reset - <see cref="Nghttp3ResponseWriter.AbortAsync"/> does that, and is no fault.
+    /// still has to be ended. It can also be told of the stack's own failure to complete a
+    /// streamed response once its handler has returned, as stderr was. A handler that cannot
+    /// finish its response need not throw to have the stream reset -
+    /// <see cref="Nghttp3ResponseWriter.AbortAsync"/> does that, and is no fault.
     /// </remarks>
     public Action<Nghttp3Request, Exception>? OnHandlerFault { get; init; }
 }
