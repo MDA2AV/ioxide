@@ -301,7 +301,7 @@ internal static class OffReactorFlushTests
             (string certPath, string keyPath) = TestCert.Ensure();
             var options = new TlsOptions { CertificatePath = certPath, KeyPath = keyPath };
 
-            Assert.Equal("completed at once", FlushAfterTheStop(options, typeof(TlsEncryptingPipeWriter)));
+            AssertFlushedAfterTheStop(FlushAfterTheStop(options, typeof(TlsEncryptingPipeWriter)));
         });
 
         runner.Test("tls pipe: control: under kTLS TX a flush from another thread once the reactor has stopped returns completed at once", () =>
@@ -311,7 +311,7 @@ internal static class OffReactorFlushTests
             (string certPath, string keyPath) = TestCert.Ensure();
             var options = new TlsOptions { CertificatePath = certPath, KeyPath = keyPath, KernelTx = true };
 
-            Assert.Equal("completed at once", FlushAfterTheStop(options, typeof(TcpConnectionPipeWriter)));
+            AssertFlushedAfterTheStop(FlushAfterTheStop(options, typeof(TcpConnectionPipeWriter)));
         }, skip: !ktls);
 
         runner.Test("tls pipe: a flush from another thread still queued when the reactor stops completes, instead of waiting forever", () =>
@@ -350,12 +350,20 @@ internal static class OffReactorFlushTests
         });
     }
 
+    // Completed at once, nothing left staged that nothing would ever send, and the cancel reported by the flush it was for.
+    private static void AssertFlushedAfterTheStop((string Flushed, long Staged, string Canceled) after)
+    {
+        Assert.Equal("completed at once", after.Flushed);
+        Assert.True(after.Staged == 0, $"{after.Staged} bytes still staged after the flush, which nothing will ever send");
+        Assert.Equal("canceled, completed at once", after.Canceled);
+    }
+
     // The handler leaves the reactor, waits on its own thread until the reactor has stopped, then writes and flushes there.
-    private static string FlushAfterTheStop(TlsOptions options, Type writer)
+    private static (string Flushed, long Staged, string Canceled) FlushAfterTheStop(TlsOptions options, Type writer)
     {
         var offReactor = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         using var stopped = new ManualResetEventSlim();
-        var outcome = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var outcome = new TaskCompletionSource<(string, long, string)>(TaskCreationOptions.RunContinuationsAsynchronously);
 
         (int port, Reactor reactor, Thread thread) = TestServer.StartConfigured(
             StoppedFlushHandler(writer, offReactor, stopped, outcome),
@@ -388,9 +396,12 @@ internal static class OffReactorFlushTests
     }
 
     // How a flush from another thread ended. Left waiting, it is "never finished", and nothing will ever run it now.
-    private static string FlushOutcome(ValueTask<FlushResult> flush)
+    private static string FlushOutcome(ValueTask<FlushResult> flush) => FlushOutcome(flush, flush.IsCompleted);
+
+    // Told whether the flush had completed when FlushAsync returned, by a caller that read it before anything else could
+    // complete it. Read later, a completion from elsewhere would pass for one at once.
+    private static string FlushOutcome(ValueTask<FlushResult> flush, bool atOnce)
     {
-        bool atOnce = flush.IsCompleted;
         Task<FlushResult> ended = flush.AsTask();
         try
         {
@@ -404,13 +415,15 @@ internal static class OffReactorFlushTests
             return e.InnerException?.GetType().Name ?? e.GetType().Name;
         }
 
-        return !ended.Result.IsCompleted ? "returned, not completed"
+        string ending = !ended.Result.IsCompleted ? "returned, not completed"
             : atOnce ? "completed at once"
             : "completed";
+        return ended.Result.IsCanceled ? $"canceled, {ending}" : ending;
     }
 
     private static Func<Reactor, TcpConnection, Task> StoppedFlushHandler(
-        Type writer, TaskCompletionSource offReactor, ManualResetEventSlim stopped, TaskCompletionSource<string> outcome)
+        Type writer, TaskCompletionSource offReactor, ManualResetEventSlim stopped,
+        TaskCompletionSource<(string, long, string)> outcome)
         => async (reactor, connection) =>
         {
             TlsSession? session = null;
@@ -438,16 +451,21 @@ internal static class OffReactorFlushTests
                 // The half the handshake chose: under the wrong one this would test the other.
                 if (pipe.Output.GetType() != writer)
                 {
-                    outcome.TrySetResult($"the session's writer is {pipe.Output.GetType().Name}");
+                    outcome.TrySetResult(($"the session's writer is {pipe.Output.GetType().Name}", -1, ""));
                     return;
                 }
 
                 pipe.Output.Write("never sent"u8);
-                outcome.TrySetResult(FlushOutcome(pipe.Output.FlushAsync()));
+                string flushed = FlushOutcome(pipe.Output.FlushAsync());
+                long staged = pipe.Output.UnflushedBytes;
+
+                // A cancel asked for before a flush is that flush's to report, the reactor stopped or not.
+                pipe.Output.CancelPendingFlush();
+                outcome.TrySetResult((flushed, staged, FlushOutcome(pipe.Output.FlushAsync())));
             }
             catch (Exception e)
             {
-                outcome.TrySetResult(e.GetType().Name);
+                outcome.TrySetResult((e.GetType().Name, -1, ""));
                 offReactor.TrySetResult();
             }
             finally
@@ -499,10 +517,15 @@ internal static class OffReactorFlushTests
                     new Thread(() =>
                     {
                         ValueTask<FlushResult> flush;
+                        bool atOnce;
                         try
                         {
                             output.Write("never sent"u8);
                             flush = output.FlushAsync();
+
+                            // Read while the reactor is still held, when nothing can have completed the flush: once posted
+                            // is set, the stop can hand it to the thread pool, which may complete it before this thread looks.
+                            atOnce = flush.IsCompleted;
                         }
                         catch (Exception e)
                         {
@@ -514,7 +537,7 @@ internal static class OffReactorFlushTests
                             posted.Set();
                         }
 
-                        outcome.TrySetResult(FlushOutcome(flush));
+                        outcome.TrySetResult(FlushOutcome(flush, atOnce));
                     }) { IsBackground = true, Name = "tls-568-writer" }.Start();
 
                     if (!posted.Wait(10_000))
