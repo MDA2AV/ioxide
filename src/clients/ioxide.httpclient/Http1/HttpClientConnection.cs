@@ -468,10 +468,11 @@ internal sealed class HttpClientConnection : IDisposable
     /// </summary>
     /// <remarks>
     /// Structure and hardening are Glyph11's: bare LF, obs-fold, whitespace before the colon,
-    /// token and field-value charsets, duplicate and malformed Content-Length, and the
+    /// token and field-value charsets, duplicate and malformed Content-Length, the
     /// Transfer-Encoding + Content-Length pair that lets a proxy and a client disagree about where
-    /// this response ends. What stays here is what Glyph11 has no opinion on - copying the fields
-    /// the caller keeps, and connection reuse.
+    /// this response ends, and Transfer-Encoding from an HTTP/1.0 sender, which RFC 9112 6.1 calls
+    /// faulty framing. What stays here is what Glyph11 has no opinion on - copying the fields the
+    /// caller keeps, and connection reuse.
     /// </remarks>
     private unsafe int TryParseHead(HttpClientResponse response, HttpClientRequest request)
     {
@@ -484,11 +485,10 @@ internal sealed class HttpClientConnection : IDisposable
         ReadOnlyMemory<byte> buffered = ReceiveBufferAsMemory();
 
         bool complete;
-        int bytesRead;
+        int headSize;
         try
         {
-            complete = UltraHardenedParser.TryExtractFullResponseHeaderROM(
-                ref buffered, _head, in _limits, out bytesRead);
+            complete = UltraHardenedParser.TryParseResponseHeader(ref buffered, _head, in _limits, out headSize);
         }
         catch (HttpParseException e)
         {
@@ -501,10 +501,6 @@ internal sealed class HttpClientConnection : IDisposable
         {
             return 0;
         }
-
-        // Glyph11 reports one less than the block's real size - see the note in its diff harness,
-        // "C# returns total-1; the C ABI returns the clean total".
-        int headSize = bytesRead + 1;
 
         response.Status = _head.Status;
 
