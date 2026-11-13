@@ -17,6 +17,9 @@ public sealed class RingOpSource : IRingCompletion, IValueTaskSource<int>
 
     private volatile bool _inFlight;
 
+    /// <summary>Whether an operation was armed and has not completed yet.</summary>
+    internal bool InFlight => _inFlight;
+
     /// <summary>Arm for one operation; call immediately before the submit.</summary>
     public ValueTask<int> Prepare()
     {
