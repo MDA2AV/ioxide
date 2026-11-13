@@ -163,7 +163,31 @@ public unsafe partial class QuicEngineConnection
         }
         MarkOutStreamDead(streamId);
         Ngtcp2.iq_conn_shutdown_stream(_conn, streamId, applicationErrorCode);
+
+        // Reported here, not by the STOP_SENDING ngtcp2 writes for it: StopReading writes one too, and ends no response.
+        EnqueueLifecycle(streamId, QuicStreamEvent.StopSending, applicationErrorCode);
         FlushConnection();
+    }
+
+    public override void StopReading(long streamId, ulong applicationErrorCode)
+    {
+        if (_closed)
+        {
+            return;
+        }
+
+        int result = Ngtcp2.iq_conn_shutdown_stream_read(_conn, streamId, applicationErrorCode);
+        if (result != 0)
+        {
+            CloseFromEngine(result);
+            return;
+        }
+
+        // Off-cycle nothing sends it before the peer's next packet; in a cycle its end does.
+        if (!_inEngineCycle)
+        {
+            FlushConnection();
+        }
     }
 
     /// <summary>Open a server-initiated unidirectional stream (H3 control / QPACK); id, or negative.</summary>

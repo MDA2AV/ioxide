@@ -404,7 +404,12 @@ public sealed partial class Http2Connection
         if (credit > 0)
         {
             WriteWindowUpdate(0, credit);
-            WriteWindowUpdate(header.StreamId, credit);
+
+            // RFC 9113 5.1: a closed stream takes no WINDOW_UPDATE, and one in neither table is closed or has no reader left.
+            if (pending is not null || _responseWindows.ContainsKey(header.StreamId))
+            {
+                WriteWindowUpdate(header.StreamId, credit);
+            }
         }
 
         if ((header.Flags & FrameFlags.EndStream) != 0 && pending is not null)

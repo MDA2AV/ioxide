@@ -42,7 +42,7 @@ internal static class Http2TrailerTests
             // RFC 9113 5.1.1: stream 1 was opened once, and a HEADERS on it later opens nothing.
             Assert.True(served.SequenceEqual(["1 '/unread'", "3 '/next'"]),
                 $"expected stream 1 once, then stream 3; the handler was handed: {string.Join(", ", served)}");
-            Assert.Equal("", Resets(peer));   // trailers are legal here; nothing to refuse or reset
+            Assert.Equal("1 NO_ERROR", Resets(peer));   // answered unread, so its upload is stopped; the trailers are legal here
 
             peer.Close(run);
         });
@@ -358,6 +358,7 @@ internal static class Http2TrailerTests
 
     private static string ErrorName(ReadOnlySpan<byte> code) => BinaryPrimitives.ReadUInt32BigEndian(code) switch
     {
+        0x0 => "NO_ERROR",
         0x1 => "PROTOCOL_ERROR",
         0x7 => "REFUSED_STREAM",
         0x9 => "COMPRESSION_ERROR",

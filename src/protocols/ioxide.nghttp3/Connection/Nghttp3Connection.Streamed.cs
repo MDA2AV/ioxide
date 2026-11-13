@@ -274,6 +274,7 @@ public sealed partial class Nghttp3Connection
     private void RequestHandled(Nghttp3Request request)
     {
         request.HandlerDone = true;
+        StopReadingIfAnsweredEarly(request);
         if (!_streamBodies || request.Detached)
         {
             ReleaseRequest(request);
@@ -319,6 +320,7 @@ public sealed partial class Nghttp3Connection
                 Nghttp3.ih3_shutdown_stream_write(_nghttp3Handle, streamId);
             }
             _quicConnection.ResetStream(streamId, H3InternalError);
+            request.AnsweredEarly = false;   // the reset stopped its read side as well
             return;
         }
 

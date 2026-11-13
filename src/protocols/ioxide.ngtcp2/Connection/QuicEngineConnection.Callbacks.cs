@@ -93,21 +93,6 @@ public unsafe partial class QuicEngineConnection
     }
 
     [UnmanagedCallersOnly]
-    internal static void CbStreamStopSending(void* user, long streamId, ulong appError)
-    {
-        QuicEngineConnection? c = From(user);
-        if (c is null) return;
-
-        try
-        {
-            c.SettleResponse(streamId);
-            c.MarkOutStreamDead(streamId);
-            c.EnqueueLifecycle(streamId, QuicStreamEvent.StopSending, appError);
-        }
-        catch (Exception e) { c.OnCallbackFault(e, nameof(CbStreamStopSending)); }
-    }
-
-    [UnmanagedCallersOnly]
     internal static void CbHandshakeCompleted(void* user)
     {
         QuicEngineConnection? c = From(user);

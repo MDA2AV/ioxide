@@ -368,11 +368,28 @@ public sealed partial class Http2Connection : IDisposable
     /// Done with a stream. The buffered path already took it out of <c>_streams</c> when it became
     /// ready; a streamed request is still in there, because DATA frames were arriving the whole
     /// time the handler ran. Once per dispatched request: it goes back for the next stream.
+    /// A request still arriving is then reset with NO_ERROR, which stops its upload and leaves the client the response (RFC 9113 8.1).
     /// </summary>
     private void RetireStream(PendingRequest pending)
     {
-        _streams.Remove(pending.StreamId);
+        // Every reset takes the stream out of _streams; short of one, a streamed writer has staged END_STREAM.
+        bool live = _streams.Remove(pending.StreamId) && !IsBroken;
+
+        // A buffered rest parked on credit keeps its window: its END_STREAM is still to go.
+        bool reset = live && !pending.RequestEnded && !_responseWindows.ContainsKey(pending.StreamId);
+
+        if (reset)
+        {
+            ResetStream(pending.StreamId, Http2Error.NoError);
+        }
+
         Recycle(pending);
+
+        // Outside a pass nothing else would write the reset; a flush already running carries it.
+        if (reset && !_passFlushPending && !_flushing)
+        {
+            _ = FlushDetachedAsync();
+        }
     }
 
     // Kept unless the pool is full or a peer's header lines grew its lists; only the reactor rents.

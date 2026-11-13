@@ -76,6 +76,7 @@ public sealed class Nghttp3Request
     internal bool HandlerDone;    // streaming: the handler's ValueTask completed
     internal bool Detached;       // streaming: the stream closed while the handler was still running
     internal bool Overflowed;     // the assembled body passed MaxRequestBytes: reset, never dispatched
+    internal bool AnsweredEarly;  // streaming: the handler finished with its body still arriving
     internal bool Pooled;         // recycled - guards double-release
 
     internal unsafe (int Off, int Len) Append(byte* source, int length)
@@ -160,6 +161,7 @@ public sealed class Nghttp3Request
         HandlerDone = false;
         Detached = false;
         Overflowed = false;
+        AnsweredEarly = false;
         Pooled = false;
     }
 

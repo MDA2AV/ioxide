@@ -29,7 +29,30 @@ public sealed partial class Nghttp3Connection
         if (_sinks.Remove(request.StreamId))
         {
             _quicConnection.SetStreamPaced(request.StreamId, false);
+            request.AnsweredEarly = true;
         }
+    }
+
+    // Once the response is handed over: STOP_SENDING with H3_NO_ERROR stops the upload and leaves the client the response (RFC 9114 4.1).
+    private void StopReadingIfAnsweredEarly(Nghttp3Request request)
+    {
+        // A reset or the stream's close (Detached) already ended its read side.
+        if (!request.AnsweredEarly || request.Detached || _nghttp3Handle == 0 || _protocolFailed)
+        {
+            return;
+        }
+        request.AnsweredEarly = false;
+
+        int result = Nghttp3.ih3_shutdown_stream_read(_nghttp3Handle, request.StreamId);
+        if (result < 0)
+        {
+            Console.Error.WriteLine($"[ioxide.nghttp3] shutdown_stream_read failed: {Nghttp3.StrError(result)}");
+            FailProtocol(result);
+            return;
+        }
+
+        // Last: its flush can end the connection inline, and the teardown frees nghttp3.
+        _quicConnection.StopReading(request.StreamId, H3NoError);
     }
 
     // A sink with a parked reader became ready mid-PushToEngine; the wake is deferred to FireBodyWakes.

@@ -153,6 +153,9 @@ public abstract class QuicConnection : IValueTaskSource<QuicRecvSnapshot>
     /// </summary>
     public virtual void ResetStream(long streamId, ulong applicationErrorCode) { }
 
+    /// <summary>STOP_SENDING alone: the response still goes out whole, and what arrives after is dropped, credited on the connection window only.</summary>
+    public virtual void StopReading(long streamId, ulong applicationErrorCode) { }
+
     /// <summary>Send one datagram (or a GSO batch) to the connection's current peer address.</summary>
     protected void Send(ReadOnlySpan<byte> payload, int gsoSegmentSize = 0)
     {

@@ -293,17 +293,19 @@ public sealed partial class Http2Connection
 
     private void WriteResponse(int streamId, Http2Response response)
     {
+        ReadOnlyMemory<byte> body = response.Body;   // a null response throws here, with the window still there for the 500
+
         // Gone once the peer has reset the stream, and nothing may follow a reset (RFC 9113 5.1).
         if (!_responseWindows.Remove(streamId, out int window))
         {
             return;
         }
 
-        WriteHeaders(streamId, response, endStream: response.Body.Length == 0);
+        WriteHeaders(streamId, response, endStream: body.Length == 0);
 
-        if (response.Body.Length > 0)
+        if (body.Length > 0)
         {
-            WriteData(streamId, response.Body.Span, window);
+            WriteData(streamId, body.Span, window);
         }
     }
 

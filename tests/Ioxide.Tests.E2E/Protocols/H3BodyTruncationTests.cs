@@ -453,9 +453,14 @@ internal sealed unsafe class RawH3Client : IDisposable
     private long _streamId = -1;
     private bool _peerClosed;
     private ulong? _resetCode;
+    private readonly List<byte> _received = [];
+    private bool _fin;
 
     /// <summary>Whether the peer ended the connection - the engine reports every terminal state.</summary>
     public bool PeerClosed => _peerClosed;
+
+    /// <summary>The h3 frames the server has sent on the request stream.</summary>
+    public byte[] Received => [.. _received];
 
     private static ulong NowNs() => (ulong)(System.Diagnostics.Stopwatch.GetTimestamp() *
                                             (1_000_000_000.0 / System.Diagnostics.Stopwatch.Frequency));
@@ -586,7 +591,14 @@ internal sealed unsafe class RawH3Client : IDisposable
     /// Write raw bytes, and/or a bare fin, on the request stream. Never drops a tail: while the
     /// engine is blocked it pumps the wire, since the server's credits arrive as datagrams.
     /// </summary>
-    public void Write(ReadOnlySpan<byte> bytes, bool fin)
+    public void Write(ReadOnlySpan<byte> bytes, bool fin) => Write(bytes, fin, untilShut: false);
+
+    /// <summary>As <see cref="Write(ReadOnlySpan{byte}, bool)"/>, but false once the server's STOP_SENDING has shut the sending side.</summary>
+    public bool TryWrite(ReadOnlySpan<byte> bytes, bool fin) => Write(bytes, fin, untilShut: true);
+
+    private const int StreamShutWr = -219;   // NGTCP2_ERR_STREAM_SHUT_WR
+
+    private bool Write(ReadOnlySpan<byte> bytes, bool fin, bool untilShut)
     {
         byte[] data = GC.AllocateUninitializedArray<byte>(bytes.Length, pinned: true);
         bytes.CopyTo(data);
@@ -608,6 +620,11 @@ internal sealed unsafe class RawH3Client : IDisposable
                 byte* ptr = off < data.Length ? src + off : null;
                 n = iq_conn_write(_conn, dest, (nuint)_sendScratch.Length, _streamId,
                                   ptr, (nuint)(data.Length - off), finPending ? 1 : 0, &consumed, NowNs());
+            }
+
+            if ((int)n == StreamShutWr && untilShut)
+            {
+                return false;
             }
 
             if ((int)n < 0)
@@ -640,6 +657,7 @@ internal sealed unsafe class RawH3Client : IDisposable
                 PumpIn();
             }
         }
+        return true;
     }
 
     /// <summary>Abandon the request stream mid-upload, as a client cancelling it: RESET_STREAM and STOP_SENDING.</summary>
@@ -652,8 +670,7 @@ internal sealed unsafe class RawH3Client : IDisposable
     /// <summary>Ask the server to stop sending on the request stream, and nothing else: the upload stays open.</summary>
     public void StopSending(ulong appErrorCode)
     {
-        // The shim only has the call that does both directions, and an iq_conn starts with its ngtcp2_conn.
-        Assert.True(ngtcp2_conn_shutdown_stream_read(*(nint*)_conn, 0, _streamId, appErrorCode) == 0, "shutdown_stream_read failed");
+        Assert.True(iq_conn_shutdown_stream_read(_conn, _streamId, appErrorCode) == 0, "shutdown_stream_read failed");
         FlushOut();
     }
 
@@ -670,6 +687,18 @@ internal sealed unsafe class RawH3Client : IDisposable
             PumpIn();
         }
         return signal.IsCompleted;
+    }
+
+    /// <summary>Pump the wire until the server ends its side of the request stream: true at its FIN, false at a reset or the deadline.</summary>
+    public bool WaitForFin(int timeoutMs)
+    {
+        long deadline = Environment.TickCount64 + timeoutMs;
+        while (Environment.TickCount64 < deadline && !_fin && _resetCode is null && !_peerClosed)
+        {
+            FlushOut();
+            PumpIn();
+        }
+        return _fin;
     }
 
     /// <summary>
@@ -735,9 +764,16 @@ internal sealed unsafe class RawH3Client : IDisposable
         addr.GetAddressBytes().CopyTo(sa[4..]);
     }
 
-    // The response is never read: this client asks a question the server answers by closing.
     [UnmanagedCallersOnly]
-    private static void OnStreamData(void* user, long streamId, byte* data, nuint len, int fin) { }
+    private static void OnStreamData(void* user, long streamId, byte* data, nuint len, int fin)
+    {
+        var self = (RawH3Client)GCHandle.FromIntPtr((nint)user).Target!;
+        if (streamId == self._streamId)
+        {
+            self._received.AddRange(new ReadOnlySpan<byte>(data, (int)len));
+            self._fin |= fin != 0;
+        }
+    }
 
     [UnmanagedCallersOnly]
     private static void OnStreamReset(void* user, long streamId, ulong appError)
@@ -786,6 +822,6 @@ internal sealed unsafe class RawH3Client : IDisposable
     [DllImport(Lib)] private static extern int  iq_conn_read(nint conn, void* remoteSa, nuint remoteLen, byte* pkt, nuint pktLen, byte ecn, ulong ts);
     [DllImport(Lib)] private static extern int  iq_conn_is_established(nint conn);
     [DllImport(Lib)] private static extern int  iq_conn_shutdown_stream(nint conn, long streamId, ulong appErrorCode);
-    [DllImport(Lib)] private static extern int  ngtcp2_conn_shutdown_stream_read(nint conn, uint flags, long streamId, ulong appErrorCode);
+    [DllImport(Lib)] private static extern int  iq_conn_shutdown_stream_read(nint conn, long streamId, ulong appErrorCode);
     [DllImport(Lib)] private static extern void iq_conn_free(nint conn);
 }
