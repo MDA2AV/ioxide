@@ -260,6 +260,13 @@ public sealed partial class Http2Connection
 
     private void WriteWindowUpdate(int streamId, int increment)
     {
+        // RFC 9113 6.9: the peer must treat an increment of 0 as a PROTOCOL_ERROR, on stream 0 by ending
+        // the connection, so a caller left with nothing to credit sends nothing.
+        if (increment <= 0)
+        {
+            return;
+        }
+
         Span<byte> frame = stackalloc byte[FrameHeader.Size + 4];
         new FrameHeader(4, FrameType.WindowUpdate, FrameFlags.None, streamId).Write(frame);
         BinaryPrimitives.WriteUInt32BigEndian(frame[FrameHeader.Size..], (uint)increment);

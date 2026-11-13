@@ -83,29 +83,30 @@ internal static class Http2ContentLengthTests
             bool trailers = onTrailers;
             runner.Test($"h2 content-length: a buffered body that ends short of its content-length {(trailers ? "at its trailers" : "at its last DATA")} is reset, and no handler runs", () =>
             {
-                using var client = new StrictClient();
-                var served = new List<string>();
-                Task run = client.Connection.RunAsync(request =>
+                foreach ((string label, byte[] ending) in Endings(trailers))
                 {
-                    served.Add($"{request.StreamId} {request.Body.Length}");
-                    return Http2Response.Text("ok");
-                });
-                client.SendRequests();
-                client.Drain();
+                    using var client = new StrictClient();
+                    var served = new List<string>();
+                    Task run = client.Connection.RunAsync(request =>
+                    {
+                        served.Add($"{request.StreamId} {request.Body.Length}");
+                        return Http2Response.Text("ok");
+                    });
+                    client.SendRequests();
+                    client.Drain();
 
-                client.Feed(FrameBytes(Headers, EndHeaders, 1, Post("100")));
-                client.Feed(Body(1, 10, endStream: !trailers));
-                if (trailers)
-                {
-                    client.Feed(FrameBytes(Headers, EndHeaders | EndStream, 1, Http2TrailerTests.Field("x-checksum", "abc")));
+                    client.Feed(FrameBytes(Headers, EndHeaders, 1, Post("100")));
+                    client.Feed(Body(1, 10, endStream: false));
+                    client.Feed(ending);
+                    client.Feed(FrameBytes(Headers, EndHeaders | EndStream, 3, Post()));
+                    List<Frame> frames = client.Drain();
+                    client.Close(run);
+
+                    Assert.True(Errors(frames) == "1 PROTOCOL_ERROR",
+                        $"a body short of its content-length: 100 ended on {label}, and the server wrote [{Errors(frames)}]");
+                    Assert.True(served.SequenceEqual(["3 0"]),
+                        $"a body short of its content-length: 100 ended on {label}, and the handler was handed: {string.Join(", ", served)}");
                 }
-                client.Feed(FrameBytes(Headers, EndHeaders | EndStream, 3, Post()));
-                List<Frame> frames = client.Drain();
-                client.Close(run);
-
-                Assert.Equal("1 PROTOCOL_ERROR", Errors(frames));
-                Assert.True(served.SequenceEqual(["3 0"]),
-                    $"ten bytes ended a request that declared a hundred, and the handler was handed: {string.Join(", ", served)}");
             });
         }
 
@@ -148,15 +149,15 @@ internal static class Http2ContentLengthTests
             runner.Test($"h2 content-length: one that is no number, or comes twice, resets the stream before any handler{(reader ? " taking a body reader" : "")} runs, and HPACK stays in step", () =>
             {
                 // Each with the ten bytes it claims, so only the field is wrong. A repeat is refused even
-                // when the values agree, as nghttp2 refuses it.
+                // when the values agree, as nghttp2 refuses it. long.TryParse lets a trailing NUL through.
                 foreach (string[] fields in new string[][]
                 {
-                    ["ten"], ["-10"], ["+10"], ["10 "], [""], ["10, 10"], ["9223372036854775808"], ["10", "10"], ["10", "11"], ["11", "10"],
+                    ["ten"], ["-10"], ["+10"], ["10 "], ["10\0"], [""], ["10, 10"], ["9223372036854775808"], ["10", "10"], ["10", "11"], ["11", "10"],
                 })
                 {
                     string outcome = MalformedOutcome(reader, fields);
                     Assert.True(outcome == "reset 1 PROTOCOL_ERROR, served 3 x-b=w",
-                        $"content-length {string.Join(" + ", fields.Select(f => $"'{f}'"))}: {outcome}");
+                        $"content-length {string.Join(" + ", fields.Select(f => $"'{f.Replace("\0", "\\0")}'"))}: {outcome}");
                 }
             });
         }
@@ -183,14 +184,15 @@ internal static class Http2ContentLengthTests
             bool trailers = onTrailers;
             runner.Test($"h2 content-length: a streamed body that ends short of its content-length {(trailers ? "at its trailers" : "at its last DATA")} raises on read instead of ending", () =>
             {
-                byte[] ending = trailers
-                    ? FrameBytes(Headers, EndHeaders | EndStream, 1, Http2TrailerTests.Field("x-checksum", "abc"))
-                    : Body(1, 4, endStream: true);
-                (string end, string trace) = StreamedOutcome("100", ending);
+                foreach ((string label, byte[] ending) in Endings(trailers))
+                {
+                    (string end, string trace) = StreamedOutcome("100", ending);
 
-                Assert.True(end.StartsWith("raised after 6: ") && end.Contains("short of its content-length"),
-                    $"the body ended short of its content-length under a handler reading it, and its read {end}");
-                Assert.Equal("RST_STREAM PROTOCOL_ERROR", trace);
+                    Assert.True(end.StartsWith("raised after 6: ") && end.Contains("short of its content-length"),
+                        $"the body ended short of its content-length on {label} under a handler reading it, and its read {end}");
+                    Assert.True(trace == "RST_STREAM PROTOCOL_ERROR",
+                        $"the body ended short of its content-length on {label}, and the server wrote [{trace}]");
+                }
             });
         }
 
@@ -385,6 +387,14 @@ internal static class Http2ContentLengthTests
         return $"reset {Errors(frames)}, served {string.Join(", ", served)}";
     }
 
+    /// <summary>
+    /// The frame that ends stream 1's body, after ten bytes of it: trailers, or a last DATA with four
+    /// bytes or none. An empty DATA is a legal way to end a body, and refusing it leaves nothing to credit.
+    /// </summary>
+    private static (string Label, byte[] Frame)[] Endings(bool trailers) => trailers
+        ? [("trailers", FrameBytes(Headers, EndHeaders | EndStream, 1, Http2TrailerTests.Field("x-checksum", "abc")))]
+        : [("a last DATA of four bytes", Body(1, 4, endStream: true)), ("an empty last DATA", Body(1, 0, endStream: true))];
+
     // :method POST, :scheme http and :path / from the static table, and a content-length field per value.
     private static byte[] Post(params string[] contentLengths)
     {
@@ -411,28 +421,44 @@ internal static class Http2ContentLengthTests
         var fields = new List<string>();
         foreach (KeyValuePair<ReadOnlyMemory<byte>, ReadOnlyMemory<byte>> field in request.Headers.AsSpan())
         {
-            fields.Add($"{Encoding.ASCII.GetString(field.Key.Span)}={Encoding.ASCII.GetString(field.Value.Span)}");
+            // A NUL is spelled out, so a failure that hands one through still prints as text.
+            fields.Add($"{Encoding.ASCII.GetString(field.Key.Span)}={Encoding.ASCII.GetString(field.Value.Span).Replace("\0", "\\0")}");
         }
         return string.Join(' ', fields);
     }
 
-    /// <summary>Every RST_STREAM as "stream CODE", and every GOAWAY as "GOAWAY CODE", in wire order.</summary>
+    /// <summary>
+    /// Every RST_STREAM as "stream CODE", every GOAWAY as "GOAWAY CODE", and every WINDOW_UPDATE of
+    /// zero as "WINDOW_UPDATE stream +0", in wire order.
+    /// </summary>
     private static string Errors(IEnumerable<Frame> frames) => string.Join(", ", frames
-        .Where(f => f.Type is RstStream or GoAway)
-        .Select(f => f.Type == RstStream
-            ? $"{f.StreamId} {ErrorName(f.Payload.AsSpan(0, 4))}"
-            : $"GOAWAY {ErrorName(f.Payload.AsSpan(4, 4))}"));
+        .Where(f => f.Type is RstStream or GoAway || ZeroCredit(f))
+        .Select(f => f.Type switch
+        {
+            RstStream => $"{f.StreamId} {ErrorName(f.Payload.AsSpan(0, 4))}",
+            GoAway => $"GOAWAY {ErrorName(f.Payload.AsSpan(4, 4))}",
+            _ => $"WINDOW_UPDATE {f.StreamId} +0",
+        }));
 
-    /// <summary>What went out on one stream, flow control aside: its response, and how it ended.</summary>
+    /// <summary>
+    /// What went out on one stream, flow control aside: its response, and how it ended. A WINDOW_UPDATE
+    /// of zero on any stream is listed with it, as the one piece of flow control that is an error.
+    /// </summary>
     private static string Trace(IEnumerable<Frame> frames, int streamId) => string.Join(", ", frames
-        .Where(f => f.StreamId == streamId && f.Type != WindowUpdate)
+        .Where(f => ZeroCredit(f) || (f.StreamId == streamId && f.Type != WindowUpdate))
         .Select(f => f.Type switch
         {
             Headers => "HEADERS",
             Data => "DATA",
             RstStream => $"RST_STREAM {ErrorName(f.Payload.AsSpan(0, 4))}",
+            WindowUpdate => $"WINDOW_UPDATE {f.StreamId} +0",
             byte other => $"frame 0x{other:x}",
         }));
+
+    // RFC 9113 6.9: the peer must treat an increment of 0 as a PROTOCOL_ERROR, and on stream 0 end the
+    // whole connection over it, every other stream on it included.
+    private static bool ZeroCredit(Frame frame)
+        => frame.Type == WindowUpdate && (BinaryPrimitives.ReadUInt32BigEndian(frame.Payload) & 0x7FFFFFFF) == 0;
 
     private static int Credit(IEnumerable<Frame> frames, int streamId) => frames
         .Where(f => f.Type == WindowUpdate && f.StreamId == streamId)

@@ -393,7 +393,13 @@ public sealed partial class Http2Connection
             if (!pending.BodyFits(ended: (header.Flags & FrameFlags.EndStream) != 0))
             {
                 RefuseBody(pending);
-                WriteWindowUpdate(0, payload.Length);   // the stream is gone; the connection is still owed this frame
+
+                // The stream is gone; the connection is still owed this frame. An empty one, a common way
+                // to end a body, is owed nothing, and a WINDOW_UPDATE of 0 would end the connection.
+                if (payload.Length > 0)
+                {
+                    WriteWindowUpdate(0, payload.Length);
+                }
                 return;
             }
         }
@@ -741,9 +747,12 @@ public sealed partial class Http2Connection
 
             if (name.SequenceEqual("content-length"u8))
             {
-                // Digits only (RFC 9110 8.6), and once: two that disagree leave whoever reads the request
-                // to pick a length, and a repeat is refused even when the values agree, as nghttp2 refuses it.
-                if (ContentLength >= 0 || !long.TryParse(value, NumberStyles.None, CultureInfo.InvariantCulture, out long length))
+                // Digits only (RFC 9110 8.6), each byte checked since TryParse lets a trailing NUL through,
+                // and once: two that disagree leave whoever reads the request to pick a length, and a
+                // repeat is refused even when the values agree, as nghttp2 refuses it.
+                if (ContentLength >= 0
+                    || value.IndexOfAnyExceptInRange((byte)'0', (byte)'9') >= 0
+                    || !long.TryParse(value, NumberStyles.None, CultureInfo.InvariantCulture, out long length))
                 {
                     Malformed = true;
                 }
