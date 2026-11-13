@@ -7,7 +7,8 @@ namespace ioxide;
 /// socket ABI (Native.Socket.cs), TCP (Native.Tcp.cs), UDP/datagram (Native.Udp.cs), and file
 /// I/O (Native.File.cs). This file owns the ring itself: syscalls, opcodes, setup/CQE flags,
 /// the kernel struct layouts, and the generic fd operations the loop machinery needs
-/// (mmap for the rings, eventfd + read/write for the cross-thread wake, close).
+/// (mmap for the rings, eventfd + read/write for the cross-thread wake, close, and dup3 for a
+/// ring whose number must stay taken).
 /// </summary>
 public static unsafe partial class Native {
     private const long SYS_IO_URING_SETUP    = 425;
@@ -126,6 +127,11 @@ public static unsafe partial class Native {
     [DllImport("libc")] public static extern void* mmap(void* addr, nuint length, int prot, int flags, int fd, long offset);
     [DllImport("libc")] public static extern int   munmap(void* addr, nuint length);
     [DllImport("libc")] public static extern int   close(int fd);
+
+    // Makes newfd refer to what oldfd does, closing what it referred to before, in one step: the number is never free in
+    // between, as it would be between a close and an open. The flags apply to newfd, unlike dup2, which clears CLOEXEC.
+    [DllImport("libc")] internal static extern int dup3(int oldfd, int newfd, int flags);
+
     [DllImport("libc")] public static extern int   eventfd(uint initval, int flags);
     [DllImport("libc")] public static extern long  write(int fd, void* buf, nuint count);
     [DllImport("libc")] public static extern long  read(int fd, void* buf, nuint count);

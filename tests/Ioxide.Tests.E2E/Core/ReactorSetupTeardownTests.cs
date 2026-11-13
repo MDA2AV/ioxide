@@ -97,9 +97,10 @@ internal static class ReactorSetupTeardownTests
             Assert.True(leaked <= 2, $"{2 * attempts} refused binds left {leaked} descriptors open");
         });
 
-        runner.Test("reactor: a start that fails keeps its ring's descriptor open, so the number is not handed out mid-run", () =>
+        runner.Test("reactor: a start that fails keeps its ring's number taken by a /dev/null no child inherits, so the number is not handed out mid-run", () =>
         {
-            // A number handed back mid-run goes to the next socket opened, and a stale close of it ends that connection.
+            // A number handed back mid-run goes to the next socket opened, and a stale close of it ends that connection
+            // (#242). The ring itself goes (#573), so what keeps the number has to be something else.
             int ringFd = -1;
             Exception? reported = null;
 
@@ -119,8 +120,93 @@ internal static class ReactorSetupTeardownTests
             Assert.True(thread.Join(TimeSpan.FromSeconds(10)), "Run should have returned after OnStart threw");
             Assert.True(reported is InvalidOperationException { Message: "fault-on-purpose" },
                 $"the start failed somewhere other than OnStart: {reported}");
-            Assert.True(ExecInheritance.Target(ringFd) == "anon_inode:[io_uring]",
-                $"the failed start closed its ring's descriptor {ringFd}, so the number went back to the process mid-run");
+
+            string kept = ExecInheritance.Target(ringFd);
+            Assert.True(kept == DevNull, kept switch
+            {
+                "" => $"the failed start closed its ring's descriptor {ringFd}, so the number went back to the process mid-run",
+                IoUring => $"the failed start kept its ring open at {ringFd}, so every retry of the start holds one more",
+                _ => $"the failed start left {ringFd} referring to {kept}",
+            });
+
+            // The ring's descriptor was close-on-exec, so what took its place must be too. The control: a /dev/null opened
+            // without it is inherited, at its number.
+            int plain = Native.open(DevNull, Native.O_RDONLY, 0);
+            Dictionary<int, string> held;
+            try
+            {
+                held = ExecInheritance.HeldByChildByNumber();
+            }
+            finally
+            {
+                Native.close(plain);
+            }
+            Assert.True(held.GetValueOrDefault(plain) == DevNull,
+                "control: the child did not inherit a plain /dev/null, so a leak would go unseen");
+            Assert.True(held.GetValueOrDefault(ringFd) != DevNull,
+                $"a child process inherited {ringFd}, the number the failed start keeps");
+        });
+
+        runner.Test("reactor: a start retried on a taken port holds no more rings for it, only the number each attempt keeps", () =>
+        {
+            // The host's retry loop (#573). A plain listener asks for no SO_REUSEPORT, so every start on its port fails its bind.
+            using var holder = new TcpListener(IPAddress.Any, 0);
+            holder.Start();
+            ushort port = (ushort)((IPEndPoint)holder.LocalEndpoint).Port;
+
+            const int attempts = 8;
+            HashSet<int> ringsBefore = ExecInheritance.Referring(IoUring);
+            HashSet<int> devNullsBefore = ExecInheritance.Referring(DevNull);
+            var numbers = new HashSet<int>();
+
+            for (int attempt = 0; attempt < attempts; attempt++)
+            {
+                Exception? reported = null;
+                int ringFd = -1;
+
+                var reactor = new Reactor(0, new ServerConfig
+                {
+                    ReactorCount = 1,
+                    RecvBufferSize = 4096,
+                    RecvSlots = 256,
+                    Tcp = new TcpOptions { Port = port },
+                })
+                {
+                    TcpHandle = (_, connection) =>
+                    {
+                        connection.DecRef();
+                        return Task.CompletedTask;
+                    },
+                    // Raised before the teardown, so the ring this start made is still open to be seen.
+                    OnFault = (r, e) =>
+                    {
+                        reported = e;
+                        int fd = RingOf(r).Fd;
+                        ringFd = ExecInheritance.Target(fd) == IoUring ? fd : -1;
+                    },
+                };
+
+                var thread = new Thread(reactor.Run) { IsBackground = true };
+                thread.Start();
+
+                Assert.True(thread.Join(TimeSpan.FromSeconds(10)), "Run should have returned after its bind failed");
+                Assert.True(reported?.Message.Contains("bind failed") == true,
+                    $"attempt {attempt} failed somewhere other than its bind: {reported?.Message ?? "no fault"}");
+                Assert.True(ringFd > 0, $"attempt {attempt} had no ring open when it failed, so there was none to leak");
+                numbers.Add(ringFd);
+            }
+
+            HashSet<int> rings = ExecInheritance.Referring(IoUring);
+            rings.ExceptWith(ringsBefore);
+            Assert.True(rings.Count == 0,
+                $"{attempts} failed starts left {rings.Count} rings open, at {string.Join(", ", rings.Order())}");
+
+            // What each attempt is left with instead: the number its ring had, on /dev/null, and no other descriptor.
+            HashSet<int> devNulls = ExecInheritance.Referring(DevNull);
+            devNulls.ExceptWith(devNullsBefore);
+            Assert.True(devNulls.SetEquals(numbers),
+                $"the failed starts' rings were at {string.Join(", ", numbers.Order())}, and /dev/null is now open at "
+                + $"{string.Join(", ", devNulls.Order())}");
         });
 
         runner.Test("reactor: a ring the kernel refuses reaches OnFault instead of ending the process", () =>
@@ -420,6 +506,10 @@ internal static class ReactorSetupTeardownTests
 
     [UnsafeAccessor(UnsafeAccessorKind.Field, Name = "_ring")]
     private static extern ref Ring RingOf(Reactor reactor);
+
+    // What /proc/self/fd links a descriptor to. Every ring links to the same target, so only the number tells two apart.
+    private const string IoUring = "anon_inode:[io_uring]";
+    private const string DevNull = "/dev/null";
 
     // A connect completes into a listener's backlog without anyone accepting, so it succeeds exactly
     // while the listening socket is open.
