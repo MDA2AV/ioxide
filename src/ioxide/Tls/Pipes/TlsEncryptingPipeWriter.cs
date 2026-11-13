@@ -20,7 +20,8 @@ namespace ioxide.tls;
 /// the slab, so there is exactly one extra pass over the bytes, not two.
 ///
 /// The session belongs to the reactor, so a flush or a completion from another thread is handed to
-/// it rather than encrypting where it was called.
+/// it rather than encrypting where it was called. Once the reactor has stopped, such a flush
+/// reports the writer completed instead of waiting for it.
 /// </remarks>
 public sealed class TlsEncryptingPipeWriter : PipeWriter, IValueTaskSource<FlushResult>
 {
@@ -39,6 +40,7 @@ public sealed class TlsEncryptingPipeWriter : PipeWriter, IValueTaskSource<Flush
     };
     private ValueTaskAwaiter _pendingFlush;
     private readonly Action _onFlushDone;
+    private readonly Action _flushOnReactor;
 
     public TlsEncryptingPipeWriter(TcpConnection connection, TlsSession session)
     {
@@ -46,6 +48,7 @@ public sealed class TlsEncryptingPipeWriter : PipeWriter, IValueTaskSource<Flush
         _tls = session ?? throw new ArgumentNullException(nameof(session));
         _staging = ArrayPool<byte>.Shared.Rent(16 * 1024);
         _onFlushDone = OnFlushDone;
+        _flushOnReactor = FlushOnReactor;
     }
 
     public override bool CanGetUnflushedBytes => true;
@@ -81,8 +84,16 @@ public sealed class TlsEncryptingPipeWriter : PipeWriter, IValueTaskSource<Flush
         Reactor reactor = _conn.Reactor;
         if (!reactor.OnReactorThread)
         {
+            // Nothing runs on a reactor that has stopped, so the flush ends here (#568).
+            if (reactor.PostsClosed)
+            {
+                return new ValueTask<FlushResult>(Stopped());
+            }
+
+            // As a continuation, so a reactor that stops before running it hands it to the thread pool
+            // instead of dropping it: the caller hears of the stop rather than waiting forever.
             _core.Reset();
-            reactor.ScheduleOnReactor(static state => ((TlsEncryptingPipeWriter)state!).FlushOnReactor(), this);
+            reactor.ScheduleContinuation(_flushOnReactor);
             return new ValueTask<FlushResult>(this, _core.Version);
         }
 
@@ -126,12 +137,16 @@ public sealed class TlsEncryptingPipeWriter : PipeWriter, IValueTaskSource<Flush
     }
 
     // The flush a caller on another thread asked for. A completion since, by the pipe's dispose,
-    // has already committed what was staged.
+    // has already committed what was staged. On the thread pool, the reactor stopped before it got here.
     private void FlushOnReactor()
     {
         try
         {
-            if (_completed)
+            if (_conn.Reactor.PostsClosed)
+            {
+                _core.SetResult(Stopped());
+            }
+            else if (_completed)
             {
                 _core.SetResult(new FlushResult(isCanceled: false, isCompleted: true));
             }
@@ -148,6 +163,18 @@ public sealed class TlsEncryptingPipeWriter : PipeWriter, IValueTaskSource<Flush
         {
             _core.SetException(e);
         }
+    }
+
+    // A flush once the reactor has stopped, which touches neither the session nor the connection.
+    // Nothing will encrypt or send what is staged, so it is dropped rather than left to grow under a
+    // writer that keeps going, and the writer is reported completed, as TcpConnectionPipeWriter, the
+    // kTLS half, reports it over a connection the stop closed.
+    private FlushResult Stopped()
+    {
+        bool canceled = _cancelRequested;
+        _cancelRequested = false;
+        _staged = 0;
+        return new FlushResult(canceled, isCompleted: true);
     }
 
     // Completion of a flush that waited - runs inline on the reactor.
@@ -257,7 +284,8 @@ public sealed class TlsEncryptingPipeWriter : PipeWriter, IValueTaskSource<Flush
         short token,
         ValueTaskSourceOnCompletedFlags flags)
     {
-        // Completes on the reactor thread only - strip the context-post so resumes stay inline.
+        // Completes on the reactor thread, or on the thread pool once it has stopped - strip the
+        // context-post so resumes stay inline.
         _core.OnCompleted(continuation, state, token,
             flags & ~ValueTaskSourceOnCompletedFlags.UseSchedulingContext);
     }

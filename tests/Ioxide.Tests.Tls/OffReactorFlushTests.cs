@@ -11,13 +11,14 @@ namespace Ioxide.Tests;
 
 /// <summary>
 /// A TLS handler working from a thread other than its reactor: writing while the reactor decrypts
-/// what the client sends on the same session (#249), reading, and tearing the connection down.
+/// what the client sends on the same session (#249), reading, tearing the connection down, and
+/// outliving the reactor.
 /// </summary>
 internal static class OffReactorFlushTests
 {
     private const int ReadyReads = 8;
 
-    public static void Register(Runner runner)
+    public static void Register(Runner runner, bool ktls)
     {
         runner.Test("tls pipe: a flush from another thread while the reactor decrypts keeps the session intact", () =>
         {
@@ -293,7 +294,255 @@ internal static class OffReactorFlushTests
             Assert.True(outcome.Task.Wait(10_000), "the read never finished, and nothing will ever run it now");
             Assert.Equal("ObjectDisposedException", outcome.Task.Result);
         });
+
+        runner.Test("tls pipe: a flush from another thread once the reactor has stopped returns completed at once, instead of waiting forever", () =>
+        {
+            // A stopped reactor drops what is posted to it: this flush was posted, and its caller left waiting forever (#568).
+            (string certPath, string keyPath) = TestCert.Ensure();
+            var options = new TlsOptions { CertificatePath = certPath, KeyPath = keyPath };
+
+            Assert.Equal("completed at once", FlushAfterTheStop(options, typeof(TlsEncryptingPipeWriter)));
+        });
+
+        runner.Test("tls pipe: control: under kTLS TX a flush from another thread once the reactor has stopped returns completed at once", () =>
+        {
+            // The connection's own writer, which the dual pipe hands out instead: the stop closed the connection, which is
+            // what it reports.
+            (string certPath, string keyPath) = TestCert.Ensure();
+            var options = new TlsOptions { CertificatePath = certPath, KeyPath = keyPath, KernelTx = true };
+
+            Assert.Equal("completed at once", FlushAfterTheStop(options, typeof(TcpConnectionPipeWriter)));
+        }, skip: !ktls);
+
+        runner.Test("tls pipe: a flush from another thread still queued when the reactor stops completes, instead of waiting forever", () =>
+        {
+            // Posted before the stop, but after the reactor last ran its posts: the stop dropped it (#568).
+            (string certPath, string keyPath) = TestCert.Ensure();
+            var options = new TlsOptions { CertificatePath = certPath, KeyPath = keyPath };
+
+            var outcome = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
+            (int port, Reactor reactor, Thread thread) = TestServer.StartConfigured(
+                QueuedFlushHandler(outcome),
+                new ServerConfig
+                {
+                    RecvBufferSize = 4096, RecvSlots = 256,
+                    Tcp = new TcpOptions { WriteSlabSize = 16 * 1024, PoolMax = 64, RecvQueueEntries = 64 },
+                },
+                r => TlsService.Start(r, options));
+
+            using var tcp = new TcpClient();
+            tcp.Connect("127.0.0.1", port);
+            using var ssl = new SslStream(tcp.GetStream(), leaveInnerStreamOpen: false, (_, _, _, _) => true);
+            ssl.AuthenticateAsClient(new SslClientAuthenticationOptions { TargetHost = "localhost" });
+            ssl.Write(new byte[] { 1 });
+
+            // The handler stops the reactor itself, in the pass the flush was posted in.
+            bool stopped = thread.Join(TimeSpan.FromSeconds(10));
+            if (!stopped)
+            {
+                reactor.Stop();
+            }
+            Assert.True(stopped, $"the handler never stopped the reactor: {(outcome.Task.IsCompleted ? outcome.Task.Result : "no outcome")}");
+
+            // A flush the reactor ran before its stop would have found the connection open, and returned not completed.
+            Assert.True(outcome.Task.Wait(20_000), "the handler never reported");
+            Assert.Equal("completed", outcome.Task.Result);
+        });
     }
+
+    // The handler leaves the reactor, waits on its own thread until the reactor has stopped, then writes and flushes there.
+    private static string FlushAfterTheStop(TlsOptions options, Type writer)
+    {
+        var offReactor = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        using var stopped = new ManualResetEventSlim();
+        var outcome = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        (int port, Reactor reactor, Thread thread) = TestServer.StartConfigured(
+            StoppedFlushHandler(writer, offReactor, stopped, outcome),
+            new ServerConfig
+            {
+                RecvBufferSize = 4096, RecvSlots = 256,
+                Tcp = new TcpOptions { WriteSlabSize = 16 * 1024, PoolMax = 64, RecvQueueEntries = 64 },
+            },
+            r => TlsService.Start(r, options));
+
+        using var tcp = new TcpClient();
+        tcp.Connect("127.0.0.1", port);
+        using var ssl = new SslStream(tcp.GetStream(), leaveInnerStreamOpen: false, (_, _, _, _) => true);
+        ssl.AuthenticateAsClient(new SslClientAuthenticationOptions { TargetHost = "localhost" });
+        ssl.Write(new byte[] { 1 });
+
+        try
+        {
+            Assert.True(offReactor.Task.Wait(10_000), "the handler never left the reactor");
+            reactor.Stop();
+            Assert.True(thread.Join(TimeSpan.FromSeconds(10)), "the reactor did not stop");
+        }
+        finally
+        {
+            stopped.Set();
+        }
+
+        Assert.True(outcome.Task.Wait(20_000), "the handler never reported");
+        return outcome.Task.Result;
+    }
+
+    // How a flush from another thread ended. Left waiting, it is "never finished", and nothing will ever run it now.
+    private static string FlushOutcome(ValueTask<FlushResult> flush)
+    {
+        bool atOnce = flush.IsCompleted;
+        Task<FlushResult> ended = flush.AsTask();
+        try
+        {
+            if (!ended.Wait(10_000))
+            {
+                return "never finished";
+            }
+        }
+        catch (AggregateException e)
+        {
+            return e.InnerException?.GetType().Name ?? e.GetType().Name;
+        }
+
+        return !ended.Result.IsCompleted ? "returned, not completed"
+            : atOnce ? "completed at once"
+            : "completed";
+    }
+
+    private static Func<Reactor, TcpConnection, Task> StoppedFlushHandler(
+        Type writer, TaskCompletionSource offReactor, ManualResetEventSlim stopped, TaskCompletionSource<string> outcome)
+        => async (reactor, connection) =>
+        {
+            TlsSession? session = null;
+            TlsConnectionDualPipe? pipe = null;
+            try
+            {
+                try
+                {
+                    session = await reactor.GetService<TlsService>()!.AcceptAsync(connection);
+                }
+                catch
+                {
+                    return;   // the harness's readiness probe never completes a handshake
+                }
+
+                pipe = new TlsConnectionDualPipe(connection, session);
+
+                ReadResult first = await pipe.Input.ReadAsync();
+                pipe.Input.AdvanceTo(first.Buffer.End);
+
+                await Task.Yield();   // leaves the reactor: nothing brings it back
+                offReactor.TrySetResult();
+                stopped.Wait();
+
+                // The half the handshake chose: under the wrong one this would test the other.
+                if (pipe.Output.GetType() != writer)
+                {
+                    outcome.TrySetResult($"the session's writer is {pipe.Output.GetType().Name}");
+                    return;
+                }
+
+                pipe.Output.Write("never sent"u8);
+                outcome.TrySetResult(FlushOutcome(pipe.Output.FlushAsync()));
+            }
+            catch (Exception e)
+            {
+                outcome.TrySetResult(e.GetType().Name);
+                offReactor.TrySetResult();
+            }
+            finally
+            {
+                if (pipe is not null)
+                {
+                    await pipe.DisposeAsync();
+                }
+                else
+                {
+                    session?.Dispose();
+                }
+                connection.DecRef();
+            }
+        };
+
+    private static Func<Reactor, TcpConnection, Task> QueuedFlushHandler(TaskCompletionSource<string> outcome)
+        => async (reactor, connection) =>
+        {
+            TlsSession? session = null;
+            TlsConnectionDualPipe? pipe = null;
+            try
+            {
+                try
+                {
+                    session = await reactor.GetService<TlsService>()!.AcceptAsync(connection);
+                }
+                catch
+                {
+                    return;   // the harness's readiness probe never completes a handshake
+                }
+
+                pipe = new TlsConnectionDualPipe(connection, session);
+                using var posted = new ManualResetEventSlim();
+
+                // Resumed by the client's byte, among the pass's completions: the pass ran its posts before them.
+                ReadResult first = await pipe.Input.ReadAsync();
+                pipe.Input.AdvanceTo(first.Buffer.End);
+
+                if (pipe.Output is not TlsEncryptingPipeWriter)
+                {
+                    outcome.TrySetResult($"the session's writer is {pipe.Output.GetType().Name}");
+                }
+                else
+                {
+                    // Another thread flushes while this holds the reactor, so the flush is posted, and the stop then ends
+                    // the loop with this pass: it never runs its posts again.
+                    PipeWriter output = pipe.Output;
+                    new Thread(() =>
+                    {
+                        ValueTask<FlushResult> flush;
+                        try
+                        {
+                            output.Write("never sent"u8);
+                            flush = output.FlushAsync();
+                        }
+                        catch (Exception e)
+                        {
+                            outcome.TrySetResult(e.GetType().Name);
+                            return;
+                        }
+                        finally
+                        {
+                            posted.Set();
+                        }
+
+                        outcome.TrySetResult(FlushOutcome(flush));
+                    }) { IsBackground = true, Name = "tls-568-writer" }.Start();
+
+                    if (!posted.Wait(10_000))
+                    {
+                        outcome.TrySetResult("the writer never flushed");
+                    }
+                }
+
+                reactor.Stop();
+                await outcome.Task;   // the writer must be out of the session before it is disposed under it
+            }
+            catch (Exception e)
+            {
+                outcome.TrySetResult(e.GetType().Name);
+            }
+            finally
+            {
+                if (pipe is not null)
+                {
+                    await pipe.DisposeAsync();
+                }
+                else
+                {
+                    session?.Dispose();
+                }
+                connection.DecRef();
+            }
+        };
 
     // With nothing parked, what a recv brought waits on the connection and this says so.
     [UnsafeAccessor(UnsafeAccessorKind.Field, Name = "_pending")]
