@@ -66,9 +66,8 @@ internal static unsafe class Nghttp3
     /// rest. Negative = fatal.</summary>
     [DllImport(Lib)] internal static extern long ih3_writev(nint connection, long* streamId, int* fin, byte* buf, nuint bufLen);
 
-    /// <summary>The request stream's read side is done - the peer reset it (RESET_STREAM), or we
-    /// stopped reading it: stop expecting request bytes and release the stream's QPACK decode
-    /// state. 0 or a negative nghttp3 error.</summary>
+    /// <summary>Peer aborted its sending side (RESET_STREAM), or we stopped reading it: stop expecting request bytes and
+    /// release the stream's QPACK decode state. 0 or a negative nghttp3 error.</summary>
     [DllImport(Lib)] internal static extern int  ih3_shutdown_stream_read(nint connection, long streamId);
 
     /// <summary>Peer refused our response (STOP_SENDING): stop generating output for the stream.

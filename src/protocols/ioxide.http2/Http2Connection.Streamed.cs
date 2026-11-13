@@ -100,7 +100,7 @@ public sealed partial class Http2Connection
             // the connection grows without bound - 20 GB over eight seconds of load, measured.
             _creditWaiters.Remove(writer.StreamId);
             _responseWindows.Remove(writer.StreamId);
-            RetireStream(pending, writer);
+            RetireStream(pending);
             _writerPool.Push(writer);
         }
     }

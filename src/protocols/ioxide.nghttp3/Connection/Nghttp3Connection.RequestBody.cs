@@ -33,30 +33,26 @@ public sealed partial class Nghttp3Connection
         }
     }
 
-    // A handler that answered before its body ended - a 401, a 413, a redirect - would otherwise have
-    // the client upload the rest for nothing, credited and dropped as it arrives. So once the response
-    // is handed over, the request stream's read side is stopped with H3_NO_ERROR, asking the client to
-    // stop sending (RFC 9114 4.1). STOP_SENDING and nothing else: the response's own direction is
-    // untouched, so it still arrives whole, and clients must not discard it.
+    // Once the response is handed over: STOP_SENDING with H3_NO_ERROR stops the upload and leaves the client the response (RFC 9114 4.1).
     private void StopReadingIfAnsweredEarly(Nghttp3Request request)
     {
-        // Not once the stack has reset the stream (FailStreamed), nor one that the peer reset or that
-        // closed while the response was finishing (Detached): their read sides are done already.
+        // A reset or the stream's close (Detached) already ended its read side.
         if (!request.AnsweredEarly || request.Detached || _nghttp3Handle == 0 || _protocolFailed)
         {
             return;
         }
         request.AnsweredEarly = false;
 
-        _quicConnection.StopReading(request.StreamId, H3NoError);
-
-        // nghttp3's half: drop what is already on its way instead of parsing it.
         int result = Nghttp3.ih3_shutdown_stream_read(_nghttp3Handle, request.StreamId);
         if (result < 0)
         {
             Console.Error.WriteLine($"[ioxide.nghttp3] shutdown_stream_read failed: {Nghttp3.StrError(result)}");
             FailProtocol(result);
+            return;
         }
+
+        // Last: its flush can end the connection inline, and the teardown frees nghttp3.
+        _quicConnection.StopReading(request.StreamId, H3NoError);
     }
 
     // A sink with a parked reader became ready mid-PushToEngine; the wake is deferred to FireBodyWakes.

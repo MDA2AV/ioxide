@@ -42,9 +42,7 @@ internal static class Http2TrailerTests
             // RFC 9113 5.1.1: stream 1 was opened once, and a HEADERS on it later opens nothing.
             Assert.True(served.SequenceEqual(["1 '/unread'", "3 '/next'"]),
                 $"expected stream 1 once, then stream 3; the handler was handed: {string.Join(", ", served)}");
-            // Answered unread, so stream 1 is reset with NO_ERROR to stop its upload (#571); the
-            // trailers are legal here, and nothing refuses or resets them.
-            Assert.Equal("1 NO_ERROR", Resets(peer));
+            Assert.Equal("1 NO_ERROR", Resets(peer));   // answered unread, so its upload is stopped; the trailers are legal here
 
             peer.Close(run);
         });
