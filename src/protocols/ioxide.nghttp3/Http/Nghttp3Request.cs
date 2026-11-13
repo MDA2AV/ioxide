@@ -63,7 +63,13 @@ public sealed class Nghttp3Request
     /// arrives without one. This is what nghttp3 reports at the end of the HEADERS, so it is
     /// settled before a handler that takes an <see cref="Nghttp3BodyReader"/> is dispatched, never
     /// changes while the body arrives, and means the same whether the body is streamed or assembled
-    /// in <see cref="Body"/>. A fin sent on its own after the HEADERS ends a body that is empty.
+    /// in <see cref="Body"/>.
+    ///
+    /// A fin sent on its own after the HEADERS normally ends a body that is empty. With the QPACK
+    /// dynamic table on - <see cref="Nghttp3Options.QpackDynamicTableCapacity"/> and
+    /// <see cref="Nghttp3Options.QpackBlockedStreams"/> both above 0 - it can count as no body
+    /// instead: nghttp3 holds HEADERS back while they wait on the peer's encoder stream, and a fin
+    /// that arrives meanwhile is handed over with them. No body bytes follow in either case.
     /// </remarks>
     public bool HasBody { get; internal set; }
 

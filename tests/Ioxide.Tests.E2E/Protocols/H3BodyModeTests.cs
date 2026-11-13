@@ -162,16 +162,19 @@ internal static class H3BodyModeTests
     /// <summary>
     /// What a handler was told about its body before reading any, for each request a host has to
     /// tell apart: a GET whose fin came with its HEADERS, a small upload that ended in the same packet,
-    /// and a large one still arriving when its handler runs. None of them carries a content-length,
-    /// which is what a host had to go on before - and what would call both uploads bodyless.
+    /// and a large one - past the stream window, so a handler with a body reader starts while it is
+    /// still arriving, and one given the whole body once it has been assembled. None of them
+    /// carries a content-length, which is what a host had to go on before - and what would call
+    /// both uploads bodyless.
     /// </summary>
     private static void AssertTold(string given, Func<QuicConnection, Task> serve)
     {
         string[] answers = Answers(serve, ("GET", null), ("POST", Small), ("POST", Upload));
+        string large = given == "streamed" ? "a large upload still arriving when its handler started" : "a large upload assembled whole";
 
         Assert.True(answers[0] == $"no body, {given} 0", $"a GET whose fin came with its HEADERS was told '{answers[0]}'");
         Assert.True(answers[1] == $"a body, {given} {Small.Length}", $"an upload that ended with its HEADERS was told '{answers[1]}'");
-        Assert.True(answers[2] == $"a body, {given} {Upload.Length}", $"an upload still arriving at dispatch was told '{answers[2]}'");
+        Assert.True(answers[2] == $"a body, {given} {Upload.Length}", $"{large} was told '{answers[2]}'");
     }
 
     private static string Told(bool hasBody, string received) => $"{(hasBody ? "a body" : "no body")}, {received}";

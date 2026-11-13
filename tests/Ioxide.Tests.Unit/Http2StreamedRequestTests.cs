@@ -120,6 +120,16 @@ internal static class Http2StreamedRequestTests
                 $"a body arrived with its HEADERS, and {look}");
         });
 
+        runner.Test("h2 streamed request: a request whose body is one empty DATA frame still says it has one, and reads empty", () =>
+        {
+            // In the same read, so the stream has ended before its handler runs without a byte of
+            // DATA: what telling a body from none by its bytes would take for no body.
+            FirstLook look = LookAtDispatch(peer => peer.OpenRequest(streamId: 1, endStream: false, bodyBytes: 0));
+
+            Assert.True(!look.Parked, $"the empty DATA came in the same read as the HEADERS, so no read had to wait, and {look}");
+            Assert.True(look.HasBody == true && look.Read == 0, $"the HEADERS left the stream open for a body, and {look}");
+        });
+
         runner.Test("h2 streamed request: buffered dispatch still assembles the body", () =>
         {
             int seen = -1;
@@ -292,10 +302,10 @@ internal static class Http2StreamedRequestTests
 
         /// <summary>
         /// Preface, an empty SETTINGS, then one indexed-HPACK POST that opens a stream - and in the
-        /// same read, with <paramref name="bodyBytes"/>, a DATA frame of that many that ends it, and
-        /// with <paramref name="resetWith"/>, the peer's RST_STREAM for it.
+        /// same read, with <paramref name="bodyBytes"/>, a DATA frame of that many that ends it (0
+        /// for an empty one), and with <paramref name="resetWith"/>, the peer's RST_STREAM for it.
         /// </summary>
-        public void OpenRequest(int streamId, bool endStream, uint? resetWith = null, int bodyBytes = 0)
+        public void OpenRequest(int streamId, bool endStream, uint? resetWith = null, int? bodyBytes = null)
         {
             var bytes = new List<byte>("PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n"u8.ToArray());
             bytes.AddRange(Header(0, 0x4, 0, 0));
@@ -305,9 +315,9 @@ internal static class Http2StreamedRequestTests
             byte flags = (byte)(0x4 | (endStream ? 0x1 : 0));
             bytes.AddRange(Header(3, 0x1, flags, streamId));
             bytes.AddRange([0x83, 0x86, 0x84]);
-            if (bodyBytes > 0)
+            if (bodyBytes is int length)
             {
-                bytes.AddRange(Data(streamId, bodyBytes, endStream: true));
+                bytes.AddRange(Data(streamId, length, endStream: true));
             }
             if (resetWith is uint code)
             {

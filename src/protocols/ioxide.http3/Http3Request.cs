@@ -32,10 +32,11 @@ public sealed class Http3Request
     /// <c>content-length</c> cannot answer this. HTTP/3 does not require it, and a body of unknown
     /// length - one <c>HttpClient</c> streams, or <c>fetch</c> sends from a <c>ReadableStream</c> -
     /// arrives without one. This is decided at the end of the HEADERS, by the test nghttp3 makes
-    /// for ioxide.nghttp3 - did the fin come with them - so the two stacks agree. It is settled
-    /// before a handler that takes an <see cref="Http3BodyReader"/> is dispatched, never changes
-    /// while the body arrives, and means the same whether the body is streamed or assembled in
-    /// <see cref="Body"/>. A fin sent on its own after the HEADERS ends a body that is empty.
+    /// for ioxide.nghttp3 - did the fin come with them - so the two stacks agree while nghttp3's
+    /// QPACK dynamic table is off, as it is by default. It is settled before a handler that takes
+    /// an <see cref="Http3BodyReader"/> is dispatched, never changes while the body arrives, and
+    /// means the same whether the body is streamed or assembled in <see cref="Body"/>. A fin sent on
+    /// its own after the HEADERS ends a body that is empty.
     /// </remarks>
     public bool HasBody { get; internal set; }
 
