@@ -9,7 +9,9 @@ namespace ioxide.http2;
 /// <c>RunAsync</c> overloads with an <see cref="Http2BodyReader"/> parameter.
 /// The connection loop pushes chunks in as DATA frames arrive; the handler pulls with
 /// <see cref="ReadAsync"/>. An empty chunk means the body ended whole, at END_STREAM. A body cut off
-/// by a reset stream or a lost connection ends with an <see cref="IOException"/> instead.
+/// by a reset stream or a lost connection ends with an <see cref="IOException"/> instead, and so does
+/// one that runs past or ends short of the request's content-length (RFC 9113 8.1.1), whose stream
+/// the server resets.
 ///
 /// Backpressure is real rather than buffered-and-hoped-for: a chunk is credited back to the peer's
 /// window only as it is handed over, so a slow consumer stops replenishing, the peer runs out of
@@ -52,8 +54,9 @@ public sealed class Http2BodyReader : IValueTaskSource<ReadOnlyMemory<byte>>
 
     /// <summary>
     /// The next body chunk; empty means the body ended whole. Throws <see cref="IOException"/> in
-    /// place of the end when it was cut off. The memory is valid until the next
-    /// <see cref="ReadAsync"/> call, or until the handler returns, whichever comes first.
+    /// place of the end when it was cut off, or did not match the request's content-length. The
+    /// memory is valid until the next <see cref="ReadAsync"/> call, or until the handler returns,
+    /// whichever comes first.
     /// </summary>
     public ValueTask<ReadOnlyMemory<byte>> ReadAsync()
     {
@@ -157,12 +160,13 @@ public sealed class Http2BodyReader : IValueTaskSource<ReadOnlyMemory<byte>>
     // The stream was reset, or the connection went away, under a running handler: what is queued
     // will never be read, so it goes back now. The chunk the handler holds stays its own until its
     // next read or its return, and a parked read wakes through the deferred list. A body that had
-    // not ended, or loses bytes here, was cut off, and its end has to say so.
-    internal void Abort()
+    // not ended, or loses bytes here, was cut off, and its end has to say so - with the reason, when
+    // the server refused the request over its body.
+    internal void Abort(string? reason = null)
     {
         if (!_ended || _chunks.Count > 0)
         {
-            _fault = new IOException("the request body was cut off: its stream was reset or its connection closed");
+            _fault = new IOException(reason ?? "the request body was cut off: its stream was reset or its connection closed");
         }
         DropQueued();
         End();
