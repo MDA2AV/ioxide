@@ -84,9 +84,9 @@ public sealed unsafe partial class TcpConnection : IValueTaskSource, IFlushListe
     /// threw out of a finally and faulted the connection handler (#234).
     ///
     /// Skipping loses nothing: while _flushInProgress is set every GetSpan/GetMemory/Advance/Write
-    /// is refused (TcpConnection.Write.cs), so nothing can have entered the slab since the
-    /// in-flight flush armed, and that flush snapshotted everything that was already there. A
-    /// second flush would compute target == 0 and return anyway.
+    /// is refused (TcpConnection.Write.cs), and so is ReadFileAsync (TcpConnection.FileRead.cs), so
+    /// nothing can have entered the slab since the in-flight flush armed, and that flush snapshotted
+    /// everything that was already there. A second flush would compute target == 0 and return anyway.
     ///
     /// Not the same as relaxing the guard above. A caller that means "send my bytes" must still
     /// hear that they were not sent.
