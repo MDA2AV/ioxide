@@ -153,6 +153,14 @@ public abstract class QuicConnection : IValueTaskSource<QuicRecvSnapshot>
     /// </summary>
     public virtual void ResetStream(long streamId, ulong applicationErrorCode) { }
 
+    /// <summary>
+    /// Stop reading one stream (STOP_SENDING) with an application error code, and leave its sending side
+    /// alone - for a request answered before its body ended: the peer stops uploading what nothing will
+    /// read, and the response still goes out whole. What arrives after it is dropped, its flow-control
+    /// credit given back. Reactor thread only.
+    /// </summary>
+    public virtual void StopReading(long streamId, ulong applicationErrorCode) { }
+
     /// <summary>Send one datagram (or a GSO batch) to the connection's current peer address.</summary>
     protected void Send(ReadOnlySpan<byte> payload, int gsoSegmentSize = 0)
     {

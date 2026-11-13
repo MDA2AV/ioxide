@@ -439,6 +439,7 @@ public unsafe partial class QuicEngineConnection : QuicConnection
     {
         _closed = true;
         _owedStreams.Clear();
+        _readStopped.Clear();
         foreach (OutStream os in _outStreams.Values)
         {
             while (os.Chunks.Count > 0)

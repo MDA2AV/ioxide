@@ -37,6 +37,9 @@ public sealed class Http2ResponseWriter : IBufferWriter<byte>
     private bool _headersSent;
     private bool _completed;
 
+    // END_STREAM is staged: the response is whole, where a completion the peer cut short is not.
+    private bool _endedStream;
+
     // Headers written off the reactor, staged by the next flush or the completion, which run on it.
     private Http2Response? _unsent;
 
@@ -57,6 +60,9 @@ public sealed class Http2ResponseWriter : IBufferWriter<byte>
 
     /// <summary>True once the body has been finished and END_STREAM sent.</summary>
     public bool IsCompleted => _completed;
+
+    /// <summary>True once END_STREAM is staged on this stream, which a completion after the peer reset it never stages.</summary>
+    internal bool EndedStream => _endedStream;
 
     /// <summary>
     /// Send the response headers. Exactly once, before any body byte - HTTP/2 puts HEADERS ahead
@@ -299,6 +305,7 @@ public sealed class Http2ResponseWriter : IBufferWriter<byte>
             bool last = endStream && sent + chunk == _staged;
 
             _connection.SendStreamedData(_streamId, _staging.AsSpan(sent, chunk), last);
+            _endedStream |= last;
             sent += chunk;
         }
         return Progress.Sent;
@@ -320,6 +327,7 @@ public sealed class Http2ResponseWriter : IBufferWriter<byte>
         {
             // Nothing left to send, but the stream still needs its end.
             _connection.SendStreamedData(_streamId, ReadOnlySpan<byte>.Empty, endStream: true);
+            _endedStream = true;
         }
 
         // Inside a pass the pass flush carries these frames with every other response's, so the
@@ -405,6 +413,7 @@ public sealed class Http2ResponseWriter : IBufferWriter<byte>
         _sinceRealFlush = 0;
         _headersSent = false;
         _completed = false;
+        _endedStream = false;
         _unsent = null;
     }
 }

@@ -52,8 +52,9 @@ static ptls_key_exchange_algorithm_t *iq_client_key_exchanges[] = {
  *   4 - iq_conn_shutdown_stream added
  *   5 - iq_client_engine_set_idle_timeout added
  *   6 - iq_conn_writev added
- *   7 - iq_conn_peer_certificate added */
-#define IQ_ABI 7
+ *   7 - iq_conn_peer_certificate added
+ *   8 - iq_conn_shutdown_stream_read added */
+#define IQ_ABI 8
 
 /* ---- callback table into C# ------------------------------------------------------------- */
 
@@ -2141,6 +2142,18 @@ int iq_conn_shutdown_stream(iq_conn *c, int64_t stream_id, uint64_t app_error_co
         return -1;
     }
     return ngtcp2_conn_shutdown_stream(c->conn, 0, stream_id, app_error_code);
+}
+
+/* Stop reading a stream - STOP_SENDING alone - with an application error code, and leave its
+ * sending side as it is: the peer stops sending a request nothing will read, and the response to
+ * it still goes out whole. ngtcp2 drops what arrives after it and credits the connection window
+ * for it. Reactor thread only. */
+int iq_conn_shutdown_stream_read(iq_conn *c, int64_t stream_id, uint64_t app_error_code)
+{
+    if (c == NULL || c->conn == NULL) {
+        return -1;
+    }
+    return ngtcp2_conn_shutdown_stream_read(c->conn, 0, stream_id, app_error_code);
 }
 
 /* ---- app-paced receive windows ----------------------------------------------------------- */

@@ -368,12 +368,40 @@ public sealed partial class Http2Connection : IDisposable
     /// Done with a stream. The buffered path already took it out of <c>_streams</c> when it became
     /// ready; a streamed request is still in there, because DATA frames were arriving the whole
     /// time the handler ran. Once per dispatched request: it goes back for the next stream.
+    ///
+    /// A handler can answer before its request has ended - a 401, a 413, a redirect - and the
+    /// client would then upload the rest for nothing: what arrives for a stream that is gone is
+    /// credited and dropped. So a request still arriving is reset with NO_ERROR once its response
+    /// is whole, which asks the client to stop sending and leaves it the response (RFC 9113 8.1).
+    /// Never ahead of END_STREAM, because a reset ends the stream both ways and would cut the
+    /// response off; staged after it, it reaches the wire after it.
     /// </summary>
-    private void RetireStream(PendingRequest pending)
+    /// <param name="writer">The writer of a streamed response; null for a buffered one.</param>
+    private void RetireStream(PendingRequest pending, Http2ResponseWriter? writer = null)
     {
-        _streams.Remove(pending.StreamId);
+        // Still in the table without END_STREAM: neither side has reset it, and the client is still sending.
+        bool arriving = _streams.Remove(pending.StreamId) && !pending.RequestEnded;
+        bool reset = arriving && !IsBroken && ResponseEnded(pending.StreamId, writer);
+
+        if (reset)
+        {
+            ResetStream(pending.StreamId, Http2Error.NoError);
+        }
+
         Recycle(pending);
+
+        // Outside a pass nothing else would write the reset; a flush already running carries it.
+        if (reset && !_passFlushPending && !_flushing)
+        {
+            _ = FlushDetachedAsync();
+        }
     }
+
+    // A streamed response has ended once its writer staged END_STREAM. A buffered one was written
+    // whole unless its window is still here, which only a rest parked on credit keeps: that rest
+    // ends after the retire, so its stream is not reset.
+    private bool ResponseEnded(int streamId, Http2ResponseWriter? writer)
+        => writer?.EndedStream ?? !_responseWindows.ContainsKey(streamId);
 
     // Kept unless the pool is full or a peer's header lines grew its lists; only the reactor rents.
     private void Recycle(PendingRequest pending)

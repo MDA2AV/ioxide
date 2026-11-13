@@ -62,6 +62,7 @@ public unsafe partial class QuicEngineConnection
         {
             c.SettleResponse(streamId);
             c.PurgeOutStream(streamId);
+            c._readStopped.Remove(streamId);   // a STOP_SENDING ngtcp2 never wrote, the request having ended first
             c.EnqueueLifecycle(streamId, QuicStreamEvent.Closed, appError);
             c.OnStreamClosed(streamId, appError);
         }
@@ -100,6 +101,13 @@ public unsafe partial class QuicEngineConnection
 
         try
         {
+            // The STOP_SENDING this side writes, not the peer's. After StopReading that is all it is:
+            // the response going out on the stream carries on, and the h3 layer asked for it.
+            if (c._readStopped.Remove(streamId))
+            {
+                return;
+            }
+
             c.SettleResponse(streamId);
             c.MarkOutStreamDead(streamId);
             c.EnqueueLifecycle(streamId, QuicStreamEvent.StopSending, appError);

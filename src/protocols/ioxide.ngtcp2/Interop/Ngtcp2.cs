@@ -100,7 +100,7 @@ internal static unsafe class Ngtcp2
     [DllImport(Lib)] internal static extern uint iq_abi();
 
     /// <summary>What this managed binding was written against. Bump both together.</summary>
-    internal const uint Abi = 7;
+    internal const uint Abi = 8;
 
     /// <summary>
     /// Refuse to run against a native library this binding was not built for.
@@ -185,6 +185,9 @@ internal static unsafe class Ngtcp2
     [DllImport(Lib)] internal static extern void  iq_conn_set_keep_alive(nint conn, int on, ulong boundNs);
 
     [DllImport(Lib)] internal static extern int   iq_conn_shutdown_stream(nint conn, long streamId, ulong appErrorCode);
+
+    /// <summary>STOP_SENDING alone: the stream's sending side, and a response on it, are left as they are.</summary>
+    [DllImport(Lib)] internal static extern int   iq_conn_shutdown_stream_read(nint conn, long streamId, ulong appErrorCode);
 
     [DllImport(Lib)] internal static extern int   iq_conn_is_established(nint conn);
     [DllImport(Lib)] internal static extern long  iq_conn_open_uni(nint conn);

@@ -162,8 +162,30 @@ public unsafe partial class QuicEngineConnection
             ApplyKeepAlive();
         }
         MarkOutStreamDead(streamId);
+        _readStopped.Remove(streamId);   // both ways now, so the STOP_SENDING it writes reports as a reset's
         Ngtcp2.iq_conn_shutdown_stream(_conn, streamId, applicationErrorCode);
         FlushConnection();
+    }
+
+    // Streams StopReading stopped and nothing more. ngtcp2 reports the STOP_SENDING it writes for each
+    // through CbStreamStopSending, which for a reset also ends the sending side - and here must not.
+    private readonly HashSet<long> _readStopped = [];
+
+    public override void StopReading(long streamId, ulong applicationErrorCode)
+    {
+        if (_closed || (_outStreams.TryGetValue(streamId, out OutStream? os) && os.Dead))
+        {
+            return;   // already shut both ways: its STOP_SENDING went with the reset
+        }
+
+        _readStopped.Add(streamId);
+        Ngtcp2.iq_conn_shutdown_stream_read(_conn, streamId, applicationErrorCode);
+
+        // Off-cycle nothing sends it before the peer's next packet; in a cycle its end does.
+        if (!_inEngineCycle)
+        {
+            FlushConnection();
+        }
     }
 
     /// <summary>Open a server-initiated unidirectional stream (H3 control / QPACK); id, or negative.</summary>
