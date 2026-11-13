@@ -245,6 +245,17 @@ public sealed partial class Http2Connection
         Stage(frame);
     }
 
+    // INITIAL_WINDOW_SIZE sizes streams only. The connection's window starts at the RFC's 65535 and
+    // moves by WINDOW_UPDATE alone (RFC 9113 6.9.2), and the credit this server sends returns what was
+    // consumed and never more, so the window is opened here or never.
+    private void WriteConnectionWindow()
+    {
+        if (_options.InitialConnectionWindowSize > 65535)
+        {
+            WriteWindowUpdate(0, _options.InitialConnectionWindowSize - 65535);
+        }
+    }
+
     private static void WriteSetting(Span<byte> body, int slot, ushort id, uint value)
     {
         BinaryPrimitives.WriteUInt16BigEndian(body[(slot * 6)..], id);

@@ -9,8 +9,8 @@ namespace Ioxide.Tests;
 /// </summary>
 internal static class Http2FlowControlTests
 {
-    // RFC 9113 6.9.2 default; ioxide never sends a stream-0 WINDOW_UPDATE to raise it.
-    private const int ConnectionWindow = 65535;
+    // RFC 9113 6.9.2 default, which ioxide keeps unless InitialConnectionWindowSize raises it.
+    internal const int ConnectionWindow = 65535;
 
     internal const ushort InitialWindowSize = 0x4;
     internal const uint Cancel = 0x8;
@@ -380,12 +380,12 @@ internal static class Http2FlowControlTests
         }
     }
 
-    private sealed class Tally
+    internal sealed class Tally
     {
         public long Bytes;
     }
 
-    private static async ValueTask ReadAll(Http2BodyReader body, Tally read, Func<Task>? between = null)
+    internal static async ValueTask ReadAll(Http2BodyReader body, Tally read, Func<Task>? between = null)
     {
         while (true)
         {
@@ -403,7 +403,7 @@ internal static class Http2FlowControlTests
         }
     }
 
-    private static ValueTask Answer(Http2ResponseWriter writer, int status)
+    internal static ValueTask Answer(Http2ResponseWriter writer, int status)
     {
         writer.WriteHeaders(new Http2Response { Status = status });
         return writer.CompleteAsync();
@@ -430,7 +430,7 @@ internal static class Http2FlowControlTests
     }
 
     /// <summary>Flow control as the client keeps it: only WINDOW_UPDATEs that reach it give credit back.</summary>
-    private sealed class PeerWindow
+    internal sealed class PeerWindow
     {
         private readonly Dictionary<int, long> _streams = new();
         private long _streamInitial = 65535;
@@ -516,11 +516,11 @@ internal static class Http2FlowControlTests
     }
 
     // Static-table HPACK only: 0x83 POST / 0x82 GET, 0x86 :scheme http, 0x84 :path /.
-    private static byte[] Post(int streamId) => FrameBytes(0x1, 0x4, streamId, [0x83, 0x86, 0x84]);
+    internal static byte[] Post(int streamId) => FrameBytes(0x1, 0x4, streamId, [0x83, 0x86, 0x84]);
 
     internal static byte[] Get(int streamId) => FrameBytes(0x1, 0x5, streamId, [0x82, 0x86, 0x84]);
 
-    private static byte[] Data(int streamId, int length, bool endStream, int padding = -1)
+    internal static byte[] Data(int streamId, int length, bool endStream, int padding = -1)
     {
         byte flags = endStream ? (byte)0x1 : (byte)0x0;
         if (padding < 0)

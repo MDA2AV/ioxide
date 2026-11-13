@@ -13,8 +13,36 @@ public sealed record Http2Options
     /// <summary>Largest frame payload we will accept, and advertise. RFC 9113 floor is 16384.</summary>
     public int MaxFrameSize { get; init; } = 16384;
 
-    /// <summary>Flow-control window advertised per stream.</summary>
+    /// <summary>
+    /// Flow-control window advertised per stream: how much of one request's body the peer may send
+    /// ahead of the credit it gets back. A stream needs room in the connection's window too,
+    /// <see cref="InitialConnectionWindowSize"/>, which at its default holds every stream to 64 KiB.
+    /// </summary>
     public int InitialWindowSize { get; init; } = 1 << 20;
+
+    /// <summary>
+    /// Flow-control window for the whole connection: how much request body all its streams together
+    /// may have in flight. SETTINGS cannot carry it - INITIAL_WINDOW_SIZE sizes streams only - so a
+    /// size past the RFC's 65,535 is opened by a WINDOW_UPDATE on stream 0 right behind them. Floored
+    /// at 65,535, which is also the default: the uploads of a connection then move 64 KiB a round trip
+    /// between them, whatever <see cref="InitialWindowSize"/> says.
+    ///
+    /// Raise it with the transport. While the frame loop waits on a flush - a response going out to a
+    /// slow peer, or a streamed writer's turn - it reads nothing, and what the peer sends meanwhile
+    /// waits in the connection's receive queue: an entry per receive, and a receive can be a single
+    /// segment of some 1.4 KiB. A queue that overflows closes the connection, so a window the queue
+    /// cannot hold lets a peer that keeps to that window be cut off. The default
+    /// <see cref="TcpOptions.RecvQueueEntries"/>, 64, holds about the RFC's window; 1 MiB needs 1024.
+    /// Under <see cref="ServerConfig.Incremental"/> a connection whose ring is full parks its receive
+    /// instead.
+    ///
+    /// A streamed body is credited only as its handler reads, so a handler that has stopped reading
+    /// keeps up to one stream window of this: at twice <see cref="InitialWindowSize"/> the other
+    /// streams still have a whole one, where at one they all wait for it. It is also what bounds
+    /// memory: the streamed bodies of one connection hold at most this between them. A buffered body
+    /// is credited as it arrives, so for one this paces the upload and bounds nothing.
+    /// </summary>
+    public int InitialConnectionWindowSize { get; init; } = 65535;
 
     /// <summary>
     /// Streams the peer may have open at once. Advertised in SETTINGS <em>and</em> enforced: past
