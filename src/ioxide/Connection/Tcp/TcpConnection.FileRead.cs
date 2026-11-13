@@ -24,12 +24,16 @@ public sealed unsafe partial class TcpConnection
     /// <paramref name="len"/> bytes: the slab, grown to hold them under <see cref="WriteOverflowStrategy.Grow"/>;
     /// under <see cref="WriteOverflowStrategy.Segmented"/> an overflow segment once the slab can't hold
     /// them, or once the response has spilled, so the file's bytes go out behind everything written
-    /// before them.
+    /// before them. A read that goes to a segment leaves the response spilled, so <see cref="GetMemory"/>
+    /// is refused until the next flush, as after any spill.
     ///
     /// The bytes are placed but NOT yet part of the pending write - call <see cref="AdvanceWrite"/>
-    /// with the result to commit them before <c>FlushAsync</c>, and write nothing in between. Framing a
-    /// header first (with a known Content-Length) then reading the body after it sends header + body in
-    /// one flush. Like every write, refused while a flush is in flight.
+    /// with the result to commit them before <c>FlushAsync</c>. Until then, write nothing, flush nothing,
+    /// and start no other file read on this connection: a write can land on the read's bytes or free the
+    /// buffer under it, and a flush resets the position <see cref="AdvanceWrite"/> commits at, so it
+    /// commits whatever lies there instead. A second file read is refused; the rest is the caller's to
+    /// keep. Framing a header first (with a known Content-Length) then reading the body after it sends
+    /// header + body in one flush. Like every write, refused while a flush is in flight.
     ///
     /// <b>Cleartext only.</b> The bytes go on the wire as read, so this is for a plain connection. A
     /// TLS connection must read into a buffer and encrypt (<c>TlsSession.Write</c>) - the wire carries
@@ -43,7 +47,13 @@ public sealed unsafe partial class TcpConnection
     /// </returns>
     /// <exception cref="InvalidOperationException">A flush is in flight, or another file read is.</exception>
     /// <exception cref="ArgumentOutOfRangeException">
-    /// <paramref name="len"/> is negative, or more than the write buffer can hand out in one piece.
+    /// <paramref name="len"/> is negative, or so large that the write position plus <paramref name="len"/>
+    /// passes <see cref="int.MaxValue"/>.
+    /// </exception>
+    /// <exception cref="OutOfMemoryException">
+    /// The buffer can't be made to hold <paramref name="len"/>: under Grow the slab would have to grow past
+    /// 1 GiB, or its new size can't be allocated; under Segmented a segment of at least
+    /// <paramref name="len"/> bytes, up to <see cref="int.MaxValue"/>, can't be allocated.
     /// </exception>
     public ValueTask<int> ReadFileAsync(int fileFd, int len, long fileOffset)
     {
@@ -57,6 +67,14 @@ public sealed unsafe partial class TcpConnection
         if (Volatile.Read(ref _flushInProgress) != 0)
         {
             throw new InvalidOperationException("Cannot write while flush is in progress.");
+        }
+
+        // Before anything is sized: making room for this read can grow the slab, which frees the buffer the
+        // kernel is still filling for the read in flight. The op source refuses a second read too, but only
+        // once that is done.
+        if (_fileRead.InFlight)
+        {
+            throw new InvalidOperationException("A file read is already in flight on this connection.");
         }
 
         // Where GetSpan would hand out len bytes, so AdvanceWrite commits the read where it landed. After a
@@ -81,16 +99,21 @@ public sealed unsafe partial class TcpConnection
 
     /// <summary>
     /// Commit <paramref name="n"/> bytes just read by <see cref="ReadFileAsync"/>, so the next
-    /// <c>FlushAsync</c> sends them. Pass the read's return value; a non-positive result (end of file
-    /// or an error) commits nothing. The commit is <see cref="Advance"/>'s, at the same position the
-    /// read was given, so it is refused the same way: during a flush, and past the rest of the slab or
-    /// segment the read went into.
+    /// <c>FlushAsync</c> sends them. Pass the read's return value. The commit is <see cref="Advance"/>'s,
+    /// at the same position the read was given, so it is refused the same way: during a flush, and past
+    /// the rest of the slab or segment the read went into. A non-positive result (end of file or an
+    /// error) commits nothing, and gives back a segment the read spilled into while it is still empty, so
+    /// the response isn't left spilled, refusing <see cref="GetMemory"/>, for no bytes.
     /// </summary>
     public void AdvanceWrite(int n)
     {
         if (n > 0)
         {
             Advance(n);
+        }
+        else if (Volatile.Read(ref _flushInProgress) == 0)
+        {
+            ReturnEmptySpill();   // a flush in flight may be sending the chain, so that is left as it is
         }
     }
 }

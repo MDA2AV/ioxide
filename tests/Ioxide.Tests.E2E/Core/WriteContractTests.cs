@@ -12,8 +12,8 @@ namespace Ioxide.Tests;
 /// The TCP write side as an <see cref="IBufferWriter{T}"/> and a <see cref="PipeWriter"/>: GetSpan past
 /// the slab, Advance past what was handed out, the counts a writer reads, and a write and flush made
 /// after the peer has gone. And a file read into the write buffer (ReadFileAsync, AdvanceWrite): where
-/// its bytes land behind what was written before them, a read during a flush, and one after the peer
-/// has gone.
+/// its bytes land behind what was written before them, a spill it commits nothing to, a read during a
+/// flush or during another read, and one after the peer has gone.
 /// </summary>
 /// <remarks>
 /// Already pinned elsewhere: Write past the slab in both overflow strategies, a GetSpan the slab cannot
@@ -217,6 +217,36 @@ internal static class WriteContractTests
             Assert.Equal($"writable {Slab}", string.Join(" | ", noted));
         });
 
+        runner.Test("tcp writer: under Segmented, a file read that commits nothing gives back the segment it spilled into", () =>
+        {
+            byte[] content = Pattern(6000, 15);   // more than the slab has left behind the head, so a read of it spills
+            using SafeFileHandle file = FileOf(content);
+            int fd = (int)file.DangerousGetHandle();
+            byte[] head = Pattern(100, 16);
+
+            (List<string> noted, byte[] received) = Exchange(WriteOverflowStrategy.Segmented, async (conn, writer, notes) =>
+            {
+                writer.Write(head);
+
+                int atEnd = await conn.ReadFileAsync(fd, content.Length, fileOffset: content.Length);
+                conn.AdvanceWrite(atEnd);
+                notes.Add($"read {atEnd}: {TryGetMemory(writer)}");
+
+                // The control: a read that commits its bytes leaves the response spilled until the flush.
+                int n = await conn.ReadFileAsync(fd, content.Length, 0);
+                conn.AdvanceWrite(n);
+                notes.Add($"read {n}: {TryGetMemory(writer)}");
+                await writer.FlushAsync();
+                notes.Add($"flushed: {TryGetMemory(writer)}");
+            });
+
+            Assert.Equal(string.Join(" | ",
+                "read 0: GetMemory handed out",
+                "read 6000: GetMemory refused (GetMemory across segmented overflow is not supported; use GetSpan.)",
+                "flushed: GetMemory handed out"), string.Join(" | ", noted));
+            AssertReceived([.. head, .. content], received);
+        });
+
         runner.Test("tcp writer: a file read and its commit are refused while a flush is in flight, and taken once it is done", () =>
         {
             byte[] content = Pattern(3000, 10);
@@ -231,7 +261,7 @@ internal static class WriteContractTests
                 // The handler runs on the reactor, which can complete the flush only once the handler awaits, so
                 // both calls below are made while it is in flight.
                 ValueTask<FlushResult> flush = writer.FlushAsync();
-                ValueTask<int> during = ReadDuringFlush(conn, fd, content.Length, notes);
+                ValueTask<int> during = TryStartRead(conn, fd, content.Length, "read during the flush", notes);
                 CommitDuringFlush(conn, notes);
                 await flush;
                 await during;   // one let through still has to land before the next read
@@ -247,6 +277,35 @@ internal static class WriteContractTests
                 "commit during the flush: refused (Cannot write while flush is in progress.)",
                 "after the flush: read 3000"), string.Join(" | ", noted));
             AssertReceived([.. head, .. content], received);
+        });
+
+        runner.Test("tcp writer: a second file read while one is in flight is refused before it can move the buffer the first is filling", () =>
+        {
+            byte[] content = Pattern(3000, 17);
+            using SafeFileHandle file = FileOf(content);
+            int fd = (int)file.DangerousGetHandle();
+            byte[] head = Pattern(100, 18);
+
+            (List<string> noted, byte[] received) = Exchange(WriteOverflowStrategy.Grow, async (conn, writer, notes) =>
+            {
+                writer.Write(head);
+
+                // The first reads at the end of the file, so the kernel writes nothing, wherever its buffer went.
+                // The second asks for more than the slab has left, so sizing it first grew the slab under the first.
+                ValueTask<int> first = conn.ReadFileAsync(fd, content.Length, fileOffset: content.Length);
+                ValueTask<int> second = TryStartRead(conn, fd, 2 * content.Length, "second read", notes);
+                await second;   // one let through still has to land before anything else
+
+                int n = await first;
+                conn.AdvanceWrite(n);
+                notes.Add($"first read {n}, writable {conn.GetSpan(1).Length}");
+                await writer.FlushAsync();
+            });
+
+            Assert.Equal(string.Join(" | ",
+                "second read: refused (A file read is already in flight on this connection.)",
+                $"first read 0, writable {Slab - head.Length}"), string.Join(" | ", noted));
+            AssertReceived(head, received);
         });
 
         runner.Test("tcp writer: neither a file read nor its commit goes past what the write buffer handed out", () =>
@@ -351,20 +410,34 @@ internal static class WriteContractTests
         });
     }
 
-    // Synchronous, so the flush it is made during cannot finish first. One that is let through is returned to
-    // be awaited, and one refused is noted with the reason.
-    private static ValueTask<int> ReadDuringFlush(TcpConnection conn, int fd, int length, List<string> notes)
+    // Synchronous, so what the read is made during - a flush, another read - cannot finish first. One that is
+    // let through is returned to be awaited, and one refused is noted with the reason.
+    private static ValueTask<int> TryStartRead(TcpConnection conn, int fd, int length, string label, List<string> notes)
     {
         try
         {
             ValueTask<int> read = conn.ReadFileAsync(fd, length, 0);
-            notes.Add("read during the flush: taken");
+            notes.Add($"{label}: taken");
             return read;
         }
         catch (InvalidOperationException e)
         {
-            notes.Add($"read during the flush: refused ({e.Message})");
+            notes.Add($"{label}: refused ({e.Message})");
             return default;
+        }
+    }
+
+    // GetMemory is refused while a Segmented response is spilled, so whether it hands out says whether it is.
+    private static string TryGetMemory(TcpConnectionPipeWriter writer)
+    {
+        try
+        {
+            writer.GetMemory(16);
+            return "GetMemory handed out";
+        }
+        catch (NotSupportedException e)
+        {
+            return $"GetMemory refused ({e.Message})";
         }
     }
 

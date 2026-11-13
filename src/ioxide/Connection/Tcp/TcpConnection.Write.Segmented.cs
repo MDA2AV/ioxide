@@ -47,18 +47,35 @@ public sealed unsafe partial class TcpConnection
 
         if (k >= _ovKept || _ov[k].Cap < need)
         {
+            int cap = (int)Math.Min(Math.Max((long)_baseSlabSize << Math.Min(k + 1, 6), need), int.MaxValue);
+
+            // Allocated before the kept segment it replaces is freed, so an allocation that throws leaves that
+            // one as it was. Freed first, _ov[k] kept the freed block and its size, for the next spill to write
+            // into and the recycle to free a second time.
+            nint ptr = (nint)NativeMemory.AlignedAlloc((nuint)cap, 64);
             if (k < _ovKept)
             {
                 NativeMemory.AlignedFree((void*)_ov[k].Ptr);   // kept, but too small for this write
             }
 
-            int cap = (int)Math.Min(Math.Max((long)_baseSlabSize << Math.Min(k + 1, 6), need), int.MaxValue);
-            _ov[k] = new OvSeg { Ptr = (nint)NativeMemory.AlignedAlloc((nuint)cap, 64), Used = 0, Cap = cap };
+            _ov[k] = new OvSeg { Ptr = ptr, Used = 0, Cap = cap };
             _ovKept = Math.Max(_ovKept, k + 1);
         }
 
         _ovCount = k + 1;
         _inOverflow = true;
+    }
+
+    // Gives back the last segment while nothing has been written to it: one a file read spilled into and then
+    // committed nothing to. Left in the chain, it kept the response spilled, and GetMemory refused until the
+    // next flush, for no bytes at all. It stays kept for the next spill, like a released one.
+    private void ReturnEmptySpill()
+    {
+        if (_ovCount > 0 && _ov![_ovCount - 1].Used == 0)
+        {
+            _ovCount--;
+            _inOverflow = _ovCount > 0;
+        }
     }
 
     // Builds the stable iovec/msghdr describing [primary, overflow...] for a SENDMSG. Lazily allocates
