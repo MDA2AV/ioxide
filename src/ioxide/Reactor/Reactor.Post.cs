@@ -59,8 +59,17 @@ public sealed unsafe partial class Reactor
         }
     }
 
+    /// <summary>
+    /// <see cref="ScheduleOnReactor"/> for a continuation somebody is waiting on, posted the way a
+    /// <see cref="ReactorSwitch"/> posts its own: if the reactor stops before running it, it runs on the
+    /// thread pool rather than never. There it finds <see cref="PostsClosed"/> set, and must leave alone
+    /// what the reactor owns.
+    /// </summary>
+    internal void ScheduleContinuation(Action continuation) => ScheduleOnReactor(ReactorSwitch.Resume, continuation);
+
     // A switch waiting on a stopped reactor resumes on the thread pool, where its GetResult throws, instead of
-    // waiting forever. Any other post is dropped: it would never have run.
+    // waiting forever, as does a continuation posted like one (ScheduleContinuation). Every other post is dropped:
+    // it would never have run.
     [MethodImpl(MethodImplOptions.NoInlining)]
     private void DrainStoppedPosts()
     {
