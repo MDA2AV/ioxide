@@ -159,9 +159,8 @@ public sealed partial class Http2Connection : IDisposable
     /// instead of finding it assembled in <see cref="Http2Request.Body"/>.
     ///
     /// The trade is what memory is bound by. A whole body is held whole, which suits ordinary
-    /// requests and not hostile uploads; a streamed one holds one flow-control window, and all of a
-    /// connection's together one connection window, because credit is only returned to the peer as
-    /// the handler reads.
+    /// requests and not hostile uploads; a streamed one holds one flow-control window, because
+    /// credit is only returned to the peer as the handler reads.
     /// </summary>
     public Task RunAsync(Func<Http2Request, Http2BodyReader, ValueTask<Http2Response>> handler)
     {

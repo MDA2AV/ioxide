@@ -23,6 +23,7 @@ internal static class Http2ConnectionWindowTests
                 ("set", new Http2Options { InitialConnectionWindowSize = Opened }, Opened),
                 ("by default", new Http2Options(), ConnectionWindow),
                 ("set below the RFC's", new Http2Options { InitialConnectionWindowSize = 16384 }, ConnectionWindow),
+                ("set negative", new Http2Options { InitialConnectionWindowSize = -1 }, ConnectionWindow),
             })
             {
                 using var client = new StrictClient(options);

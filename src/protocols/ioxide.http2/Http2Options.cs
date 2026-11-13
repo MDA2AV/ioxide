@@ -23,24 +23,26 @@ public sealed record Http2Options
     /// <summary>
     /// Flow-control window for the whole connection: how much request body all its streams together
     /// may have in flight. SETTINGS cannot carry it - INITIAL_WINDOW_SIZE sizes streams only - so a
-    /// size past the RFC's 65,535 is opened by a WINDOW_UPDATE on stream 0 right behind them. Floored
-    /// at 65,535, which is also the default: the uploads of a connection then move 64 KiB a round trip
-    /// between them, whatever <see cref="InitialWindowSize"/> says.
+    /// size past the RFC's 65,535 is opened by a WINDOW_UPDATE on stream 0 right behind them. 65,535 is
+    /// the default, and a smaller value, negative ones included, has no effect: the window starts at
+    /// 65,535 and a WINDOW_UPDATE can only open it. At 65,535 the uploads of a connection move 64 KiB a
+    /// round trip between them, whatever <see cref="InitialWindowSize"/> says.
     ///
-    /// Raise it with the transport. While the frame loop waits on a flush - a response going out to a
-    /// slow peer, or a streamed writer's turn - it reads nothing, and what the peer sends meanwhile
-    /// waits in the connection's receive queue: an entry per receive, and a receive can be a single
-    /// segment of some 1.4 KiB. A queue that overflows closes the connection, so a window the queue
-    /// cannot hold lets a peer that keeps to that window be cut off. The default
-    /// <see cref="TcpOptions.RecvQueueEntries"/>, 64, holds about the RFC's window; 1 MiB needs 1024.
-    /// Under <see cref="ServerConfig.Incremental"/> a connection whose ring is full parks its receive
-    /// instead.
+    /// Raise it with the transport in mind. While the frame loop waits on a flush - a response going
+    /// out to a slow peer, or a streamed writer's turn - it reads nothing. In the default shared
+    /// receive mode what the peer sends meanwhile waits in the connection's receive queue, an entry
+    /// per receive however few bytes it carries, and a queue that overflows closes the connection.
+    /// Enough small frames overflow it at any window, 65,535 included (#535); a larger window lets an
+    /// ordinary upload overflow it too. 1024 <see cref="TcpOptions.RecvQueueEntries"/> held a
+    /// 1 MiB upload arriving in full-size segments where the default 64 did not, though a longer queue
+    /// lets one connection hold that many of the reactor's receive buffers (#526). Under
+    /// <see cref="ServerConfig.Incremental"/> a connection whose ring is full parks its receive
+    /// instead of closing.
     ///
     /// A streamed body is credited only as its handler reads, so a handler that has stopped reading
     /// keeps up to one stream window of this: at twice <see cref="InitialWindowSize"/> the other
-    /// streams still have a whole one, where at one they all wait for it. It is also what bounds
-    /// memory: the streamed bodies of one connection hold at most this between them. A buffered body
-    /// is credited as it arrives, so for one this paces the upload and bounds nothing.
+    /// streams still have a whole one, where at one they all wait for it. A buffered body is credited
+    /// as it arrives, so it keeps none.
     /// </summary>
     public int InitialConnectionWindowSize { get; init; } = 65535;
 
