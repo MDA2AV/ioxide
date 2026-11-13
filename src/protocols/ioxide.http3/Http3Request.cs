@@ -60,8 +60,10 @@ public sealed class Http3Request
 
         if (name.SequenceEqual("content-length"u8))
         {
-            // A repeated one is refused even when the values agree, as nghttp3 does.
+            // Digits only, each byte checked since TryParse lets a trailing NUL through. A repeated one
+            // is refused even when the values agree, as nghttp3 does.
             ContentLengthLeft = ContentLengthLeft == -1
+                && value.IndexOfAnyExceptInRange((byte)'0', (byte)'9') < 0
                 && long.TryParse(value, NumberStyles.None, CultureInfo.InvariantCulture, out long length)
                     ? length
                     : -2;
