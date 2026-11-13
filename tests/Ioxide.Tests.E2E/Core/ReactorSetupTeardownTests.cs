@@ -157,12 +157,14 @@ internal static class ReactorSetupTeardownTests
             const int attempts = 8;
             HashSet<int> ringsBefore = ExecInheritance.Referring(IoUring);
             HashSet<int> devNullsBefore = ExecInheritance.Referring(DevNull);
+            int mappingsBefore = IoUringMappings();
             var numbers = new HashSet<int>();
 
             for (int attempt = 0; attempt < attempts; attempt++)
             {
                 Exception? reported = null;
                 int ringFd = -1;
+                int mappedAtFault = 0;
 
                 var reactor = new Reactor(0, new ServerConfig
                 {
@@ -183,6 +185,7 @@ internal static class ReactorSetupTeardownTests
                         reported = e;
                         int fd = RingOf(r).Fd;
                         ringFd = ExecInheritance.Target(fd) == IoUring ? fd : -1;
+                        mappedAtFault = IoUringMappings();
                     },
                 };
 
@@ -193,6 +196,8 @@ internal static class ReactorSetupTeardownTests
                 Assert.True(reported?.Message.Contains("bind failed") == true,
                     $"attempt {attempt} failed somewhere other than its bind: {reported?.Message ?? "no fault"}");
                 Assert.True(ringFd > 0, $"attempt {attempt} had no ring open when it failed, so there was none to leak");
+                Assert.True(mappedAtFault > mappingsBefore,
+                    $"attempt {attempt}'s ring was not mapped when it failed, so counting mappings could not see one left behind");
                 numbers.Add(ringFd);
             }
 
@@ -200,6 +205,13 @@ internal static class ReactorSetupTeardownTests
             rings.ExceptWith(ringsBefore);
             Assert.True(rings.Count == 0,
                 $"{attempts} failed starts left {rings.Count} rings open, at {string.Join(", ", rings.Order())}");
+
+            // A descriptor is not all that keeps a ring alive: a mapping does too, and the number now on /dev/null says
+            // nothing of one. munmap is synchronous, so Run has unmapped by the time it returns. The slot
+            // IORING_REGISTER_RING_FDS gives a ring keeps it alive as well, and nothing in /proc shows that one.
+            int mappings = IoUringMappings();
+            Assert.True(mappings <= mappingsBefore,
+                $"{attempts} failed starts left {mappings - mappingsBefore} io_uring mappings, so their rings are still alive");
 
             // What each attempt is left with instead: the number its ring had, on /dev/null, and no other descriptor.
             HashSet<int> devNulls = ExecInheritance.Referring(DevNull);
@@ -510,6 +522,10 @@ internal static class ReactorSetupTeardownTests
     // What /proc/self/fd links a descriptor to. Every ring links to the same target, so only the number tells two apart.
     private const string IoUring = "anon_inode:[io_uring]";
     private const string DevNull = "/dev/null";
+
+    // The io_uring mappings in this process, a line of /proc/self/maps each: two per ring, the SQ/CQ rings and the SQEs.
+    private static int IoUringMappings()
+        => File.ReadLines("/proc/self/maps").Count(line => line.Contains(IoUring, StringComparison.Ordinal));
 
     // A connect completes into a listener's backlog without anyone accepting, so it succeeds exactly
     // while the listening socket is open.

@@ -11,6 +11,10 @@ public sealed unsafe class Ring : IDisposable
 {
     private int _fd;
 
+    /// <summary>
+    /// The ring's descriptor until the ring is disposed, and 0 after: by then the number is closed, or holds
+    /// something that is not this ring's to act on.
+    /// </summary>
     public int Fd => _fd;
 
     private uint*       _sqHead;
@@ -276,14 +280,36 @@ public sealed unsafe class Ring : IDisposable
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public void CqAdvance(uint n) => Volatile.Write(ref *_cqHead, *_cqHead + n);
 
-    public void Dispose() => Dispose(true);
+    /// <summary>Unmaps both rings and closes the descriptor, which frees the ring.</summary>
+    public void Dispose()
+    {
+        UnmapAndUnregister();
+
+        if (_fd > 0)
+        {
+            close(_fd); _fd = 0;
+        }
+    }
 
     /// <summary>
-    /// Unmaps both rings and closes the descriptor, which frees the ring. Unless <paramref name="closeFd"/>
-    /// says otherwise: then the ring is freed all the same, but /dev/null takes its place at the number,
-    /// which stays taken. That is for one case only - see Reactor.Teardown.
+    /// Frees the ring as <see cref="Dispose"/> does, but leaves its number taken: /dev/null takes the ring's
+    /// place there. For one case only - see Reactor.Teardown.
     /// </summary>
-    public void Dispose(bool closeFd)
+    internal void DisposeKeepingNumber()
+    {
+        UnmapAndUnregister();
+
+        if (_fd > 0)
+        {
+            ReplaceWithDevNull(_fd);
+
+            // No longer the ring's to close, even where the ring had to stay: a Dispose after this must not free the number.
+            _fd = 0;
+        }
+    }
+
+    // All that holds the ring but its descriptor.
+    private void UnmapAndUnregister()
     {
         if (_ringPtr != null)
         {
@@ -304,32 +330,22 @@ public sealed unsafe class Ring : IDisposable
             io_uring_register(_fd, IORING_UNREGISTER_RING_FDS, &update, 1);
             _enterFlags = 0;
         }
-
-        if (_fd > 0 && closeFd)
-        {
-            close(_fd); _fd = 0;
-        }
-        else if (_fd > 0 && ReplaceWithDevNull(_fd))
-        {
-            _fd = 0;
-        }
     }
 
     // With the mappings and the registered slot gone, the descriptor holds the ring's last reference, so replacing it
     // frees the ring just as a close would - but dup3 puts /dev/null at the number in the same step, so the number is
     // never free. Close-on-exec, as the ring's descriptor was, or every process the host starts would inherit it. With
     // no /dev/null to be had (a process out of descriptors) the ring stays open at its number, which keeps it taken too.
-    private static bool ReplaceWithDevNull(int fd)
+    private static void ReplaceWithDevNull(int fd)
     {
         int devNull = open("/dev/null", O_RDONLY | O_CLOEXEC, 0);
         if (devNull < 0)
         {
-            return false;
+            return;
         }
 
-        bool replaced = dup3(devNull, fd, O_CLOEXEC) == fd;
+        dup3(devNull, fd, O_CLOEXEC);
         close(devNull);
-        return replaced;
     }
 }
 
