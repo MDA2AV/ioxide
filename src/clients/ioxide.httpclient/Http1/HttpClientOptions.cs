@@ -19,9 +19,10 @@ public sealed record HttpClientOptions
     /// each carries one request at a time, so this is the concurrency ceiling for this reactor.</summary>
     public int PoolSize { get; init; } = 4;
 
-    /// <summary>Per-request ceiling for headers + body; a bigger response fails the request
-    /// instead of growing the buffer without bound. A response must also fit one array, so past
-    /// about 2 GiB it fails whatever this is set to.</summary>
+    /// <summary>Per-request ceiling for every byte of the response: headers, body, its chunk framing and
+    /// trailers, and any 1xx heads before it. A bigger response fails the request instead of being read
+    /// without bound. A response must also fit one array, so past about 2 GiB it fails whatever this is
+    /// set to.</summary>
     public int MaxResponseBytes { get; init; } = 8 * 1024 * 1024;
 
     /// <summary>Per-connection send buffer; larger request bodies are sent straight from the
