@@ -140,6 +140,15 @@ internal static class OffReactorStreamTests
         runner.Test("h3 off-reactor (http3): a handler that throws from the thread pool is reset from the reactor, and the connection serves on", () =>
             AssertH3Throws((conn, calls) => new Http3Connection(conn).RunAsync((_, writer) =>
                 ThrowFirst(calls, status => writer.WriteHeaders(new Http3Response { Status = status })))));
+
+        // A handler can also reset its stream without throwing (#572): that reset is connection work too.
+        runner.Test("h2 off-reactor (http2): ResetStreamAsync from the thread pool resets the stream from the reactor, and the connection serves on", () =>
+            AssertH2Throws((pipe, calls) => new Http2Connection(pipe).RunAsync((_, writer) =>
+                ResetFirst(calls, status => writer.WriteHeaders(new Http2Response { Status = status }), () => writer.ResetStreamAsync()))));
+
+        runner.Test("h3 off-reactor (nghttp3): ResetStreamAsync from the thread pool resets the stream from the reactor, and the connection serves on", () =>
+            AssertH3Throws((conn, calls) => new Nghttp3Connection(conn).RunAsync((_, writer) =>
+                ResetFirst(calls, status => writer.WriteHeaders(new Nghttp3Response { Status = status }), () => writer.ResetStreamAsync()))));
     }
 
     /// <summary>
@@ -231,6 +240,20 @@ internal static class OffReactorStreamTests
         writeHeaders(202);
     }
 
+    // The first request's stream is reset from the pool, after its headers; the next is answered normally.
+    private static async ValueTask ResetFirst(Calls calls, Action<int> writeHeaders, Func<ValueTask> reset)
+    {
+        await LeaveReactor();
+        calls.Note();
+        if (Interlocked.Increment(ref calls.Requests) == 1)
+        {
+            writeHeaders(200);
+            await reset();
+            return;
+        }
+        writeHeaders(202);
+    }
+
     private static ConfiguredTaskAwaitable LeaveReactor() => Task.CompletedTask.ConfigureAwait(ConfigureAwaitOptions.ForceYielding);
 
     /// <summary>Where the handler's calls were made, set by the server and read by the test.</summary>
@@ -241,6 +264,27 @@ internal static class OffReactorStreamTests
         public int QuicCallsOff;
         private int _on;
         private int _off;
+        private readonly List<string> _resets = [];
+
+        /// <summary>Every stream the server's QUIC connection was asked to reset, with its code.</summary>
+        public string Resets
+        {
+            get
+            {
+                lock (_resets)
+                {
+                    return string.Join(", ", _resets);
+                }
+            }
+        }
+
+        public void NoteReset(long streamId, ulong code)
+        {
+            lock (_resets)
+            {
+                _resets.Add($"stream {streamId} with 0x{code:x}");
+            }
+        }
 
         public void Note()
         {
@@ -465,6 +509,10 @@ internal static class OffReactorStreamTests
             (int failed, _) = client.Request("GET", "/", null, timeoutMs: 5_000);
             Assert.True(failed != 200, $"the failed request was reset rather than answered ({failed})");
 
+            // The client sees a reset as no answer at all, which a request that timed out looks like too.
+            Assert.True(SpinWait.SpinUntil(() => calls.Resets.Contains("stream 0 with 0x102"), 5_000),
+                $"the failed request's stream was reset with H3_INTERNAL_ERROR (resets: [{calls.Resets}])");
+
             (int status, string text) = client.Request("GET", "/", null, timeoutMs: 30_000);
             Assert.Equal(202, status);
             Assert.Equal(0, text.Length);
@@ -519,6 +567,7 @@ internal static class OffReactorStreamTests
         public override void ResetStream(long streamId, ulong applicationErrorCode)
         {
             Note();
+            calls.NoteReset(streamId, applicationErrorCode);
             base.ResetStream(streamId, applicationErrorCode);
         }
 

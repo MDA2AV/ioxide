@@ -293,11 +293,11 @@ public sealed partial class Http2Connection : IDisposable
     {
         while (_ready.TryDequeue(out PendingRequest? pending))
         {
+            Http2Request request = pending.Freeze();
             ValueTask<Http2Response> inFlight;
 
             try
             {
-                Http2Request request = pending.Freeze();
                 inFlight = handler(request);
             }
             catch (Exception exception)
@@ -327,7 +327,7 @@ public sealed partial class Http2Connection : IDisposable
             // stream on this connection behind it, including responses already staged and ready to
             // go, because they all share this one dispatch loop and one TCP connection. So it
             // finishes on its own and writes its own bytes when it does.
-            _ = CompleteBufferedAsync(inFlight, pending);
+            _ = CompleteBufferedAsync(inFlight, request, pending);
         }
     }
 
@@ -337,7 +337,7 @@ public sealed partial class Http2Connection : IDisposable
     /// since the pass flush has long gone by. Forgetting that tail in the streamed path is what
     /// leaked 20 GB.
     /// </summary>
-    private async Task CompleteBufferedAsync(ValueTask<Http2Response> inFlight, PendingRequest pending)
+    private async Task CompleteBufferedAsync(ValueTask<Http2Response> inFlight, Http2Request request, PendingRequest pending)
     {
         try
         {
@@ -350,7 +350,7 @@ public sealed partial class Http2Connection : IDisposable
             await new ReactorSwitch(_reactor);
             // Nobody can observe this task, so an escaping exception would vanish silently and the
             // peer would wait on a stream that is never coming.
-            Console.Error.WriteLine($"[ioxide.http2] request handler faulted: {exception.GetBaseException().Message}");
+            ReportHandlerFault(request, exception);
 
             if (!IsBroken)
             {
@@ -361,6 +361,30 @@ public sealed partial class Http2Connection : IDisposable
         {
             RetireStream(pending);
             await MaybeFlushAsync();
+        }
+    }
+
+    /// <summary>
+    /// A handler threw: the host's <see cref="Http2Options.OnHandlerFault"/> is told, or without one
+    /// stderr is, as it always was. On the reactor, before the request is ended.
+    /// </summary>
+    private void ReportHandlerFault(Http2Request request, Exception exception)
+    {
+        Action<Http2Request, Exception>? onFault = _options.OnHandlerFault;
+        if (onFault is null)
+        {
+            Console.Error.WriteLine($"[ioxide.http2] request handler faulted: {exception.GetBaseException().Message}");
+            return;
+        }
+
+        try
+        {
+            onFault(request, exception);
+        }
+        catch
+        {
+            // The host's own code, run where the stack is cleaning up after the handler: the
+            // request still has to be ended, so nothing the hook throws may get in the way.
         }
     }
 
