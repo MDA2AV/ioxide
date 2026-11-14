@@ -28,6 +28,12 @@ public sealed partial class Http2Connection
     private byte[] _queued = [];
     private int _queuedUsed;
 
+    // The DATA among those bytes: the peer's own windows bound it, so it never holds the read loop back.
+    private int _queuedData;
+
+    // What else may queue behind a flush before the read loop waits for it: every stream's credit and answer fit.
+    private const int MaxQueuedBytes = 1024 * 1024;
+
     // Callers parked on the pump's next turn, in the order they parked: woken when the flush AFTER the
     // current one finishes - the one that carries the queue. Callers who staged into the queue wait for
     // it, which keeps the two things a real flush provided: backpressure, and the yield that hands the
@@ -56,6 +62,17 @@ public sealed partial class Http2Connection
         }
     }
 
+    private void StageData(ReadOnlySpan<byte> header, ReadOnlySpan<byte> body)
+    {
+        int queued = _queuedUsed;
+        Stage(header);
+        if (!body.IsEmpty)
+        {
+            Stage(body);
+        }
+        _queuedData += _queuedUsed - queued;
+    }
+
     // Not async: a wait for the pump's next turn is returned as it is, on the caller's own waiter if it keeps one.
     private ValueTask<FlushResult> FlushAsync(TurnWaiter? waiter = null)
     {
@@ -75,9 +92,29 @@ public sealed partial class Http2Connection
         return _staged ? PumpAsync() : default;
     }
 
+    // The read loop's flush: it reads on behind it, and waits only once more than MaxQueuedBytes besides DATA queue behind it.
+    private ValueTask<FlushResult> FlushPassAsync()
+    {
+        if (_disposed || _writeDead)
+        {
+            return default;
+        }
+
+        if (_flushing)
+        {
+            return _queuedUsed - _queuedData > MaxQueuedBytes ? AwaitTurn(new TurnWaiter()) : default;
+        }
+
+        if (_staged)
+        {
+            _ = PumpAsync(detached: true);
+        }
+        return default;
+    }
+
     // This caller becomes the pump: it drives turn after turn until a flush completes with the
     // queue empty. Everyone else who staged meanwhile waits for their turn.
-    private async ValueTask<FlushResult> PumpAsync()
+    private async ValueTask<FlushResult> PumpAsync(bool detached = false)
     {
         _flushing = true;
         TurnWaiter? turn = null;
@@ -115,6 +152,7 @@ public sealed partial class Http2Connection
 
                 _pipe.Output.Write(_queued.AsSpan(0, _queuedUsed));
                 _queuedUsed = 0;
+                _queuedData = 0;
             }
         }
         catch
@@ -123,7 +161,11 @@ public sealed partial class Http2Connection
             // must drop rather than throw from detached tails nobody observes.
             _writeDead = true;
             _failed = true;
-            throw;
+            if (!detached)
+            {
+                throw;
+            }
+            return PeerGone;   // nobody awaits it: the read loop hears through IsBroken
         }
         finally
         {
@@ -150,7 +192,13 @@ public sealed partial class Http2Connection
         Wake(TakeTurn(), result);
         if (_writeDead)
         {
-            ReleaseAllCreditWaiters();   // the fault reached a writer, so no teardown is on its way to them
+            ReleaseAllCreditWaiters();   // now: the teardown waits on the read loop's next read
+
+            // The read loop waits on a read, not on this flush: the cancel ends that read, or the next one.
+            if (!_disposed)
+            {
+                _pipe.Input.CancelPendingRead();
+            }
         }
     }
 
@@ -394,8 +442,7 @@ public sealed partial class Http2Connection
             new FrameHeader(chunk, FrameType.Data, last ? FrameFlags.EndStream : FrameFlags.None, streamId)
                 .Write(header);
 
-            Stage(header);
-            Stage(body.Slice(offset, chunk));
+            StageData(header, body.Slice(offset, chunk));
 
             _peerConnectionWindow -= chunk;
             window -= chunk;
