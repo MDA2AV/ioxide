@@ -429,12 +429,6 @@ public sealed partial class Http2Connection : IDisposable
         {
             ResetStream(pending.StreamId, Http2Error.NoError);
         }
-        else if (live && !pending.RequestEnded)
-        {
-            // Its upload goes on behind the parked rest, and what its reader held is dropped below: all it was sent is consumed.
-            _parkedUploads[pending.StreamId] = 0;
-            CreditParkedUpload(pending.StreamId, _initialStreamWindow - pending.ReceiveWindow, ended: false);
-        }
 
         Recycle(pending);
 
@@ -506,33 +500,6 @@ public sealed partial class Http2Connection : IDisposable
 
         CreditStream(pending, consumed);
         return true;
-    }
-
-    // The upload still arriving behind each buffered answer parked on credit, by stream: what it has had dropped and not been credited.
-    private readonly Dictionary<int, int> _parkedUploads = new();
-
-    // Credited in steps as it is dropped, so a client that credits the answer only once its upload ends can finish both.
-    private void CreditParkedUpload(int streamId, int dropped, bool ended)
-    {
-        if (!_parkedUploads.TryGetValue(streamId, out int owed))
-        {
-            return;
-        }
-
-        // An ended request is owed none, and a stream whose answer has gone takes none (RFC 9113 5.1).
-        if (ended || !_responseWindows.ContainsKey(streamId))
-        {
-            _parkedUploads.Remove(streamId);
-            return;
-        }
-
-        owed += dropped;
-        if (owed >= _creditStep)
-        {
-            WriteWindowUpdate(streamId, owed);
-            owed = 0;
-        }
-        _parkedUploads[streamId] = owed;
     }
 
     // Every WINDOW_UPDATE the server sends goes through these two, which add back exactly what they grant.

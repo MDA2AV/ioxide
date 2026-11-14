@@ -222,9 +222,8 @@ internal static class Http2EarlyAnswerTests
             client.Close(run);
         });
 
-        runner.Test("h2 early answer: an upload still arriving while a buffered answer is parked on credit is credited on its stream", () =>
+        runner.Test("h2 early answer: an upload still arriving behind a buffered answer parked on credit is credited nothing, and a client that credits the answer gets it whole", () =>
         {
-            // A client that credits its answer only once its upload ends can then end it.
             byte[] answer = new byte[64 * 1024];
 
             using var client = new StrictClient();
@@ -235,16 +234,16 @@ internal static class Http2EarlyAnswerTests
             List<Frame> frames = client.Drain();
             Assert.Equal(16384, Frame.Body(frames, 1).Length);   // one stream window, then parked
 
-            // A step's worth, in one WINDOW_UPDATE that counts the 1,000 bytes dropped unread with its handler too.
+            // Its handler is done with the request, so what still arrives is dropped and its window stays shut.
             client.Feed(Fill(1, 4 * 16384));
-            List<Frame> credited = client.Drain();
-            Assert.Equal(1000 + (4 * 16384), Credit(credited, 1));
-            Assert.Equal(1, credited.Count(f => f is { Type: Frame.WindowUpdate, StreamId: 1 }));
+            List<Frame> dropped = client.Drain();
+            Assert.Equal(0, Credit(dropped, 1));
 
-            client.Feed(WindowUpdate(1, 1 << 20));
-            frames.AddRange(credited);
+            client.Feed(WindowUpdate(1, 1 << 20));               // a client that reads its answer while it uploads
+            frames.AddRange(dropped);
             frames.AddRange(client.Drain());
-            Assert.Equal(answer.Length, Frame.Body(frames, 1).Length);
+            Assert.True(Frame.Body(frames, 1).Length == answer.Length && frames.Last(f => f is { Type: Frame.Data, StreamId: 1 }).EndStream,
+                $"the answer came to {Frame.Body(frames, 1).Length} of {answer.Length} bytes once the client credited it");
 
             client.Close(run);
         });

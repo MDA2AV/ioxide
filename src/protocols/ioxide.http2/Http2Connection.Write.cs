@@ -484,7 +484,6 @@ public sealed partial class Http2Connection
         {
             _creditWaiters.Remove(writer.StreamId);
             _responseWindows.Remove(writer.StreamId);
-            _parkedUploads.Remove(writer.StreamId);
             _writerPool.Push(writer);
         }
     }

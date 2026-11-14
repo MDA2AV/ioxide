@@ -195,7 +195,7 @@ public sealed class Http2BodyReader : IValueTaskSource<ReadOnlyMemory<byte>>
         FireIfReady();
     }
 
-    // Owed no credit here: the connection was charged for these on arrival, and a stream left open behind a parked answer counts them at its retire.
+    // Owed no credit: the connection was charged for these on arrival, and their stream is done.
     private void DropQueued()
     {
         while (_chunks.TryDequeue(out (byte[] Buffer, int Length) chunk))

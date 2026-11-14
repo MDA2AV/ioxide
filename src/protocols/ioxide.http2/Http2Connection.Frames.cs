@@ -404,9 +404,7 @@ public sealed partial class Http2Connection
 
         if (!_streams.TryGetValue(header.StreamId, out PendingRequest? pending))
         {
-            // A buffered answer parked on credit still has its upload credited; any other stream's window went with it.
-            CreditParkedUpload(header.StreamId, payload.Length, ended);
-            return;
+            return;   // done with its request, so owed no credit, behind a buffered answer still parked on credit too
         }
 
         // Past its window is a stream error (6.9), and its response stops with it; an empty frame may still end it (6.9.1).

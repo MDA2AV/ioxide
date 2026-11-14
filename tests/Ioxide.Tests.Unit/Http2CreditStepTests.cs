@@ -1,6 +1,5 @@
 using System.Buffers.Binary;
 using System.Globalization;
-using System.Runtime.CompilerServices;
 using System.Text;
 using ioxide.http2;
 using static Ioxide.Tests.Http2FlowControlTests;
@@ -20,15 +19,11 @@ internal static class Http2CreditStepTests
 
     private const uint EnhanceYourCalm = 0xb;
 
-    [UnsafeAccessor(UnsafeAccessorKind.Field, Name = "_parkedUploads")]
-    private static extern ref Dictionary<int, int> ParkedUploads(Http2Connection connection);
-
     public static void Register(Runner runner)
     {
         RegisterSteps(runner);
         RegisterNoStall(runner);
         RegisterEnds(runner);
-        RegisterParked(runner);
     }
 
     private static void RegisterSteps(Runner runner)
@@ -268,87 +263,6 @@ internal static class Http2CreditStepTests
         });
     }
 
-    private static void RegisterParked(Runner runner)
-    {
-        // The answer is twice the client's 16 KiB window for it, so its rest parks on credit the client gives only once its upload is done.
-        foreach (int unread in new[] { StreamWindow - 16384, StreamWindow })
-        {
-            runner.Test($"h2 credit: a buffered answer parked on credit, its handler gone with {unread} bytes unread, still lets a client that credits it only after its upload finish both", () =>
-            {
-                const long Size = 1L << 20;
-                byte[] answer = new byte[32 * 1024];
-                var gate = new TaskCompletionSource();
-
-                using var client = new StrictClient();
-                Task run = client.Connection.RunAsync(async (_, _) =>
-                {
-                    await gate.Task;
-                    return new Http2Response { Status = 413, Body = answer };
-                });
-
-                Uploader up = Start(client, applied: true, frame: 16384, clientSettings: [(InitialWindowSize, 16384)]);
-                Assert.True(up.SendTo(unread, Size), $"the upload stopped at {up.Sent} bytes, before the {unread} its handler leaves unread");
-
-                gate.SetResult();
-                Assert.True(up.SendTo(Size, Size),
-                    $"behind the parked answer the upload stopped at {up.Sent} of {Size} bytes, its stream credited [{Summary(Increments(up.Frames, 1))}]");
-
-                client.Feed(WindowUpdate(1, 1 << 20));
-                up.Take();
-                Assert.True(Frame.Body(up.Frames, 1).Length == answer.Length && up.Frames.Last(f => f.StreamId == 1 && f.Type == Frame.Data).EndStream,
-                    $"the answer came to {Frame.Body(up.Frames, 1).Length} of {answer.Length} bytes once the client credited it");
-
-                List<int> credit = Increments(up.Frames, 1);
-                Assert.True(credit.All(c => c >= Step), $"the stream was credited [{Summary(credit)}], not in whole steps");
-
-                client.Close(run);
-            });
-        }
-
-        runner.Test("h2 credit: an upload behind a parked answer is credited nothing, and leaves nothing behind, once it ends, once its answer has ended, or once either side resets it", () =>
-        {
-            foreach (string end in new[] { "it ended", "its answer ended", "the peer reset it", "the server reset it" })
-            {
-                using var client = new StrictClient();
-                Task run = client.Connection.RunAsync((_, _) => new ValueTask<Http2Response>(new Http2Response { Status = 413, Body = new byte[32 * 1024] }));
-
-                // Answered unread: 16,384 bytes of the answer go out, its flush left in flight, the rest parks, and 50,152 bytes are dropped, 15,383 short of a step.
-                client.ReleaseFlush();
-                client.Feed([.. Open((InitialWindowSize, 16384)), .. WindowUpdate(0, 1 << 20), .. Post(1), .. Data(1, 1000, endStream: false), .. Fill(1, 3 * 16384)]);
-                Assert.True(ParkedUploads(client.Connection).TryGetValue(1, out int owed) && owed == 1000 + (3 * 16384),
-                    $"the upload behind the parked answer was counted at {owed} bytes, not the 50152 dropped");
-
-                // Then a frame that would make the step.
-                switch (end)
-                {
-                    case "it ended":
-                        client.Feed(Data(1, 16384, endStream: true));
-                        break;
-                    case "its answer ended":
-                        client.Drain();
-                        client.Feed(WindowUpdate(1, 1 << 20));
-                        Assert.True(client.Drain().Any(f => f.StreamId == 1 && f.EndStream), "the answer never ended");
-                        client.Feed(Data(1, 16384, endStream: false));
-                        break;
-                    case "the peer reset it":
-                        client.Feed(RstStream(1, Cancel));
-                        break;
-                    default:
-                        // Past 2^31-1, so reset with FLOW_CONTROL_ERROR under the answer's flush, the client's DATA already on its way.
-                        client.Feed([.. WindowUpdate(1, 1), .. WindowUpdate(1, int.MaxValue), .. Data(1, 16384, endStream: false)]);
-                        break;
-                }
-
-                int credited = Credit(client.Drain(), 1);
-                int left = ParkedUploads(client.Connection).Count;
-                Assert.True(credited == 0 && left == 0,
-                    $"once {end}, the upload behind a parked answer was credited {credited} bytes, and {left} of its counts were left behind");
-
-                client.Close(run);
-            }
-        });
-    }
-
     /// <summary>
     /// A client uploading on one stream: it sends what the windows it counts allow, in frames of at most
     /// <c>frame</c> bytes, and takes in everything the server flushes before each frame.
@@ -392,14 +306,13 @@ internal static class Http2CreditStepTests
     }
 
     // The preface taken in, the server's SETTINGS applied by the client or not, then the client's own preface and a POST on stream 1.
-    private static Uploader Start(StrictClient client, bool applied, int frame, bool acknowledge = false,
-        params (ushort Id, uint Value)[] clientSettings)
+    private static Uploader Start(StrictClient client, bool applied, int frame, bool acknowledge = false)
     {
         List<Frame> preface = Frame.Walk(client.ReleaseFlush());
         var peer = new PeerWindow();
         peer.Absorb(applied ? preface : preface.Where(f => f.Type != Frame.Settings));
 
-        client.Feed([.. Open(clientSettings), .. (acknowledge ? SettingsAck() : []), .. WindowUpdate(0, 1 << 20), .. Post(1)]);
+        client.Feed([.. Open(), .. (acknowledge ? SettingsAck() : []), .. WindowUpdate(0, 1 << 20), .. Post(1)]);
         return new Uploader(client, peer, streamId: 1, frame) { ServerSettings = preface.First(f => f.Type == Frame.Settings) };
     }
 
