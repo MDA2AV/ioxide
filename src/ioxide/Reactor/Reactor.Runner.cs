@@ -199,11 +199,8 @@ public sealed unsafe partial class Reactor
             NativeMemory.AlignedFree(_bufRing);
             _bufRing = null;
         }
-        if (_bufSlab != null)
-        {
-            NativeMemory.AlignedFree(_bufSlab);
-            _bufSlab = null;
-        }
+        // Not under a handler holding a connection, whose queue and reader may point into it: the last to let go frees it.
+        ReleaseBufSlab();
         FreeUdpMemory();
 
         // Last, so what is still queued, or posted from here on, fails its switch rather than waiting forever.

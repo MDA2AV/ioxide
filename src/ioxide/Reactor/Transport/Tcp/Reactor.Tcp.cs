@@ -252,6 +252,7 @@ public sealed unsafe partial class Reactor
             conn.UseZc = _zeroCopySend;   // config default; kTLS overrides to plain on handshake
             Track(clientFd, conn);
             conn.InitRefs();
+            Interlocked.Increment(ref _bufSlabHolders);   // the handler's, given up by its DecRef
             conn.ListenerPort = PortOf(listenFd);
             conn.BindSendOpFlags(_sendOpFlags);   // TcpOptions.SendWaitAll; the kTLS handoff clears it
             SubmitRecvMultishot(clientFd, (ushort)conn.Generation, bgid);

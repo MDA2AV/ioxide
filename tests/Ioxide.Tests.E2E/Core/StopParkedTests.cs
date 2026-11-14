@@ -1,3 +1,5 @@
+using System.Buffers;
+using System.IO.Pipelines;
 using System.Net;
 using System.Net.Sockets;
 using System.Runtime.InteropServices;
@@ -341,6 +343,164 @@ internal static class StopParkedTests
             AfterTheStop((conn, _) => conn.ReadAsync().AsTask(), "ReadAsync");
         });
 
+        foreach (bool peerClosed in new[] { false, true })
+        {
+            string state = peerClosed ? "its client closed before the stop" : "open at the stop";
+
+            runner.Test($"stop: a read from another thread after the stop gets the bytes queued before it, intact, from receive memory the stop kept ({state})", () =>
+            {
+                QueuedAcrossTheStop(SharedRing, peerClosed);
+            });
+        }
+
+        runner.Test("stop: control: in incremental mode a read from another thread after the stop gets the bytes queued before it, intact", () =>
+        {
+            QueuedAcrossTheStop(IncrementalRing, peerClosed: false);
+        }, skip: !TestServer.KernelAtLeast(6, 12));
+
+        runner.Test("stop: what a pipe reader took before the stop and still holds stays intact, in receive memory the stop kept", () =>
+        {
+            var holding = new TaskCompletionSource<(TcpConnection, ReadOnlySequence<byte>)>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+
+            (int port, Reactor reactor, Thread thread) = TestServer.StartConfigured(async (_, conn) =>
+            {
+                var reader = new TcpConnectionPipeReader(conn);
+                try
+                {
+                    while (true)
+                    {
+                        ReadResult result = await reader.ReadAsync();
+                        if (result.Buffer.Length >= Payload.Length)
+                        {
+                            holding.TrySetResult((conn, result.Buffer));   // neither consumed nor completed
+                            await release.Task;
+                            return;
+                        }
+                        if (result.IsCompleted)
+                        {
+                            return;   // the harness's listen probe
+                        }
+                        reader.AdvanceTo(result.Buffer.Start, result.Buffer.End);
+                    }
+                }
+                finally
+                {
+                    reader.Complete();
+                    conn.DecRef();
+                }
+            }, SharedRing);
+
+            try
+            {
+                using Socket client = Connect(port);
+                client.Send(Payload);
+                Assert.True(holding.Task.Wait(5_000), "the handler never read what its client sent");
+
+                StopAndJoin(reactor, thread);
+
+                (TcpConnection conn, ReadOnlySequence<byte> held) = holding.Task.Result;
+                foreach (ReadOnlyMemory<byte> segment in held)
+                {
+                    AssertInAllocatedSlab(reactor, conn, SharedRing, segment);
+                }
+                Assert.True(held.ToArray().AsSpan().SequenceEqual(Payload), "what the reader held changed across the stop");
+            }
+            finally
+            {
+                release.TrySetResult();
+            }
+        });
+
+        runner.Test("stop: the receive slab is freed once the handlers the stop woke let go", () =>
+        {
+            var parked = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var letGo = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+
+            (int port, Reactor reactor, Thread thread) = TestServer.StartConfigured(async (_, conn) =>
+            {
+                if (!await IsThisTestsConnection(conn))
+                {
+                    conn.DecRef();
+                    return;
+                }
+
+                parked.TrySetResult();
+                await conn.ReadAsync();   // until the stop closes it
+                conn.DecRef();
+                letGo.TrySetResult();
+            }, SharedRing);
+
+            using Socket client = Connect(port);
+            client.Send("hi"u8);
+            Assert.True(parked.Task.Wait(5_000), "the handler never parked");
+
+            StopAndJoin(reactor, thread);
+            Assert.True(letGo.Task.Wait(ReturnsWithinMs), "the handler the stop woke never let go");
+            Assert.True(!HasSlab(reactor), "the receive slab outlived a stop whose handlers have all let go");
+        });
+
+        runner.Test("stop: the receive slab outlives the stop until the last handler still holding a connection lets go", () =>
+        {
+            using var running = new CountdownEvent(2);
+            var release = new Dictionary<char, TaskCompletionSource>();
+            var letGo = new Dictionary<char, TaskCompletionSource>();
+            foreach (char role in "ab")
+            {
+                release[role] = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+                letGo[role] = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            }
+
+            (int port, Reactor reactor, Thread thread) = TestServer.StartConfigured(async (_, conn) =>
+            {
+                int role = await ReadRole(conn);
+                if (role < 0)
+                {
+                    conn.DecRef();
+                    return;
+                }
+
+                running.Signal();
+                await release[(char)role].Task;   // busy outside ioxide when the stop comes
+                conn.DecRef();
+                letGo[(char)role].TrySetResult();
+            }, SharedRing);
+
+            var clients = new List<Socket>();
+            try
+            {
+                foreach (char role in "ab")
+                {
+                    Socket client = Connect(port);
+                    clients.Add(client);
+                    client.Send([(byte)role]);
+                }
+                Assert.True(running.Wait(5_000), "the handlers never ran");
+
+                StopAndJoin(reactor, thread);
+                Assert.True(HasSlab(reactor), "the receive slab was freed at the stop, under two connections their handlers still hold");
+
+                release['a'].TrySetResult();
+                Assert.True(letGo['a'].Task.Wait(ReturnsWithinMs), "the first handler never let go");
+                Assert.True(HasSlab(reactor), "the receive slab was freed when the first of two handlers let go, under the other");
+
+                release['b'].TrySetResult();
+                Assert.True(letGo['b'].Task.Wait(ReturnsWithinMs), "the second handler never let go");
+                Assert.True(!HasSlab(reactor), "the receive slab outlived the last handler to let go");
+            }
+            finally
+            {
+                foreach (TaskCompletionSource each in release.Values)
+                {
+                    each.TrySetResult();
+                }
+                foreach (Socket client in clients)
+                {
+                    client.Dispose();
+                }
+            }
+        });
+
         runner.Test("stop: a RingTimer wait from another thread after the reactor stopped returns", () =>
         {
             AfterTheStop((_, reactor) => new RingTimer(reactor).DelayAsync(1).AsTask(), "DelayAsync");
@@ -471,6 +631,122 @@ internal static class StopParkedTests
             }
         }
     }
+
+    // Small, so a slice's bounds are easy to check.
+    private static readonly ServerConfig SharedRing = new() { RecvBufferSize = 4096, RecvSlots = 256, Tcp = new TcpOptions() };
+
+    private static readonly ServerConfig IncrementalRing = new()
+    {
+        Incremental = new IncrementalOptions { MaxConnections = 16 },
+        Tcp = new TcpOptions(),
+    };
+
+    private static readonly byte[] Payload = [.. Enumerable.Range(0, 1000).Select(i => (byte)('a' + i % 26))];
+
+    // A handler waiting on something else while its client's bytes queue, the stop, and then a read from another thread.
+    private static void QueuedAcrossTheStop(ServerConfig config, bool peerClosed)
+    {
+        var running = new TaskCompletionSource<TcpConnection>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        (int port, Reactor reactor, Thread thread) = TestServer.StartConfigured(async (_, conn) =>
+        {
+            if (await IsThisTestsConnection(conn))
+            {
+                running.TrySetResult(conn);
+                await release.Task;   // waiting on something else, and not on the connection
+            }
+
+            conn.DecRef();
+        }, config);
+
+        try
+        {
+            using Socket client = Connect(port);
+            client.Send("hi"u8);
+            Assert.True(running.Task.Wait(5_000), "the handler never ran");
+            TcpConnection conn = running.Task.Result;
+
+            client.Send(Payload);
+            if (peerClosed)
+            {
+                client.Shutdown(SocketShutdown.Send);   // the reactor closes the connection itself, before the stop
+            }
+            Assert.True(SpinWait.SpinUntil(() => peerClosed ? conn.IsClosed : !RecvOf(conn).IsEmpty(), 5_000),
+                peerClosed ? "the reactor never saw its client close" : "the client's bytes were never queued");
+
+            StopAndJoin(reactor, thread);
+
+            Task<byte[]> read = Task.Run(() => ReadQueued(reactor, conn, config));
+            Assert.True(((IAsyncResult)read).AsyncWaitHandle.WaitOne(ReturnsWithinMs), "the read after the stop never returned");
+            byte[] received = read.GetAwaiter().GetResult();
+            Assert.True(received.AsSpan().SequenceEqual(Payload),
+                $"the read after the stop got {received.Length} bytes, not the {Payload.Length} queued before it");
+        }
+        finally
+        {
+            release.TrySetResult();
+        }
+    }
+
+    private static byte[] ReadQueued(Reactor reactor, TcpConnection conn, ServerConfig config)
+    {
+        ValueTask<RecvSnapshot> read = conn.ReadAsync();
+        Assert.True(read.IsCompleted, "the read after the stop waited");
+
+        RecvSnapshot snapshot = read.Result;
+        var received = new List<byte>();
+        while (conn.TryGetItem(snapshot, out SpscRecvRing.Item item))
+        {
+            if (item.HasBuffer)
+            {
+                AssertInAllocatedSlab(reactor, conn, config, in item);
+                received.AddRange(item.AsSpan());
+                conn.ReturnBuffer(in item);
+            }
+        }
+
+        return [.. received];
+    }
+
+    private static unsafe void AssertInAllocatedSlab(Reactor reactor, TcpConnection conn, ServerConfig config, in SpscRecvRing.Item item)
+        => AssertInAllocatedSlab(reactor, conn, config, item.Ptr, item.Len);
+
+    private static unsafe void AssertInAllocatedSlab(Reactor reactor, TcpConnection conn, ServerConfig config, ReadOnlyMemory<byte> segment)
+    {
+        fixed (byte* ptr = segment.Span)
+        {
+            AssertInAllocatedSlab(reactor, conn, config, ptr, segment.Length);
+        }
+    }
+
+    // Before a byte of it is read: one of a freed slab can fault the process.
+    private static unsafe void AssertInAllocatedSlab(Reactor reactor, TcpConnection conn, ServerConfig config, byte* ptr, int length)
+    {
+        byte* slab;
+        nuint size;
+        if (config.Incremental is { } incremental)
+        {
+            slab = BufSlabOf(conn);
+            size = (nuint)incremental.RecvSlots * (nuint)incremental.RecvBufferSize;
+        }
+        else
+        {
+            slab = SlabOf(reactor);
+            size = (nuint)config.RecvSlots * (nuint)config.RecvBufferSize;
+        }
+
+        Assert.True(slab != null, "the receive slab the read points into was freed at the stop, under a connection its handler still holds");
+        Assert.True(ptr >= slab && ptr + length <= slab + size, "the read handed out bytes from outside the receive slab");
+    }
+
+    private static unsafe bool HasSlab(Reactor reactor) => SlabOf(reactor) != null;
+
+    [System.Runtime.CompilerServices.UnsafeAccessor(System.Runtime.CompilerServices.UnsafeAccessorKind.Field, Name = "_bufSlab")]
+    private static extern unsafe ref byte* SlabOf(Reactor reactor);
+
+    [System.Runtime.CompilerServices.UnsafeAccessor(System.Runtime.CompilerServices.UnsafeAccessorKind.Field, Name = "_recv")]
+    private static extern ref SpscRecvRing RecvOf(TcpConnection connection);
 
     private static unsafe bool HasWriteBuffer(TcpConnection connection) => WriteBufferOf(connection) != null;
 

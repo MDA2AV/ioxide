@@ -67,6 +67,9 @@ public sealed unsafe partial class Reactor
     private uint   _bufRingMask;
     private ushort _bufRingTail;
 
+    // The teardown and every handler yet to let go: what a connection queued, or its reader took, points into the slab.
+    private int    _bufSlabHolders = 1;
+
     // Transport settings resolved once. _tcp / _udp are always non-null so the sizing knobs stay
     // readable; _tcpEnabled records whether the config actually asked for TCP.
     private readonly TcpOptions _tcp;

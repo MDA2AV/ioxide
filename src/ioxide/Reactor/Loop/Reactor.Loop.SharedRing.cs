@@ -34,6 +34,17 @@ public sealed unsafe partial class Reactor
         _bufRingTail = (ushort)_bufferRingEntries;
     }
 
+    // The last holder frees it, on whatever thread it lets go on: the kernel let go when the teardown unregistered the
+    // ring. Incremental mode counts its handlers too, and has no slab to free.
+    internal void ReleaseBufSlab()
+    {
+        if (Interlocked.Decrement(ref _bufSlabHolders) == 0)
+        {
+            NativeMemory.AlignedFree(_bufSlab);
+            _bufSlab = null;
+        }
+    }
+
     private void DispatchSharedRing(in IoUringCqe cqe)
     {
         byte   kind = (byte)(cqe.user_data >> KindShift);

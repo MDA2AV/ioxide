@@ -148,6 +148,7 @@ public sealed unsafe partial class TcpConnection
         }
 
         ReleaseRef();
+        _reactor.ReleaseBufSlab();   // after a stop, the last handler to let go frees the receive slab
     }
 
     internal void ReleaseReactorRef() => ReleaseRef();
