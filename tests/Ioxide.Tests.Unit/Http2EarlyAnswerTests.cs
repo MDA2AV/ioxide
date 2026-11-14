@@ -134,6 +134,42 @@ internal static class Http2EarlyAnswerTests
 
             client.Close(run);
         });
+
+        runner.Test("h2 early answer: a buffered response that cannot be written, from a handler that never parked, is answered 500, and the reset follows it", () =>
+        {
+            using var client = new StrictClient();
+            Task run = client.Connection.RunAsync((_, _) => new ValueTask<Http2Response>((Http2Response)null!));
+
+            client.ReleaseFlush();
+            client.Feed([.. Open(), .. Post(1), .. Data(1, 1000, endStream: false)]);
+            List<Frame> frames = client.Drain();
+
+            Assert.True(!run.IsCompleted, "the connection ended on a null response");
+            AssertAnsweredThenStopped(frames, streamId: 1, 500, "");
+
+            client.Close(run);
+        });
+
+        runner.Test("h2: a synchronous handler's response that cannot be written is answered 500 on its own stream, the host is told, and the next stream is served", () =>
+        {
+            var faults = new List<string>();
+            using var client = new StrictClient(new Http2Options { OnHandlerFault = (request, fault) => faults.Add($"stream {request.StreamId}: {fault.GetType().Name}") });
+            Task run = client.Connection.RunAsync(request => request.StreamId == 1 ? null! : Http2Response.Text("ok"));
+
+            client.ReleaseFlush();
+            client.Feed([.. Open(), .. Get(1), .. Get(3)]);
+            List<Frame> frames = client.Drain();
+
+            Assert.True(!run.IsCompleted, "the connection ended on a null response");
+            List<Frame> stream = frames.Where(f => f.StreamId == 1).ToList();
+            Assert.True(stream is [{ Type: Frame.Headers, EndStream: true }],
+                $"stream 1 was sent [{string.Join(", ", stream.Select(f => $"type {f.Type} flags 0x{f.Flags:x}"))}], not one HEADERS that ends it");
+            Assert.Equal(500, Status(stream));
+            Assert.Equal("ok", Encoding.UTF8.GetString(Frame.Body(frames, 3)));
+            Assert.Equal("stream 1: NullReferenceException", string.Join(", ", faults));
+
+            client.Close(run);
+        });
     }
 
     private static void RegisterControls(Runner runner)

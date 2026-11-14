@@ -335,6 +335,10 @@ public sealed partial class Http2Connection : IDisposable
                 {
                     WriteResponse(pending.StreamId, inFlight.Result);
                 }
+                catch (Exception exception)
+                {
+                    AnswerFault(request, pending.StreamId, exception);
+                }
                 finally
                 {
                     RetireStream(pending);
@@ -369,17 +373,22 @@ public sealed partial class Http2Connection : IDisposable
             await new ReactorSwitch(_reactor);
             // Nobody can observe this task, so an escaping exception would vanish silently and the
             // peer would wait on a stream that is never coming.
-            ReportHandlerFault(request, exception);
-
-            if (!IsBroken)
-            {
-                WriteResponse(pending.StreamId, new Http2Response { Status = 500 });
-            }
+            AnswerFault(request, pending.StreamId, exception);
         }
         finally
         {
             RetireStream(pending);
             await MaybeFlushAsync();
+        }
+    }
+
+    // A handler that threw, or answered with a response that cannot be written, gets a 500 on its own stream.
+    private void AnswerFault(Http2Request request, int streamId, Exception exception)
+    {
+        ReportHandlerFault(request, exception);
+        if (!IsBroken)
+        {
+            WriteResponse(streamId, new Http2Response { Status = 500 });
         }
     }
 
