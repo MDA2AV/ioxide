@@ -386,65 +386,75 @@ public sealed partial class Http2Connection
             body = body[..^padding];
         }
 
-        _streams.TryGetValue(header.StreamId, out PendingRequest? pending);
+        // All of the payload counts, padding included, against the connection whatever its stream (RFC 9113 6.1, 6.9, 5.1).
+        if (payload.Length > _receiveWindow)
+        {
+            GoAway(Http2Error.FlowControlError);
+            return;
+        }
+        _receiveWindow -= payload.Length;
+
+        // Topped back up once below a quarter, as nginx does: the stream windows are the limit.
+        if (_receiveWindow < MaxWindow / 4)
+        {
+            CreditConnection(MaxWindow - _receiveWindow);
+        }
+
+        bool ended = (header.Flags & FrameFlags.EndStream) != 0;
+
+        if (!_streams.TryGetValue(header.StreamId, out PendingRequest? pending))
+        {
+            // A buffered answer parked on credit still has its upload credited, so a client that credits the
+            // answer only once its upload ends can finish both. Any other stream's window went with it.
+            if (payload.Length > 0 && !ended && _responseWindows.ContainsKey(header.StreamId))
+            {
+                WriteWindowUpdate(header.StreamId, payload.Length);
+            }
+            return;
+        }
+
+        // Past its window is a stream error (6.9), and its response stops with it; an empty frame may still end it (6.9.1).
+        if (payload.Length > 0 && payload.Length > pending.ReceiveWindow)
+        {
+            _responseWindows.Remove(header.StreamId);
+            ResetStream(header.StreamId, Http2Error.FlowControlError);
+            ReleaseCreditWaiters(header.StreamId);
+            return;
+        }
+        pending.ReceiveWindow -= payload.Length;
 
         // Counted before the payload is taken: a frame that runs past the content-length is refused at
         // once rather than at the end, so neither a handler nor the arena holds a byte of it, and an
         // END_STREAM short of it is refused where it lands.
-        if (pending is not null)
+        pending.BodyReceived += body.Length;
+        if (!pending.BodyFits(ended))
         {
-            pending.BodyReceived += body.Length;
-            if (!pending.BodyFits(ended: (header.Flags & FrameFlags.EndStream) != 0))
-            {
-                RefuseBody(pending);
-
-                // The stream is gone; the connection is still owed this frame. An empty one, a common way
-                // to end a body, is owed nothing, and a WINDOW_UPDATE of 0 would end the connection.
-                if (payload.Length > 0)
-                {
-                    WriteWindowUpdate(0, payload.Length);
-                }
-                return;
-            }
+            RefuseBody(pending);
+            return;
         }
 
-        if (pending?.BodyReader is { } reader)
+        if (pending.BodyReader is { } reader)
         {
             reader.Push(body);
         }
-        else if (pending is not null)
+        else
         {
             if (pending.BodyLength + body.Length > _options.MaxRequestBytes)
             {
                 ResetStream(header.StreamId, Http2Error.EnhanceYourCalm);
-                WriteWindowUpdate(0, payload.Length);   // the stream is gone; the connection is still owed this frame
                 return;
             }
             pending.AppendBody(body);
         }
 
-        // The whole payload counts against the window, padding included, so the peer's accounting
-        // and ours agree. Replenished immediately here because this server buffers the request
-        // anyway, so holding the window back would only stall the peer for nothing.
-        //
-        // A STREAMED body is the exception, and the reason to stream one at all: its credit is
-        // returned as the handler reads (Http2BodyReader.ReadAsync), so a consumer that falls
-        // behind stops replenishing and the peer stops sending. Crediting here as well would hand
-        // the window back before the bytes were consumed and put the bound back on memory. Its
-        // padding never reaches the handler, though, so that much is still credited here.
-        int credit = pending?.BodyReader is null ? payload.Length : payload.Length - body.Length;
-        if (credit > 0)
+        // Consumed now: a buffered body, or a streamed one's padding, its body credited as read; an ended request is owed none.
+        int credit = pending.BodyReader is null ? payload.Length : payload.Length - body.Length;
+        if (credit > 0 && !ended)
         {
-            WriteWindowUpdate(0, credit);
-
-            // RFC 9113 5.1: a closed stream takes no WINDOW_UPDATE, and one in neither table is closed or has no reader left.
-            if (pending is not null || _responseWindows.ContainsKey(header.StreamId))
-            {
-                WriteWindowUpdate(header.StreamId, credit);
-            }
+            CreditStream(pending, credit);
         }
 
-        if ((header.Flags & FrameFlags.EndStream) != 0 && pending is not null)
+        if (ended)
         {
             pending.RequestEnded = true;
             pending.BodyReader?.End();
@@ -495,7 +505,17 @@ public sealed partial class Http2Connection
     {
         if ((header.Flags & FrameFlags.Ack) != 0)
         {
-            return;   // our own SETTINGS acknowledged
+            // Our SETTINGS acknowledged: the peer has resized its open streams by them, and sizes new ones by them (RFC 9113 6.9.2).
+            int delta = _options.InitialWindowSize - _initialStreamWindow;
+            if (delta != 0)
+            {
+                _initialStreamWindow = _options.InitialWindowSize;
+                foreach (PendingRequest stream in _streams.Values)
+                {
+                    stream.ReceiveWindow += delta;
+                }
+            }
+            return;
         }
 
         if (payload.Length % 6 != 0)
@@ -673,6 +693,9 @@ public sealed partial class Http2Connection
 
         /// <summary>What the peer will still accept on this stream. Starts at its advertised default.</summary>
         public int SendWindow = 65535;
+
+        /// <summary>What the peer may still send on this stream before the server credits it more.</summary>
+        public int ReceiveWindow;
 
         public int BodyLength => _body.Length;
 

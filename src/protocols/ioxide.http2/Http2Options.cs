@@ -13,16 +13,31 @@ public sealed record Http2Options
     /// <summary>Largest frame payload we will accept, and advertise. RFC 9113 floor is 16384.</summary>
     public int MaxFrameSize { get; init; } = 16384;
 
-    /// <summary>Flow-control window advertised per stream.</summary>
-    public int InitialWindowSize { get; init; } = 1 << 20;
+    /// <summary>
+    /// Flow-control window advertised per stream, and enforced: how much of one request's body the
+    /// peer may send ahead of the credit the server gives back. A DATA frame past it resets its
+    /// stream with FLOW_CONTROL_ERROR (RFC 9113 6.9). A buffered body is credited as it arrives, a
+    /// streamed one as its handler reads it, so a handler that stops reading holds one window and
+    /// stalls only its own upload.
+    ///
+    /// The connection's own window is opened to 2^31-1 right behind the server's SETTINGS and kept
+    /// there, so what bounds a connection's request bodies in flight is
+    /// <see cref="MaxConcurrentStreams"/> times this. Below the RFC's 65,535 a stream is held to it
+    /// only once the peer has acknowledged the SETTINGS, since until then it may size the stream at
+    /// 65,535 (RFC 9113 6.9.3).
+    /// </summary>
+    public int InitialWindowSize { get; init; } = 256 * 1024;
 
     /// <summary>
     /// Streams the peer may have open at once. Advertised in SETTINGS <em>and</em> enforced: past
     /// this, a new stream is refused with REFUSED_STREAM rather than allocated. It was advisory
     /// once, which made "open a stream, reset it, repeat" (CVE-2023-44487) cost the server an
     /// arena per cycle and the peer nothing.
+    ///
+    /// It also bounds a connection's request bodies in flight: this many streams times
+    /// <see cref="InitialWindowSize"/>, since the connection's window is not the limit.
     /// </summary>
-    public int MaxConcurrentStreams { get; init; } = 1000;
+    public int MaxConcurrentStreams { get; init; } = 100;
 
     /// <summary>
     /// Ceiling on one request's header block, accumulated across HEADERS and every CONTINUATION

@@ -203,7 +203,7 @@ internal static class Http2EarlyAnswerTests
 
     private static void RegisterCredit(Runner runner)
     {
-        runner.Test("h2 early answer: DATA in flight after the reset is credited on the connection, never on its closed stream", () =>
+        runner.Test("h2 early answer: DATA in flight after the reset counts against the connection, and is never credited on its closed stream", () =>
         {
             using var client = new StrictClient();
             Task run = client.Connection.RunAsync((_, _) => new ValueTask<Http2Response>(Http2Response.Text("too large", 413)));
@@ -215,14 +215,14 @@ internal static class Http2EarlyAnswerTests
             client.Feed(Data(1, 16384, endStream: false));   // sent before the client saw the reset
             List<Frame> after = client.Drain();
 
-            Assert.Equal(16384, Credit(after, 0));
+            Assert.Equal(0, Credit(after, 0));   // charged on arrival; the top-up below a quarter returns it
             Assert.True(!after.Any(f => f.StreamId == 1),
                 $"after its RST_STREAM, stream 1 was sent [{string.Join(", ", after.Where(f => f.StreamId == 1).Select(f => $"type {f.Type}"))}] (RFC 9113 5.1)");
 
             client.Close(run);
         });
 
-        runner.Test("h2 early answer: an upload still arriving while a buffered answer is parked on credit is credited on both windows", () =>
+        runner.Test("h2 early answer: an upload still arriving while a buffered answer is parked on credit is credited on its stream", () =>
         {
             // A client that credits its answer only once its upload ends can then end it.
             byte[] answer = new byte[64 * 1024];
@@ -237,7 +237,6 @@ internal static class Http2EarlyAnswerTests
 
             client.Feed(Data(1, 16384, endStream: false));
             List<Frame> credited = client.Drain();
-            Assert.Equal(16384, Credit(credited, 0));
             Assert.Equal(16384, Credit(credited, 1));
 
             client.Feed(WindowUpdate(1, 1 << 20));
@@ -306,8 +305,6 @@ internal static class Http2EarlyAnswerTests
     }
 
     // A POST that opens a stream with its body still to come. Static-table HPACK only: 0x83 :method POST, 0x86 :scheme http, 0x84 :path /.
-    internal static byte[] Post(int streamId) => FrameBytes(0x1, 0x4, streamId, [0x83, 0x86, 0x84]);
-
     internal static byte[] Data(int streamId, int length, bool endStream)
         => FrameBytes(0x0, endStream ? (byte)0x1 : (byte)0x0, streamId, new byte[length]);
 

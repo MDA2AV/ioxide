@@ -144,11 +144,7 @@ public sealed partial class Http2Connection
         new FrameHeader(body.Length, FrameType.Data,
             endStream ? FrameFlags.EndStream : FrameFlags.None, streamId).Write(header);
 
-        Stage(header);
-        if (!body.IsEmpty)
-        {
-            Stage(body);
-        }
+        StageData(header, body);
 
         _peerConnectionWindow -= body.Length;
 

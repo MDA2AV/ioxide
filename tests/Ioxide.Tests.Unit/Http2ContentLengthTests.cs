@@ -73,9 +73,9 @@ internal static class Http2ContentLengthTests
             Assert.Equal("", Errors(after));
             Assert.True(served.SequenceEqual(["3 0"]), $"the handler was handed: {string.Join(", ", served)}");
 
-            // The refused frame never reached the body, but it used the connection's window like the
-            // rest, so it is credited back with them, or the window would shrink by it for good.
-            Assert.Equal(18, Credit([.. atOverrun, .. after], 0));
+            // The refused frame counts against the connection like the rest, and the top-up below a
+            // quarter returns them together: a credit of its own would run the peer's window ahead of ours.
+            Assert.Equal(0, Credit([.. atOverrun, .. after], 0));
         });
 
         foreach (bool onTrailers in new[] { false, true })

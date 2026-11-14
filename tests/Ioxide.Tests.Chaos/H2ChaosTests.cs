@@ -412,5 +412,48 @@ internal static class H2ChaosTests
             Assert.True(seen.Contains(3) && !seen.Contains(1),
                 $"the handler saw streams [{string.Join(", ", seen)}], not only 3");
         });
+
+        runner.Test("h2c: a stream window of upload sent while the server's flush is stalled behind a download the client is not reading arrives whole", () =>
+        {
+            // A download loopback's socket buffers cannot hold, and an upload in more 4 KiB receives than 64 queue entries hold.
+            const int Download = 32 * 1024 * 1024, Upload = 256 * 1024;
+            byte[] big = new byte[Download];
+            int port = TestServer.Start(async (_, conn) =>
+            {
+                try
+                {
+                    await new Http2Connection(conn).RunAsync(request => request.Path.Span.SequenceEqual("/download"u8)
+                        ? new Http2Response { Status = 200, Body = big }
+                        : Http2Response.Text(request.Body.Length.ToString(System.Globalization.CultureInfo.InvariantCulture)));
+                }
+                finally
+                {
+                    conn.DecRef();
+                }
+            });
+
+            using var client = new H2cClient(port, timeoutMs: 30_000);
+            client.WriteRaw("PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n"u8);
+            client.WriteFrame(0x4, flags: 0, streamId: 0, [0, 0x4, 0x7F, 0xFF, 0xFF, 0xFF]);   // INITIAL_WINDOW_SIZE 2^31-1
+            client.WriteWindowUpdate(streamId: 0, int.MaxValue - 65535);                         // so all of the download goes out at once
+            Assert.True(client.AwaitConnectionWindow(int.MaxValue), "the server did not open its connection window");
+
+            client.Request(streamId: 1, path: "/download");
+            Thread.Sleep(200);                                       // its response staged and its flush stuck, before the upload lands
+
+            client.OpenPost(streamId: 3, "/upload");
+            byte[] frame = new byte[16384];
+            for (int sent = 0; sent < Upload; sent += frame.Length)
+            {
+                client.WriteFrame(0x0, flags: (byte)(sent + frame.Length == Upload ? 0x1 : 0x0), streamId: 3, frame);
+            }
+
+            var bytes = new Dictionary<int, long>();
+            var ended = new HashSet<int>();
+            bool done = client.ReadData(bytes, ended, () => ended.Contains(1) && ended.Contains(3), credit: false, timeoutMs: 30_000);
+            Assert.True(done && bytes.GetValueOrDefault(1) == Download,
+                $"the download stopped at {bytes.GetValueOrDefault(1)} of {Download} bytes, and the upload's answer {(ended.Contains(3) ? "came" : "never came")}");
+            Assert.Equal((long)Upload.ToString(System.Globalization.CultureInfo.InvariantCulture).Length, bytes.GetValueOrDefault(3));
+        });
     }
 }
