@@ -295,7 +295,7 @@ internal static class OffReactorFlushTests
             Assert.Equal("ObjectDisposedException", outcome.Task.Result);
         });
 
-        runner.Test("tls pipe: a flush from another thread once the reactor has stopped returns completed at once, instead of waiting forever", () =>
+        runner.Test("tls pipe: a flush from another thread once the reactor has stopped returns completed, instead of waiting forever", () =>
         {
             // A stopped reactor drops what is posted to it: this flush was posted, and its caller left waiting forever (#568).
             (string certPath, string keyPath) = TestCert.Ensure();
@@ -304,7 +304,7 @@ internal static class OffReactorFlushTests
             AssertFlushedAfterTheStop(FlushAfterTheStop(options, typeof(TlsEncryptingPipeWriter)));
         });
 
-        runner.Test("tls pipe: control: under kTLS TX a flush from another thread once the reactor has stopped returns completed at once", () =>
+        runner.Test("tls pipe: control: under kTLS TX a flush from another thread once the reactor has stopped returns completed", () =>
         {
             // The connection's own writer, which the dual pipe hands out instead: the stop closed the connection, which is
             // what it reports.
@@ -350,12 +350,13 @@ internal static class OffReactorFlushTests
         });
     }
 
-    // Completed at once, nothing left staged that nothing would ever send, and the cancel reported by the flush it was for.
+    // Completed, at once or through the thread pool, nothing left staged that nothing would ever send, and the cancel
+    // reported by the flush it was for.
     private static void AssertFlushedAfterTheStop((string Flushed, long Staged, string Canceled) after)
     {
-        Assert.Equal("completed at once", after.Flushed);
+        Assert.True(after.Flushed is "completed" or "completed at once", $"the flush after the stop: {after.Flushed}");
         Assert.True(after.Staged == 0, $"{after.Staged} bytes still staged after the flush, which nothing will ever send");
-        Assert.Equal("canceled, completed at once", after.Canceled);
+        Assert.True(after.Canceled is "canceled, completed" or "canceled, completed at once", $"the flush after the cancel: {after.Canceled}");
     }
 
     // The handler leaves the reactor, waits on its own thread until the reactor has stopped, then writes and flushes there.

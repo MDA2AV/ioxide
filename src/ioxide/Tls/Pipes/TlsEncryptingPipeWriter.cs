@@ -84,14 +84,8 @@ public sealed class TlsEncryptingPipeWriter : PipeWriter, IValueTaskSource<Flush
         Reactor reactor = _conn.Reactor;
         if (!reactor.OnReactorThread)
         {
-            // Nothing runs on a reactor that has stopped, so the flush ends here (#568).
-            if (reactor.PostsClosed)
-            {
-                return new ValueTask<FlushResult>(Stopped());
-            }
-
-            // As a continuation, so a reactor that stops before running it hands it to the thread pool
-            // instead of dropping it: the caller hears of the stop rather than waiting forever.
+            // As a continuation: a reactor that has stopped, or stops before running it, hands it to the
+            // thread pool instead of dropping it, so the caller hears of the stop rather than waiting forever.
             _core.Reset();
             reactor.ScheduleContinuation(_flushOnReactor);
             return new ValueTask<FlushResult>(this, _core.Version);
