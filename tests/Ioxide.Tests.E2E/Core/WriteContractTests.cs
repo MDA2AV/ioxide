@@ -4,18 +4,22 @@ using System.Net;
 using System.Net.Sockets;
 using ioxide;
 using ioxide.utils;
+using Microsoft.Win32.SafeHandles;
 
 namespace Ioxide.Tests;
 
 /// <summary>
 /// The TCP write side as an <see cref="IBufferWriter{T}"/> and a <see cref="PipeWriter"/>: GetSpan past
 /// the slab, Advance past what was handed out, the counts a writer reads, and a write and flush made
-/// after the peer has gone.
+/// after the peer has gone. And a file read into the write buffer (ReadFileAsync, AdvanceWrite): where
+/// its bytes land behind what was written before them, a spill it commits nothing to, a read during a
+/// flush or during another read, and one after the peer has gone.
 /// </summary>
 /// <remarks>
 /// Already pinned elsewhere: Write past the slab in both overflow strategies, a GetSpan the slab cannot
-/// grow to (CoreTests), the size of each spill segment (SpillSegmentTests), and the TLS writer above
-/// this one (the TLS suite's WriterContractTests).
+/// grow to (CoreTests), the size of each spill segment (SpillSegmentTests), the TLS writer above
+/// this one (the TLS suite's WriterContractTests), and a file served through ReadFileAsync (the File
+/// suite's FileTests).
 /// </remarks>
 internal static class WriteContractTests
 {
@@ -155,6 +159,349 @@ internal static class WriteContractTests
                 "pipe: staged 65537, 65537 B given back, completed True",
                 "again: completed True, closed True"), outcome.Task.Result);
         });
+
+        RegisterFileRead(runner);
+    }
+
+    // ReadFileAsync reads a file into the write buffer where the next write would go, and AdvanceWrite
+    // commits it there. Each file is a pattern of its own, so a byte out of place names where it came from.
+    private static void RegisterFileRead(Runner runner)
+    {
+        foreach (WriteOverflowStrategy strategy in new[] { WriteOverflowStrategy.Grow, WriteOverflowStrategy.Segmented })
+        {
+            runner.Test($"tcp writer: a file read goes out after the head written before it, when that head outgrew the slab ({strategy})", () =>
+            {
+                byte[] content = Pattern(3000, 5);
+                using SafeFileHandle file = FileOf(content);
+                int fd = (int)file.DangerousGetHandle();
+
+                // Two responses behind one flush, as pipelined requests are answered. The first fits the slab
+                // and leaves less than the second's head, which Segmented spills: its file read has to follow
+                // it into the spill segment, as every write after a spill does.
+                byte[] first = Pattern(100, 6);
+                byte[] second = Pattern(1500, 7);
+
+                (List<string> noted, byte[] received) = Exchange(strategy, async (conn, writer, notes) =>
+                {
+                    writer.Write(first);
+                    int a = await conn.ReadFileAsync(fd, content.Length, 0);
+                    conn.AdvanceWrite(a);
+                    writer.Write(second);
+                    int b = await conn.ReadFileAsync(fd, content.Length, 0);
+                    conn.AdvanceWrite(b);
+                    await writer.FlushAsync();
+                    notes.Add($"read {a} and {b}");
+                });
+
+                Assert.Equal("read 3000 and 3000", string.Join(" | ", noted));
+                AssertReceived([.. first, .. content, .. second, .. content], received);
+            });
+        }
+
+        runner.Test("tcp writer: under Segmented, a file read the slab cannot hold spills into a segment, and the slab keeps its size", () =>
+        {
+            byte[] content = Pattern(6000, 8);   // more than the slab has left behind the head
+            using SafeFileHandle file = FileOf(content);
+            int fd = (int)file.DangerousGetHandle();
+            byte[] head = Pattern(100, 9);
+
+            (List<string> noted, byte[] received) = Exchange(WriteOverflowStrategy.Segmented, async (conn, writer, notes) =>
+            {
+                writer.Write(head);
+                conn.AdvanceWrite(await conn.ReadFileAsync(fd, content.Length, 0));
+                await writer.FlushAsync();
+                notes.Add($"writable {conn.GetSpan(1).Length}");   // a grown slab keeps its growth until the connection is recycled
+            });
+
+            AssertReceived([.. head, .. content], received);
+            Assert.Equal($"writable {Slab}", string.Join(" | ", noted));
+        });
+
+        runner.Test("tcp writer: under Segmented, a file read that commits nothing gives back the segment it spilled into", () =>
+        {
+            byte[] content = Pattern(6000, 15);   // more than the slab has left behind the head, so a read of it spills
+            using SafeFileHandle file = FileOf(content);
+            int fd = (int)file.DangerousGetHandle();
+            byte[] head = Pattern(100, 16);
+
+            (List<string> noted, byte[] received) = Exchange(WriteOverflowStrategy.Segmented, async (conn, writer, notes) =>
+            {
+                writer.Write(head);
+
+                int atEnd = await conn.ReadFileAsync(fd, content.Length, fileOffset: content.Length);
+                conn.AdvanceWrite(atEnd);
+                notes.Add($"read {atEnd}: {TryGetMemory(writer)}");
+
+                // The control: a read that commits its bytes leaves the response spilled until the flush.
+                int n = await conn.ReadFileAsync(fd, content.Length, 0);
+                conn.AdvanceWrite(n);
+                notes.Add($"read {n}: {TryGetMemory(writer)}");
+                await writer.FlushAsync();
+                notes.Add($"flushed: {TryGetMemory(writer)}");
+            });
+
+            Assert.Equal(string.Join(" | ",
+                "read 0: GetMemory handed out",
+                "read 6000: GetMemory refused (GetMemory across segmented overflow is not supported; use GetSpan.)",
+                "flushed: GetMemory handed out"), string.Join(" | ", noted));
+            AssertReceived([.. head, .. content], received);
+        });
+
+        runner.Test("tcp writer: a file read and its commit are refused while a flush is in flight, and taken once it is done", () =>
+        {
+            byte[] content = Pattern(3000, 10);
+            using SafeFileHandle file = FileOf(content);
+            int fd = (int)file.DangerousGetHandle();
+            byte[] head = Pattern(3000, 11);   // with the file, more than the slab holds: a read let through grows it
+
+            (List<string> noted, byte[] received) = Exchange(WriteOverflowStrategy.Grow, async (conn, writer, notes) =>
+            {
+                writer.Write(head);
+
+                // The handler runs on the reactor, which can complete the flush only once the handler awaits, so
+                // both calls below are made while it is in flight.
+                ValueTask<FlushResult> flush = writer.FlushAsync();
+                ValueTask<int> during = TryStartRead(conn, fd, content.Length, "read during the flush", notes);
+                CommitDuringFlush(conn, notes);
+                await flush;
+                await during;   // one let through still has to land before the next read
+
+                int n = await conn.ReadFileAsync(fd, content.Length, 0);
+                conn.AdvanceWrite(n);
+                notes.Add($"after the flush: read {n}");
+                await writer.FlushAsync();
+            });
+
+            Assert.Equal(string.Join(" | ",
+                "read during the flush: refused (Cannot write while flush is in progress.)",
+                "commit during the flush: refused (Cannot write while flush is in progress.)",
+                "after the flush: read 3000"), string.Join(" | ", noted));
+            AssertReceived([.. head, .. content], received);
+        });
+
+        runner.Test("tcp writer: a second file read while one is in flight is refused before it can move the buffer the first is filling", () =>
+        {
+            byte[] content = Pattern(3000, 17);
+            using SafeFileHandle file = FileOf(content);
+            int fd = (int)file.DangerousGetHandle();
+            byte[] head = Pattern(100, 18);
+
+            (List<string> noted, byte[] received) = Exchange(WriteOverflowStrategy.Grow, async (conn, writer, notes) =>
+            {
+                writer.Write(head);
+
+                // The first reads at the end of the file, so the kernel writes nothing, wherever its buffer went.
+                // The second asks for more than the slab has left, so sizing it first grew the slab under the first.
+                ValueTask<int> first = conn.ReadFileAsync(fd, content.Length, fileOffset: content.Length);
+                ValueTask<int> second = TryStartRead(conn, fd, 2 * content.Length, "second read", notes);
+                await second;   // one let through still has to land before anything else
+
+                int n = await first;
+                conn.AdvanceWrite(n);
+                notes.Add($"first read {n}, writable {conn.GetSpan(1).Length}");
+                await writer.FlushAsync();
+            });
+
+            Assert.Equal(string.Join(" | ",
+                "second read: refused (A file read is already in flight on this connection.)",
+                $"first read 0, writable {Slab - head.Length}"), string.Join(" | ", noted));
+            AssertReceived(head, received);
+        });
+
+        runner.Test("tcp writer: neither a file read nor its commit goes past what the write buffer handed out", () =>
+        {
+            byte[] content = Pattern(3000, 12);
+            using SafeFileHandle file = FileOf(content);
+            int fd = (int)file.DangerousGetHandle();
+            byte[] head = Pattern(100, 13);
+
+            (List<string> noted, byte[] received) = Exchange(WriteOverflowStrategy.Grow, async (conn, writer, notes) =>
+            {
+                writer.Write(head);
+
+                // The kernel is told the length, not the buffer: -1 is some 4 GiB to it, and int.MaxValue
+                // overflows the tail's bound. The file is small, so one let through still fits.
+                foreach (int length in new[] { -1, int.MaxValue })
+                {
+                    notes.Add($"read of {length}: {await TryReadFile(conn, fd, length)}");
+                }
+
+                int n = await conn.ReadFileAsync(fd, content.Length, 0);
+                if (CommitPastHandedOut(conn, n, notes))
+                {
+                    await writer.FlushAsync();
+                }
+            });
+
+            Assert.Equal(string.Join(" | ",
+                "read of -1: refused (len)",
+                $"read of {int.MaxValue}: refused (len)",
+                $"commit({Slab - head.Length + 1}): refused",
+                $"commit({int.MaxValue}): refused",
+                "commit(3000): taken"), string.Join(" | ", noted));
+            AssertReceived([.. head, .. content], received);
+        });
+
+        runner.Test("tcp writer: a file read once the peer has gone returns -EPIPE, where the end of the file returns 0", () =>
+        {
+            const int EPIPE = 32;
+            byte[] content = Pattern(3000, 14);
+            using SafeFileHandle file = FileOf(content);
+            int fd = (int)file.DangerousGetHandle();
+            var outcome = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
+
+            int port = TestServer.StartConfigured(async (_, conn) =>
+            {
+                bool peerSent = false;
+                try
+                {
+                    RecvSnapshot snapshot;
+                    do
+                    {
+                        snapshot = await conn.ReadAsync();
+                        peerSent = Discard(conn, snapshot);
+                    }
+                    while (!peerSent && !snapshot.IsClosed);
+
+                    if (!peerSent)   // the harness's readiness probe
+                    {
+                        return;
+                    }
+
+                    // The control, while the peer waits for the reply: a read at the end of the file is 0.
+                    int atEnd = await conn.ReadFileAsync(fd, 100, fileOffset: content.Length);
+                    conn.Write("ready"u8);
+                    await conn.FlushAsync();
+
+                    while (!snapshot.IsClosed)
+                    {
+                        snapshot = await conn.ReadAsync();
+                        Discard(conn, snapshot);
+                    }
+
+                    int gone = await conn.ReadFileAsync(fd, 100, fileOffset: 0);
+                    outcome.TrySetResult($"at the end of the file: {atEnd} | once the peer has gone: {gone}");
+                }
+                catch (Exception e) when (peerSent)
+                {
+                    outcome.TrySetResult($"threw {e.GetType().Name}: {e.Message}");
+                }
+                finally
+                {
+                    conn.DecRef();
+                }
+            }, Config(WriteOverflowStrategy.Grow)).Port;
+
+            using (var client = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp) { ReceiveTimeout = 10_000 })
+            {
+                client.Connect(IPAddress.Loopback, port);
+                client.Send("go"u8);
+
+                byte[] reply = new byte[5];
+                for (int got = 0, n; got < reply.Length; got += n)
+                {
+                    n = client.Receive(reply, got, reply.Length - got, SocketFlags.None);
+                    Assert.True(n > 0, "the server closed before it replied");
+                }
+            }
+
+            Assert.True(outcome.Task.Wait(TimeSpan.FromSeconds(10)), "the handler never saw the peer go");
+            Assert.Equal($"at the end of the file: 0 | once the peer has gone: {-EPIPE}", outcome.Task.Result);
+        });
+    }
+
+    // Synchronous, so what the read is made during - a flush, another read - cannot finish first. One that is
+    // let through is returned to be awaited, and one refused is noted with the reason.
+    private static ValueTask<int> TryStartRead(TcpConnection conn, int fd, int length, string label, List<string> notes)
+    {
+        try
+        {
+            ValueTask<int> read = conn.ReadFileAsync(fd, length, 0);
+            notes.Add($"{label}: taken");
+            return read;
+        }
+        catch (InvalidOperationException e)
+        {
+            notes.Add($"{label}: refused ({e.Message})");
+            return default;
+        }
+    }
+
+    // GetMemory is refused while a Segmented response is spilled, so whether it hands out says whether it is.
+    private static string TryGetMemory(TcpConnectionPipeWriter writer)
+    {
+        try
+        {
+            writer.GetMemory(16);
+            return "GetMemory handed out";
+        }
+        catch (NotSupportedException e)
+        {
+            return $"GetMemory refused ({e.Message})";
+        }
+    }
+
+    private static void CommitDuringFlush(TcpConnection conn, List<string> notes)
+    {
+        try
+        {
+            conn.AdvanceWrite(1);
+            notes.Add("commit during the flush: taken");
+        }
+        catch (InvalidOperationException e)
+        {
+            notes.Add($"commit during the flush: refused ({e.Message})");
+        }
+    }
+
+    // A read refused is noted with the parameter it was refused for; one let through is awaited, never committed.
+    private static async ValueTask<string> TryReadFile(TcpConnection conn, int fd, int length)
+    {
+        ValueTask<int> read;
+        try
+        {
+            read = conn.ReadFileAsync(fd, length, 0);
+        }
+        catch (ArgumentOutOfRangeException e)
+        {
+            return $"refused ({e.ParamName})";
+        }
+        return $"taken, read {await read}";
+    }
+
+    // Synchronous, like AdvancePastHandedOut. False once a count past the rest of the buffer was taken, which
+    // leaves the slab claiming bytes past its end, so it is not flushed.
+    private static bool CommitPastHandedOut(TcpConnection conn, int read, List<string> notes)
+    {
+        int handedOut = conn.GetSpan(1).Length;
+        foreach (int count in new[] { handedOut + 1, int.MaxValue })
+        {
+            try
+            {
+                conn.AdvanceWrite(count);
+                notes.Add($"commit({count}): taken");
+                return false;
+            }
+            catch (ArgumentOutOfRangeException)
+            {
+                notes.Add($"commit({count}): refused");
+            }
+        }
+
+        // The control: what the read returned is taken.
+        conn.AdvanceWrite(read);
+        notes.Add($"commit({read}): taken");
+        return true;
+    }
+
+    // A file holding `content`, already unlinked: the descriptor is all a read needs, and nothing is left behind.
+    private static SafeFileHandle FileOf(byte[] content)
+    {
+        string path = Path.Combine(Path.GetTempPath(), $"ioxide-e2e-file-read-{Environment.ProcessId}-{Guid.NewGuid():N}");
+        File.WriteAllBytes(path, content);
+        SafeFileHandle file = File.OpenHandle(path);
+        File.Delete(path);
+        return file;
     }
 
     // Past the slab, so a drop is not the slab's limit at work: once through the connection's own flush,
