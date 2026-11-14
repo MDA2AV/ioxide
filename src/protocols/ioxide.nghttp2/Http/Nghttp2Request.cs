@@ -8,6 +8,10 @@ namespace ioxide.nghttp2;
 /// The memories point into an arena owned by the connection and are valid for the duration of the
 /// handler call. Copy anything you keep past it: a request whose body arrived whole is itself reused
 /// for a later stream on the same connection once its handler is done.
+///
+/// No <c>HasBody</c> yet, unlike <c>Http2Request</c>: the native shim reports the end of the headers
+/// without their END_STREAM flag, so HEADERS that end the stream look the same here as HEADERS
+/// followed by one empty DATA frame that does.
 /// </summary>
 public sealed class Nghttp2Request
 {

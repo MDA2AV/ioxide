@@ -173,12 +173,18 @@ public sealed unsafe partial class Reactor
         // back to the allocator while it still holds them.
         UnregisterSharedBufRings();
 
-        // Both mappings go back either way; the descriptor is kept when the start failed, because
-        // releasing its number mid-run kills an unrelated live connection - #242. Bisected: closing
-        // it by dup2'ing /dev/null over the number is green, so the damage is the number being
-        // reused, not the ring teardown. Costs the ring's memlock charge until exit, which is what
-        // this path already did before it tore anything down at all.
-        _ring.Dispose(closeFd: !startFailed);
+        // The ring goes either way, its memory with it. When the start failed its number does not: releasing that
+        // mid-run kills an unrelated live connection - #242, whose bisect found the damage is the number being handed
+        // out again, not the ring teardown. So /dev/null takes the ring's place at the number, and a host that retries
+        // a failed start is left a /dev/null descriptor per attempt rather than a ring (#573).
+        if (startFailed)
+        {
+            _ring.DisposeKeepingNumber();
+        }
+        else
+        {
+            _ring.Dispose();
+        }
 
         // Pooled connections are past their last send (#250) and their incremental ring is unregistered,
         // so their slabs can go, the ones the stop returned included. One a handler still holds stays (#223).
