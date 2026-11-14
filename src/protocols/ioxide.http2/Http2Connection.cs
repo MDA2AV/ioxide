@@ -331,12 +331,14 @@ public sealed partial class Http2Connection : IDisposable
             // there is no Task to allocate.
             if (inFlight.IsCompletedSuccessfully)
             {
+                Http2Response response = inFlight.Result;
                 try
                 {
-                    WriteResponse(pending.StreamId, inFlight.Result);
+                    WriteResponse(pending.StreamId, response);
                 }
-                catch (Exception exception)
+                catch (NullReferenceException exception) when (response is null)
                 {
+                    // A null answer throws before anything is staged; anything else may tear a frame, so it ends the connection.
                     AnswerFault(request, pending.StreamId, exception);
                 }
                 finally

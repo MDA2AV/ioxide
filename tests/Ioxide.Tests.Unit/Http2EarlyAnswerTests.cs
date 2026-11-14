@@ -170,6 +170,39 @@ internal static class Http2EarlyAnswerTests
 
             client.Close(run);
         });
+
+        runner.Test("h2: a write refused partway through a synchronous handler's answer ends the connection, and no torn frame goes out", () =>
+        {
+            using var client = new StrictClient();
+            int buffers = -1;
+            bool refused = false;
+            client.OnBuffer = () =>
+            {
+                // The second buffer of stream 1's answer is its header block's, behind a frame header already staged.
+                if (buffers >= 0 && ++buffers == 2)
+                {
+                    refused = true;
+                    throw new OutOfMemoryException("the write slab cannot grow");
+                }
+            };
+            Task run = client.Connection.RunAsync(request =>
+            {
+                if (request.StreamId == 1)
+                {
+                    buffers = 0;
+                }
+                return Http2Response.Text("ok");
+            });
+
+            client.ReleaseFlush();
+            client.Feed([.. Open(), .. Get(1), .. Get(3)]);
+
+            Assert.True(refused, "the test never refused a write");
+            Assert.True(run.Wait(5_000), "the connection served on after stream 1's HEADERS frame header was staged without its block");
+            List<Frame> frames = client.Drain();
+            Assert.True(frames.All(f => f.StreamId is not (1 or 3)),
+                $"frames went out on the streams of a torn pass: [{string.Join(", ", frames.Select(f => $"stream {f.StreamId} type {f.Type}"))}]");
+        });
     }
 
     private static void RegisterControls(Runner runner)
