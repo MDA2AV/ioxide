@@ -191,16 +191,19 @@ public sealed unsafe partial class Reactor : IRingHost
         }
     }
 
-    // At stop, each once the kernel is done with it. A waiter that submits again reuses its slot, past this loop.
+    // At stop, each once the kernel is done with it. The free slots go first: an op a waiter submits again from its
+    // completion fails as a handoff after the stop does, where it would otherwise wait in an SQ nothing submits again.
     private void CompleteParkedOps()
     {
+        _opFree = [];
+        _opFreeTop = 0;
+
         int slots = _opTargets.Length;
         for (int slot = 0; slot < slots; slot++)
         {
             if (_opTargets[slot] is { } target && CancelAndWait(Tag(KindClient, 0, slot)))
             {
                 _opTargets[slot] = null;
-                _opFree[_opFreeTop++] = slot;
                 target.Complete(-ECANCELED);
             }
         }
@@ -271,6 +274,9 @@ public sealed unsafe partial class Reactor : IRingHost
     {
         if (_opFreeTop == 0)
         {
+            // The stop empties it (CompleteParkedOps); else only a full table gets here, so no submit pays for the test.
+            ObjectDisposedException.ThrowIf(_opFree.Length == 0, this);
+
             int oldLength = _opTargets.Length;
             Array.Resize(ref _opTargets, oldLength * 2);
             Array.Resize(ref _opFree, oldLength * 2);

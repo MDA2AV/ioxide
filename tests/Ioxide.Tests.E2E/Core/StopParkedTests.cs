@@ -85,6 +85,48 @@ internal static class StopParkedTests
             Assert.True(finished.Task.Wait(ReturnsWithinMs), "the handler is still parked in its wait, its finally not run");
         });
 
+        runner.Test("stop: a RingTimer wait a handler starts again from the one the stop ended fails rather than waiting forever", () =>
+        {
+            var parked = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var again = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
+
+            (int port, Reactor reactor, Thread thread) = TestServer.StartConfigured(async (r, conn) =>
+            {
+                if (!await IsThisTestsConnection(conn))
+                {
+                    conn.DecRef();
+                    return;
+                }
+
+                var timer = new RingTimer(r);
+                try
+                {
+                    parked.TrySetResult();
+                    await timer.DelayAsync(600_000);
+
+                    // Inline in the completion the stop gives, as a retry loop would.
+                    int result = await timer.DelayAsync(600_000);
+                    again.TrySetResult($"the second wait returned {result}");
+                }
+                catch (Exception e)
+                {
+                    again.TrySetResult(e.GetType().Name);
+                }
+                finally
+                {
+                    conn.DecRef();
+                }
+            }, new ServerConfig { Tcp = new TcpOptions() });
+
+            using Socket client = Connect(port);
+            client.Send("hi"u8);
+            Assert.True(parked.Task.Wait(5_000), "the handler never parked");
+
+            StopAndJoin(reactor, thread);
+            Assert.True(again.Task.Wait(ReturnsWithinMs), "the handler is still parked in the wait it started again");
+            Assert.Equal(nameof(ObjectDisposedException), again.Task.Result);
+        });
+
         runner.Test("stop: a handler parked in a flush its client holds up gets to run its finally", () =>
         {
             var parked = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);

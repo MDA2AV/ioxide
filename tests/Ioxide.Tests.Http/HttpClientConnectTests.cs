@@ -89,6 +89,42 @@ internal static class HttpClientConnectTests
             }
         });
 
+        runner.Test("httpclient h1: a connect its reactor's stop cancels ends with the stop, rather than going on to the next address and waiting forever", () =>
+        {
+            using var silent = new TcpListener(IPAddress.Parse("127.0.0.3"), 0);
+            silent.Start(0);
+            var silentAt = (IPEndPoint)silent.LocalEndpoint;
+            Socket[] queued = FillAcceptQueue(silentAt);
+
+            try
+            {
+                // 127.0.0.2 refuses at once, should the kernel ever be handed the connect to it.
+                var started = new TaskCompletionSource<Task>(TaskCreationOptions.RunContinuationsAsynchronously);
+                (_, Reactor reactor, Thread thread) = TestServer.StartConfigured(
+                    (_, connection) => { connection.DecRef(); return Task.CompletedTask; },
+                    new ServerConfig { Tcp = new TcpOptions() },
+                    r => started.SetResult(ClientTransport.ConnectAsync(r, [silentAt.Address, IPAddress.Parse("127.0.0.2")],
+                        (ushort)silentAt.Port, tls: null, serverName: null, connectTimeoutMs: 0).AsTask()));
+
+                Task connect = started.Task.Result;
+                Thread.Sleep(200);   // the first connect reaches the kernel, which holds it
+                Assert.True(!connect.IsCompleted, $"the connect ended before the stop: {connect.Status}");
+
+                reactor.Stop();
+                Assert.True(thread.Join(TimeSpan.FromSeconds(10)), "the reactor did not stop");
+                Assert.True(((IAsyncResult)connect).AsyncWaitHandle.WaitOne(3_000), "the connect is still waiting 3 s after its reactor stopped");
+                Assert.True(connect.Exception?.InnerException is ObjectDisposedException,
+                    $"expected ObjectDisposedException, got {connect.Status}: {connect.Exception?.InnerException?.GetType().Name}");
+            }
+            finally
+            {
+                foreach (Socket socket in queued)
+                {
+                    socket.Dispose();
+                }
+            }
+        });
+
         runner.Test("httpclient h1: an idle connection past MaxLifetimeMs is replaced by the sweep", () =>
         {
             int clientPort = 0;
