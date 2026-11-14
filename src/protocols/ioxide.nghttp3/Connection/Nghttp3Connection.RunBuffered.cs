@@ -74,7 +74,7 @@ public sealed partial class Nghttp3Connection
             }
             catch (Exception exception)
             {
-                Console.Error.WriteLine($"[ioxide.nghttp3] request handler faulted: {exception.GetBaseException().Message}");
+                ReportHandlerFault(request, exception);
                 response = new Nghttp3Response { Status = 500 };
             }
 
@@ -103,7 +103,7 @@ public sealed partial class Nghttp3Connection
             }
             catch (Exception exception)
             {
-                Console.Error.WriteLine($"[ioxide.nghttp3] request handler faulted: {exception.GetBaseException().Message}");
+                ReportHandlerFault(request, exception);
                 RetireBody(request);
                 QueueResponse(streamId, new Nghttp3Response { Status = 500 });
                 RequestHandled(request);
@@ -135,7 +135,8 @@ public sealed partial class Nghttp3Connection
         }
         catch (Exception exception)
         {
-            Console.Error.WriteLine($"[ioxide.nghttp3] request handler faulted: {exception.GetBaseException().Message}");
+            await new ReactorSwitch(Reactor);   // the hook runs on the reactor, wherever the handler finished
+            ReportHandlerFault(request, exception);
             response = new Nghttp3Response { Status = 500 };
         }
 

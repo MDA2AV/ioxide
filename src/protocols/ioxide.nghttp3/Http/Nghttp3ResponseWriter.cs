@@ -19,7 +19,7 @@ namespace ioxide.nghttp3;
 /// blocks cannot. They are recycled as soon as nghttp3 reports them written, which is what keeps
 /// memory bounded by the flush size rather than by the response.
 /// </summary>
-/// <remarks>One caller at a time, on any thread: what reaches the connection runs on its reactor.</remarks>
+/// <remarks>One caller at a time, on any thread, though <see cref="ResetStreamAsync"/> may cut in: what reaches the connection runs on its reactor.</remarks>
 public sealed class Nghttp3ResponseWriter : IBufferWriter<byte>
 {
     // One in-flight chunk is enough to keep the pump fed: nghttp3 copies a chunk out on the write
@@ -59,6 +59,9 @@ public sealed class Nghttp3ResponseWriter : IBufferWriter<byte>
     private bool _completed;   // the handler has finished producing
     private bool _gone;        // the peer stopped reading, or the stream closed under the handler
 
+    // The stream was reset rather than ended. Not _completed: that tells a pull to send the FIN.
+    private bool _streamReset;
+
     // Headers written off the reactor, submitted by the next flush or the completion, which run on it.
     private Nghttp3Response? _unsent;
     private byte[] _unsentBytes = [];   // their names and values
@@ -86,6 +89,7 @@ public sealed class Nghttp3ResponseWriter : IBufferWriter<byte>
         _headersSent = false;
         _completed = false;
         _gone = false;
+        _streamReset = false;
         _unsent = null;
         HandlerRunning = false;
 
@@ -97,8 +101,8 @@ public sealed class Nghttp3ResponseWriter : IBufferWriter<byte>
     /// <summary>The stream this response belongs to.</summary>
     public long StreamId => _streamId;
 
-    /// <summary>True once the body has been fully produced and handed over.</summary>
-    public bool IsCompleted => _completed;
+    /// <summary>True once the response has ended: its body fully produced and handed over, or its stream reset by <see cref="ResetStreamAsync"/>.</summary>
+    public bool IsCompleted => _completed || _streamReset;
 
     /// <summary>True once the response headers have been handed to nghttp3.</summary>
     internal bool HeadersSent => _headersSent;
@@ -251,6 +255,12 @@ public sealed class Nghttp3ResponseWriter : IBufferWriter<byte>
     /// </returns>
     public async ValueTask<FlushResult> FlushAsync()
     {
+        // Ahead of the headers check and the switch: ResetStreamAsync may have come before the headers, or after the reactor stopped.
+        if (IsCompleted)
+        {
+            return PeerGone;
+        }
+
         if (!_headersSent)
         {
             throw new InvalidOperationException("Write the response headers before flushing a body chunk.");
@@ -296,7 +306,7 @@ public sealed class Nghttp3ResponseWriter : IBufferWriter<byte>
     /// </summary>
     public async ValueTask CompleteAsync()
     {
-        if (_completed)
+        if (_completed || _streamReset)
         {
             return;
         }
@@ -328,6 +338,80 @@ public sealed class Nghttp3ResponseWriter : IBufferWriter<byte>
         }
         _connection.ResumeStreamedResponse(_streamId);
         _connection.PumpIfOutsidePass();
+    }
+
+    // RFC 9000 16: an application error code travels as a variable-length integer, which holds 62
+    // bits. ngtcp2's encoder asserts on more, and that assertion takes the whole process down.
+    private const ulong MaxErrorCode = (1UL << 62) - 1;
+
+    /// <summary>
+    /// End the response with RESET_STREAM instead of a FIN, for a handler that cannot finish it: an
+    /// upstream that dropped, a read that failed. A streamed response carries no content-length, so
+    /// completing it would pass the truncated body off as whole; reset, the peer knows it failed.
+    /// What is staged is dropped, and so are headers not submitted yet.
+    /// </summary>
+    /// <param name="errorCode">
+    /// The RFC 9114 section 8.1 code the peer is told: <see cref="Nghttp3ErrorCode.InternalError"/>
+    /// unless another is given, such as <see cref="Nghttp3ErrorCode.RequestCancelled"/> for a
+    /// response that is no longer wanted rather than one that failed. At most 2^62 - 1, which is
+    /// all QUIC can carry.
+    /// </param>
+    /// <remarks>
+    /// Once the response has completed, the peer has stopped reading the stream or the connection
+    /// is gone, it sends nothing. Either way the response has ended: <see cref="IsCompleted"/> is
+    /// true, <see cref="FlushAsync"/> reports the peer gone, and nothing more is sent when the
+    /// handler returns. The reset goes both ways, so the peer is asked to stop sending the request
+    /// body as well. Before the headers it resets the stream too; a handler that wants a 500 writes
+    /// one. Like <see cref="FlushAsync"/>, it may be called from any thread and runs on the
+    /// connection's reactor, but unlike the writer's other calls it need not wait for the one
+    /// before it: made while a flush waits on a slow peer - from a timeout, say - it ends that
+    /// flush too, which reports the peer gone. The writer is the handler's only until the handler
+    /// returns, after which it can serve another stream, so a task the handler started has to be
+    /// done with it by then.
+    /// </remarks>
+    /// <exception cref="ArgumentOutOfRangeException"><paramref name="errorCode"/> is past 2^62 - 1.</exception>
+    public ValueTask ResetStreamAsync(ulong errorCode = Nghttp3ErrorCode.InternalError)
+    {
+        ArgumentOutOfRangeException.ThrowIfGreaterThan(errorCode, MaxErrorCode);
+        return _completed || _streamReset ? default : ResetStreamOnReactorAsync(errorCode);
+    }
+
+    private async ValueTask ResetStreamOnReactorAsync(ulong errorCode)
+    {
+        try
+        {
+            await new ReactorSwitch(_connection.Reactor);
+        }
+        catch (ObjectDisposedException)
+        {
+            // The reactor stopped, and the connection with it: nothing to reset, and a cleanup call must not throw over its caller.
+            _streamReset = true;
+            return;
+        }
+        ResetStream(errorCode);
+    }
+
+    /// <summary>
+    /// The reset itself, on the reactor: the handler's own, or the stack's for a handler that threw
+    /// once its headers were out.
+    /// </summary>
+    internal void ResetStream(ulong errorCode)
+    {
+        if (_completed || _streamReset)
+        {
+            return;
+        }
+
+        _streamReset = true;
+        _staged = 0;
+        _unsent = null;
+
+        // Not once the peer has stopped the stream, and not on a connection that is gone.
+        if (!_gone && !_connection.IsFailed)
+        {
+            _connection.ResetStreamed(_streamId, errorCode);
+        }
+        _gone = true;   // nothing is sent on it from here on
     }
 
     /// <summary>

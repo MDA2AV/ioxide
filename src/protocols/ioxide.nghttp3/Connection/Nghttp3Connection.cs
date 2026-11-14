@@ -88,6 +88,31 @@ public sealed partial class Nghttp3Connection : IDisposable
     }
 
     /// <summary>
+    /// A handler threw: the host's <see cref="Nghttp3Options.OnHandlerFault"/> is told, or without
+    /// one stderr is, as it always was. On the reactor, before the request is ended. Unlike the
+    /// failures above, it fails nothing but its own request.
+    /// </summary>
+    private void ReportHandlerFault(Nghttp3Request request, Exception exception)
+    {
+        Action<Nghttp3Request, Exception>? onFault = _options.OnHandlerFault;
+        if (onFault is null)
+        {
+            Console.Error.WriteLine($"[ioxide.nghttp3] request handler faulted: {exception.GetBaseException().Message}");
+            return;
+        }
+
+        try
+        {
+            onFault(request, exception);
+        }
+        catch
+        {
+            // The host's own code, run where the stack is cleaning up after the handler: the
+            // request still has to be ended, so nothing the hook throws may get in the way.
+        }
+    }
+
+    /// <summary>
     /// Tell the peer why, if there is a why. Called from the run loop's finally, where the
     /// connection is being let go: without it the transport keeps the connection registered and
     /// routable, and the client's request never completes.
