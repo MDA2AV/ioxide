@@ -1,6 +1,10 @@
+using System.Net;
+using System.Net.Sockets;
+using System.Runtime.CompilerServices;
 using System.Text;
 using ioxide;
 using ioxide.httpclient;
+using ioxide.timer;
 
 namespace Ioxide.Tests;
 
@@ -140,7 +144,82 @@ internal static class RingHttpClientTests
             string body = Get(client, "get", $"http://127.0.0.1:{TestServer.DeadPort()}/");
             Assert.True(body.StartsWith("599|") && body.Contains("errno 111"), $"expected the refusal, got: {body}");
         });
+
+        runner.Test("ring client: an https open still connecting at Dispose is closed before its handshake", () =>
+        {
+            // Dispose frees the TLS context this open would make its SSL from. A bare listener shows what the open sent.
+            using var listener = new TcpListener(IPAddress.Loopback, 0);
+            listener.Start();
+            Task<string> origin = FirstConnectionAsync(listener);
+
+            string open = OnReactor.Run(async reactor =>
+            {
+                RingHttpClient http = RingHttpClient.Start(reactor);
+                ValueTask<HttpClientResponse> request = http.GetAsync($"https://localhost:{((IPEndPoint)listener.LocalEndpoint).Port}/");
+                HttpClientPool pool = OriginsOf(http).Values.Single();
+                http.Dispose();   // in the same pass, so the open is still resolving or connecting
+
+                try
+                {
+                    (await request).Dispose();
+                }
+                catch (HttpClientException)
+                {
+                    // Failed by the Dispose; what this test watches is the open.
+                }
+
+                var timer = new RingTimer(reactor);
+                for (long deadline = Native.MonotonicMs + 10_000; pool.ConnectionCount > 0 && Native.MonotonicMs < deadline;)
+                {
+                    await timer.DelayAsync(10);
+                }
+                return $"{pool.ConnectionCount} open, the open failed with: {LastOpenFailureOf(pool)}";
+            });
+
+            Assert.True(open.StartsWith("0 open,") && open.Contains(nameof(TlsClientContext)),
+                $"expected the open refused for its disposed TLS context, got: {open}");
+            Assert.Equal("closed after 0 bytes", origin.Result);
+        });
     }
+
+    // What the first connection to arrive sends before it closes, or that it never arrived or never closed.
+    private static async Task<string> FirstConnectionAsync(TcpListener listener)
+    {
+        using var timeout = new CancellationTokenSource(10_000);
+        TcpClient connection;
+        try
+        {
+            connection = await listener.AcceptTcpClientAsync(timeout.Token);
+        }
+        catch (OperationCanceledException)
+        {
+            return "no connection within 10 s";
+        }
+
+        using (connection)
+        {
+            var buffer = new byte[4096];
+            int total = 0;
+            try
+            {
+                for (int n; (n = await connection.GetStream().ReadAsync(buffer, timeout.Token)) > 0;)
+                {
+                    total += n;
+                }
+                return $"closed after {total} bytes";
+            }
+            catch (OperationCanceledException)
+            {
+                return $"still open after 10 s, {total} bytes in";
+            }
+        }
+    }
+
+    [UnsafeAccessor(UnsafeAccessorKind.Field, Name = "_origins")]
+    private static extern ref Dictionary<string, HttpClientPool> OriginsOf(RingHttpClient client);
+
+    [UnsafeAccessor(UnsafeAccessorKind.Field, Name = "_lastOpenFailure")]
+    private static extern ref string? LastOpenFailureOf(HttpClientPool pool);
 
     private static int StartClientHost(RingHttpClientOptions? options = null)
         => TestServer.Start(ClientHost, onStart: reactor => RingHttpClient.Start(reactor, options));

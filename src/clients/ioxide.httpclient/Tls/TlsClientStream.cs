@@ -63,6 +63,13 @@ public sealed class TlsClientStream : IDisposable
         // Everything from here to the constructor is unowned: the stream that would free it does
         // not exist yet, and ClientTransport hands the socket over on the understanding that the
         // stream closes it on failure. So each step that can throw unwinds explicitly.
+        if (context.IsDisposed)
+        {
+            // Its SSL_CTX is freed unless an SSL still holds it, so SSL_new would read freed memory.
+            socket.Dispose();
+            throw new ObjectDisposedException(nameof(TlsClientContext));
+        }
+
         nint ssl = BoringSsl.SSL_new(context.Handle);
         if (ssl == 0)
         {

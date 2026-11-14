@@ -28,6 +28,8 @@ public sealed unsafe class TlsClientContext : IDisposable
 
     internal nint Handle => _ctx;
 
+    internal bool IsDisposed => _disposed;
+
     internal TlsClientOptions Options { get; }
 
     private TlsClientContext(nint ctx, TlsClientOptions options)
@@ -204,6 +206,7 @@ public sealed unsafe class TlsClientContext : IDisposable
     /// Open a TLS connection over an already-connected ring socket. The stream takes ownership of
     /// the socket and closes it on dispose.
     /// </summary>
+    /// <exception cref="ObjectDisposedException">This context was disposed; the socket is closed.</exception>
     public ValueTask<TlsClientStream> ConnectAsync(RingSocket socket)
         => ConnectAsync(socket, Options.ServerName ?? throw new InvalidOperationException(
             "no ServerName to verify the origin against: set TlsClientOptions.ServerName, or pass the name"));
