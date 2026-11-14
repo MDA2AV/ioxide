@@ -722,8 +722,8 @@ internal static class TcpTimeoutTests
 
     private static bool IsOpen(int fd) => fcntl(fd, FGetFd) != -1;
 
-    // Teardown closes every fd without releasing the reactor's ref, so a later release still sees a
-    // live connection. Its FIN must not reach whichever socket took the number since.
+    // Teardown closes every fd, and a release after it frees the connection. Neither its FIN nor that
+    // free's close may reach whichever socket took the number since.
     private static void ReleaseAfterStop(Action<TcpConnection> release)
     {
         var captured = new TaskCompletionSource<TcpConnection>(TaskCreationOptions.RunContinuationsAsynchronously);

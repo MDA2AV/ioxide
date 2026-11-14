@@ -9,6 +9,7 @@ public sealed unsafe partial class TcpConnection
 
     internal Reactor Reactor => _reactor;
 
+    /// <summary>The connection's socket, or -1 once its reactor's stop has closed it.</summary>
     public int ClientFd { get; private set; }
 
     /// <summary>The listener port this connection was accepted on; set per accept.</summary>
@@ -316,6 +317,7 @@ public sealed unsafe partial class TcpConnection
             NativeMemory.AlignedFree(_msg);
             _msg = null;
         }
+        FreeKeptSegments();   // a no-op after Clear(); a stopped reactor frees a connection without one
         DisposeIncremental();
     }
 }

@@ -223,7 +223,7 @@ internal static class StopParkedTests
         {
             string mode = incremental ? "incremental" : "shared ring";
 
-            runner.Test($"stop: a connection its handler let go of has its memory freed, one a handler still holds keeps it ({mode})", () =>
+            runner.Test($"stop: a connection its handler let go of has its memory freed, one a handler still holds keeps it until it lets go ({mode})", () =>
             {
                 var conns = new System.Collections.Concurrent.ConcurrentDictionary<char, TcpConnection>();
                 using var parked = new CountdownEvent(Roles.Length);
@@ -273,13 +273,16 @@ internal static class StopParkedTests
                                 await held.Task;   // busy outside ioxide when the stop comes
                                 conn.Write("late"u8);
                                 await conn.FlushAsync();
-                                heldFinished.TrySetResult();
                                 break;
                         }
                     }
                     finally
                     {
                         conn.DecRef();
+                        if (role == 'h')
+                        {
+                            heldFinished.TrySetResult();
+                        }
                     }
                 }, config);
 
@@ -315,6 +318,12 @@ internal static class StopParkedTests
                     Assert.True(HasWriteBuffer(conns['h']), "the write slab of a connection its handler still holds was freed under it");
                     held.TrySetResult();
                     Assert.True(heldFinished.Task.Wait(ReturnsWithinMs), "the held handler never finished");
+
+                    Assert.True(!HasWriteBuffer(conns['h']), "the write slab of the connection its handler let go of after the stop outlived that release");
+                    if (incremental)
+                    {
+                        Assert.True(!HasRing(conns['h']), "the buffer ring of the connection its handler let go of after the stop outlived that release");
+                    }
                 }
                 finally
                 {
@@ -324,6 +333,53 @@ internal static class StopParkedTests
                         client.Dispose();
                     }
                 }
+            }, skip: incremental && !TestServer.KernelAtLeast(6, 12));
+
+            runner.Test($"stop: a connection whose peer closed first, let go of after the stop, has its socket closed and its memory freed ({mode})", () =>
+            {
+                PeerClosedFirst handler = new();
+                (int port, Reactor reactor, Thread thread) = TestServer.StartConfigured(handler.Handle, PeerClosedConfig(incremental));
+
+                using Socket client = SendAndClose(port);
+                TcpConnection conn = handler.Wait();
+
+                StopAndJoin(reactor, thread);
+                Assert.True(HasWriteBuffer(conn), "the write slab of a connection its handler still holds was freed under it");
+
+                handler.Release();
+                AssertClosedAndFreed(conn, client, incremental);
+            }, skip: incremental && !TestServer.KernelAtLeast(6, 12));
+
+            runner.Test($"stop: a connection let go of just before the stop, its recycle still queued, has its socket closed and its memory freed ({mode})", () =>
+            {
+                PeerClosedFirst handler = new();
+                (int port, Reactor reactor, Thread thread) = TestServer.StartConfigured(handler.Handle, PeerClosedConfig(incremental));
+
+                using Socket client = SendAndClose(port);
+                TcpConnection conn = handler.Wait();
+
+                // The loop takes recycles before posts, so one queued while it runs a post waits for its next pass, and a
+                // stop requested meanwhile means there is none.
+                using var running = new ManualResetEventSlim();
+                using var busy = new ManualResetEventSlim();
+                reactor.ScheduleOnReactor(_ =>
+                {
+                    running.Set();
+                    busy.Wait(ReturnsWithinMs);
+                }, null);
+                try
+                {
+                    Assert.True(running.Wait(5_000), "the reactor never ran the post");
+                    handler.Release();
+                    reactor.Stop();
+                }
+                finally
+                {
+                    busy.Set();
+                }
+                Assert.True(thread.Join(TimeSpan.FromSeconds(10)), "the reactor did not stop");
+
+                AssertClosedAndFreed(conn, client, incremental);
             }, skip: incremental && !TestServer.KernelAtLeast(6, 12));
         }
 
@@ -472,6 +528,106 @@ internal static class StopParkedTests
         }
     }
 
+    // More than the default write slab: shared ring mode spills it into overflow segments, incremental mode grows the
+    // slab.
+    private const int StagedBytes = 64 * 1024;
+
+    private static ServerConfig PeerClosedConfig(bool incremental) => new()
+    {
+        Incremental = incremental ? new IncrementalOptions { MaxConnections = 16, RecvSlots = 4 } : null,
+        Tcp = new TcpOptions { WriteOverflow = WriteOverflowStrategy.Segmented },
+    };
+
+    // A handler whose peer closes first, so the reactor has let go of the connection before the stop and the stop never
+    // sees it. It stages a write it never flushes and waits outside ioxide until the test releases it.
+    private sealed class PeerClosedFirst
+    {
+        private readonly TaskCompletionSource<TcpConnection> _closed = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private readonly TaskCompletionSource _release = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private readonly TaskCompletionSource _released = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public async Task Handle(Reactor reactor, TcpConnection conn)
+        {
+            if (!await IsThisTestsConnection(conn))
+            {
+                conn.DecRef();
+                return;
+            }
+
+            await UntilClosed(conn);   // the peer's FIN: the reactor lets go of its ref
+            conn.Write(new byte[StagedBytes]);
+            _closed.TrySetResult(conn);
+
+            await _release.Task;
+            conn.DecRef();
+            _released.TrySetResult();
+        }
+
+        public TcpConnection Wait()
+        {
+            Assert.True(_closed.Task.Wait(5_000), "the handler never saw its peer close");
+            return _closed.Task.Result;
+        }
+
+        public void Release()
+        {
+            _release.TrySetResult();
+            Assert.True(_released.Task.Wait(ReturnsWithinMs), "the handler never let go");
+        }
+    }
+
+    private static async Task UntilClosed(TcpConnection conn)
+    {
+        while (true)
+        {
+            RecvSnapshot snapshot = await conn.ReadAsync();
+            while (conn.TryGetItem(snapshot, out SpscRecvRing.Item item))
+            {
+                if (item.HasBuffer)
+                {
+                    conn.ReturnBuffer(in item);
+                }
+            }
+
+            if (snapshot.IsClosed)
+            {
+                return;
+            }
+        }
+    }
+
+    // Its request sent, the client closes its side, as one done sending does.
+    private static Socket SendAndClose(int port)
+    {
+        Socket client = Connect(port);
+        client.Send("hi"u8);
+        client.Shutdown(SocketShutdown.Send);
+        return client;
+    }
+
+    private static void AssertClosedAndFreed(TcpConnection conn, Socket client, bool incremental)
+    {
+        Assert.True(!HasWriteBuffer(conn), "the write slab outlived its handler's release");
+        Assert.True(KeptSegmentsOf(conn) == 0, $"{KeptSegmentsOf(conn)} overflow segments outlived its handler's release");
+        if (incremental)
+        {
+            Assert.True(!HasRing(conn), "the buffer ring outlived its handler's release");
+        }
+
+        // Closed, the server's side sends the client its FIN, or a reset for what it never read.
+        client.ReceiveTimeout = ReturnsWithinMs;
+        string outcome;
+        try
+        {
+            outcome = client.Receive(new byte[16]) == 0 ? "closed" : "data";
+        }
+        catch (SocketException e)
+        {
+            outcome = e.SocketErrorCode == SocketError.TimedOut ? "still open" : "closed";
+        }
+        Assert.True(outcome == "closed", $"the server's socket, whose peer closed first, is {outcome} after its handler let go");
+    }
+
     private static unsafe bool HasWriteBuffer(TcpConnection connection) => WriteBufferOf(connection) != null;
 
     private static unsafe bool HasRing(TcpConnection connection) => BufRingOf(connection) != null && BufSlabOf(connection) != null;
@@ -484,6 +640,9 @@ internal static class StopParkedTests
 
     [System.Runtime.CompilerServices.UnsafeAccessor(System.Runtime.CompilerServices.UnsafeAccessorKind.Field, Name = "BufSlab")]
     private static extern unsafe ref byte* BufSlabOf(TcpConnection connection);
+
+    [System.Runtime.CompilerServices.UnsafeAccessor(System.Runtime.CompilerServices.UnsafeAccessorKind.Field, Name = "_ovKept")]
+    private static extern ref int KeptSegmentsOf(TcpConnection connection);
 
     private static async Task SwitchTo(Reactor reactor) => await new ReactorSwitch(reactor);
 

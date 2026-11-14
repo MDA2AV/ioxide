@@ -101,6 +101,31 @@ public sealed unsafe partial class Reactor
         // Allocations stay for pool reuse.
     }
 
+    // At the stop, while the ring is open: a ring still registered is one the stop could not return, which a release
+    // after it frees, and a recv still armed on it could fill it after that. Every gid off the free stack is one.
+    private void UnregisterHeldConnectionBufRings()
+    {
+        if (_freeGids is null)
+        {
+            return;
+        }
+
+        var free = new bool[_maxConnections + 2];
+        foreach (ushort gid in _freeGids)
+        {
+            free[gid] = true;
+        }
+
+        for (int gid = 2; gid < free.Length; gid++)
+        {
+            if (!free[gid])
+            {
+                var reg = new io_uring_buf_reg { bgid = (ushort)gid };
+                io_uring_register(_ring.Fd, IORING_UNREGISTER_PBUF_RING, &reg, 1);
+            }
+        }
+    }
+
     // Re-add a fully-consumed buffer to its connection's ring. Reactor-thread-only.
     private void ReturnConnectionBuffer(TcpConnection conn, ushort bid)
     {

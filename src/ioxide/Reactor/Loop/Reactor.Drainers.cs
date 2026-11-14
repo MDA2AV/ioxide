@@ -117,6 +117,11 @@ public sealed unsafe partial class Reactor
         }
         _recycleQ.Enqueue(conn);
         Wake();
+
+        if (_postsClosed)
+        {
+            DrainStoppedRecycles();   // the reactor is gone: nothing else will take it
+        }
     }
 
     private void DrainRecycleQ()
@@ -124,6 +129,24 @@ public sealed unsafe partial class Reactor
         while (_recycleQ.TryDequeue(out TcpConnection? conn))
         {
             Recycle(conn, conn.ClientFd);
+        }
+    }
+
+    // A stopped reactor's recycle, on the thread that let go: with the ring gone only the descriptor and the memory are
+    // left, and the descriptor only when the stop has not closed it (ClientFd -1).
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private void DrainStoppedRecycles()
+    {
+        // As in DrainStoppedPosts: a release that saw the queue open must not be stranded.
+        Interlocked.MemoryBarrier();
+
+        while (_recycleQ.TryDequeue(out TcpConnection? conn))
+        {
+            if (conn.ClientFd >= 0)
+            {
+                close(conn.ClientFd);
+            }
+            conn.Dispose();
         }
     }
 

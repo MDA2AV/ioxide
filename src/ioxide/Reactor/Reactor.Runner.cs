@@ -170,8 +170,9 @@ public sealed unsafe partial class Reactor
         }
         // Before the fd goes: unregistering is synchronous, closing is not (io_uring_release
         // defers to a workqueue), so without this the frees below could hand the kernel's pages
-        // back to the allocator while it still holds them.
+        // back to the allocator while it still holds them, and so could a held connection's release.
         UnregisterSharedBufRings();
+        UnregisterHeldConnectionBufRings();
 
         // The ring goes either way, its memory with it. When the start failed its number does not: releasing that
         // mid-run kills an unrelated live connection - #242, whose bisect found the damage is the number being handed
@@ -187,7 +188,8 @@ public sealed unsafe partial class Reactor
         }
 
         // Pooled connections are past their last send (#250) and their incremental ring is unregistered,
-        // so their slabs can go, the ones the stop returned included. One a handler still holds stays (#223).
+        // so their slabs can go, the ones the stop returned included. One a handler still holds stays
+        // until it lets go (#223).
         while (_pool.TryPop(out TcpConnection? pooled))
         {
             pooled.Dispose();
@@ -206,9 +208,11 @@ public sealed unsafe partial class Reactor
         }
         FreeUdpMemory();
 
-        // Last, so what is still queued, or posted from here on, fails its switch rather than waiting forever.
+        // Last, so what is still queued, or posted from here on, fails its switch rather than waiting forever, and a
+        // connection let go of is freed past the ring.
         _postsClosed = true;
         DrainStoppedPosts();
+        DrainStoppedRecycles();
         DrainStoppedOps();
 
         // After all that could still run here, since until then a handshake may read a TLS service's contexts (#543).

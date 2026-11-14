@@ -433,9 +433,10 @@ public sealed unsafe partial class Reactor
     {
         for (int fd = 0; fd < _connections.Length; fd++)
         {
-            if (_connections[fd] != null)
+            if (_connections[fd] is { } conn)
             {
                 close(fd);
+                conn.SetFd(-1);   // the number may be another socket's by the time a handler lets go (#242)
             }
         }
     }
@@ -459,8 +460,9 @@ public sealed unsafe partial class Reactor
     }
 
     // Once every wake is done, while the ring is open: a connection its handler let go of goes back to the pool as a
-    // recycle would, and the teardown's last step frees it. One a handler still holds, or whose send the kernel may
-    // still be reading, keeps its memory, as a write into it would land in freed memory (#223).
+    // recycle would, and the teardown's last step frees it. One a handler still holds keeps its memory until that
+    // handler lets go, as a write into it would land in freed memory (#223); one whose send the kernel may still be
+    // reading keeps it for good.
     private void ReturnReleasedTcpConnections()
     {
         for (int fd = 0; fd < _connections.Length; fd++)
@@ -480,6 +482,10 @@ public sealed unsafe partial class Reactor
 
                 conn.Clear();
                 ReturnToPool(conn);
+            }
+            else if (!conn.FlushSubmitted)
+            {
+                conn.ReleaseReactorRef();   // the handler's release then frees it, past the ring
             }
         }
     }
