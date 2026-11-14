@@ -413,6 +413,15 @@ public sealed partial class Http2Connection
             return;
         }
 
+        // Past END_STREAM the stream is half-closed (remote), where DATA is a stream error of STREAM_CLOSED (RFC 9113 5.1, 6.1).
+        if (pending.RequestEnded)
+        {
+            _responseWindows.Remove(header.StreamId);
+            ResetStream(header.StreamId, Http2Error.StreamClosed);
+            ReleaseCreditWaiters(header.StreamId);
+            return;
+        }
+
         // Past its window is a stream error (6.9), and its response stops with it; an empty frame may still end it (6.9.1).
         if (payload.Length > 0 && payload.Length > pending.ReceiveWindow)
         {
