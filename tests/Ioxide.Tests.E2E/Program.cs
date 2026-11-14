@@ -79,6 +79,7 @@ internal static class Program
         Http3RequestReuseTests.Register(runner);
         H3BodyModeTests.Register(runner);
         H3BufferedFaultTests.Register(runner);
+        H3NullAnswerTests.Register(runner);
         StreamResetTests.Register(runner);
         HandlerFaultHookTests.Register(runner);
         H3BodyLimitTests.Register(runner);

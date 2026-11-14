@@ -682,7 +682,7 @@ public sealed partial class Http3Connection
                 resp = new Http3Response { Status = 500 };
             }
 
-            Submit(rs.Request.StreamId, resp);
+            SubmitAnswer(rs.Request.StreamId, resp);
             Recycle(rs);
         }
         _ready.Clear();
@@ -722,7 +722,7 @@ public sealed partial class Http3Connection
             {
                 RetireBody(rs);
                 Http3Response response = pending.Result;   // once: a ValueTask is consumed by reading it
-                Submit(sid, response);
+                SubmitAnswer(sid, response);
                 Recycle(rs);
             }
             else
@@ -752,8 +752,27 @@ public sealed partial class Http3Connection
         {
             return;
         }
-        Submit(rs.Request.StreamId, resp);
+        SubmitAnswer(rs.Request.StreamId, resp);
         Recycle(rs);
+    }
+
+    // A null answer has sent nothing, so it gets what a handler that threw gets.
+    private void SubmitAnswer(long streamId, Http3Response resp)
+    {
+        if (resp is null)
+        {
+            AnswerNull(streamId);
+            return;
+        }
+        Submit(streamId, resp);
+    }
+
+    // Out of line, as only a handler that answered null comes here.
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private void AnswerNull(long streamId)
+    {
+        Console.Error.WriteLine($"[ioxide.http3] request handler faulted: {new NullReferenceException().Message}");
+        Submit(streamId, new Http3Response { Status = 500 });
     }
 
     /// <summary>Back for the next stream once the handler is done and the response submitted.</summary>
