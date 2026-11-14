@@ -17,9 +17,10 @@ namespace ioxide.http2;
 /// Whether there is one to read is <see cref="Http2Request.HasBody"/>, known before the first read.
 ///
 /// Backpressure is real rather than buffered-and-hoped-for: a chunk is credited back to the peer's
-/// window only as it is handed over, so a slow consumer stops replenishing, the peer runs out of
-/// window and stops sending. Memory is bound by one window instead of by the whole body, which is
-/// the difference that makes a hostile upload harmless.
+/// window only once it has been handed over, in the steps <see cref="Http2Options.InitialWindowSize"/>
+/// describes, so a slow consumer stops replenishing, the peer runs out of window and stops sending.
+/// Memory is bound by one window instead of by the whole body, which is the difference that makes a
+/// hostile upload harmless.
 ///
 /// The window is the stream's own. The connection's is opened to its maximum and kept there, so a
 /// handler that never reads holds back only its own upload, never the other streams'.
@@ -37,6 +38,10 @@ public sealed class Http2BodyReader : IValueTaskSource<ReadOnlyMemory<byte>>
     private readonly int _streamId;
 
     private readonly Queue<(byte[] Buffer, int Length)> _chunks = new();
+
+    // What _chunks holds, counted: a credit check that summed the queue at every read would go quadratic in tiny frames.
+    internal int Unread { get; private set; }
+
     private (byte[]? Buffer, int Length) _handedOut;
     private bool _ended;
     private Exception? _fault;   // what the end is reported as, when the body was cut off
@@ -72,7 +77,8 @@ public sealed class Http2BodyReader : IValueTaskSource<ReadOnlyMemory<byte>>
         if (_chunks.TryDequeue(out (byte[] Buffer, int Length) chunk))
         {
             _handedOut = chunk;
-            _owner.CreditBody(_streamId, chunk.Length);   // consumption is what opens the window
+            Unread -= chunk.Length;
+            _owner.CreditBody(_streamId);   // consumption is what opens the window
             return new ValueTask<ReadOnlyMemory<byte>>(chunk.Buffer.AsMemory(0, chunk.Length));
         }
 
@@ -99,6 +105,7 @@ public sealed class Http2BodyReader : IValueTaskSource<ReadOnlyMemory<byte>>
         byte[] buffer = ArrayPool<byte>.Shared.Rent(data.Length);
         data.CopyTo(buffer);
         _chunks.Enqueue((buffer, data.Length));
+        Unread += data.Length;
 
         if (_armed)
         {
@@ -142,7 +149,8 @@ public sealed class Http2BodyReader : IValueTaskSource<ReadOnlyMemory<byte>>
         {
             _armed = false;
             _handedOut = chunk;
-            _owner.CreditBody(_streamId, chunk.Length);
+            Unread -= chunk.Length;
+            _owner.CreditBody(_streamId);
             _core.SetResult(chunk.Buffer.AsMemory(0, chunk.Length));
         }
         else if (_ended)
@@ -187,13 +195,14 @@ public sealed class Http2BodyReader : IValueTaskSource<ReadOnlyMemory<byte>>
         FireIfReady();
     }
 
-    // Owed no credit: the connection was charged for these on arrival, and their stream is done.
+    // Owed no credit here: the connection was charged for these on arrival, and a stream left open behind a parked answer counts them at its retire.
     private void DropQueued()
     {
         while (_chunks.TryDequeue(out (byte[] Buffer, int Length) chunk))
         {
             ArrayPool<byte>.Shared.Return(chunk.Buffer);
         }
+        Unread = 0;
     }
 
     private void ReleaseHandedOut()

@@ -18,7 +18,10 @@ public sealed record Http2Options
     /// peer may send ahead of the credit the server gives back. A DATA frame past it resets its
     /// stream with FLOW_CONTROL_ERROR (RFC 9113 6.9). A buffered body is credited as it arrives, a
     /// streamed one as its handler reads it, so a handler that stops reading holds one window and
-    /// stalls only its own upload.
+    /// stalls only its own upload. The credit goes back in steps of a quarter of this, and of at most
+    /// 65,535 bytes, the window a peer counts until it has applied the SETTINGS (RFC 9113 6.9.2): one
+    /// WINDOW_UPDATE per step rather than per DATA frame, with the peer never out of window while the
+    /// handler keeps reading.
     ///
     /// The connection's own window is opened to 2^31-1 right behind the server's SETTINGS and kept
     /// there, so what bounds a connection's request bodies in flight is

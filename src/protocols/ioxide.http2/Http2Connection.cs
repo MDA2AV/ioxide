@@ -87,6 +87,9 @@ public sealed partial class Http2Connection : IDisposable
     // A new stream's receive window: InitialWindowSize, but no less than the 65535 a peer uses until it has our SETTINGS.
     private int _initialStreamWindow;
 
+    // What a stream consumes before it is credited: a quarter of its window, but at most the 65,535 a peer counts until it applies our SETTINGS, so any window it counts holds a step.
+    private readonly int _creditStep;
+
     // The reactor this connection is served on; null when it runs without one, as over a test pipe.
     private Reactor? _reactor;
 
@@ -102,6 +105,7 @@ public sealed partial class Http2Connection : IDisposable
         _options = options ?? new Http2Options();
         _decoder = new HpackDecoder();
         _initialStreamWindow = Math.Max(_options.InitialWindowSize, DefaultWindow);
+        _creditStep = Math.Clamp(_options.InitialWindowSize / 4, 1, DefaultWindow);
     }
 
     /// <summary>Convenience for cleartext h2c: wraps the connection in its own duplex pipe.</summary>
@@ -425,6 +429,12 @@ public sealed partial class Http2Connection : IDisposable
         {
             ResetStream(pending.StreamId, Http2Error.NoError);
         }
+        else if (live && !pending.RequestEnded)
+        {
+            // Its upload goes on behind the parked rest, and what its reader held is dropped below: all it was sent is consumed.
+            _parkedUploads[pending.StreamId] = 0;
+            CreditParkedUpload(pending.StreamId, _initialStreamWindow - pending.ReceiveWindow, ended: false);
+        }
 
         Recycle(pending);
 
@@ -471,16 +481,58 @@ public sealed partial class Http2Connection : IDisposable
         return pending;
     }
 
-    /// <summary>Return a read chunk's credit to its stream alone: the connection was charged for it on arrival.</summary>
-    internal void CreditBody(int streamId, int length)
+    /// <summary>A chunk was read: its stream alone is credited once a step is consumed, as the connection was charged for it on arrival.</summary>
+    internal void CreditBody(int streamId)
     {
-        if (length <= 0 || IsBroken || !_streams.TryGetValue(streamId, out PendingRequest? pending) || pending.RequestEnded)
+        if (IsBroken || !_streams.TryGetValue(streamId, out PendingRequest? pending) || pending.RequestEnded)
         {
             return;
         }
 
-        CreditStream(pending, length);
-        FlushCredit();
+        if (CreditConsumed(pending))
+        {
+            FlushCredit();
+        }
+    }
+
+    // Received and not yet credited, less what the reader still holds: the window is what bounds the unread bytes, so they are never credited.
+    private bool CreditConsumed(PendingRequest pending)
+    {
+        int consumed = _initialStreamWindow - pending.ReceiveWindow - (pending.BodyReader?.Unread ?? 0);
+        if (consumed < _creditStep)
+        {
+            return false;
+        }
+
+        CreditStream(pending, consumed);
+        return true;
+    }
+
+    // The upload still arriving behind each buffered answer parked on credit, by stream: what it has had dropped and not been credited.
+    private readonly Dictionary<int, int> _parkedUploads = new();
+
+    // Credited in steps as it is dropped, so a client that credits the answer only once its upload ends can finish both.
+    private void CreditParkedUpload(int streamId, int dropped, bool ended)
+    {
+        if (!_parkedUploads.TryGetValue(streamId, out int owed))
+        {
+            return;
+        }
+
+        // An ended request is owed none, and a stream whose answer has gone takes none (RFC 9113 5.1).
+        if (ended || !_responseWindows.ContainsKey(streamId))
+        {
+            _parkedUploads.Remove(streamId);
+            return;
+        }
+
+        owed += dropped;
+        if (owed >= _creditStep)
+        {
+            WriteWindowUpdate(streamId, owed);
+            owed = 0;
+        }
+        _parkedUploads[streamId] = owed;
     }
 
     // Every WINDOW_UPDATE the server sends goes through these two, which add back exactly what they grant.

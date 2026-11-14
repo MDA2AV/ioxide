@@ -235,9 +235,11 @@ internal static class Http2EarlyAnswerTests
             List<Frame> frames = client.Drain();
             Assert.Equal(16384, Frame.Body(frames, 1).Length);   // one stream window, then parked
 
-            client.Feed(Data(1, 16384, endStream: false));
+            // A step's worth, in one WINDOW_UPDATE that counts the 1,000 bytes dropped unread with its handler too.
+            client.Feed(Fill(1, 4 * 16384));
             List<Frame> credited = client.Drain();
-            Assert.Equal(16384, Credit(credited, 1));
+            Assert.Equal(1000 + (4 * 16384), Credit(credited, 1));
+            Assert.Equal(1, credited.Count(f => f is { Type: Frame.WindowUpdate, StreamId: 1 }));
 
             client.Feed(WindowUpdate(1, 1 << 20));
             frames.AddRange(credited);
