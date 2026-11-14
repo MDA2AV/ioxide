@@ -46,6 +46,7 @@ internal static class Program
         Nghttp2ResetResponseTests.Register(runner);
         Http2PeerClosedFlushTests.Register(runner);
         Http2StreamResetTests.Register(runner);
+        Http2StreamStateTests.Register(runner);
         HpackEncodeTests.Register(runner);
         QpackStaticEncodeTests.Register(runner);
         AlpnSelectTests.Register(runner);

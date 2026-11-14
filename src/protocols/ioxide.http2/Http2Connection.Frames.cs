@@ -153,8 +153,8 @@ public sealed partial class Http2Connection
 
         if (!_streams.TryGetValue(header.StreamId, out PendingRequest? pending))
         {
-            // An id at or below one already opened opens nothing (RFC 9113 5.1.1) - it is trailers
-            // for a request already answered - so it is decoded like a refused block, but not reset.
+            // An id at or below one already opened opens nothing (RFC 9113 5.1.1): its block is decoded
+            // like a refused one, and resets its stream only if that stream is still answering.
             if (header.StreamId <= _highestStream || _streams.Count >= _options.MaxConcurrentStreams)
             {
                 // Past the limit we advertised. The block still has to be DECODED - HPACK is one
@@ -177,10 +177,13 @@ public sealed partial class Http2Connection
         else if (pending.BodyReader is { } reader)
         {
             // Trailers for a request already being served: its arena backs what the handler holds,
-            // so the block is decoded aside and dropped, and only its END_STREAM is kept.
+            // so the block is decoded aside and dropped, and only its END_STREAM is kept. A block after
+            // that END_STREAM, or one without it, marks the stream to be reset once it is decoded.
+            bool trailers = !pending.RequestEnded && (header.Flags & FrameFlags.EndStream) != 0;
+            pending.Malformed = !trailers;
             _discardBlock.StreamId = header.StreamId;
             DiscardHeaderBlock(header, block);
-            if ((header.Flags & FrameFlags.EndStream) != 0)
+            if (trailers)
             {
                 if (!pending.BodyFits(ended: true))
                 {
@@ -230,9 +233,9 @@ public sealed partial class Http2Connection
     }
 
     /// <summary>
-    /// A header block that opens no request - a refused stream's, or trailers: decoded to keep the
-    /// HPACK table in step with the peer, and thrown away. Bounded like any other block, so refusing
-    /// a stream cannot itself be the way in.
+    /// A header block that opens no request - a refused stream's, trailers, or one its stream cannot
+    /// take: decoded to keep the HPACK table in step with the peer, and thrown away, and only then is
+    /// its stream reset. Bounded like any other block, so refusing a stream cannot itself be the way in.
     /// </summary>
     private void DiscardHeaderBlock(in FrameHeader header, ReadOnlySpan<byte> block)
     {
@@ -252,12 +255,30 @@ public sealed partial class Http2Connection
         int streamId = _discardBlock.StreamId;
         _discardBlock.StreamId = 0;
 
+        if (!DecodeHeaderBlock(_discardBlock, discard: true))
+        {
+            return;
+        }
+
         // Only a new id was refused; nothing of another stream can arrive mid-block to move the
-        // highest. Trailers are not reset: REFUSED_STREAM says the request went unprocessed.
-        if (DecodeHeaderBlock(_discardBlock, discard: true) && streamId > _highestStream)
+        // highest. Trailers are never refused: REFUSED_STREAM says the request went unprocessed.
+        if (streamId > _highestStream)
         {
             ResetStream(streamId, Http2Error.RefusedStream);
             _highestStream = streamId;   // refused, but used
+        }
+        else if (_streams.TryGetValue(streamId, out PendingRequest? pending))
+        {
+            // Still open: marked by the HEADERS of a body-reader request that cannot take the block, one
+            // after its END_STREAM (RFC 9113 5.1) or one without END_STREAM (8.1, malformed).
+            if (pending.Malformed)
+            {
+                ResetAnswering(streamId, pending.RequestEnded ? Http2Error.StreamClosed : Http2Error.ProtocolError);
+            }
+        }
+        else if (!_streamBodies && _responseWindows.ContainsKey(streamId))
+        {
+            ResetAnswering(streamId, Http2Error.StreamClosed);   // half-closed (remote), as HandleData finds it
         }
     }
 
@@ -404,6 +425,14 @@ public sealed partial class Http2Connection
 
         if (!_streams.TryGetValue(header.StreamId, out PendingRequest? pending))
         {
+            // Answering, and out of _streams only once its request has ended: half-closed (remote), where DATA is
+            // STREAM_CLOSED (RFC 9113 5.1, 6.1). With a body reader, a rest parked on credit leaves _streams early.
+            if (!_streamBodies && _responseWindows.ContainsKey(header.StreamId))
+            {
+                ResetAnswering(header.StreamId, Http2Error.StreamClosed);
+                return;
+            }
+
             // A buffered answer parked on credit still has its upload credited, so a client that credits the
             // answer only once its upload ends can finish both. Any other stream's window went with it.
             if (payload.Length > 0 && !ended && _responseWindows.ContainsKey(header.StreamId))
@@ -479,6 +508,14 @@ public sealed partial class Http2Connection
         _responseWindows.Remove(streamId);
         ResetStream(streamId, Http2Error.ProtocolError);
         ReleaseCreditWaiters(streamId);   // a writer parked on credit wakes to find the stream gone
+    }
+
+    // As a window overrun resets: nothing of its answer may follow (RFC 9113 5.1), and a writer parked on its credit wakes to find it gone.
+    private void ResetAnswering(int streamId, uint errorCode)
+    {
+        _responseWindows.Remove(streamId);
+        ResetStream(streamId, errorCode);
+        ReleaseCreditWaiters(streamId);
     }
 
     private void TryComplete(PendingRequest pending)
@@ -708,7 +745,8 @@ public sealed partial class Http2Connection
         public (int Offset, int Length) Authority;
 
         // A pseudo-header out of place, or a content-length that is no number or comes twice: the
-        // stream is reset once the block is decoded, never dispatched.
+        // stream is reset once the block is decoded, never dispatched. Set on a body-reader request
+        // being served by a later block it cannot take, whose decode then resets it.
         public bool Malformed;
 
         // What the content-length says the DATA comes to, -1 without one, and what it has come to so
