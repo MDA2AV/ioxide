@@ -16,7 +16,7 @@ internal static class EarlyAnswerTests
     // A control's upload, read whole by its handler.
     private const long ReadUpload = 8L << 20;
 
-    // Measured stops are 64 KiB on h2, the connection window, and 192 KiB on h3; these leave room for a slow box.
+    // Measured stops are up to 320 KiB on h2, the stream window and what the client had buffered, and 192 KiB on h3; these leave room for a slow box.
     private const long H2Stopped = 512L << 10;
     private const long H3Stopped = 1L << 20;
 
