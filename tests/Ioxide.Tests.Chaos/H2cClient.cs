@@ -42,6 +42,9 @@ public sealed class H2cClient : IDisposable
         /// <summary>RST_STREAM on the stream. The error code says why.</summary>
         Reset,
 
+        /// <summary>HEADERS, then RST_STREAM(NO_ERROR): the request was answered, and the client asked to send no more of it (RFC 9113 8.1).</summary>
+        Stopped,
+
         /// <summary>GOAWAY: the whole connection ended, not just the stream.</summary>
         GoAway,
 
@@ -53,7 +56,7 @@ public sealed class H2cClient : IDisposable
     /// POST <paramref name="length"/> body bytes of <see cref="PatternAt"/> within the server's
     /// flow-control windows, reading what arrives before sending more, until the server has answered
     /// and the whole body is sent, or it resets the stream, or goes away. An answer that comes early
-    /// does not stop the body: a real client still sends it, and the server still has to credit it.
+    /// does not stop the body, but a RST_STREAM(NO_ERROR) after it does.
     /// </summary>
     /// <param name="padding">
     /// Pad every DATA frame with this many bytes. Padding counts against both windows and never
@@ -142,7 +145,8 @@ public sealed class H2cClient : IDisposable
             }
             else if (type == RstStream && sid == streamId && payload.Length == 4)
             {
-                return (UploadEnd.Reset, BinaryPrimitives.ReadUInt32BigEndian(payload), sent);
+                uint code = BinaryPrimitives.ReadUInt32BigEndian(payload);
+                return (answered && code == 0 ? UploadEnd.Stopped : UploadEnd.Reset, code, sent);
             }
             else if (type == Headers && sid == streamId)
             {

@@ -371,8 +371,10 @@ internal static class Nghttp2StreamedRequestTests
 
             for (int i = 1; i <= Uploads; i++)
             {
+                // An unread upload that has not ended by its answer is stopped after it (RFC 9113 8.1).
                 (H2cClient.UploadEnd end, uint error, long sent) = client.Upload(streamId: (2 * i) - 1, UploadBytes, path: path);
-                Assert.True(end == H2cClient.UploadEnd.Answered && sent == UploadBytes,
+                bool stopped = end == H2cClient.UploadEnd.Stopped && path != "/read";
+                Assert.True(stopped || (end == H2cClient.UploadEnd.Answered && sent == UploadBytes),
                     $"{path}: upload {i} of {Uploads}, {(i - 1) * UploadBytes / 1024} KiB already sent, ended {end} "
                     + $"(error 0x{error:x}) after {sent} of {UploadBytes} bytes");
             }
