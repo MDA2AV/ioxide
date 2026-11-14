@@ -262,17 +262,35 @@ internal static class OffReactorFlushTests
             Assert.True(outcome.Task.Result >= Rounds / 2, $"the handler resumed on the reactor after {outcome.Task.Result} of {Rounds} decrypts");
         });
 
-        runner.Test("tls pipe: a read from another thread that has to decrypt fails once the reactor has stopped, instead of waiting forever", () =>
+        runner.Test("tls pipe: a read from another thread that has to decrypt returns completed once the reactor has stopped, instead of throwing", () =>
         {
+            // Its switch to the reactor threw ObjectDisposedException, where the kTLS RX half reports the connection the stop closed (#585).
             (string certPath, string keyPath) = TestCert.Ensure();
             var options = new TlsOptions { CertificatePath = certPath, KeyPath = keyPath };
 
-            var offReactor = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-            using var stopped = new ManualResetEventSlim();
-            var outcome = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
+            string read = ReadAfterTheStop(options, typeof(TlsDecryptingPipeReader));
+            Assert.True(read is "completed" or "completed at once", $"the read after the stop: {read}");
+        });
 
+        runner.Test("tls pipe: control: under kTLS RX a read from another thread once the reactor has stopped returns completed", () =>
+        {
+            // The connection's own reader, under the prologue reader: it reports the connection the stop closed.
+            (string certPath, string keyPath) = TestCert.Ensure();
+            var options = new TlsOptions { CertificatePath = certPath, KeyPath = keyPath, KernelTx = true, KernelRx = true };
+
+            string read = ReadAfterTheStop(options, typeof(TlsProloguePipeReader));
+            Assert.True(read is "completed" or "completed at once", $"the read after the stop: {read}");
+        }, skip: !ktls);
+
+        runner.Test("tls pipe: a read from another thread still queued when the reactor stops returns completed, instead of throwing", () =>
+        {
+            // Posted before the stop, but after the reactor last ran its posts: the stop handed its switch to the thread pool (#585).
+            (string certPath, string keyPath) = TestCert.Ensure();
+            var options = new TlsOptions { CertificatePath = certPath, KeyPath = keyPath };
+
+            var outcome = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
             (int port, Reactor reactor, Thread thread) = TestServer.StartConfigured(
-                StoppedReadHandler(offReactor, stopped, outcome),
+                QueuedReadHandler(outcome),
                 new ServerConfig
                 {
                     RecvBufferSize = 4096, RecvSlots = 256,
@@ -286,13 +304,51 @@ internal static class OffReactorFlushTests
             ssl.AuthenticateAsClient(new SslClientAuthenticationOptions { TargetHost = "localhost" });
             ssl.Write(new byte[] { 1 });
 
-            Assert.True(offReactor.Task.Wait(10_000), "the handler never left the reactor");
-            reactor.Stop();
-            Assert.True(thread.Join(TimeSpan.FromSeconds(10)), "the reactor did not stop");
-            stopped.Set();
+            // The handler stops the reactor itself, in the pass the read was posted in.
+            bool stopped = thread.Join(TimeSpan.FromSeconds(10));
+            if (!stopped)
+            {
+                reactor.Stop();
+            }
+            Assert.True(stopped, $"the handler never stopped the reactor: {(outcome.Task.IsCompleted ? outcome.Task.Result : "no outcome")}");
 
-            Assert.True(outcome.Task.Wait(10_000), "the read never finished, and nothing will ever run it now");
-            Assert.Equal("ObjectDisposedException", outcome.Task.Result);
+            Assert.True(outcome.Task.Wait(20_000), "the handler never reported");
+            Assert.Equal("completed", outcome.Task.Result);
+        });
+
+        runner.Test("tls pipe: a read from another thread once the reactor has stopped reports a receive-queue overflow before it as an error", () =>
+        {
+            // The overflow dropped ciphertext, a truncation, which the stop must not turn into a clean end.
+            (string certPath, string keyPath) = TestCert.Ensure();
+            var options = new TlsOptions { CertificatePath = certPath, KeyPath = keyPath };
+
+            string read = ReadAfterTheStop(options, typeof(TlsDecryptingPipeReader),
+                new ServerConfig
+                {
+                    RecvBufferSize = 64, RecvSlots = 256,
+                    Tcp = new TcpOptions { WriteSlabSize = 16 * 1024, PoolMax = 8, RecvQueueEntries = 16 },
+                },
+                (ssl, connection) =>
+                {
+                    ssl.Write(new byte[4096]);   // 64-byte buffers: 65 deliveries into a 16-slot queue
+                    Assert.True(SpinWait.SpinUntil(() => connection.RecvOverflowed, 10_000), "the queue never overflowed");
+                });
+            Assert.Equal("IOException", read);
+        });
+
+        runner.Test("tls pipe: a read from another thread once the reactor has stopped returns completed without decrypting what arrived before the stop", () =>
+        {
+            // What is queued points into the reactor's receive buffers, which the stop freed.
+            (string certPath, string keyPath) = TestCert.Ensure();
+            var options = new TlsOptions { CertificatePath = certPath, KeyPath = keyPath };
+
+            string read = ReadAfterTheStop(options, typeof(TlsDecryptingPipeReader), beforeTheStop: (ssl, connection) =>
+            {
+                ssl.Write(new byte[1000]);
+                Assert.True(SpinWait.SpinUntil(() => Volatile.Read(ref PendingOf(connection)) == 1, 10_000),
+                    "the client's bytes never reached the connection");
+            });
+            Assert.True(read is "completed" or "completed at once", $"the read after the stop: {read}");
         });
 
         runner.Test("tls pipe: a flush from another thread once the reactor has stopped returns completed, instead of waiting forever", () =>
@@ -348,6 +404,69 @@ internal static class OffReactorFlushTests
             Assert.True(outcome.Task.Wait(20_000), "the handler never reported");
             Assert.Equal("completed", outcome.Task.Result);
         });
+    }
+
+    // The handler leaves the reactor, waits on its own thread until the reactor has stopped, then reads there.
+    private static string ReadAfterTheStop(
+        TlsOptions options, Type reader, ServerConfig? config = null, Action<SslStream, TcpConnection>? beforeTheStop = null)
+    {
+        var offReactor = new TaskCompletionSource<TcpConnection>(TaskCreationOptions.RunContinuationsAsynchronously);
+        using var stopped = new ManualResetEventSlim();
+        var outcome = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        (int port, Reactor reactor, Thread thread) = TestServer.StartConfigured(
+            StoppedReadHandler(reader, offReactor, stopped, outcome),
+            config ?? new ServerConfig
+            {
+                RecvBufferSize = 4096, RecvSlots = 256,
+                Tcp = new TcpOptions { WriteSlabSize = 16 * 1024, PoolMax = 64, RecvQueueEntries = 64 },
+            },
+            r => TlsService.Start(r, options));
+
+        using var tcp = new TcpClient();
+        tcp.Connect("127.0.0.1", port);
+        using var ssl = new SslStream(tcp.GetStream(), leaveInnerStreamOpen: false, (_, _, _, _) => true);
+        ssl.AuthenticateAsClient(new SslClientAuthenticationOptions { TargetHost = "localhost" });
+        ssl.Write(new byte[] { 1 });
+
+        try
+        {
+            Assert.True(offReactor.Task.Wait(10_000), "the handler never left the reactor");
+            beforeTheStop?.Invoke(ssl, offReactor.Task.Result);
+            reactor.Stop();
+            Assert.True(thread.Join(TimeSpan.FromSeconds(10)), "the reactor did not stop");
+        }
+        finally
+        {
+            stopped.Set();
+        }
+
+        Assert.True(outcome.Task.Wait(20_000), "the handler never reported");
+        return outcome.Task.Result;
+    }
+
+    // How a read from another thread ended, told whether it had completed when ReadAsync returned. Left waiting, it is
+    // "never finished", and nothing will ever run it now.
+    private static string ReadOutcome(ValueTask<ReadResult> read, bool atOnce)
+    {
+        Task<ReadResult> ended = read.AsTask();
+        try
+        {
+            if (!ended.Wait(10_000))
+            {
+                return "never finished";
+            }
+        }
+        catch (AggregateException e)
+        {
+            return e.InnerException?.GetType().Name ?? e.GetType().Name;
+        }
+
+        ReadResult result = ended.Result;
+        string ending = !result.IsCompleted ? "returned, not completed"
+            : atOnce ? "completed at once"
+            : "completed";
+        return result.Buffer.IsEmpty ? ending : $"{ending}, with {result.Buffer.Length} bytes";
     }
 
     // Completed, at once or through the thread pool, nothing left staged that nothing would ever send, and the cancel
@@ -631,7 +750,7 @@ internal static class OffReactorFlushTests
         };
 
     private static Func<Reactor, TcpConnection, Task> StoppedReadHandler(
-        TaskCompletionSource offReactor, ManualResetEventSlim stopped, TaskCompletionSource<string> outcome)
+        Type reader, TaskCompletionSource<TcpConnection> offReactor, ManualResetEventSlim stopped, TaskCompletionSource<string> outcome)
         => async (reactor, connection) =>
         {
             TlsSession? session = null;
@@ -653,18 +772,105 @@ internal static class OffReactorFlushTests
                 pipe.Input.AdvanceTo(first.Buffer.End);
 
                 await Task.Yield();   // leaves the reactor: nothing brings it back
-                offReactor.TrySetResult();
+                offReactor.TrySetResult(connection);
                 stopped.Wait();
 
+                // The half the handshake chose: under the wrong one this would test the other.
+                if (pipe.Input.GetType() != reader)
+                {
+                    outcome.TrySetResult($"the session's reader is {pipe.Input.GetType().Name}");
+                    return;
+                }
+
+                ValueTask<ReadResult> read = pipe.Input.ReadAsync();
+                outcome.TrySetResult(ReadOutcome(read, read.IsCompleted));
+            }
+            catch (Exception e)
+            {
+                outcome.TrySetResult(e.GetType().Name);
+                offReactor.TrySetResult(connection);
+            }
+            finally
+            {
+                if (pipe is not null)
+                {
+                    await pipe.DisposeAsync();
+                }
+                else
+                {
+                    session?.Dispose();
+                }
+                connection.DecRef();
+            }
+        };
+
+    private static Func<Reactor, TcpConnection, Task> QueuedReadHandler(TaskCompletionSource<string> outcome)
+        => async (reactor, connection) =>
+        {
+            TlsSession? session = null;
+            TlsConnectionDualPipe? pipe = null;
+            try
+            {
                 try
                 {
-                    await pipe.Input.ReadAsync();
-                    outcome.TrySetResult("the read returned");
+                    session = await reactor.GetService<TlsService>()!.AcceptAsync(connection);
                 }
-                catch (Exception e)
+                catch
                 {
-                    outcome.TrySetResult(e.GetType().Name);
+                    return;   // the harness's readiness probe never completes a handshake
                 }
+
+                pipe = new TlsConnectionDualPipe(connection, session);
+                using var posted = new ManualResetEventSlim();
+
+                // Resumed by the client's byte, among the pass's completions: the pass ran its posts before them.
+                ReadResult first = await pipe.Input.ReadAsync();
+                pipe.Input.AdvanceTo(first.Buffer.End);
+
+                if (pipe.Input is not TlsDecryptingPipeReader)
+                {
+                    outcome.TrySetResult($"the session's reader is {pipe.Input.GetType().Name}");
+                }
+                else
+                {
+                    // Another thread reads while this holds the reactor, so the read's switch is posted, and the stop then
+                    // ends the loop with this pass: it never runs its posts again.
+                    PipeReader input = pipe.Input;
+                    new Thread(() =>
+                    {
+                        ValueTask<ReadResult> read;
+                        bool atOnce;
+                        try
+                        {
+                            read = input.ReadAsync();
+                            atOnce = read.IsCompleted;   // while the reactor is held, so nothing else can have completed it
+                        }
+                        catch (Exception e)
+                        {
+                            outcome.TrySetResult(e.GetType().Name);
+                            return;
+                        }
+                        finally
+                        {
+                            posted.Set();
+                        }
+
+                        string ended = ReadOutcome(read, atOnce);
+
+                        // Set by the stop's close only with no read parked, and cleared by a read that reaches the connection.
+                        outcome.TrySetResult(Volatile.Read(ref PendingOf(connection)) == 1
+                            ? ended
+                            : $"{ended}, by a read that reached the connection");
+                    }) { IsBackground = true, Name = "tls-585-reader" }.Start();
+
+                    if (!posted.Wait(10_000))
+                    {
+                        outcome.TrySetResult("the reader never read");
+                    }
+                }
+
+                reactor.Stop();
+                await outcome.Task;   // the reader must be done with the pipe before it is disposed under it
             }
             catch (Exception e)
             {

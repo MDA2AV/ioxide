@@ -18,7 +18,11 @@ namespace ioxide.tls;
 /// consumed/examined bookkeeping a PipeReader owes its caller. The caller's read IS that Pipe's
 /// read; this class only feeds it.
 /// </summary>
-/// <remarks>A read from another thread takes what is already decrypted there; decrypting and disposal run on the connection's reactor.</remarks>
+/// <remarks>
+/// A read from another thread takes what is already decrypted there; decrypting and disposal run on the connection's
+/// reactor. Once the reactor has stopped, such a read reports the end of the stream instead of decrypting what is still
+/// queued.
+/// </remarks>
 public sealed class TlsDecryptingPipeReader : PipeReader, IAsyncDisposable, IRecvListener
 {
     private readonly TcpConnection _conn;
@@ -91,7 +95,16 @@ public sealed class TlsDecryptingPipeReader : PipeReader, IAsyncDisposable, IRec
     [MethodImpl(MethodImplOptions.NoInlining)]
     private async ValueTask<ReadResult> FillOnReactor(ValueTask<ReadResult> read)
     {
-        await new ReactorSwitch(_conn.Reactor);
+        try
+        {
+            await new ReactorSwitch(_conn.Reactor);
+        }
+        catch (ObjectDisposedException)
+        {
+            // The stop closed the connection and freed the shared receive buffers, which what is queued may point into.
+            EndClosed();
+            return await read;
+        }
 
         if (!read.IsCompleted)
         {
@@ -231,11 +244,13 @@ public sealed class TlsDecryptingPipeReader : PipeReader, IAsyncDisposable, IRec
         }
         if (closed)
         {
-            // An overflow dropped ciphertext: a truncation, so it ends the stream as an error.
-            End(!_session.Closed && _conn.RecvOverflowed ? TcpConnection.RecvOverflowError() : null);
+            EndClosed();
         }
         return true;
     }
+
+    // An overflow dropped ciphertext: a truncation, so it ends the stream as an error.
+    private void EndClosed() => End(!_session.Closed && _conn.RecvOverflowed ? TcpConnection.RecvOverflowError() : null);
 
     // Make what was just decrypted readable. With no pause threshold this never waits.
     private void Publish()
