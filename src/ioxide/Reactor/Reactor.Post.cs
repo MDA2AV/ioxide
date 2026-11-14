@@ -27,13 +27,19 @@ public sealed unsafe partial class Reactor
     /// <summary>True once the reactor has stopped for good: nothing posted to it runs on it any more.</summary>
     internal bool PostsClosed => _postsClosed;
 
-    /// <summary>True when the caller is executing on this reactor's loop thread.</summary>
+    /// <summary>
+    /// True when the caller is executing on this reactor's loop thread. False on every thread once the reactor has
+    /// stopped, the one that ran it included.
+    /// </summary>
     public bool OnReactorThread => Environment.CurrentManagedThreadId == _reactorThreadId;
 
     [ThreadStatic]
     private static Reactor? t_current;
 
-    /// <summary>The reactor whose loop runs on the calling thread, or null on any other thread.</summary>
+    /// <summary>
+    /// The reactor whose loop runs on the calling thread, or null on any other thread. Null too on the thread that ran a
+    /// reactor, once that reactor has stopped.
+    /// </summary>
     public static Reactor? Current => t_current;
 
     /// <summary>
