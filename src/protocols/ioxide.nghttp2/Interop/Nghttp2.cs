@@ -24,7 +24,7 @@ internal static unsafe partial class Nghttp2
     {
         public delegate* unmanaged<void*, int, void> OnBeginHeaders;
         public delegate* unmanaged<void*, int, byte*, nuint, byte*, nuint, void> OnHeader;
-        public delegate* unmanaged<void*, int, void> OnEndHeaders;
+        public delegate* unmanaged<void*, int, int, void> OnEndHeaders;   // (user, streamId, endStream): non-zero when END_STREAM came with the block
         public delegate* unmanaged<void*, int, byte*, nuint, void> OnData;
         public delegate* unmanaged<void*, int, void> OnEndStream;
         public delegate* unmanaged<void*, int, uint, void> OnStreamError;

@@ -195,6 +195,8 @@ public sealed partial class Nghttp2Connection : IDisposable
         // The body passed MaxRequestBytes, or the headers MaxHeaderListSize: the stream is reset once ih2_read unwinds, never dispatched.
         public bool Overflowed;
 
+        public bool HasBody;   // what Nghttp2Request.HasBody reports: the opening HEADERS did not end the stream
+
         // What this request's header blocks have decoded to so far.
         public long HeaderListSize;
 
@@ -267,6 +269,7 @@ public sealed partial class Nghttp2Connection : IDisposable
             request.Scheme     = Slice(Scheme);
             request.Authority  = Slice(Authority);
             request.Body       = Slice(_body);
+            request.HasBody    = HasBody;
             request.BodyReader = BodyReader;
 
             foreach ((int nameOffset, int nameLength, int valueOffset, int valueLength) in _fields)
@@ -300,6 +303,7 @@ public sealed partial class Nghttp2Connection : IDisposable
         {
             StreamId = 0;
             Overflowed = false;
+            HasBody = false;
             Method = Path = Scheme = Authority = _body = default;
 
             // Its request still points into the arena Dispose returned, which the pool must not pin.
