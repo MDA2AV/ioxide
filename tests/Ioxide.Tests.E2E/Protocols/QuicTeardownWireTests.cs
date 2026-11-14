@@ -342,9 +342,9 @@ internal sealed unsafe class TeardownWireClient : IDisposable
         return false;
     }
 
-    /// <summary>Open a bidi stream and send the payload with fin, without waiting for the answer;
-    /// returns the stream's id.</summary>
-    public long SendRequest(byte[] payload)
+    /// <summary>Open a bidi stream and send the payload, with fin unless <paramref name="fin"/> says
+    /// the rest is held back, without waiting for the answer; returns the stream's id.</summary>
+    public long SendRequest(byte[] payload, bool fin = true)
     {
         long sid = iq_client_open_bidi(_conn);
         Assert.True(sid >= 0, "failed to open a client stream");
@@ -360,7 +360,7 @@ internal sealed unsafe class TeardownWireClient : IDisposable
                 byte* data = stream >= 0 ? src + off : null;
                 nuint len = stream >= 0 ? (nuint)(payload.Length - off) : 0;
                 nint n = iq_conn_write(_conn, dest, (nuint)_scratch.Length, stream,
-                                       data, len, 1, &consumed, NowNs());
+                                       data, len, fin ? 1 : 0, &consumed, NowNs());
                 if ((int)n < 0)
                 {
                     if (stream < 0)

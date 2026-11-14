@@ -131,17 +131,18 @@ internal static class Http2TrailerTests
             Task run = peer.Connection.RunAsync(request =>     // no body reader: the body comes whole
             {
                 request.TryGetHeader("x-checksum"u8, out ReadOnlyMemory<byte> checksum);
-                served.Add($"{request.StreamId} '{Ascii(request.Path)}' {request.Body.Length} x-checksum '{Ascii(checksum)}'");
+                served.Add($"{request.StreamId} '{Ascii(request.Path)}' {request.Body.Length} x-checksum '{Ascii(checksum)}' "
+                           + (request.HasBody ? "a body" : "no body"));
                 return Http2Response.Text("done");
             });
 
             peer.Open();
             peer.Headers(1, Request("/upload"), endStream: false);
             peer.Data(1, 400, endStream: false);
-            peer.Headers(1, Field("x-checksum", "abc"), endStream: true);
+            peer.Headers(1, Field("x-checksum", "abc"), endStream: true);   // decoded the way the opening block was, and its END_STREAM is no answer to HasBody
             peer.Headers(3, Request("/next"), endStream: true);
 
-            Assert.True(served.SequenceEqual(["1 '/upload' 400 x-checksum 'abc'", "3 '/next' 0 x-checksum ''"]),
+            Assert.True(served.SequenceEqual(["1 '/upload' 400 x-checksum 'abc' a body", "3 '/next' 0 x-checksum '' no body"]),
                 $"the handler was handed: {string.Join(", ", served)}");
             Assert.Equal("", Resets(peer));
 

@@ -138,12 +138,13 @@ internal static class H3BodyTruncationTests
         runner.Test("http3: an invalid or repeated content-length is refused with H3_MESSAGE_ERROR", () =>
         {
             // Each with a ten-byte body, so only the header is wrong. A repeated content-length is
-            // refused even when the values agree, as nghttp3 refuses it.
-            foreach (string[] fields in new string[][] { ["ten"], ["-10"], ["+10"], ["10 "], ["10", "10"] })
+            // refused even when the values agree, as nghttp3 refuses it. long.TryParse lets a trailing
+            // NUL through.
+            foreach (string[] fields in new string[][] { ["ten"], ["-10"], ["+10"], ["10 "], ["10\0"], ["10", "10"] })
             {
                 string outcome = BufferedOutcome("0123456789"u8.ToArray(), fields);
                 Assert.True(outcome == "reset 0x10e",
-                    $"content-length {string.Join(" + ", fields.Select(f => $"'{f}'"))}: expected reset 0x10e, got {outcome}");
+                    $"content-length {string.Join(" + ", fields.Select(f => $"'{f.Replace("\0", "\\0")}'"))}: expected reset 0x10e, got {outcome}");
             }
         });
 
