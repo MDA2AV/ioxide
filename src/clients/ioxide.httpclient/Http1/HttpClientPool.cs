@@ -34,6 +34,9 @@ public sealed class HttpClientPool : IDisposable
     private int _requests;     // inside SendAsync: acquiring, waiting or sending
     private bool _disposed;
 
+    // What an open started behind the backoff gate waits on. One is enough: such an open starts only with none opening.
+    private readonly RingOpSource _backoff = new();
+
     // Warm: PoolSize connections opened up front and kept that way, the long-lived upstream shape.
     // Otherwise connections open as requests need them, which is how RingHttpClient's pools run.
     private readonly bool _warm;
@@ -161,7 +164,7 @@ public sealed class HttpClientPool : IDisposable
 
             // Honour the same backoff gate Sweep() does. Without it, a dead origin turns this loop
             // into a connect() storm: open, refuse, wake, reopen - thousands of syscalls a second
-            // on the reactor thread. Behind the gate the ticker paces the retries instead. One open
+            // on the reactor thread. Behind the gate the retry waits the backoff out, below. One open
             // in flight per waiting request, so a burst that finds no connection opens in parallel.
             if (_live < _options.PoolSize && _opening <= _waiters.Count && Native.MonotonicMs >= _reopenAtMs)
             {
@@ -171,6 +174,12 @@ public sealed class HttpClientPool : IDisposable
             if (Native.MonotonicMs >= deadlineMs)
             {
                 throw new HttpClientException(AcquireTimeoutMessage());
+            }
+
+            // Nothing opening: the retry starts now, waiting the backoff out on the ring, so a stop ends this wait too.
+            if (_opening == 0 && _live < _options.PoolSize)
+            {
+                StartOpen(Math.Max(1, _reopenAtMs - Native.MonotonicMs));
             }
 
             // No timer of its own: the sweep fails a waiter at its deadline. A Task.WhenAny with a
@@ -223,7 +232,7 @@ public sealed class HttpClientPool : IDisposable
         WakeWaiters();   // they must re-check: a replacement is opening
     }
 
-    private void StartOpen()
+    private void StartOpen(long backoffMs = 0)
     {
         if (_disposed)
         {
@@ -232,13 +241,28 @@ public sealed class HttpClientPool : IDisposable
 
         _live++;
         _opening++;
-        _ = OpenOneAsync();
+        _ = OpenOneAsync(backoffMs);
     }
 
-    private async Task OpenOneAsync()
+    private async Task OpenOneAsync(long backoffMs)
     {
         try
         {
+            if (backoffMs > 0)
+            {
+                ValueTask<int> backoff = _backoff.Prepare();
+                _host.SubmitTimeout(backoffMs * 1_000_000L, _backoff);
+                int waited = await backoff;
+
+                // Not -ETIME, the wait running its course, but the stop: no connect, and no failure to report.
+                if (waited is not (-62 or 0) || _disposed)
+                {
+                    _live--;
+                    WakeWaiters();
+                    return;
+                }
+            }
+
             HttpClientConnection connection = await HttpClientConnection.ConnectAsync(_host, _options);
             _reopenAtMs = 0;   // healthy - allow immediate replenishment
             _lastOpenFailure = null;

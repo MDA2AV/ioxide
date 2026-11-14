@@ -24,6 +24,7 @@ internal static class Program
         HttpClientResponseLimitTests.Register(runner);
         HttpClientHttp10Tests.Register(runner);
         HttpClientThreadTests.Register(runner);
+        HttpClientBackoffTests.Register(runner);
         TlsClientTests.Register(runner);
 
         // Areas reserved for the failing-test review pass; empty until one lands.
