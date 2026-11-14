@@ -272,7 +272,9 @@ internal static class Http2FlowControlTests
             using var client = new StrictClient();
             Task run = client.Connection.RunAsync(async (_, writer) =>
             {
-                await AnswerWith(writer, new byte[64 * 1024]);
+                writer.WriteHeaders(new Http2Response { Status = 200 });
+                writer.Write(new byte[64 * 1024]);
+                await writer.FlushAsync();                           // waits on credit, where CompleteAsync leaves it to the connection
                 finished = true;
             });
 

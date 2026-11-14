@@ -346,22 +346,20 @@ public sealed partial class Http2Connection
 
     private static readonly byte[] StatusName = ":status"u8.ToArray();
 
-    private void WriteResponse(int streamId, Http2Response response)
+    // Null once the body is staged whole; otherwise the writer its rest waits in for credit, which the caller retires the stream behind.
+    private Http2ResponseWriter? WriteResponse(int streamId, Http2Response response)
     {
         ReadOnlyMemory<byte> body = response.Body;   // a null response throws here, with the window still there for the 500
 
         // Gone once the peer has reset the stream, and nothing may follow a reset (RFC 9113 5.1).
         if (!_responseWindows.Remove(streamId, out int window))
         {
-            return;
+            return null;
         }
 
         WriteHeaders(streamId, response, endStream: body.Length == 0);
 
-        if (body.Length > 0)
-        {
-            WriteData(streamId, body.Span, window);
-        }
+        return body.Length > 0 ? WriteData(streamId, body.Span, window) : null;
     }
 
     private void WriteHeaders(int streamId, Http2Response response, bool endStream)
@@ -426,7 +424,7 @@ public sealed partial class Http2Connection
         }
     }
 
-    private void WriteData(int streamId, ReadOnlySpan<byte> body, int window)
+    private Http2ResponseWriter? WriteData(int streamId, ReadOnlySpan<byte> body, int window)
     {
         int offset = 0;
 
@@ -441,8 +439,7 @@ public sealed partial class Http2Connection
             {
                 // Out of credit: the rest waits for a WINDOW_UPDATE the way a streamed response does.
                 _responseWindows[streamId] = window;
-                ParkRest(streamId, body[offset..]);
-                return;
+                return ParkRest(streamId, body[offset..]);
             }
 
             bool last = offset + chunk >= body.Length;
@@ -457,35 +454,17 @@ public sealed partial class Http2Connection
             window -= chunk;
             offset += chunk;
         }
+        return null;
     }
 
     // Copied into a writer, because the body is the handler's again once it has returned.
-    private void ParkRest(int streamId, ReadOnlySpan<byte> rest)
+    private Http2ResponseWriter ParkRest(int streamId, ReadOnlySpan<byte> rest)
     {
         Http2ResponseWriter writer = RentWriter(streamId);
         writer.ContinueBody();
         rest.CopyTo(writer.GetSpan(rest.Length));
         writer.Advance(rest.Length);
-
-        _ = CompleteParkedAsync(writer);
-    }
-
-    private async Task CompleteParkedAsync(Http2ResponseWriter writer)
-    {
-        try
-        {
-            await writer.CompleteAsync();
-        }
-        catch
-        {
-            // FlushAsync has already marked the connection broken; the read loop sees it.
-        }
-        finally
-        {
-            _creditWaiters.Remove(writer.StreamId);
-            _responseWindows.Remove(writer.StreamId);
-            _writerPool.Push(writer);
-        }
+        return writer;
     }
 
     // Three ASCII digits: HTTP/2 has no reason phrase and every valid status is 100..599.

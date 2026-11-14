@@ -16,9 +16,12 @@ internal static class EarlyAnswerTests
     // A control's upload, read whole by its handler.
     private const long ReadUpload = 8L << 20;
 
-    // Measured stops are 64 KiB on h2, the connection window, and 192 KiB on h3; these leave room for a slow box.
+    // Measured stops are up to 320 KiB on h2, the stream window and what the client had buffered, and 192 KiB on h3; these leave room for a slow box.
     private const long H2Stopped = 512L << 10;
     private const long H3Stopped = 1L << 20;
+
+    // A duplex upload is credited while the answer waits on the client's credit, so it stops later: measured up to 2.5 MiB.
+    private const long H2DrainedStopped = 32L << 20;
 
     // What the raw client offers to upload after the request's headers: past it, nothing stopped the upload.
     private const long RawBudget = 4L << 20;
@@ -28,7 +31,67 @@ internal static class EarlyAnswerTests
     public static void Register(Runner runner)
     {
         RegisterHttpClient(runner);
+        RegisterPastWindow(runner);
         RegisterRawClient(runner);
+    }
+
+    // Past the client's 64 KiB stream window, which this client credits only once its upload ends: the unread upload has to be credited first.
+    private static void RegisterPastWindow(Runner runner)
+    {
+        byte[] answer = Pattern(256 * 1024);
+
+        runner.Test("h2 early answer: a streamed 413 past the client's window, its handler returning CompleteAsync, arrives whole, and the upload ends", () =>
+        {
+            int port = StartH2(connection => connection.RunAsync((_, _, writer) => AnswerAsync(writer, answer)));
+            using HttpClient client = H2Client();
+            var upload = new CountedUpload(Upload);
+            AssertAnsweredAndEnded(PostAsync(client, $"http://127.0.0.1:{port}/", upload), upload, answer);
+        });
+
+        runner.Test("h2 early answer: a streamed 413 past the client's window, left to the stack to complete, arrives whole, and the upload ends", () =>
+        {
+            int port = StartH2(connection => connection.RunAsync((_, _, writer) =>
+            {
+                writer.WriteHeaders(new Http2Response { Status = 413 });
+                writer.Write(answer);
+                return default;
+            }));
+            using HttpClient client = H2Client();
+            var upload = new CountedUpload(Upload);
+            AssertAnsweredAndEnded(PostAsync(client, $"http://127.0.0.1:{port}/", upload), upload, answer);
+        });
+
+        runner.Test("h2 early answer: a buffered 413 past the client's window, returned once the upload has stalled, arrives whole, and the upload ends", () =>
+        {
+            var stalled = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            int port = StartH2(connection => connection.RunAsync(async (_, _) =>
+            {
+                await stalled.Task;
+                return new Http2Response { Status = 413, Body = answer };
+            }));
+            using HttpClient client = H2Client();
+            var upload = new CountedUpload(Upload);
+            Task<(HttpStatusCode Status, byte[] Body)> answered = PostAsync(client, $"http://127.0.0.1:{port}/", upload);
+
+            WaitStalled(upload);
+            Assert.True(upload.Sent < Upload, $"precondition: the upload was meant to stall on the window its unread body was given, not run to {upload.Sent} bytes");
+            stalled.SetResult();
+            AssertAnsweredAndEnded(answered, upload, answer);
+        });
+
+        foreach (bool streamed in new[] { false, true })
+        {
+            bool stream = streamed;
+            runner.Test($"h2 early answer: a {(stream ? "streamed" : "buffered")} 413 past the client's window to a duplex upload arrives whole, and the upload stops", () =>
+            {
+                // This client credits the answer as it uploads; once the answer has ended, the reset after it stops the upload.
+                int port = StartH2(connection => stream
+                    ? connection.RunAsync((_, _, writer) => AnswerAsync(writer, answer))
+                    : connection.RunAsync((_, _) => new ValueTask<Http2Response>(new Http2Response { Status = 413, Body = answer })));
+                using HttpClient client = H2Client();
+                AssertAnsweredAndStopped(client, $"http://127.0.0.1:{port}/", answer, H2DrainedStopped, duplex: true);
+            });
+        }
     }
 
     private static void RegisterHttpClient(Runner runner)
@@ -191,18 +254,54 @@ internal static class EarlyAnswerTests
         });
     }
 
-    private static void AssertAnsweredAndStopped(HttpClient client, string url, byte[] answer, long stopped)
+    private static void AssertAnsweredAndStopped(HttpClient client, string url, byte[] answer, long stopped, bool duplex = false)
     {
-        var upload = new CountedUpload(Upload);
+        HttpContent upload = duplex ? new DuplexUpload(Upload) : new CountedUpload(Upload);
         Task<(HttpStatusCode Status, byte[] Body)> answered = PostAsync(client, url, upload);
 
         Assert.True(answered.Wait(100_000), "the answer never arrived");
         Assert.Equal(HttpStatusCode.RequestEntityTooLarge, answered.Result.Status);
         AssertBody(answer, answered.Result.Body);
 
-        long sent = upload.Ended.Result;
+        long sent = ((ICountedUpload)upload).Ended.Result;
         Assert.True(sent < stopped,
             $"the client uploaded {sent} of {Upload} bytes to a handler that read none of them: nothing asked it to stop");
+    }
+
+    // A client that reads the answer only once its upload has ended gets the answer whole, its upload taken to the end.
+    private static void AssertAnsweredAndEnded(Task<(HttpStatusCode Status, byte[] Body)> answered, CountedUpload upload, byte[] answer)
+    {
+        try
+        {
+            Assert.True(answered.Wait(100_000), $"the answer never arrived; the upload is at {upload.Sent} of {Upload} bytes");
+        }
+        catch (AggregateException exception)
+        {
+            throw new Exception($"the answer never arrived ({exception.GetBaseException().Message}); the upload is at {upload.Sent} of {Upload} bytes");
+        }
+        Assert.Equal(HttpStatusCode.RequestEntityTooLarge, answered.Result.Status);
+        AssertBody(answer, answered.Result.Body);
+        Assert.Equal(Upload, upload.Ended.Result);
+    }
+
+    // Until what the client takes from its source stops growing: an unread upload filled the window it was given.
+    private static void WaitStalled(CountedUpload upload)
+    {
+        long last = -1, since = Environment.TickCount64, deadline = since + 30_000;
+        while (Environment.TickCount64 < deadline)
+        {
+            long now = upload.Sent;
+            if (now != last)
+            {
+                (last, since) = (now, Environment.TickCount64);
+            }
+            else if (now > 0 && Environment.TickCount64 - since > 500)
+            {
+                return;
+            }
+            Thread.Sleep(20);
+        }
+        throw new Exception($"the upload never stalled: it went on to {upload.Sent} bytes");
     }
 
     private static void AssertReadWhole(HttpClient client, string url)
@@ -217,17 +316,18 @@ internal static class EarlyAnswerTests
     }
 
     // The answer, once the upload has ended as well: at its last byte, or where the client gave up on the rest.
-    private static async Task<(HttpStatusCode Status, byte[] Body)> PostAsync(HttpClient client, string url, CountedUpload upload)
+    private static async Task<(HttpStatusCode Status, byte[] Body)> PostAsync(HttpClient client, string url, HttpContent upload)
     {
+        var counted = (ICountedUpload)upload;
         try
         {
             using HttpResponseMessage response = await client.PostAsync(url, upload);
             byte[] body = await response.Content.ReadAsByteArrayAsync();
 
             // Held open until then: disposing it would have the client cancel the upload itself.
-            if (await Task.WhenAny(upload.Ended, Task.Delay(30_000)) != upload.Ended)
+            if (await Task.WhenAny(counted.Ended, Task.Delay(30_000)) != counted.Ended)
             {
-                throw new Exception($"the upload neither finished nor stopped, at {upload.Sent} bytes");
+                throw new Exception($"the upload neither finished nor stopped, at {counted.Sent} bytes");
             }
             return (response.StatusCode, body);
         }
@@ -372,8 +472,15 @@ internal static class EarlyAnswerTests
         return bytes;
     }
 
-    // A StreamContent, so not duplex: over HTTP/3 the client finishes its upload before it hands over the answer.
-    private sealed class CountedUpload : StreamContent
+    private interface ICountedUpload
+    {
+        long Sent { get; }
+
+        Task<long> Ended { get; }
+    }
+
+    // A StreamContent, so not duplex: the client finishes its upload before it hands over the answer, and over HTTP/2 credits the answer only then.
+    private sealed class CountedUpload : StreamContent, ICountedUpload
     {
         private readonly Source _source;
         private readonly TaskCompletionSource<long> _ended = new(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -403,6 +510,41 @@ internal static class EarlyAnswerTests
             {
                 _ended.TrySetResult(Sent);
             }
+        }
+    }
+
+    // An HttpContent of its own, which SocketsHttpHandler sends duplex: the answer is handed over, and credited, while the upload goes on.
+    private sealed class DuplexUpload(long length) : HttpContent, ICountedUpload
+    {
+        private long _sent;
+        private readonly TaskCompletionSource<long> _ended = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public long Sent => Interlocked.Read(ref _sent);
+
+        public Task<long> Ended => _ended.Task;
+
+        protected override async Task SerializeToStreamAsync(Stream stream, TransportContext? context)
+        {
+            byte[] chunk = new byte[64 * 1024];
+            try
+            {
+                while (Sent < length)
+                {
+                    int count = (int)Math.Min(chunk.Length, length - Sent);
+                    await stream.WriteAsync(chunk.AsMemory(0, count));
+                    Interlocked.Add(ref _sent, count);
+                }
+            }
+            finally
+            {
+                _ended.TrySetResult(Sent);
+            }
+        }
+
+        protected override bool TryComputeLength(out long size)
+        {
+            size = length;
+            return true;
         }
     }
 

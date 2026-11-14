@@ -1,5 +1,6 @@
 using System.Buffers;
 using System.IO.Pipelines;
+using System.Runtime.CompilerServices;
 
 namespace ioxide.http2;
 
@@ -331,13 +332,14 @@ public sealed partial class Http2Connection : IDisposable
             // there is no Task to allocate.
             if (inFlight.IsCompletedSuccessfully)
             {
+                Http2ResponseWriter? parked = null;
                 try
                 {
-                    WriteResponse(pending.StreamId, inFlight.Result);
+                    parked = WriteResponse(pending.StreamId, inFlight.Result);
                 }
                 finally
                 {
-                    RetireStream(pending);
+                    Retire(pending, parked);
                 }
                 continue;
             }
@@ -358,11 +360,12 @@ public sealed partial class Http2Connection : IDisposable
     /// </summary>
     private async Task CompleteBufferedAsync(ValueTask<Http2Response> inFlight, Http2Request request, PendingRequest pending)
     {
+        Http2ResponseWriter? parked = null;
         try
         {
             Http2Response response = await inFlight;
             await new ReactorSwitch(_reactor);   // back on the reactor, wherever the handler finished
-            WriteResponse(pending.StreamId, response);
+            parked = WriteResponse(pending.StreamId, response);
         }
         catch (Exception exception)
         {
@@ -373,12 +376,12 @@ public sealed partial class Http2Connection : IDisposable
 
             if (!IsBroken)
             {
-                WriteResponse(pending.StreamId, new Http2Response { Status = 500 });
+                WriteResponse(pending.StreamId, new Http2Response { Status = 500 });   // no body, so nothing parks
             }
         }
         finally
         {
-            RetireStream(pending);
+            Retire(pending, parked);
             await MaybeFlushAsync();
         }
     }
@@ -418,7 +421,7 @@ public sealed partial class Http2Connection : IDisposable
         // Every reset takes the stream out of _streams; short of one, a streamed writer has staged END_STREAM.
         bool live = _streams.Remove(pending.StreamId) && !IsBroken;
 
-        // A buffered rest parked on credit keeps its window: its END_STREAM is still to go.
+        // A response parked on credit keeps its window: its END_STREAM is still to go.
         bool reset = live && !pending.RequestEnded && !_responseWindows.ContainsKey(pending.StreamId);
 
         if (reset)
@@ -435,6 +438,68 @@ public sealed partial class Http2Connection : IDisposable
         }
     }
 
+    // A handler is done with its stream: retired now, unless the rest of its response waits on credit in a writer.
+    private void Retire(PendingRequest pending, Http2ResponseWriter? parked)
+    {
+        if (parked is null)
+        {
+            RetireStream(pending);
+        }
+        else
+        {
+            RetireAfterEnd(parked, pending);
+        }
+    }
+
+    /// <summary>
+    /// A handler is done, and the end of its response waits on the peer's credit. Its stream stays open behind it:
+    /// a request still arriving is drained meanwhile, credited and dropped, since a client that reads its response
+    /// only once its upload has ended credits nothing before then. The stream is retired once the end is out, and
+    /// reset with NO_ERROR after it if the request is still arriving then (RFC 9113 8.1).
+    /// </summary>
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private void RetireAfterEnd(Http2ResponseWriter writer, PendingRequest pending)
+    {
+        PendingRequest? open = null;
+        if (!IsBroken && _streams.ContainsKey(pending.StreamId))
+        {
+            pending.BodyReader?.Drop();   // credits what the handler left unread, and DATA still to come as it lands
+            open = pending;
+        }
+        else
+        {
+            RetireStream(pending);   // reset, broken, or a whole body that left _streams once it arrived: no stream to hold open
+        }
+
+        _ = FinishParkedAsync(writer, open);
+    }
+
+    private async Task FinishParkedAsync(Http2ResponseWriter writer, PendingRequest? open)
+    {
+        try
+        {
+            await writer.CompleteAsync();   // a buffered rest starts here; a streamed handler's writer has completed already
+            if (writer.ParkedEnd is { } end)
+            {
+                await end;
+            }
+        }
+        catch
+        {
+            // FlushAsync has already marked the connection broken; the read loop sees it.
+        }
+        finally
+        {
+            _creditWaiters.Remove(writer.StreamId);
+            _responseWindows.Remove(writer.StreamId);
+            if (open is not null)
+            {
+                RetireStream(open);
+            }
+            _writerPool.Push(writer);
+        }
+    }
+
     // Kept unless the pool is full or a peer's header lines grew its lists; only the reactor rents.
     private void Recycle(PendingRequest pending)
     {
@@ -445,7 +510,7 @@ public sealed partial class Http2Connection : IDisposable
         }
     }
 
-    // Ended before its request did: without a body reader it was never dispatched; with one, its handler retires it.
+    // Ended before its request did: without a body reader it was never dispatched; with one, its handler or the response it left on credit retires it.
     private void Discard(PendingRequest pending)
     {
         if (pending.BodyReader is null)

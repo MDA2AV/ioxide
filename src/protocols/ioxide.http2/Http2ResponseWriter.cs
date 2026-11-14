@@ -55,8 +55,14 @@ public sealed class Http2ResponseWriter : IBufferWriter<byte>
     /// <summary>The stream this response belongs to.</summary>
     public int StreamId => _streamId;
 
-    /// <summary>True once the response has ended: its body finished and END_STREAM sent, or its stream reset by <see cref="ResetStreamAsync"/>.</summary>
+    /// <summary>
+    /// True once the response has ended: <see cref="CompleteAsync"/> has returned, its END_STREAM sent or left to
+    /// the connection to send as the peer's credit allows, or <see cref="ResetStreamAsync"/> has reset its stream.
+    /// </summary>
     public bool IsCompleted => _completed;
+
+    /// <summary>The rest of a completed response and its END_STREAM, still waiting on the peer's credit; the stream is retired behind it.</summary>
+    internal Task? ParkedEnd { get; private set; }
 
     /// <summary>
     /// Send the response headers. Exactly once, before any body byte - HTTP/2 puts HEADERS ahead
@@ -160,8 +166,8 @@ public sealed class Http2ResponseWriter : IBufferWriter<byte>
     /// growing a queue behind it.
     /// </summary>
     /// <returns>
-    /// <see cref="FlushResult.IsCompleted"/> once the peer has reset the stream or the connection is
-    /// gone, as a TCP pipe writer reports a closed peer: nothing written from then on reaches anyone.
+    /// <see cref="FlushResult.IsCompleted"/> once the response has ended, the peer has reset the stream or the
+    /// connection is gone, as a TCP pipe writer reports a closed peer: nothing written from then on reaches anyone.
     /// </returns>
     /// <remarks>Each call has to complete before the next one is made.</remarks>
     public ValueTask<FlushResult> FlushAsync() => FlushCore(endStream: false);
@@ -169,6 +175,10 @@ public sealed class Http2ResponseWriter : IBufferWriter<byte>
     /// <summary>
     /// Send what is left and mark END_STREAM. A handler that returns without calling this gets it
     /// called for it - the peer is owed an end either way.
+    ///
+    /// It does not wait for the peer's credit, as <see cref="FlushAsync"/> does: what the peer's windows cannot
+    /// take yet is left to the connection, which sends it, END_STREAM last, as credit arrives. A client that reads
+    /// its response only once its upload has ended gives that credit only then, and the handler is not held until it does.
     /// </summary>
     public async ValueTask CompleteAsync()
     {
@@ -185,10 +195,10 @@ public sealed class Http2ResponseWriter : IBufferWriter<byte>
         await FlushCore(endStream: true);
         _completed = true;
 
-        if (_staging.Length > 0)
+        // A parked end sends from the staging still, and gives it back once it is out.
+        if (ParkedEnd is null)
         {
-            ArrayPool<byte>.Shared.Return(_staging);
-            _staging = [];
+            ReleaseStaging();
         }
     }
 
@@ -204,8 +214,8 @@ public sealed class Http2ResponseWriter : IBufferWriter<byte>
     /// no longer wanted rather than one that failed.
     /// </param>
     /// <remarks>
-    /// Once the response has completed, the peer has reset the stream or the connection is gone, it
-    /// sends nothing. Either way the response has ended: <see cref="IsCompleted"/> is true,
+    /// Once the response has completed, its end left to the connection included, the peer has reset the stream or
+    /// the connection is gone, it sends nothing. Either way the response has ended: <see cref="IsCompleted"/> is true,
     /// <see cref="FlushAsync"/> reports the peer gone, and nothing more is sent when the handler
     /// returns. The request body ends with the stream: a read on it, parked or still to come, raises
     /// as for a body cut off. Before the headers it resets the stream too; a handler that wants a
@@ -270,7 +280,7 @@ public sealed class Http2ResponseWriter : IBufferWriter<byte>
     private ValueTask<FlushResult> FlushCore(bool endStream)
     {
         var onReactor = new ReactorSwitch(_connection.Reactor);
-        if (!_headersSent || !onReactor.IsCompleted)
+        if (_completed || !_headersSent || !onReactor.IsCompleted)   // completed: a parked end still sends from the staging
         {
             return FlushCoreAsync(endStream);
         }
@@ -323,9 +333,34 @@ public sealed class Http2ResponseWriter : IBufferWriter<byte>
         return SendStaged(endStream, ref sent) switch
         {
             Progress.Sent => Finish(endStream, sent),
+            Progress.Stalled when endStream => Park(sent),
             Progress.Stalled => SendAfterCreditAsync(endStream, sent),
             _ => new ValueTask<FlushResult>(PeerGone),
         };
+    }
+
+    // The end out of credit goes on without its caller, which a client crediting only after its upload would hold for good.
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private ValueTask<FlushResult> Park(int sent)
+    {
+        ParkedEnd = EndAfterCreditAsync(sent);
+        return default;
+    }
+
+    private async Task EndAfterCreditAsync(int sent)
+    {
+        try
+        {
+            await SendAfterCreditAsync(endStream: true, sent);
+        }
+        catch
+        {
+            // FlushAsync has already marked the connection broken; the read loop sees it.
+        }
+        finally
+        {
+            ReleaseStaging();
+        }
     }
 
     // Everything staged from `sent` on, as far as credit allows.
@@ -452,6 +487,15 @@ public sealed class Http2ResponseWriter : IBufferWriter<byte>
         _staging = grown;
     }
 
+    private void ReleaseStaging()
+    {
+        if (_staging.Length > 0)
+        {
+            ArrayPool<byte>.Shared.Return(_staging);
+            _staging = [];
+        }
+    }
+
     /// <summary>Carry on a buffered response whose headers are already out, for the body its windows could not take.</summary>
     internal void ContinueBody() => _headersSent = true;
 
@@ -464,5 +508,6 @@ public sealed class Http2ResponseWriter : IBufferWriter<byte>
         _headersSent = false;
         _completed = false;
         _unsent = null;
+        ParkedEnd = null;
     }
 }

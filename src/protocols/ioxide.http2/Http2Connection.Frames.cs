@@ -404,13 +404,7 @@ public sealed partial class Http2Connection
 
         if (!_streams.TryGetValue(header.StreamId, out PendingRequest? pending))
         {
-            // A buffered answer parked on credit still has its upload credited, so a client that credits the
-            // answer only once its upload ends can finish both. Any other stream's window went with it.
-            if (payload.Length > 0 && !ended && _responseWindows.ContainsKey(header.StreamId))
-            {
-                WriteWindowUpdate(header.StreamId, payload.Length);
-            }
-            return;
+            return;   // closed, so owed no credit (RFC 9113 5.1): a request whose answer waits on credit stays in _streams
         }
 
         // Past its window is a stream error (6.9), and its response stops with it; an empty frame may still end it (6.9.1).
@@ -433,9 +427,14 @@ public sealed partial class Http2Connection
             return;
         }
 
+        // Consumed now: a buffered body, one its handler is done with, or a streamed one's padding, its body credited as read.
+        int credit = payload.Length;
         if (pending.BodyReader is { } reader)
         {
-            reader.Push(body);
+            if (reader.Push(body))
+            {
+                credit -= body.Length;
+            }
         }
         else
         {
@@ -447,9 +446,8 @@ public sealed partial class Http2Connection
             pending.AppendBody(body);
         }
 
-        // Consumed now: a buffered body, or a streamed one's padding, its body credited as read; an ended request is owed none.
-        int credit = pending.BodyReader is null ? payload.Length : payload.Length - body.Length;
-        if (credit > 0 && !ended)
+        // An ended request is owed none.
+        if (credit > 0 && !ended && !pending.RequestEnded)
         {
             CreditStream(pending, credit);
         }

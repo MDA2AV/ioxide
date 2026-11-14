@@ -98,10 +98,17 @@ public sealed partial class Http2Connection
             // The buffered dispatch retires the stream in its own finally; the streamed one skips
             // that path, so it has to do it here. Without this every response leaks its arena and
             // the connection grows without bound - 20 GB over eight seconds of load, measured.
-            _creditWaiters.Remove(writer.StreamId);
-            _responseWindows.Remove(writer.StreamId);
-            RetireStream(pending);
-            _writerPool.Push(writer);
+            if (writer.ParkedEnd is { IsCompleted: false })
+            {
+                RetireAfterEnd(writer, pending);
+            }
+            else
+            {
+                _creditWaiters.Remove(writer.StreamId);
+                _responseWindows.Remove(writer.StreamId);
+                RetireStream(pending);
+                _writerPool.Push(writer);
+            }
         }
     }
 

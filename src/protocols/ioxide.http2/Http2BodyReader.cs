@@ -23,6 +23,14 @@ namespace ioxide.http2;
 ///
 /// The window is the stream's own. The connection's is opened to its maximum and kept there, so a
 /// handler that never reads holds back only its own upload, never the other streams'.
+///
+/// A handler that answers without reading its body to the end leaves the rest to the connection
+/// once it returns: while its response still waits on the client's credit, what arrives is credited
+/// and dropped, and once the response has ended a request still arriving is reset with NO_ERROR. A
+/// client that reads its response only once its upload has ended, as .NET's <c>HttpClient</c> does
+/// with a content that is not duplex, can then finish both. A handler that instead waits on
+/// <see cref="Http2ResponseWriter.FlushAsync"/> for that credit, its body unread, waits until such a
+/// client gives up.
 /// </summary>
 /// <remarks>
 /// Single consumer, on any thread: a read made off the reactor is served on it. Each
@@ -88,12 +96,18 @@ public sealed class Http2BodyReader : IValueTaskSource<ReadOnlyMemory<byte>>
 
     // Body bytes straight off a DATA frame. The span points into the connection's accumulator and
     // dies when the parser moves on, so it has to be copied. Never completes a parked reader
-    // inline: the wake is deferred to FireIfReady, after the parser unwinds.
-    internal void Push(ReadOnlySpan<byte> data)
+    // inline: the wake is deferred to FireIfReady, after the parser unwinds. False once the body has
+    // ended: its handler is done with it, and the caller credits bytes nobody will read.
+    internal bool Push(ReadOnlySpan<byte> data)
     {
+        if (_ended)
+        {
+            return false;
+        }
+
         if (data.IsEmpty)
         {
-            return;
+            return true;
         }
 
         byte[] buffer = ArrayPool<byte>.Shared.Rent(data.Length);
@@ -104,6 +118,7 @@ public sealed class Http2BodyReader : IValueTaskSource<ReadOnlyMemory<byte>>
         {
             _owner.NoteBodyWake(this);
         }
+        return true;
     }
 
     /// <summary>End of body: END_STREAM, or a cut one once <see cref="Abort"/> has said so. Idempotent.</summary>
@@ -175,11 +190,12 @@ public sealed class Http2BodyReader : IValueTaskSource<ReadOnlyMemory<byte>>
     }
 
     // The handler is done with the request, or never got it: recycle everything, the chunk it held
-    // included, and complete a read it left parked.
+    // included, and complete a read it left parked. Ended, so DATA still on its way is credited as it
+    // arrives while the stream stays open for a response waiting on credit.
     internal void Drop()
     {
         ReleaseHandedOut();
-        DropQueued();
+        _owner.CreditBody(_streamId, DropQueued());
 
         // Drained first, so the wake below reports end-of-body rather than handing out a chunk
         // whose stream is already gone.
@@ -187,13 +203,16 @@ public sealed class Http2BodyReader : IValueTaskSource<ReadOnlyMemory<byte>>
         FireIfReady();
     }
 
-    // Owed no credit: the connection was charged for these on arrival, and their stream is done.
-    private void DropQueued()
+    // The connection was charged for these on arrival; only a stream still open is owed them, which CreditBody checks.
+    private int DropQueued()
     {
+        int dropped = 0;
         while (_chunks.TryDequeue(out (byte[] Buffer, int Length) chunk))
         {
+            dropped += chunk.Length;
             ArrayPool<byte>.Shared.Return(chunk.Buffer);
         }
+        return dropped;
     }
 
     private void ReleaseHandedOut()
