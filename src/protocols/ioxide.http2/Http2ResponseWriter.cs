@@ -147,11 +147,14 @@ public sealed class Http2ResponseWriter : IBufferWriter<byte>
     public void Advance(int count)
     {
         ArgumentOutOfRangeException.ThrowIfNegative(count);
-        if (_staged + count > _staging.Length)
+
+        // In uint, where two non-negative ints cannot wrap: an int sum wraps negative for a count near int.MaxValue, and passes.
+        uint staged = (uint)_staged + (uint)count;
+        if (staged > (uint)_staging.Length)
         {
             throw new InvalidOperationException("Advanced past the end of the span handed out by GetSpan.");
         }
-        _staged += count;
+        _staged = (int)staged;
     }
 
     /// <summary>
@@ -434,11 +437,22 @@ public sealed class Http2ResponseWriter : IBufferWriter<byte>
 
     private void EnsureStaging(int sizeHint)
     {
-        int needed = _staged + sizeHint;
-        if (_staging.Length >= needed)
+        // In uint, where two non-negative ints cannot wrap: an int sum wraps negative for a hint near int.MaxValue, and passes for room.
+        if ((uint)_staged + (uint)sizeHint > (uint)_staging.Length)
         {
-            return;
+            GrowStaging(sizeHint);
         }
+    }
+
+    // Out of line, so the check above stays small enough to inline into GetSpan.
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private void GrowStaging(int sizeHint)
+    {
+        if (sizeHint > Array.MaxLength - _staged)
+        {
+            throw new OutOfMemoryException($"The staging array cannot hold {(long)_staged + sizeHint} bytes; flush before asking for more.");
+        }
+        int needed = _staged + sizeHint;
 
         byte[] grown = ArrayPool<byte>.Shared.Rent(Math.Max(needed, DefaultChunk));
         if (_staged > 0)

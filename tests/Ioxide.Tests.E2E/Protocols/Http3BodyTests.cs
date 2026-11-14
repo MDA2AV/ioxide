@@ -113,6 +113,21 @@ internal static class Http3BodyTests
                 await writer.CompleteAsync();
             });
         });
+
+        runner.Test("h3 body: a span asked for after a Memory is what Advance sends", () =>
+        {
+            // Advance applies to the buffer handed out last. The Memory before the span is filled, so a writer that
+            // stages it instead shows that, whatever the pool's array held before.
+            byte[] file = Pattern(26);
+
+            AssertServedBy(file, (writer, body) =>
+            {
+                writer.GetMemory(body.Length).Span.Fill((byte)'#');
+                body.CopyTo(writer.GetSpan(body.Length));
+                writer.Advance(body.Length);
+                return writer.CompleteAsync();
+            });
+        });
     }
 
     /// <param name="chunk">

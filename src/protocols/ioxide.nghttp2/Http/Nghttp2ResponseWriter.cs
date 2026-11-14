@@ -265,11 +265,24 @@ public sealed class Nghttp2ResponseWriter : IBufferWriter<byte>, IValueTaskSourc
 
     private void EnsureStaging(int sizeHint)
     {
-        int needed = _staged + Math.Max(sizeHint, 1);
-        if (_staging.Length >= needed)
+        sizeHint = Math.Max(sizeHint, 1);
+
+        // In uint, where two non-negative ints cannot wrap: an int sum wraps negative for a hint near int.MaxValue, and passes for room.
+        if ((uint)_staged + (uint)sizeHint > (uint)_staging.Length)
         {
-            return;
+            GrowStaging(sizeHint);
         }
+    }
+
+    // Out of line, so the check above stays small enough to inline into GetSpan.
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private void GrowStaging(int sizeHint)
+    {
+        if (sizeHint > Array.MaxLength - _staged)
+        {
+            throw new OutOfMemoryException($"The staging array cannot hold {(long)_staged + sizeHint} bytes; flush before asking for more.");
+        }
+        int needed = _staged + sizeHint;
 
         int size = Math.Max(needed, Math.Max(4096, _staging.Length * 2));
         byte[] grown = ArrayPool<byte>.Shared.Rent(size);

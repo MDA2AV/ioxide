@@ -186,6 +186,7 @@ public sealed class Nghttp3ResponseWriter : IBufferWriter<byte>
     /// <inheritdoc />
     public unsafe Span<byte> GetSpan(int sizeHint = 0)
     {
+        _memoryOutstanding = false;   // Advance applies to the buffer handed out last, and from here that is this span
         EnsureStaging(sizeHint <= 0 ? 1 : sizeHint);
         return new Span<byte>(_staging + _staged, _stagingCapacity - _staged);
     }
@@ -236,11 +237,13 @@ public sealed class Nghttp3ResponseWriter : IBufferWriter<byte>
             return;
         }
 
-        if (_staged + count > _stagingCapacity)
+        // In uint, where two non-negative ints cannot wrap: an int sum wraps negative for a count near int.MaxValue, and passes.
+        uint staged = (uint)_staged + (uint)count;
+        if (staged > (uint)_stagingCapacity)
         {
             throw new InvalidOperationException("Advanced past the end of the span handed out by GetSpan.");
         }
-        _staged += count;
+        _staged = (int)staged;
     }
 
     /// <summary>
@@ -478,11 +481,23 @@ public sealed class Nghttp3ResponseWriter : IBufferWriter<byte>
 
     private unsafe void EnsureStaging(int sizeHint)
     {
-        int needed = _staged + sizeHint;
-        if (_staging != null && _stagingCapacity >= needed)
+        // In uint, where two non-negative ints cannot wrap: an int sum wraps negative for a hint near int.MaxValue, and passes for room.
+        if (_staging == null || (uint)_staged + (uint)sizeHint > (uint)_stagingCapacity)
         {
-            return;
+            GrowStaging(sizeHint);
         }
+    }
+
+    // Out of line, so the check above stays small enough to inline into GetSpan.
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private unsafe void GrowStaging(int sizeHint)
+    {
+        // A span is at most int.MaxValue long, so that is all a block can hold.
+        if (sizeHint > int.MaxValue - _staged)
+        {
+            throw new OutOfMemoryException($"The staging block cannot hold {(long)_staged + sizeHint} bytes; flush before asking for more.");
+        }
+        int needed = _staged + sizeHint;
 
         int capacity = Math.Max(needed, DefaultChunk);
         byte* grown = (byte*)NativeMemory.Alloc((nuint)capacity);

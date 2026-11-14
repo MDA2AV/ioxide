@@ -76,6 +76,7 @@ internal static class Program
         EarlyAnswerTests.Register(runner);
         QuicStreamingCreditTests.Register(runner);
         Http3BodyTests.Register(runner);
+        H3StreamedWriterBoundsTests.Register(runner);
         Http3RequestReuseTests.Register(runner);
         H3BodyModeTests.Register(runner);
         H3BufferedFaultTests.Register(runner);
