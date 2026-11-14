@@ -129,6 +129,10 @@ public sealed unsafe partial class Reactor
         // A faulted loop never set it: UdpSendTo sends directly from here, as the ring may never be submitted again.
         _stopRequested = true;
 
+        // First: a client stopped here takes no new request from a handler the closes below resume, and what it wakes
+        // posts its switch in time for the last drain, which ends it on the thread pool.
+        RunStoppers();
+
         // Every connection closed to its handler first, then the queue sent while each socket it names is still its
         // own: left queued, a later submit would send it to whatever took the number (#531).
         MarkAcceptedTcpConnectionsClosed();
@@ -215,6 +219,22 @@ public sealed unsafe partial class Reactor
         foreach (TlsService service in _tlsServices ?? [])
         {
             service.Free();
+        }
+    }
+
+    // One that throws must not leave the rest of the teardown undone: the ring, the sockets and the memory.
+    private void RunStoppers()
+    {
+        for (int i = 0; i < (_stoppers?.Count ?? 0); i++)
+        {
+            try
+            {
+                _stoppers![i]();
+            }
+            catch (Exception e)
+            {
+                Console.Error.WriteLine($"[r{_id}] stopper faulted: {e.Message}");
+            }
         }
     }
 

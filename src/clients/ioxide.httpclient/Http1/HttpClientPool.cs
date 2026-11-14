@@ -62,6 +62,7 @@ public sealed class HttpClientPool : IDisposable
         }
         reactor.AddService(pool);
         reactor.AddTicker(pool.Sweep);
+        reactor.AddStopper(pool.Dispose);
         return pool;
     }
 
@@ -181,7 +182,15 @@ public sealed class HttpClientPool : IDisposable
             _waiters.Enqueue((waiter, deadlineMs));
 
             HttpClientConnection? handed = await waiter.Task;
-            await ReactorSwitch.Yield(_host);   // out of the completer's frame, still on the reactor
+            try
+            {
+                await ReactorSwitch.Yield(_host);   // out of the completer's frame, still on the reactor
+            }
+            catch (ObjectDisposedException) when (handed is not null)
+            {
+                handed.Dispose();   // stopped before this request took it: nothing else holds it, and closing needs no ring
+                throw;
+            }
             if (handed is not null)
             {
                 return handed;   // Release hands over nothing broken
@@ -333,7 +342,8 @@ public sealed class HttpClientPool : IDisposable
     /// Close the idle connections and stop replenishing. Connections currently checked out by an
     /// in-flight request are not touched - the request owns them, and they are dropped by
     /// <see cref="Release"/> when it finishes, because a disposed pool takes nothing back. Called
-    /// from another thread, it is queued to the reactor and returns.
+    /// from another thread, it is queued to the reactor and returns. A pool from <see cref="Start"/>
+    /// is disposed by its reactor's stop too, which ends the requests still waiting on it.
     /// </summary>
     public void Dispose()
     {
