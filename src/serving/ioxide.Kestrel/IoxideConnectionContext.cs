@@ -32,10 +32,10 @@ internal sealed class IoxideConnectionContext : ConnectionContext,
 
     private int _disposed;
 
-    public IoxideConnectionContext(TcpConnection connection, Reactor reactor, EndPoint localEndPoint, long id, TlsSession? session = null)
+    public IoxideConnectionContext(TcpConnection connection, ReactorPipeScheduler scheduler, EndPoint localEndPoint, long id, TlsSession? session = null)
     {
-        _pipe = new HopDuplexPipe(connection, reactor, session);
-        _reactor = reactor;
+        _pipe = new HopDuplexPipe(connection, scheduler, session);
+        _reactor = scheduler.Reactor;
 
         ConnectionId = $"ioxide-{id:x}";
         LocalEndPoint = localEndPoint;

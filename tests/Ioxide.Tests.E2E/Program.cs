@@ -91,6 +91,7 @@ internal static class Program
         KestrelBindFailureTests.Register(runner);
         KestrelAddressParityTests.Register(runner);
         KestrelBadRecordTests.Register(runner);
+        KestrelReactorStopTests.Register(runner);
 
         return runner.Summary();
     }
