@@ -25,8 +25,8 @@ using Playground.Shared;
 //          and resumes on the WINDOW_UPDATE.
 //
 //  The windows are what HTTP/2 adds over HTTP/3 here: every stream shares one TCP connection, so
-//  both a per-stream and a connection window must allow a write, and a handler that stops reading
-//  holds down the connection window for every other stream on it.
+//  both a per-stream and a connection window must allow a write. The server keeps its own
+//  connection window open, so a handler that stops reading stalls only its own stream's upload.
 //  Needs: ioxide, ioxide.http2
 // ─────────────────────────────────────────────────────────────────────────────────────────────
 
