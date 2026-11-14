@@ -173,6 +173,39 @@ internal static class Http2EarlyAnswerGuardTests
 
             client.Close(run);
         });
+        runner.Test("h2 early answer: a buffered answer that waited on credit, its request still arriving, gets no reset back once the peer has reset it, nor a second once the stack has", () =>
+        {
+            foreach (bool byPeer in new[] { true, false })
+            {
+                using var client = new StrictClient();
+                Task run = client.Connection.RunAsync((_, _) => new ValueTask<Http2Response>(Http2Response.Text(new string('x', 32 * 1024), 413)));
+
+                // Answered unread, the rest parked on credit, and the flush of its first 16 KiB left in flight.
+                client.ReleaseFlush();
+                client.Feed([.. Open((InitialWindowSize, 16384)), .. WindowUpdate(0, 1 << 20), .. Post(1), .. Data(1, 1000, endStream: false)]);
+
+                if (byPeer)
+                {
+                    client.Feed(RstStream(1, Cancel));
+                }
+                else
+                {
+                    client.Feed([.. WindowUpdate(1, 1), .. WindowUpdate(1, 0x7FFFFFFF)]);   // past 2^31-1 once the window holds a byte: FLOW_CONTROL_ERROR
+                }
+                List<Frame> frames = client.Drain();
+
+                if (byPeer)
+                {
+                    Assert.True(Resets(frames, 1).Length == 0, "stream 1 was reset after the peer had reset it");
+                }
+                else
+                {
+                    AssertResetOnce(frames, FlowControlError);
+                }
+
+                client.Close(run);
+            }
+        });
     }
 
     private static void AssertResetOnce(List<Frame> frames, uint code)

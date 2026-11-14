@@ -134,6 +134,25 @@ internal static class Http2EarlyAnswerTests
 
             client.Close(run);
         });
+        runner.Test("h2 early answer: a buffered answer that waited on the client's credit, its request still arriving, is followed by RST_STREAM(NO_ERROR) once its END_STREAM is out", () =>
+        {
+            string answer = new('x', 32 * 1024);                    // twice the client's window for it, so the rest waits on its credit
+
+            using var client = new StrictClient();
+            Task run = client.Connection.RunAsync((_, _) => new ValueTask<Http2Response>(Http2Response.Text(answer, 413)));
+
+            client.ReleaseFlush();
+            client.Feed([.. Open((InitialWindowSize, 16384)), .. WindowUpdate(0, 1 << 20), .. Post(1), .. Data(1, 1000, endStream: false)]);
+            List<Frame> frames = client.Drain();
+            Assert.True(!frames.Any(f => f.StreamId == 1 && (f.EndStream || f.Type == RstStreamFrame)),
+                "the answer ended, or its stream was reset, before the client had credited the rest of it");
+
+            client.Feed([.. Data(1, 16384, endStream: false), .. WindowUpdate(1, 1 << 20)]);   // a client that reads its answer while it uploads
+            frames.AddRange(client.Drain());
+            AssertAnsweredThenStopped(frames, streamId: 1, 413, answer);
+
+            client.Close(run);
+        });
     }
 
     private static void RegisterControls(Runner runner)
@@ -198,6 +217,30 @@ internal static class Http2EarlyAnswerTests
             AssertAnsweredNotReset(frames, "late");
 
             client.Close(run);
+        });
+        runner.Test("control: a buffered answer that waited on the client's credit, to a request that had ended, is not followed by a reset", () =>
+        {
+            string answer = new('x', 32 * 1024);
+
+            // With a body reader the request is still in the stream table when its answer parks; without one it left at its END_STREAM.
+            foreach (bool reader in new[] { true, false })
+            {
+                using var client = new StrictClient();
+                Task run = reader
+                    ? client.Connection.RunAsync((_, _) => new ValueTask<Http2Response>(Http2Response.Text(answer, 413)))
+                    : client.Connection.RunAsync(_ => Http2Response.Text(answer, 413));
+
+                client.ReleaseFlush();
+                client.Feed([.. Open((InitialWindowSize, 16384)), .. WindowUpdate(0, 1 << 20), .. Post(1), .. Data(1, 1000, endStream: true)]);
+                List<Frame> frames = client.Drain();
+                Assert.True(!frames.Any(f => f.StreamId == 1 && f.EndStream), "the answer ended before the client had credited the rest of it");
+
+                client.Feed(WindowUpdate(1, 1 << 20));
+                frames.AddRange(client.Drain());
+                AssertAnsweredNotReset(frames, answer);
+
+                client.Close(run);
+            }
         });
     }
 
