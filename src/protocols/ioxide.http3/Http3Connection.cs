@@ -427,7 +427,7 @@ public sealed partial class Http3Connection
                     if (rs.Remaining == 0)
                     {
                         rs.State = ParseState.FrameHeader;   // first: the decode may refuse the stream
-                        OnHeadersComplete(sid, rs);
+                        OnHeadersComplete(sid, rs, endsStream: fin && data.IsEmpty);
                         ArrayPool<byte>.Shared.Return(rs.HeadersBuf!);
                         rs.HeadersBuf = null;
                     }
@@ -542,8 +542,9 @@ public sealed partial class Http3Connection
     }
 
     // First HEADERS frame = the request's field section; later ones are trailers (validated by the
-    // frame walk, contents dropped - nothing in the surface carries them yet).
-    private void OnHeadersComplete(long sid, ReqStream rs)
+    // frame walk, contents dropped - nothing in the surface carries them yet). endsStream: the fin
+    // came in the same chunk, right after the frame - nghttp3's test for a request without a body.
+    private void OnHeadersComplete(long sid, ReqStream rs, bool endsStream)
     {
         if (rs.HeadersDone)
         {
@@ -556,6 +557,7 @@ public sealed partial class Http3Connection
             return;
         }
         rs.HeadersDone = true;
+        rs.Request.HasBody = !endsStream;
 
         if (rs.Request.ContentLengthLeft < -1)
         {

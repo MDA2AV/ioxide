@@ -11,6 +11,9 @@ namespace ioxide.http2;
 /// <see cref="ReadAsync"/>. An empty chunk means the body ended whole, at END_STREAM. A body cut off
 /// by a reset stream or a lost connection ends with an <see cref="IOException"/> instead.
 ///
+/// Every request is handed a reader, with or without a body; one without reads empty at once.
+/// Whether there is one to read is <see cref="Http2Request.HasBody"/>, known before the first read.
+///
 /// Backpressure is real rather than buffered-and-hoped-for: a chunk is credited back to the peer's
 /// window only as it is handed over, so a slow consumer stops replenishing, the peer runs out of
 /// window and stops sending. Memory is bound by one window instead of by the whole body, which is
