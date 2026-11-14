@@ -19,6 +19,9 @@ internal static class OffReactorH2FixTests
     // Past the initial windows on both stacks, so the body arrives only if credit flows mid-flight.
     private static readonly byte[] Upload = Pattern(1024 * 1024);
 
+    // The nghttp2 twins' 65,535: these test where calls run, and a 256 KiB window outruns the receive queue behind a pool hop.
+    private static readonly Http2Options RfcWindow = new() { InitialWindowSize = 65535 };
+
     public static void Register(Runner runner)
     {
         // A response's memories may be pooled or static: the caller reuses them once WriteHeaders returns.
@@ -42,7 +45,7 @@ internal static class OffReactorH2FixTests
 
         // A default Pipe completes a read, and a flush it held back, on the thread pool.
         runner.Test("h2 over a pipe that completes on the thread pool (http2): an upload is echoed whole, read, answered and written on the reactor", () =>
-            AssertPoolPipe((pipe, calls) => new Http2Connection(pipe).RunAsync(request =>
+            AssertPoolPipe((pipe, calls) => new Http2Connection(pipe, RfcWindow).RunAsync(request =>
             {
                 calls.Note();
                 return new Http2Response { Status = 200, Body = request.Body.ToArray() };
@@ -66,7 +69,7 @@ internal static class OffReactorH2FixTests
 
         // A connection handler that awaited something another thread completed calls RunAsync from there.
         runner.Test("h2 RunAsync begun on the thread pool (http2): an upload read and echoed from the pool arrives whole, served on the reactor", () =>
-            AssertLateStart((pipe, calls) => new Http2Connection(pipe).RunAsync((_, body, writer) =>
+            AssertLateStart((pipe, calls) => new Http2Connection(pipe, RfcWindow).RunAsync((_, body, writer) =>
                 Echo(calls, body.ReadAsync, () => writer.WriteHeaders(new Http2Response { Status = 200 }), writer, writer.FlushAsync))));
 
         runner.Test("h2 RunAsync begun on the thread pool (nghttp2): an upload read and echoed from the pool arrives whole, served on the reactor", () =>

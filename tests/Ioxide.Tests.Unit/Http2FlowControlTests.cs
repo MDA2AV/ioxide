@@ -5,12 +5,16 @@ using ioxide.http2;
 namespace Ioxide.Tests;
 
 /// <summary>
-/// HTTP/2 flow-control credit, from the GenHTTP upload report against 0.14.239.
+/// HTTP/2 flow-control credit, from the GenHTTP upload report against 0.14.239. Http2ReceiveWindowTests
+/// has what the server enforces on the windows this credit keeps open.
 /// </summary>
 internal static class Http2FlowControlTests
 {
-    // RFC 9113 6.9.2 default; ioxide never sends a stream-0 WINDOW_UPDATE to raise it.
-    private const int ConnectionWindow = 65535;
+    // RFC 9113 6.9.2: where a peer's view of the connection window starts, before the server's opening WINDOW_UPDATE.
+    internal const int ConnectionWindow = 65535;
+
+    // InitialWindowSize's default: what a stream may be sent before the server credits it.
+    internal const int StreamWindow = 256 * 1024;
 
     internal const ushort InitialWindowSize = 0x4;
     internal const uint Cancel = 0x8;
@@ -34,14 +38,14 @@ internal static class Http2FlowControlTests
             });
 
             client.ReleaseFlush();                                   // server SETTINGS
-            client.Feed([.. Open(), .. Post(1), .. FillConnectionWindow(1)]);
-            Assert.Equal(0, Credit(client.Drain(), 0));
+            client.Feed([.. Open(), .. Post(1), .. Fill(1, StreamWindow)]);
+            Assert.Equal(0, Credit(client.Drain(), 1));
 
             busy.SetResult();                                        // resumes outside the pass, as off-ring completions do
-            Assert.Equal(ConnectionWindow, (int)read.Bytes);
+            Assert.Equal(StreamWindow, (int)read.Bytes);
 
-            int credited = Credit(client.Drain(), 0);
-            Assert.True(credited == ConnectionWindow,
+            int credited = Credit(client.Drain(), 1);
+            Assert.True(credited == StreamWindow,
                 $"the handler consumed {read.Bytes} bytes but {credited} bytes of credit reached a peer that is out of window");
 
             client.Feed(Data(1, 0, endStream: true));
@@ -97,7 +101,8 @@ internal static class Http2FlowControlTests
 
         // ---------------------------------------------------------------- unread bodies
 
-        runner.Test("h2 flow: a body answered without being read gives its credit back", () =>
+        // The connection counted these bytes on arrival; Http2ReceiveWindowTests has its top-up returning each once.
+        runner.Test("h2 flow: a body answered without being read is credited nothing more", () =>
         {
             using var client = new StrictClient();
             Task run = client.Connection.RunAsync((_, _, writer) => Answer(writer, 404));
@@ -107,14 +112,14 @@ internal static class Http2FlowControlTests
             List<Frame> frames = client.Drain();
 
             Assert.True(frames.Any(f => f.Type == Frame.Headers && f.StreamId == 1), "the 404 went out");
-            int credited = Credit(frames, 0);
-            Assert.True(credited == 10_000,
-                $"10000 bytes were dropped unread and {credited} came back; the connection window is that much smaller for good");
+            int connection = Credit(frames, 0), stream = Credit(frames, 1);
+            Assert.True(connection == 0 && stream == 0,
+                $"10000 bytes were dropped unread and {connection} came back on the connection, {stream} on a stream that had ended");
 
             client.Close(run);
         });
 
-        runner.Test("h2 flow: a body arriving after the answer is credited", () =>
+        runner.Test("h2 flow: a body arriving after the answer counts against the connection, and its stream is credited nothing", () =>
         {
             using var client = new StrictClient();
             Task run = client.Connection.RunAsync((_, _, writer) => Answer(writer, 404));
@@ -123,12 +128,14 @@ internal static class Http2FlowControlTests
             client.Feed([.. Open(), .. Post(1)]);
             client.Drain();                                          // answered and retired before the body
             client.Feed(Data(1, 10_000, endStream: true));
-            Assert.Equal(10_000, Credit(client.Drain(), 0));
+            List<Frame> frames = client.Drain();
+            Assert.Equal(0, Credit(frames, 0));
+            Assert.Equal(0, Credit(frames, 1));
 
             client.Close(run);
         });
 
-        runner.Test("h2 flow: a body the peer resets gives back the credit it had queued", () =>
+        runner.Test("h2 flow: a body the peer resets is credited nothing more", () =>
         {
             var busy = new TaskCompletionSource();
 
@@ -145,9 +152,10 @@ internal static class Http2FlowControlTests
             client.Drain();
 
             client.Feed(RstStream(1, Cancel));                       // an aborted fetch
-            int credited = Credit(client.Drain(), 0);
-            Assert.True(credited == 10_000,
-                $"the reset dropped 10000 queued bytes and {credited} came back");
+            List<Frame> frames = client.Drain();
+            int connection = Credit(frames, 0), stream = Credit(frames, 1);
+            Assert.True(connection == 0 && stream == 0,
+                $"the reset dropped 10000 queued bytes and {connection} came back on the connection, {stream} on the reset stream");
 
             busy.SetResult();
             client.Drain();
@@ -194,10 +202,12 @@ internal static class Http2FlowControlTests
             List<Frame> frames = client.Drain();
 
             Assert.Equal(1000L, read.Bytes);
-            int credited = Credit(frames, 0);
+            int credited = Credit(frames, 1);
             Assert.True(credited == PaddedBodyPayload,
                 $"{PaddedBodyPayload} flow-controlled bytes arrived and {credited} were credited");
 
+            client.Feed(Data(1, 0, endStream: true));
+            client.Drain();
             client.Close(run);
         });
 
@@ -208,12 +218,15 @@ internal static class Http2FlowControlTests
 
             client.ReleaseFlush();
             client.Feed([.. Open(), .. Post(1), .. PaddedBody(1)]);
-            Assert.Equal(PaddedBodyPayload, Credit(client.Drain(), 0));
+            Assert.Equal(PaddedBodyPayload, Credit(client.Drain(), 1));
 
+            client.Feed(Data(1, 0, endStream: true));
+            client.Drain();
             client.Close(run);
         });
 
-        runner.Test("h2 flow: a DATA frame past MaxRequestBytes is still credited", () =>
+        // Its connection share was counted on arrival, and the stream is gone, so the reset is credited nothing.
+        runner.Test("h2 flow: a DATA frame past MaxRequestBytes resets its stream, and only the frames taken are credited", () =>
         {
             using var client = new StrictClient(new Http2Options { MaxRequestBytes = 20_000 });
             Task run = client.Connection.RunAsync(_ => new Http2Response { Status = 200 });
@@ -223,8 +236,9 @@ internal static class Http2FlowControlTests
             List<Frame> frames = client.Drain();
 
             Assert.True(frames.Any(f => f.Type == RstStreamFrame && f.StreamId == 1), "the stream was reset for its size");
-            int credited = Credit(frames, 0);
-            Assert.True(credited == 2 * 16384, $"{2 * 16384} bytes arrived and {credited} were credited");
+            int stream = Credit(frames, 1), connection = Credit(frames, 0);
+            Assert.True(stream == 16384 && connection == 0,
+                $"16384 bytes were taken and 16384 refused, and {stream} were credited on the stream, {connection} on the connection");
 
             client.Close(run);
         });
@@ -380,12 +394,12 @@ internal static class Http2FlowControlTests
         }
     }
 
-    private sealed class Tally
+    internal sealed class Tally
     {
         public long Bytes;
     }
 
-    private static async ValueTask ReadAll(Http2BodyReader body, Tally read, Func<Task>? between = null)
+    internal static async ValueTask ReadAll(Http2BodyReader body, Tally read, Func<Task>? between = null)
     {
         while (true)
         {
@@ -403,7 +417,7 @@ internal static class Http2FlowControlTests
         }
     }
 
-    private static ValueTask Answer(Http2ResponseWriter writer, int status)
+    internal static ValueTask Answer(Http2ResponseWriter writer, int status)
     {
         writer.WriteHeaders(new Http2Response { Status = status });
         return writer.CompleteAsync();
@@ -416,7 +430,7 @@ internal static class Http2FlowControlTests
         return writer.CompleteAsync();
     }
 
-    private static int Credit(IEnumerable<Frame> frames, int streamId)
+    internal static int Credit(IEnumerable<Frame> frames, int streamId)
     {
         int total = 0;
         foreach (Frame frame in frames)
@@ -430,7 +444,7 @@ internal static class Http2FlowControlTests
     }
 
     /// <summary>Flow control as the client keeps it: only WINDOW_UPDATEs that reach it give credit back.</summary>
-    private sealed class PeerWindow
+    internal sealed class PeerWindow
     {
         private readonly Dictionary<int, long> _streams = new();
         private long _streamInitial = 65535;
@@ -489,22 +503,26 @@ internal static class Http2FlowControlTests
 
     private static readonly byte[] Preface = "PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n"u8.ToArray();
 
-    // 1 pad-length octet + 1000 body + 200 padding, then a frame of nothing but padding (1 + 255).
+    // 1 pad-length octet + 1000 body + 200 padding, then a frame of nothing but padding (1 + 255), the request left open.
     private const int PaddedBodyPayload = 1201 + 256;
 
     private static byte[] PaddedBody(int streamId)
-        => [.. Data(streamId, 1000, endStream: false, padding: 200), .. Data(streamId, 0, endStream: true, padding: 255)];
+        => [.. Data(streamId, 1000, endStream: false, padding: 200), .. Data(streamId, 0, endStream: false, padding: 255)];
 
-    private static byte[] FillConnectionWindow(int streamId)
-        =>
-        [
-            .. Data(streamId, 16384, endStream: false), .. Data(streamId, 16384, endStream: false),
-            .. Data(streamId, 16384, endStream: false), .. Data(streamId, 16383, endStream: false),
-        ];
+    // A stream's body in full-size frames, none of them ending it.
+    internal static byte[] Fill(int streamId, int bytes)
+    {
+        var frames = new List<byte>();
+        for (int sent = 0; sent < bytes; sent += 16384)
+        {
+            frames.AddRange(Data(streamId, Math.Min(16384, bytes - sent), endStream: false));
+        }
+        return frames.ToArray();
+    }
 
     internal static byte[] Open(params (ushort Id, uint Value)[] settings) => [.. Preface, .. Settings(settings)];
 
-    private static byte[] Settings(params (ushort Id, uint Value)[] settings)
+    internal static byte[] Settings(params (ushort Id, uint Value)[] settings)
     {
         byte[] payload = new byte[settings.Length * 6];
         for (int i = 0; i < settings.Length; i++)
@@ -516,11 +534,11 @@ internal static class Http2FlowControlTests
     }
 
     // Static-table HPACK only: 0x83 POST / 0x82 GET, 0x86 :scheme http, 0x84 :path /.
-    private static byte[] Post(int streamId) => FrameBytes(0x1, 0x4, streamId, [0x83, 0x86, 0x84]);
+    internal static byte[] Post(int streamId) => FrameBytes(0x1, 0x4, streamId, [0x83, 0x86, 0x84]);
 
     internal static byte[] Get(int streamId) => FrameBytes(0x1, 0x5, streamId, [0x82, 0x86, 0x84]);
 
-    private static byte[] Data(int streamId, int length, bool endStream, int padding = -1)
+    internal static byte[] Data(int streamId, int length, bool endStream, int padding = -1)
     {
         byte flags = endStream ? (byte)0x1 : (byte)0x0;
         if (padding < 0)
@@ -550,7 +568,7 @@ internal static class Http2FlowControlTests
         return FrameBytes(0x8, 0, streamId, payload);
     }
 
-    private static byte[] Ping() => FrameBytes(0x6, 0, 0, new byte[8]);
+    internal static byte[] Ping() => FrameBytes(0x6, 0, 0, new byte[8]);
 
     internal static byte[] FrameBytes(byte type, byte flags, int streamId, ReadOnlySpan<byte> payload)
     {
