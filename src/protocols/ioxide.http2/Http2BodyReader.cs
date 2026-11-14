@@ -16,9 +16,8 @@ namespace ioxide.http2;
 /// window and stops sending. Memory is bound by one window instead of by the whole body, which is
 /// the difference that makes a hostile upload harmless.
 ///
-/// Unlike HTTP/3, credit here is shared. Every stream rides one TCP connection, so a chunk opens
-/// both the stream's window and the CONNECTION's - and a handler that never reads holds down the
-/// connection window for every other stream on it, not only its own.
+/// The window is the stream's own. The connection's is opened to its maximum and kept there, so a
+/// handler that never reads holds back only its own upload, never the other streams'.
 /// </summary>
 /// <remarks>
 /// Single consumer, on any thread: a read made off the reactor is served on it. Each
@@ -181,16 +180,13 @@ public sealed class Http2BodyReader : IValueTaskSource<ReadOnlyMemory<byte>>
         FireIfReady();
     }
 
-    // Every stream shares the connection window, so bytes dropped unread still owe it credit.
+    // Owed no credit: the connection was charged for these on arrival, and their stream is done.
     private void DropQueued()
     {
-        int unread = 0;
         while (_chunks.TryDequeue(out (byte[] Buffer, int Length) chunk))
         {
-            unread += chunk.Length;
             ArrayPool<byte>.Shared.Return(chunk.Buffer);
         }
-        _owner.CreditConnection(unread);
     }
 
     private void ReleaseHandedOut()

@@ -45,24 +45,26 @@ internal static class Http2StreamedRequestTests
 
             peer.OpenRequest(streamId: 1, endStream: false);
             peer.SendData(streamId: 1, bytes: 400, endStream: false);
-            peer.SendData(streamId: 1, bytes: 600, endStream: true);
+            peer.SendData(streamId: 1, bytes: 600, endStream: false);   // still open: a request that has ended is owed no credit
 
             // The handler is parked before its first read. The bytes are in - and the peer has been
-            // told nothing, so it may not send more.
+            // told nothing, so it may not send more. The connection has only its opening credit.
+            const int Opened = int.MaxValue - 65535;
             Assert.Equal(0, peer.CreditFor(streamId: 1));
-            Assert.Equal(0, peer.CreditFor(streamId: 0));
+            Assert.Equal(Opened, peer.CreditFor(streamId: 0));
 
             gate.SetResult();
             peer.Pump();
 
-            // Read, and only now does the window open - on the stream AND on the connection, which
-            // is the part HTTP/3 does not have to do.
+            // Read, and only now does the stream's window open. The connection counted the bytes on
+            // arrival and is topped up below a quarter of its window, far from here.
             Assert.Equal(1000, peer.CreditFor(streamId: 1));
-            Assert.Equal(1000, peer.CreditFor(streamId: 0));
+            Assert.Equal(Opened, peer.CreditFor(streamId: 0));
             Assert.Equal(2, chunks.Count);
             Assert.Equal(400, chunks[0]);
             Assert.Equal(600, chunks[1]);
 
+            peer.SendData(streamId: 1, bytes: 0, endStream: true);
             peer.Close(run);
         });
 
@@ -103,9 +105,10 @@ internal static class Http2StreamedRequestTests
             peer.Pump();
 
             // The other half of the trade: the whole body is in hand before the handler runs, and
-            // the window was credited as it arrived rather than as it was read.
+            // the window was credited as it arrived rather than as it was read - all but the frame
+            // that ended the request, after which the peer sends nothing more.
             Assert.Equal(1000, seen);
-            Assert.Equal(1000, peer.CreditFor(streamId: 1));
+            Assert.Equal(400, peer.CreditFor(streamId: 1));
 
             peer.Close(run);
         });

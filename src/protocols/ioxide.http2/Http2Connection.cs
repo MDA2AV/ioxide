@@ -77,6 +77,16 @@ public sealed partial class Http2Connection : IDisposable
     private int _peerInitialStreamWindow = 65535;
     private int _peerMaxFrameSize = 16384;
 
+    // RFC 9113 6.9.1 and 6.9.2: the largest window there is, and the one every window starts at.
+    private const int MaxWindow = int.MaxValue;
+    private const int DefaultWindow = 65535;
+
+    // What the peer may still send on the connection: opened to MaxWindow by the preface, charged by every DATA frame.
+    private int _receiveWindow = DefaultWindow;
+
+    // A new stream's receive window: InitialWindowSize, but no less than the 65535 a peer uses until it has our SETTINGS.
+    private int _initialStreamWindow;
+
     // The reactor this connection is served on; null when it runs without one, as over a test pipe.
     private Reactor? _reactor;
 
@@ -91,6 +101,7 @@ public sealed partial class Http2Connection : IDisposable
         _pipe = pipe;
         _options = options ?? new Http2Options();
         _decoder = new HpackDecoder();
+        _initialStreamWindow = Math.Max(_options.InitialWindowSize, DefaultWindow);
     }
 
     /// <summary>Convenience for cleartext h2c: wraps the connection in its own duplex pipe.</summary>
@@ -135,6 +146,7 @@ public sealed partial class Http2Connection : IDisposable
             _queued = [];
         }
         _queuedUsed = 0;
+        _queuedData = 0;
 
         // A writer parked on its turn of the write pump has to wake into IsBroken, not hang: the
         // flush that would have completed its turn is never coming.
@@ -180,7 +192,8 @@ public sealed partial class Http2Connection : IDisposable
             // Our SETTINGS go out first; a peer that opened with the preface and a request is
             // already waiting on them.
             WriteSettings();
-            await FlushAsync();
+            CreditConnection(MaxWindow - DefaultWindow);   // SETTINGS size streams only; this opens the connection (RFC 9113 6.9.2)
+            await FlushPassAsync();
 
             while (!IsBroken)
             {
@@ -206,13 +219,19 @@ public sealed partial class Http2Connection : IDisposable
                     FireBodyWakes();
 
                     _passFlushPending = false;
-                    await FlushAsync();
+                    await FlushPassAsync();
                 }
 
                 if (read.IsCompleted || read.IsCanceled)
                 {
-                    return;
+                    break;
                 }
+            }
+
+            // What the loop queued behind a flush, a GOAWAY among it, goes out before the teardown.
+            if (_flushing && !_writeDead && !_disposed)
+            {
+                await AwaitTurn(new TurnWaiter());
             }
         }
         catch (Exception)
@@ -407,32 +426,33 @@ public sealed partial class Http2Connection : IDisposable
         PendingRequest pending = _pendingPool.TryPop(out PendingRequest? pooled) ? pooled : new PendingRequest();
         pending.StreamId = streamId;
         pending.SendWindow = _peerInitialStreamWindow;
+        pending.ReceiveWindow = _initialStreamWindow;
         return pending;
     }
 
-    /// <summary>Return a consumed chunk's credit to the peer, on both windows it was charged to.</summary>
+    /// <summary>Return a read chunk's credit to its stream alone: the connection was charged for it on arrival.</summary>
     internal void CreditBody(int streamId, int length)
     {
-        if (length <= 0 || IsBroken)
+        if (length <= 0 || IsBroken || !_streams.TryGetValue(streamId, out PendingRequest? pending) || pending.RequestEnded)
         {
             return;
         }
 
-        WriteWindowUpdate(0, length);
-        WriteWindowUpdate(streamId, length);
+        CreditStream(pending, length);
         FlushCredit();
     }
 
-    /// <summary>Return the connection's share of body bytes that will never be read.</summary>
-    internal void CreditConnection(int length)
+    // Every WINDOW_UPDATE the server sends goes through these two, which add back exactly what they grant.
+    private void CreditStream(PendingRequest pending, int increment)
     {
-        if (length <= 0 || IsBroken)
-        {
-            return;
-        }
+        pending.ReceiveWindow += increment;
+        WriteWindowUpdate(pending.StreamId, increment);
+    }
 
-        WriteWindowUpdate(0, length);
-        FlushCredit();
+    private void CreditConnection(int increment)
+    {
+        _receiveWindow += increment;
+        WriteWindowUpdate(0, increment);
     }
 
     // Outside a pass nothing else writes this credit, and a peer out of window sends nothing that
