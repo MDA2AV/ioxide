@@ -136,7 +136,7 @@ public sealed unsafe class QuicEngine : IDisposable
             OnNewCid             = &QuicEngineConnection.CbNewCid,
             OnRetireCid          = &QuicEngineConnection.CbRetireCid,
             OnStreamReset        = &QuicEngineConnection.CbStreamReset,
-            OnStreamStopSending  = &QuicEngineConnection.CbStreamStopSending,
+            OnStreamStopSending  = null,   // only ever our own STOP_SENDING: a reset's, which ResetStream reports, or StopReading's
             OnAckedStreamData    = &QuicEngineConnection.CbAckedStreamData,
             OnPathChange         = &QuicEngineConnection.CbPathChange,
         };

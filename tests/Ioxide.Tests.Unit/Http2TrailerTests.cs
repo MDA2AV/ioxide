@@ -42,7 +42,7 @@ internal static class Http2TrailerTests
             // RFC 9113 5.1.1: stream 1 was opened once, and a HEADERS on it later opens nothing.
             Assert.True(served.SequenceEqual(["1 '/unread'", "3 '/next'"]),
                 $"expected stream 1 once, then stream 3; the handler was handed: {string.Join(", ", served)}");
-            Assert.Equal("", Resets(peer));   // trailers are legal here; nothing to refuse or reset
+            Assert.Equal("1 NO_ERROR", Resets(peer));   // answered unread, so its upload is stopped; the trailers are legal here
 
             peer.Close(run);
         });
@@ -131,17 +131,18 @@ internal static class Http2TrailerTests
             Task run = peer.Connection.RunAsync(request =>     // no body reader: the body comes whole
             {
                 request.TryGetHeader("x-checksum"u8, out ReadOnlyMemory<byte> checksum);
-                served.Add($"{request.StreamId} '{Ascii(request.Path)}' {request.Body.Length} x-checksum '{Ascii(checksum)}'");
+                served.Add($"{request.StreamId} '{Ascii(request.Path)}' {request.Body.Length} x-checksum '{Ascii(checksum)}' "
+                           + (request.HasBody ? "a body" : "no body"));
                 return Http2Response.Text("done");
             });
 
             peer.Open();
             peer.Headers(1, Request("/upload"), endStream: false);
             peer.Data(1, 400, endStream: false);
-            peer.Headers(1, Field("x-checksum", "abc"), endStream: true);
+            peer.Headers(1, Field("x-checksum", "abc"), endStream: true);   // decoded the way the opening block was, and its END_STREAM is no answer to HasBody
             peer.Headers(3, Request("/next"), endStream: true);
 
-            Assert.True(served.SequenceEqual(["1 '/upload' 400 x-checksum 'abc'", "3 '/next' 0 x-checksum ''"]),
+            Assert.True(served.SequenceEqual(["1 '/upload' 400 x-checksum 'abc' a body", "3 '/next' 0 x-checksum '' no body"]),
                 $"the handler was handed: {string.Join(", ", served)}");
             Assert.Equal("", Resets(peer));
 
@@ -358,6 +359,7 @@ internal static class Http2TrailerTests
 
     private static string ErrorName(ReadOnlySpan<byte> code) => BinaryPrimitives.ReadUInt32BigEndian(code) switch
     {
+        0x0 => "NO_ERROR",
         0x1 => "PROTOCOL_ERROR",
         0x7 => "REFUSED_STREAM",
         0x9 => "COMPRESSION_ERROR",

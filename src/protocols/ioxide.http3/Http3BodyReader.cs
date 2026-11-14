@@ -11,6 +11,9 @@ namespace ioxide.http3;
 /// its stream reset or its connection closed first, or short of the request's content-length
 /// (RFC 9114 4.1.2) - ends with an <see cref="IOException"/> instead, so it cannot pass for a whole one.
 ///
+/// Every request is handed a reader, with or without a body; one without reads empty at once.
+/// Whether there is one to read is <see cref="Http3Request.HasBody"/>, known before the first read.
+///
 /// Backpressure is real, not buffered-and-prayed: the request stream is flow-control paced, and
 /// each chunk is credited back to the peer's window only as it is handed to the handler - a slow
 /// consumer freezes the window and the PEER stops sending, so the sink never holds more than a

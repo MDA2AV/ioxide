@@ -355,6 +355,9 @@ public sealed unsafe class H3TestClient : IDisposable
     // datagram, falling back to the generic flush when the stream can't take more.
     private readonly byte[] _sendScratch = new byte[1452];
 
+    // NGTCP2_ERR_STREAM_SHUT_WR: a server that answered without reading the upload asked for no more of it.
+    private const int StreamShutWr = -219;
+
 
     private void WriteStream(long sid, ReadOnlySpan<byte> data, bool fin)
     {
@@ -379,6 +382,11 @@ public sealed unsafe class H3TestClient : IDisposable
                 byte* ptr = off < data.Length ? src + off : null;
                 n = iq_conn_write(_conn, dest, (nuint)_sendScratch.Length, sid,
                                   ptr, (nuint)(data.Length - off), finPending ? 1 : 0, &consumed, NowNs());
+            }
+
+            if ((int)n == StreamShutWr)
+            {
+                return;   // the server stopped reading this stream (STOP_SENDING): the rest goes nowhere
             }
 
             if ((int)n < 0)

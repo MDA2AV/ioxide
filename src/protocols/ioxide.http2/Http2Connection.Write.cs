@@ -308,6 +308,13 @@ public sealed partial class Http2Connection
 
     private void WriteWindowUpdate(int streamId, int increment)
     {
+        // RFC 9113 6.9: the peer must treat an increment of 0 as a PROTOCOL_ERROR, on stream 0 by ending
+        // the connection, so a caller left with nothing to credit sends nothing.
+        if (increment <= 0)
+        {
+            return;
+        }
+
         Span<byte> frame = stackalloc byte[FrameHeader.Size + 4];
         new FrameHeader(4, FrameType.WindowUpdate, FrameFlags.None, streamId).Write(frame);
         BinaryPrimitives.WriteUInt32BigEndian(frame[FrameHeader.Size..], (uint)increment);
@@ -341,17 +348,19 @@ public sealed partial class Http2Connection
 
     private void WriteResponse(int streamId, Http2Response response)
     {
+        ReadOnlyMemory<byte> body = response.Body;   // a null response throws here, with the window still there for the 500
+
         // Gone once the peer has reset the stream, and nothing may follow a reset (RFC 9113 5.1).
         if (!_responseWindows.Remove(streamId, out int window))
         {
             return;
         }
 
-        WriteHeaders(streamId, response, endStream: response.Body.Length == 0);
+        WriteHeaders(streamId, response, endStream: body.Length == 0);
 
-        if (response.Body.Length > 0)
+        if (body.Length > 0)
         {
-            WriteData(streamId, response.Body.Span, window);
+            WriteData(streamId, body.Span, window);
         }
     }
 

@@ -38,6 +38,7 @@ internal sealed class HttpClientConnection : IDisposable
     private UnmanagedMemoryManager _receiveView;
     private int _received;    // bytes held in the receive buffer
     private int _consumed;    // parsed prefix of those bytes
+    private long _responseBytes;   // received for this response, so 1xx heads, chunk framing and trailers count too
 
     // Glyph11's parse target, reused across requests - Clear() between, Dispose() at the end, so
     // the header list's pooled arrays are rented once for the connection's life rather than per
@@ -178,6 +179,7 @@ internal sealed class HttpClientConnection : IDisposable
         // Leftovers from the previous response (there should be none) move to the front, so every
         // response parses from offset 0.
         Compact();
+        _responseBytes = 0;
 
         var response = new HttpClientResponse();
         try
@@ -351,16 +353,12 @@ internal sealed class HttpClientConnection : IDisposable
             {
                 await ReceiveMoreAsync();
             }
-            catch (HttpClientException)
+            catch (HttpClientException) when (_responseBytes <= _options.MaxResponseBytes)
             {
-                break;   // peer closed - that IS the framing here
+                break;   // peer closed - that IS the framing here; past the limit the throw is a failure
             }
 
             total += AppendAvailable(response, long.MaxValue);
-            if (total > _options.MaxResponseBytes)
-            {
-                throw new HttpClientException("response body exceeds MaxResponseBytes");
-            }
         }
 
         response.SetBodyRange((start, total));
@@ -393,6 +391,12 @@ internal sealed class HttpClientConnection : IDisposable
             throw new HttpClientException(n == 0 ? "peer closed mid-response" : $"recv failed: errno {-n}");
         }
         _received += n;
+
+        _responseBytes += n;
+        if (_responseBytes > _options.MaxResponseBytes)
+        {
+            throw new HttpClientException("response exceeds MaxResponseBytes");
+        }
         return n;
     }
 
@@ -468,10 +472,11 @@ internal sealed class HttpClientConnection : IDisposable
     /// </summary>
     /// <remarks>
     /// Structure and hardening are Glyph11's: bare LF, obs-fold, whitespace before the colon,
-    /// token and field-value charsets, duplicate and malformed Content-Length, and the
+    /// token and field-value charsets, duplicate and malformed Content-Length, the
     /// Transfer-Encoding + Content-Length pair that lets a proxy and a client disagree about where
-    /// this response ends. What stays here is what Glyph11 has no opinion on - copying the fields
-    /// the caller keeps, and connection reuse.
+    /// this response ends, and Transfer-Encoding from an HTTP/1.0 sender, which RFC 9112 6.1 calls
+    /// faulty framing. What stays here is what Glyph11 has no opinion on - copying the fields the
+    /// caller keeps, and connection reuse.
     /// </remarks>
     private unsafe int TryParseHead(HttpClientResponse response, HttpClientRequest request)
     {
@@ -484,11 +489,10 @@ internal sealed class HttpClientConnection : IDisposable
         ReadOnlyMemory<byte> buffered = ReceiveBufferAsMemory();
 
         bool complete;
-        int bytesRead;
+        int headSize;
         try
         {
-            complete = UltraHardenedParser.TryExtractFullResponseHeaderROM(
-                ref buffered, _head, in _limits, out bytesRead);
+            complete = UltraHardenedParser.TryParseResponseHeader(ref buffered, _head, in _limits, out headSize);
         }
         catch (HttpParseException e)
         {
@@ -501,10 +505,6 @@ internal sealed class HttpClientConnection : IDisposable
         {
             return 0;
         }
-
-        // Glyph11 reports one less than the block's real size - see the note in its diff harness,
-        // "C# returns total-1; the C ABI returns the clean total".
-        int headSize = bytesRead + 1;
 
         response.Status = _head.Status;
 

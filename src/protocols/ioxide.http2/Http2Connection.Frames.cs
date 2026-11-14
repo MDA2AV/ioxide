@@ -1,5 +1,6 @@
 using System.Buffers;
 using System.Buffers.Binary;
+using System.Globalization;
 
 namespace ioxide.http2;
 
@@ -168,6 +169,10 @@ public sealed partial class Http2Connection
             pending = RentPending(header.StreamId);
             _streams[header.StreamId] = pending;
             _highestStream = header.StreamId;
+
+            // Only the block that opens a stream can say there is no body. An END_STREAM on a later
+            // one ends trailers, which come after a body, empty or not.
+            pending.HasBody = (header.Flags & FrameFlags.EndStream) == 0;
         }
         else if (pending.BodyReader is { } reader)
         {
@@ -177,6 +182,11 @@ public sealed partial class Http2Connection
             DiscardHeaderBlock(header, block);
             if ((header.Flags & FrameFlags.EndStream) != 0)
             {
+                if (!pending.BodyFits(ended: true))
+                {
+                    RefuseBody(pending);
+                    return;
+                }
                 pending.RequestEnded = true;
                 reader.End();
             }
@@ -204,7 +214,7 @@ public sealed partial class Http2Connection
 
         if ((header.Flags & FrameFlags.EndHeaders) != 0)
         {
-            if (!DecodeHeaderBlock(pending))
+            if (!DecodeHeaderBlock(pending, endsStream: (header.Flags & FrameFlags.EndStream) != 0))
             {
                 return;
             }
@@ -292,17 +302,17 @@ public sealed partial class Http2Connection
 
         if ((header.Flags & FrameFlags.EndHeaders) != 0)
         {
-            if (!DecodeHeaderBlock(pending))
+            // END_STREAM rode the HEADERS that opened this block, not the CONTINUATION closing it.
+            if (!DecodeHeaderBlock(pending, endsStream: pending.RequestEnded))
             {
                 return;
             }
-            // END_STREAM rode the HEADERS that opened this block, not the CONTINUATION closing it.
             BeginStreamedBody(pending, ended: pending.RequestEnded);
             TryComplete(pending);
         }
     }
 
-    private bool DecodeHeaderBlock(PendingRequest pending, bool discard = false)
+    private bool DecodeHeaderBlock(PendingRequest pending, bool endsStream = false, bool discard = false)
     {
         try
         {
@@ -331,7 +341,9 @@ public sealed partial class Http2Connection
             pending.HeadersDone = true;
             pending.ClosePseudoHeaders();
 
-            if (pending.Malformed)
+            // A block that ends the stream ends the body with it, so the DATA before it - none, for
+            // the block that opens the request - has to be all the content-length declared.
+            if (pending.Malformed || !pending.BodyFits(endsStream))
             {
                 ResetStream(pending.StreamId, Http2Error.ProtocolError);   // decoded whole, so HPACK is in step and only this request ends
                 return false;
@@ -388,9 +400,17 @@ public sealed partial class Http2Connection
             CreditConnection(MaxWindow - _receiveWindow);
         }
 
+        bool ended = (header.Flags & FrameFlags.EndStream) != 0;
+
         if (!_streams.TryGetValue(header.StreamId, out PendingRequest? pending))
         {
-            return;   // a stream the server is done with: its window went with it
+            // A buffered answer parked on credit still has its upload credited, so a client that credits the
+            // answer only once its upload ends can finish both. Any other stream's window went with it.
+            if (payload.Length > 0 && !ended && _responseWindows.ContainsKey(header.StreamId))
+            {
+                WriteWindowUpdate(header.StreamId, payload.Length);
+            }
+            return;
         }
 
         // Past its window is a stream error (6.9), and its response stops with it; an empty frame may still end it (6.9.1).
@@ -402,6 +422,16 @@ public sealed partial class Http2Connection
             return;
         }
         pending.ReceiveWindow -= payload.Length;
+
+        // Counted before the payload is taken: a frame that runs past the content-length is refused at
+        // once rather than at the end, so neither a handler nor the arena holds a byte of it, and an
+        // END_STREAM short of it is refused where it lands.
+        pending.BodyReceived += body.Length;
+        if (!pending.BodyFits(ended))
+        {
+            RefuseBody(pending);
+            return;
+        }
 
         if (pending.BodyReader is { } reader)
         {
@@ -417,8 +447,6 @@ public sealed partial class Http2Connection
             pending.AppendBody(body);
         }
 
-        bool ended = (header.Flags & FrameFlags.EndStream) != 0;
-
         // Consumed now: a buffered body, or a streamed one's padding, its body credited as read; an ended request is owed none.
         int credit = pending.BodyReader is null ? payload.Length : payload.Length - body.Length;
         if (credit > 0 && !ended)
@@ -432,6 +460,25 @@ public sealed partial class Http2Connection
             pending.BodyReader?.End();
             TryComplete(pending);
         }
+    }
+
+    /// <summary>
+    /// RFC 9113 8.1.1: a request whose DATA does not come to its content-length is malformed, a stream
+    /// error of PROTOCOL_ERROR. A buffered one is refused before it is dispatched. A streamed one was
+    /// handed over at its HEADERS, so its handler hears of it at its body's next read, and its response
+    /// finds the stream gone as after the peer's own reset: a reset stream takes no more frames
+    /// (RFC 9113 5.1), and a writer nobody told would keep sending into it.
+    /// </summary>
+    private void RefuseBody(PendingRequest pending)
+    {
+        int streamId = pending.StreamId;   // read first: the reset recycles a request no handler holds
+        pending.BodyReader?.Abort(pending.BodyReceived > pending.ContentLength
+            ? "the request body ran past its content-length"
+            : $"the request body ended {pending.ContentLength - pending.BodyReceived} bytes short of its content-length");
+
+        _responseWindows.Remove(streamId);
+        ResetStream(streamId, Http2Error.ProtocolError);
+        ReleaseCreditWaiters(streamId);   // a writer parked on credit wakes to find the stream gone
     }
 
     private void TryComplete(PendingRequest pending)
@@ -636,6 +683,7 @@ public sealed partial class Http2Connection
         public int StreamId;
         public bool HeadersDone;
         public bool RequestEnded;
+        public bool HasBody;   // what Http2Request.HasBody reports: the opening HEADERS did not end the stream
 
         // What this request's header blocks have decoded to so far.
         public long HeaderListSize;
@@ -659,8 +707,21 @@ public sealed partial class Http2Connection
         public (int Offset, int Length) Scheme;
         public (int Offset, int Length) Authority;
 
-        // A pseudo-header out of place: the stream is reset once the block is decoded, never dispatched.
+        // A pseudo-header out of place, or a content-length that is no number or comes twice: the
+        // stream is reset once the block is decoded, never dispatched.
         public bool Malformed;
+
+        // What the content-length says the DATA comes to, -1 without one, and what it has come to so
+        // far, padding aside: RFC 9113 8.1.1 counts the body, and padding is no part of it.
+        public long ContentLength = -1;
+        public long BodyReceived;
+
+        /// <summary>
+        /// Whether the DATA so far can still be the body the content-length declares: never past it,
+        /// and all of it once the request has <paramref name="ended"/> (RFC 9113 8.1.1).
+        /// </summary>
+        public bool BodyFits(bool ended)
+            => ContentLength < 0 || (ended ? BodyReceived == ContentLength : BodyReceived <= ContentLength);
 
         // One bit for each pseudo-header seen, and one once a regular field or the end of a block closes them.
         private int _pseudoSeen;
@@ -716,6 +777,23 @@ public sealed partial class Http2Connection
             (int Offset, int Length) nameRange = Append(name);
             (int Offset, int Length) valueRange = Append(value);
             _fields.Add((nameRange.Offset, nameRange.Length, valueRange.Offset, valueRange.Length));
+
+            if (name.SequenceEqual("content-length"u8))
+            {
+                // Digits only (RFC 9110 8.6), each byte checked since TryParse lets a trailing NUL through,
+                // and once: two that disagree leave whoever reads the request to pick a length, and a
+                // repeat is refused even when the values agree, as nghttp2 refuses it.
+                if (ContentLength >= 0
+                    || value.IndexOfAnyExceptInRange((byte)'0', (byte)'9') >= 0
+                    || !long.TryParse(value, NumberStyles.None, CultureInfo.InvariantCulture, out long length))
+                {
+                    Malformed = true;
+                }
+                else
+                {
+                    ContentLength = length;
+                }
+            }
         }
 
         // RFC 9113 8.3: each at most once and ahead of every regular field; 8.1: none in trailers.
@@ -774,6 +852,7 @@ public sealed partial class Http2Connection
             request.Scheme     = Slice(Scheme);
             request.Authority  = Slice(Authority);
             request.Body       = Slice(_body);
+            request.HasBody    = HasBody;
             request.BodyReader = BodyReader;
 
             foreach ((int nameOffset, int nameLength, int valueOffset, int valueLength) in _fields)
@@ -813,6 +892,8 @@ public sealed partial class Http2Connection
 
             Malformed = false;
             _pseudoSeen = 0;
+            ContentLength = -1;
+            BodyReceived = 0;
             ClearHeaderBlock();
             _fields.Clear();
             HeaderListSize = 0;
@@ -831,6 +912,7 @@ public sealed partial class Http2Connection
             StreamId = 0;
             HeadersDone = false;
             RequestEnded = false;
+            HasBody = false;
             SendWindow = 65535;
             Method = Path = Scheme = Authority = _body = default;
         }
