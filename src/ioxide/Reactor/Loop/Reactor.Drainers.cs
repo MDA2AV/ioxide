@@ -82,6 +82,11 @@ public sealed unsafe partial class Reactor
         SpinWait sw = default;
         while (!_returnQ.TryEnqueue(bid))
         {
+            // Nothing drains the queue past the stop, and there is no ring left to take the buffer.
+            if (_postsClosed)
+            {
+                return;
+            }
             sw.SpinOnce();
         }
         // Without the wake, a queued return waits for an unrelated CQE; if the ring

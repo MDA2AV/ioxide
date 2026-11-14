@@ -325,6 +325,85 @@ internal static class StopParkedTests
                     }
                 }
             }, skip: incremental && !TestServer.KernelAtLeast(6, 12));
+
+            runner.Test($"stop: handlers holding more buffers than the return queue takes give them all back from another thread after the stop ({mode})", () =>
+            {
+                // Past the queue's 16384 entries shared, 65536 incremental. One-byte buffers make each byte a
+                // recv, so each byte sent is a buffer, or a slice, of its own, and 32768 is the most a ring takes.
+                int connections = incremental ? 3 : 1;
+                int perConnection = incremental ? 22_000 : 17_000;
+                var tcp = new TcpOptions { RecvQueueEntries = 32_768 };
+                ServerConfig config = incremental
+                    ? new ServerConfig { Incremental = new IncrementalOptions { MaxConnections = 8, RecvSlots = 32_768, RecvBufferSize = 1 }, Tcp = tcp }
+                    : new ServerConfig { RecvSlots = 32_768, RecvBufferSize = 1, Tcp = tcp };
+
+                using var holding = new CountdownEvent(connections);
+                using var gaveBack = new CountdownEvent(connections);
+                var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+                int returned = 0;
+
+                (int port, Reactor reactor, Thread thread) = TestServer.StartConfigured(async (_, conn) =>
+                {
+                    var held = new List<SpscRecvRing.Item>();
+                    try
+                    {
+                        while (held.Count < perConnection)
+                        {
+                            RecvSnapshot snapshot = await conn.ReadAsync();
+                            while (conn.TryGetItem(snapshot, out SpscRecvRing.Item item))
+                            {
+                                if (item.HasBuffer)
+                                {
+                                    held.Add(item);
+                                }
+                            }
+                            if (snapshot.IsClosed)
+                            {
+                                return;   // the harness's listen probe
+                            }
+                        }
+
+                        holding.Signal();
+                        await release.Task;   // resumes on the thread pool, after the stop
+                        foreach (SpscRecvRing.Item item in held)
+                        {
+                            conn.ReturnBuffer(in item);
+                            Interlocked.Increment(ref returned);
+                        }
+                        gaveBack.Signal();
+                    }
+                    finally
+                    {
+                        conn.DecRef();
+                    }
+                }, config);
+
+                var clients = new List<Socket>();
+                try
+                {
+                    for (int c = 0; c < connections; c++)
+                    {
+                        Socket client = Connect(port);
+                        clients.Add(client);
+                        client.Send(new byte[perConnection]);
+                    }
+                    Assert.True(holding.Wait(10_000), $"{holding.CurrentCount} of {connections} handlers never came to hold their buffers");
+
+                    StopAndJoin(reactor, thread);
+                    release.TrySetResult();
+
+                    Assert.True(gaveBack.Wait(ReturnsWithinMs),
+                        $"{Volatile.Read(ref returned)} of the {connections * perConnection} buffers went back after the stop, and the next return still spins on a queue nothing drains");
+                }
+                finally
+                {
+                    release.TrySetResult();
+                    foreach (Socket client in clients)
+                    {
+                        client.Dispose();
+                    }
+                }
+            }, skip: incremental && !TestServer.KernelAtLeast(6, 12));
         }
 
         runner.Test("stop: a flush from another thread after the reactor stopped returns", () =>
