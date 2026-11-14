@@ -150,6 +150,7 @@ public sealed partial class Nghttp3Connection
             QueueResponse(streamId, response);
             PumpEgress();
         }
+        StopReadingIfAnsweredEarly(request);
 
         // RequestHandled's release, kept after the submit: the response may slice the request's memory.
         if (!_streamBodies || request.Detached)

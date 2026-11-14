@@ -73,6 +73,7 @@ internal static class Program
         Http2BufferedFaultTests.Register(runner);
         Nghttp2ManyHeadersTests.Register(runner);
         StreamedPeerGoneTests.Register(runner);
+        EarlyAnswerTests.Register(runner);
         QuicStreamingCreditTests.Register(runner);
         Http3BodyTests.Register(runner);
         Http3RequestReuseTests.Register(runner);

@@ -274,6 +274,7 @@ public sealed partial class Nghttp3Connection
     private void RequestHandled(Nghttp3Request request)
     {
         request.HandlerDone = true;
+        StopReadingIfAnsweredEarly(request);
         if (!_streamBodies || request.Detached)
         {
             ReleaseRequest(request);
@@ -314,6 +315,7 @@ public sealed partial class Nghttp3Connection
             // Headers are on the wire: a 500 after a 200 would be a lie the peer cannot detect, and
             // a clean end would pass a truncated body off as whole. Only a reset is honest.
             writer.ResetStream(H3InternalError);
+            request.AnsweredEarly = false;   // the reset stopped its read side as well
             return;
         }
 

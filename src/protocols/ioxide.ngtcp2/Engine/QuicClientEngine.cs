@@ -39,7 +39,7 @@ public sealed unsafe class QuicClientEngine : IDisposable
             OnNewCid             = null,   // client CIDs are not routed by the reactor
             OnRetireCid          = null,
             OnStreamReset        = &QuicEngineConnection.CbStreamReset,
-            OnStreamStopSending  = &QuicEngineConnection.CbStreamStopSending,
+            OnStreamStopSending  = null,   // only ever our own STOP_SENDING: a reset's, which ResetStream reports, or StopReading's
             OnAckedStreamData    = &QuicEngineConnection.CbAckedStreamData,
         };
 

@@ -416,7 +416,7 @@ internal static class Http2FlowControlTests
         return writer.CompleteAsync();
     }
 
-    private static int Credit(IEnumerable<Frame> frames, int streamId)
+    internal static int Credit(IEnumerable<Frame> frames, int streamId)
     {
         int total = 0;
         foreach (Frame frame in frames)
