@@ -14,15 +14,21 @@ namespace Ioxide.Tests;
 ///
 /// The session runs with nghttp2's automatic WINDOW_UPDATE off, so the only credit a peer gets back
 /// is what the server consumes, and every DATA byte must be consumed exactly once. A byte that never
-/// is shrinks the connection window for good. These tests make each way of leaking it stall an
-/// upload: the window is 65535 bytes, so an upload past it completes only if credit keeps coming
-/// back, and one the server should be holding stalls at the window instead of running ahead.
+/// is shrinks its stream's window for good, and the connection's. The connection's is opened to
+/// 2^31-1, so these tests make each way of leaking credit stall an upload at its stream's window: an
+/// upload past it completes only if credit keeps coming back, and one the server should be holding
+/// stalls at the window instead of running ahead. Nghttp2ReceiveWindowTests counts the connection's.
 /// </summary>
 internal static class Nghttp2StreamedRequestTests
 {
-    // RFC 9113's initial connection window, which nghttp2 leaves as it is: the most a peer may send
-    // ahead of what the server has consumed, on every stream together.
-    private const int ConnectionWindow = 65535;
+    // InitialWindowSize's default: the most a peer may send on one stream ahead of what the server has consumed.
+    private const int StreamWindow = 256 * 1024;
+
+    // RFC 9113's initial window: a stream's until the peer acknowledges the server's SETTINGS, and the one
+    // a test sets where a stall at it, or nghttp2's credit once 32 KiB of it is read, is the signal.
+    private const int RfcWindow = 65535;
+
+    private const byte WindowUpdateFrame = 0x8;
 
     private const int Large = 4 * 1024 * 1024;
     private const int Frame = 16384;
@@ -55,11 +61,11 @@ internal static class Nghttp2StreamedRequestTests
                 Assert.True(read.Chunks > 1, $"the body reached the handler in {read.Chunks} chunk, not streamed");
             });
 
-            runner.Test($"nghttp2 streamed request ({flavor}): uploads a handler never reads give their connection credit back",
+            runner.Test($"nghttp2 streamed request ({flavor}): uploads a handler never reads are credited all the same, each past its stream's window",
                 () => UnreadUploadsGiveCreditBack(sr));
         }
 
-        runner.Test("nghttp2 streamed request: a handler that has not read holds its peer to one window, and the upload completes once it reads", () =>
+        runner.Test("nghttp2 streamed request: a handler that has not read holds its own upload to one stream window, while another on the connection runs past it", () =>
         {
             // "/hold" reads nothing until "/go" arrives on the same connection. HEADERS are not flow
             // controlled, so the release still gets through once the window is spent.
@@ -68,21 +74,27 @@ internal static class Nghttp2StreamedRequestTests
             client.Open();
 
             long stalledAt = -1;
+            (H2cClient.UploadEnd End, uint Error, long Sent) other = default;
             (H2cClient.UploadEnd end, uint error, long sent) = client.Upload(streamId: 1, Large, path: "/hold",
                 onStall: at =>
                 {
                     stalledAt = at;
-                    client.Request(streamId: 3, path: "/go");
+                    other = client.Upload(streamId: 3, Large, path: "/read", timeoutMs: 10_000);
+                    client.Request(streamId: 5, path: "/go");
                 });
 
             Assert.True(stalledAt >= 0,
                 $"the client never stalled: the server took {sent} bytes while its handler read none");
-            Assert.True(stalledAt == ConnectionWindow,
-                $"the server took {stalledAt} bytes before its handler read any, not one {ConnectionWindow}-byte window");
+            Assert.True(stalledAt == StreamWindow,
+                $"the server took {stalledAt} bytes before its handler read any, not one {StreamWindow}-byte stream window");
+            Assert.True(other.End == H2cClient.UploadEnd.Answered && other.Sent == Large,
+                $"while stream 1's handler read nothing, the upload on stream 3 ended {other.End} (error 0x{other.Error:x}) after {other.Sent} of {Large} bytes");
             Assert.True(end == H2cClient.UploadEnd.Answered && sent == Large,
                 $"once the handler read, the upload ended {end} (error 0x{error:x}) after {sent} of {Large} bytes");
             Seen held = Single(seen, 1);
             Assert.True(held.Bytes == Large && held.Broken < 0, $"the handler read {Describe(seen)}, not {Large} bytes in order");
+            Seen read = Single(seen, 3);
+            Assert.True(read.Bytes == Large && read.Broken < 0, $"the other handler read {Describe(seen)}, not {Large} bytes in order");
         });
 
         foreach ((uint code, string name) in new[] { (Cancel, "CANCEL"), (NoError, "NO_ERROR") })
@@ -91,16 +103,16 @@ internal static class Nghttp2StreamedRequestTests
             runner.Test($"nghttp2 streamed request: a peer RST_STREAM ({name}) mid-body cuts the handler's read off, and the connection serves on", () =>
             {
                 var seen = new ConcurrentQueue<Seen>();
-                using var client = new H2cClient(Start(seen, streamedResponse: false), timeoutMs: 30_000);
+                using var client = new H2cClient(Start(seen, streamedResponse: false, initialWindowSize: RfcWindow), timeoutMs: 30_000);
                 client.Open();
 
                 client.OpenPost(streamId: 1, "/read");
                 client.SendData(streamId: 1, offset: 0, Frame);
                 client.SendData(streamId: 1, offset: Frame, Frame);
 
-                // nghttp2 returns credit once half its window is consumed, so this is the handler
+                // nghttp2 returns a stream's credit once half its window is consumed, so this is the handler
                 // having read all of it, and parked on its next read when the reset lands.
-                Assert.True(client.AwaitConnectionWindow(ConnectionWindow), "the handler never read the first 32768 bytes");
+                Assert.True(client.AwaitAnyOf([WindowUpdateFrame], streamId: 1) == WindowUpdateFrame, "the handler never read the first 32768 bytes");
                 client.ResetStream(streamId: 1, resetCode);
 
                 const int After = 256 * 1024;
@@ -133,18 +145,18 @@ internal static class Nghttp2StreamedRequestTests
             Assert.True(seen.Count(s => s.Stream == 1) == 1, $"the trailers reached a handler as a request: {Describe(seen)}");
         });
 
-        runner.Test("nghttp2 streamed request: a body left unread when its stream is reset gives its connection credit back", () =>
+        runner.Test("nghttp2 streamed request: a body left unread when its stream is reset is cut off for its handler, and the connection serves on", () =>
         {
-            // A whole window queued behind "/hold" when the peer abandons the stream: if those bytes
-            // were not credited, no DATA could follow on any stream of the connection.
+            // A whole window queued behind "/hold" when the peer abandons the stream. The credit those bytes still
+            // owe the connection is counted in Nghttp2ReceiveWindowTests, at the top-up that shows it.
             var seen = new ConcurrentQueue<Seen>();
             using var client = new H2cClient(Start(seen, streamedResponse: false), timeoutMs: 30_000);
             client.Open();
 
             client.OpenPost(streamId: 1, "/hold");
-            for (int at = 0; at < ConnectionWindow; at += Frame)
+            for (int at = 0; at < RfcWindow; at += Frame)
             {
-                client.SendData(streamId: 1, offset: at, Math.Min(Frame, ConnectionWindow - at));
+                client.SendData(streamId: 1, offset: at, Math.Min(Frame, RfcWindow - at));
             }
             client.ResetStream(streamId: 1, Cancel);
             client.Request(streamId: 3, path: "/go");
@@ -152,15 +164,15 @@ internal static class Nghttp2StreamedRequestTests
             const int After = 256 * 1024;
             (H2cClient.UploadEnd end, uint error, long sent) = client.Upload(streamId: 5, After, path: "/read");
             Assert.True(end == H2cClient.UploadEnd.Answered && sent == After,
-                $"after a reset stream left {ConnectionWindow} bytes unread, the next upload ended {end} "
-                + $"(error 0x{error:x}) after {sent} of {After} bytes: their credit never came back");
+                $"after a reset stream left {RfcWindow} bytes unread, the next upload ended {end} "
+                + $"(error 0x{error:x}) after {sent} of {After} bytes");
 
             Seen held = Single(seen, 1);
             Assert.True(held.Bytes == 0 && held.Cut,
                 $"the reset stream's handler should read none of a body its peer abandoned, and that it was cut: {Describe(seen)}");
         });
 
-        runner.Test("nghttp2 streamed request: a handler that fails mid-upload has its stream reset, and the connection keeps its credit", () =>
+        runner.Test("nghttp2 streamed request: a handler that fails mid-upload has its stream reset, and the connection serves on", () =>
         {
             // "/fail" sends its headers, then fails once "/go" releases it, with a window of its body
             // still unread - so its stream is reset by the server rather than by the peer.
@@ -253,7 +265,7 @@ internal static class Nghttp2StreamedRequestTests
             {
                 try
                 {
-                    await new Nghttp2Connection(conn)
+                    await new Nghttp2Connection(conn, new Nghttp2Options { InitialWindowSize = RfcWindow })
                         .RunAsync(async (_, body) =>
                         {
                             long bytes = 0;
@@ -286,9 +298,9 @@ internal static class Nghttp2StreamedRequestTests
                 client.SendData(streamId: 1, offset: 0, Frame);
                 client.SendData(streamId: 1, offset: Frame, Frame);
 
-                // nghttp2 returns credit once half its window is consumed, so this is the handler
+                // nghttp2 returns a stream's credit once half its window is consumed, so this is the handler
                 // having read all of it, and parked on its next read when the connection goes away.
-                Assert.True(client.AwaitConnectionWindow(ConnectionWindow), "the handler never read the first 32768 bytes");
+                Assert.True(client.AwaitAnyOf([WindowUpdateFrame], streamId: 1) == WindowUpdateFrame, "the handler never read the first 32768 bytes");
             }
 
             Assert.True(verdict.Task.Wait(10_000), "the handler parked on its body never woke when its connection went away");
@@ -297,10 +309,10 @@ internal static class Nghttp2StreamedRequestTests
 
         runner.Test("nghttp2 streamed request: a padded upload reaches the handler without its padding, and the padding's credit comes back", () =>
         {
-            // 255 bytes of padding per frame comes to more than a window over 4 MiB, so padding that
-            // was never credited would stall the upload on its own.
+            // 255 bytes of padding per frame comes to more than a 65,535-byte stream window over 4 MiB, so
+            // padding that was never credited would stall the upload on its own.
             var seen = new ConcurrentQueue<Seen>();
-            using var client = new H2cClient(Start(seen, streamedResponse: false), timeoutMs: 30_000);
+            using var client = new H2cClient(Start(seen, streamedResponse: false, initialWindowSize: RfcWindow), timeoutMs: 30_000);
             client.Open();
 
             (H2cClient.UploadEnd end, uint error, long sent) = client.Upload(streamId: 1, Large, path: "/read", padding: 255);
@@ -347,9 +359,8 @@ internal static class Nghttp2StreamedRequestTests
         });
     }
 
-    // Each upload fits the connection window and five cross it, so only credit that never comes
-    // back can wedge them.
-    private const int UploadBytes = 40 * 1024;
+    // Each upload crosses its stream's window, so only credit that never comes back can wedge one.
+    private const int UploadBytes = 100 * 1024;
     private const int Uploads = 5;
 
     /// <summary>
@@ -358,11 +369,10 @@ internal static class Nghttp2StreamedRequestTests
     /// </summary>
     private static void UnreadUploadsGiveCreditBack(bool streamedResponse)
     {
-        Assert.True(Uploads * (long)UploadBytes > ConnectionWindow && UploadBytes < ConnectionWindow,
-            "the uploads must cross the connection window while each fits it");
+        Assert.True(UploadBytes > RfcWindow, "each upload must cross its stream's window");
 
         var seen = new ConcurrentQueue<Seen>();
-        int port = Start(seen, streamedResponse);
+        int port = Start(seen, streamedResponse, initialWindowSize: RfcWindow);
 
         foreach (string path in new[] { "/read", "/unread", "/unread-after-a-wait" })
         {
@@ -389,11 +399,12 @@ internal static class Nghttp2StreamedRequestTests
     /// streamed response, "/fail" sends its headers and fails once released.
     /// </summary>
     private static int Start(ConcurrentQueue<Seen> seen, bool streamedResponse, bool streamBodies = true,
-        int maxRequestBytes = 8 * 1024 * 1024) => TestServer.Start(async (reactor, conn) =>
+        int maxRequestBytes = 8 * 1024 * 1024, int initialWindowSize = StreamWindow) => TestServer.Start(async (reactor, conn) =>
     {
         try
         {
-            var connection = new Nghttp2Connection(conn, new Nghttp2Options { MaxRequestBytes = maxRequestBytes });
+            var connection = new Nghttp2Connection(conn,
+                new Nghttp2Options { MaxRequestBytes = maxRequestBytes, InitialWindowSize = initialWindowSize });
             var timer = new RingTimer(reactor);
             var gate = new TaskCompletionSource();
 

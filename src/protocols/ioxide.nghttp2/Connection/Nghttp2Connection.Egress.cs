@@ -1,5 +1,6 @@
 using System.Buffers;
 using System.IO.Pipelines;
+using System.Runtime.CompilerServices;
 
 namespace ioxide.nghttp2;
 
@@ -96,7 +97,11 @@ public sealed partial class Nghttp2Connection
     private bool _draining;
     private bool _drainAgain;
 
-    private async ValueTask FlushEgressAsync()
+    // The read loop's wait, at its end, for the drain in flight to be done.
+    private TaskCompletionSource? _drained;
+
+    // A detached drain, as the read loop's is, has nobody to throw to: its fault is reported through IsBroken.
+    private async ValueTask FlushEgressAsync(bool detached = false)
     {
         if (_handle == 0)
         {
@@ -146,12 +151,60 @@ public sealed partial class Nghttp2Connection
             }
             while (_drainAgain && _handle != 0);
         }
+        catch
+        {
+            _failed = true;   // the transport refused a write: nothing queued can leave now
+            if (!detached)
+            {
+                throw;
+            }
+        }
         finally
         {
-            _draining = false;
+            if (OffReactor)
+            {
+                _ = EndDrainOnReactorAsync();   // a flush that faulted ends the drain on the thread that completed it
+            }
+            else
+            {
+                EndDrain();
+            }
+        }
+    }
+
+    private async Task EndDrainOnReactorAsync()
+    {
+        try
+        {
+            await new ReactorSwitch(_reactor);
+        }
+        catch (ObjectDisposedException)
+        {
+            // The reactor has stopped, so nothing races the end of the drain: it goes on here.
+        }
+        EndDrain();
+    }
+
+    // Out of line: what it runs loops, and a loop in an async method's finally costs it its optimized code.
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private void EndDrain()
+    {
+        _draining = false;
+
+        // The read loop reads on behind a drain, so one that found the connection gone ends that read, or the next.
+        if (_failed && !_disposed)
+        {
+            _pipe.Input.CancelPendingRead();
         }
 
+        FireBodyWakes();   // a stream this drain closed, sending its RST_STREAM, ends its reader now
         WakeParkedWriters();
+
+        if (_drained is { } drained)
+        {
+            _drained = null;
+            drained.SetResult();
+        }
     }
 
     private unsafe int DrainOnce()

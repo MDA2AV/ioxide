@@ -17,9 +17,9 @@ namespace ioxide.nghttp2;
 /// one window instead of by the whole body, which is the difference that makes a hostile upload
 /// harmless.
 ///
-/// As on <c>ioxide.http2</c>, credit is shared. Every stream rides one TCP connection, so a chunk
-/// opens both the stream's window and the CONNECTION's - and a handler that never reads holds down
-/// the connection window for every other stream on it, until it returns.
+/// The window that holds an upload back is its stream's own. A chunk is credited to the
+/// connection's window too, but that one is opened to its maximum and topped up as it is consumed,
+/// so a handler that never reads holds back only its own upload, never the other streams'.
 /// </summary>
 /// <remarks>
 /// Single consumer, on any thread: a read made off the reactor is served on it. Each

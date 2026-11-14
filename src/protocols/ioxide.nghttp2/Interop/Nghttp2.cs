@@ -30,14 +30,16 @@ internal static unsafe partial class Nghttp2
         public delegate* unmanaged<void*, int, uint, void> OnStreamError;
     }
 
-    /// <summary>Create a server session and queue SETTINGS. The peer's connection preface is
-    /// validated out of <see cref="ih2_read"/>. With <paramref name="manualFlow"/> non-zero nghttp2
-    /// sends no WINDOW_UPDATE for DATA by itself - every byte handed to OnData is credited once,
-    /// through <see cref="ih2_consume"/> - and OnStreamError reports every close, NO_ERROR included.
-    /// Without it, OnStreamError reports every close but the normal end of a stream: NO_ERROR once
-    /// the response's END_STREAM has gone out.
+    /// <summary>Create a server session and queue SETTINGS, advertising <paramref name="maxConcurrentStreams"/>
+    /// and <paramref name="initialWindowSize"/>, then the WINDOW_UPDATE that opens the connection's window to
+    /// 2^31-1. The peer's connection preface is validated out of <see cref="ih2_read"/>. With
+    /// <paramref name="manualFlow"/> non-zero nghttp2 sends no WINDOW_UPDATE for DATA by itself - every byte
+    /// handed to OnData is credited once, through <see cref="ih2_consume"/> - and OnStreamError reports every
+    /// close, NO_ERROR included. Without it, OnStreamError reports every close but the normal end of a stream:
+    /// NO_ERROR once the response's END_STREAM has gone out.
     /// Returns the handle, or 0 on failure.</summary>
-    [DllImport(Lib)] internal static extern nint ih2_server_new(Callbacks callbacks, void* user, int manualFlow);
+    [DllImport(Lib)] internal static extern nint ih2_server_new(Callbacks callbacks, void* user, int manualFlow,
+        uint maxConcurrentStreams, uint initialWindowSize);
 
     /// <summary>Credit DATA the application is done with: the connection window, and the stream's
     /// while it is open. Manual flow control only. Returns 0, or a negative nghttp2 error.</summary>
@@ -89,4 +91,36 @@ internal static unsafe partial class Nghttp2
 
     /// <summary>Free the session and any retained request bodies.</summary>
     [DllImport(Lib)] internal static extern void ih2_free(nint connection);
+
+    /// <summary>The shim's exported-surface revision; checked against <see cref="Abi"/> as a connection is
+    /// built, so a stale native library fails loudly instead of taking arguments in the wrong places.</summary>
+    [DllImport(Lib)] private static extern uint ih2_abi();
+
+    /// <summary>What this managed binding was written against. Bump both together.</summary>
+    internal const uint Abi = 1;
+
+    /// <summary>
+    /// Refuse to run against a native library this binding was not built for. The shim and this
+    /// assembly ship together, so a mismatch means a stale libioxide_nghttp2.so picked up out of a
+    /// build output.
+    /// </summary>
+    internal static void RequireAbi()
+    {
+        uint native;
+        try
+        {
+            native = ih2_abi();
+        }
+        catch (EntryPointNotFoundException)
+        {
+            native = 0;   // predates the counter, so certainly too old
+        }
+
+        if (native != Abi)
+        {
+            throw new InvalidOperationException(
+                $"ioxide.nghttp2: the native library reports ABI {native}, this binding needs {Abi}. " +
+                "A stale libioxide_nghttp2.so is being loaded - rebuild it with scripts/build-nghttp2-native.sh.");
+        }
+    }
 }

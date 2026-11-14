@@ -104,6 +104,7 @@ public sealed partial class Nghttp2Connection : IDisposable
     /// </summary>
     public Nghttp2Connection(IDuplexPipe pipe, Nghttp2Options? options = null)
     {
+        Nghttp2.RequireAbi();
         _pipe = pipe;
         _options = options ?? new Nghttp2Options();
     }
@@ -134,7 +135,7 @@ public sealed partial class Nghttp2Connection : IDisposable
         };
 
         _handle = Nghttp2.ih2_server_new(callbacks, (void*)GCHandle.ToIntPtr(_self),
-            _streamBodies ? 1 : 0);
+            _streamBodies ? 1 : 0, (uint)_options.MaxConcurrentStreams, (uint)_options.InitialWindowSize);
         if (_handle == 0)
         {
             _failed = true;

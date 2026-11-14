@@ -46,7 +46,8 @@ public sealed partial class Nghttp2Connection
             Setup();
 
             // SETTINGS go out before anything is read: a peer that opens with the preface and a
-            // request immediately expects ours to be on the way.
+            // request immediately expects ours to be on the way. Waited for, unlike a pass's drain: the
+            // peer may send only 65,535 bytes until it has them, and the first pass finds no drain in flight.
             await FlushEgressAsync();
 
             while (!IsBroken)
@@ -54,6 +55,13 @@ public sealed partial class Nghttp2Connection
                 ReadResult read = await _pipe.Input.ReadAsync();
                 _reactor ??= Reactor.Current;        // a RunAsync begun off the reactor learns it here
                 await new ReactorSwitch(_reactor);   // a pipe may complete its read elsewhere: a default Pipe on the thread pool
+
+                // A drain the loop read on behind found the connection gone, and ended this read to say so.
+                if (IsBroken)
+                {
+                    _pipe.Input.AdvanceTo(read.Buffer.End);
+                    break;
+                }
 
                 _inPass = true;
                 Feed(read.Buffer);
@@ -66,15 +74,24 @@ public sealed partial class Nghttp2Connection
                 // this pass's drain rather than a write of its own.
                 FireBodyWakes();
                 _inPass = false;
-                await FlushEgressAsync();
+
+                // Not waited for: an upload behind a stalled download is read on, not left to overflow the receive queue.
+                _ = FlushEgressAsync(detached: true);
 
                 // A stream nghttp2 reset itself closes as the drain sends the RST_STREAM; its reader ends now.
                 FireBodyWakes();
 
                 if (read.IsCompleted || read.IsCanceled || Nghttp2.ih2_is_dead(_handle) != 0)
                 {
-                    return;
+                    break;
                 }
+            }
+
+            // What the loop left to a drain still in flight, a GOAWAY among it, goes out before the teardown, if anything still can.
+            if (_draining && !IsBroken)
+            {
+                _drained = new TaskCompletionSource();
+                await _drained.Task;
             }
         }
         catch (Exception)

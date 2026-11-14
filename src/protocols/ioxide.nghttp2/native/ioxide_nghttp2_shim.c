@@ -9,7 +9,8 @@
  *   conn = ih2_client_new(cbs, user)          one per TCP connection (client preface queued)
  *          ih2_submit_request(hdrs, body)     headers packed [u16 nlen][name][u16 vlen][value]*
  *
- *   conn = ih2_server_new(cbs, user, manual)  one per accepted connection (server SETTINGS queued)
+ *   conn = ih2_server_new(cbs, user, manual,  one per accepted connection (server SETTINGS queued)
+ *                         streams, window)
  *          ih2_submit_response(sid, hdrs, body)
  *          ih2_consume(sid, len)              manual flow control: credit DATA once it is read
  *
@@ -28,6 +29,11 @@
 #include <string.h>
 
 #include <nghttp2/nghttp2.h>
+
+/* Exported-surface revision. Bump on any change to an exported signature or a struct crossing the
+ * boundary; ih2_abi() hands it to the managed side, which refuses to start on a mismatch.
+ *   1 - ih2_server_new gained max_concurrent_streams and initial_window_size */
+#define IH2_ABI 1
 
 /* ---- callback table into C# ------------------------------------------------------------- */
 
@@ -250,7 +256,8 @@ static ssize_t read_body(nghttp2_session *session, int32_t stream_id, uint8_t *b
 
 /* Both directions register the same callbacks and differ only in which nghttp2 constructor runs
  * and which SETTINGS go out first, so the wiring lives here once. */
-static ih2_conn *ih2_new(ih2_callbacks cbs, void *user, int server, int manual_flow)
+static ih2_conn *ih2_new(ih2_callbacks cbs, void *user, int server, int manual_flow,
+                         uint32_t max_concurrent_streams, uint32_t initial_window_size)
 {
     ih2_conn *c = calloc(1, sizeof(*c));
     if (c == NULL) {
@@ -298,10 +305,12 @@ static ih2_conn *ih2_new(ih2_callbacks cbs, void *user, int server, int manual_f
      * ENABLE_PUSH is off in both directions: nothing routes a pushed stream. */
     nghttp2_settings_entry settings[] = {
         {NGHTTP2_SETTINGS_ENABLE_PUSH, 0},
-        {NGHTTP2_SETTINGS_MAX_CONCURRENT_STREAMS, 1000},
-        {NGHTTP2_SETTINGS_INITIAL_WINDOW_SIZE, 1 << 20},
+        {NGHTTP2_SETTINGS_MAX_CONCURRENT_STREAMS, max_concurrent_streams},
+        {NGHTTP2_SETTINGS_INITIAL_WINDOW_SIZE, initial_window_size},
     };
-    if (nghttp2_submit_settings(c->session, NGHTTP2_FLAG_NONE, settings, 3) != 0) {
+    /* SETTINGS size streams only, so this opens the connection's own window behind them (RFC 9113 6.9.2). */
+    if (nghttp2_submit_settings(c->session, NGHTTP2_FLAG_NONE, settings, 3) != 0 ||
+        nghttp2_session_set_local_window_size(c->session, NGHTTP2_FLAG_NONE, 0, NGHTTP2_MAX_WINDOW_SIZE) != 0) {
         nghttp2_session_del(c->session);
         free(c);
         return NULL;
@@ -312,15 +321,18 @@ static ih2_conn *ih2_new(ih2_callbacks cbs, void *user, int server, int manual_f
 
 /* One per ACCEPTED connection. The peer is expected to have sent (or to be about to send) the
  * client connection preface; nghttp2 validates it out of ih2_read. manual_flow non-zero: every
- * DATA byte handed to on_data is credited through ih2_consume, once. */
-ih2_conn *ih2_server_new(ih2_callbacks cbs, void *user, int manual_flow)
+ * DATA byte handed to on_data is credited through ih2_consume, once. The connection's receive
+ * window is opened to 2^31-1, so what the peer may send ahead of the server's credit is
+ * max_concurrent_streams times initial_window_size. */
+ih2_conn *ih2_server_new(ih2_callbacks cbs, void *user, int manual_flow,
+                         uint32_t max_concurrent_streams, uint32_t initial_window_size)
 {
-    return ih2_new(cbs, user, 1, manual_flow);
+    return ih2_new(cbs, user, 1, manual_flow, max_concurrent_streams, initial_window_size);
 }
 
 ih2_conn *ih2_client_new(ih2_callbacks cbs, void *user)
 {
-    return ih2_new(cbs, user, 0, 0);
+    return ih2_new(cbs, user, 0, 0, 1000, 1 << 20);
 }
 
 /* Headers arrive packed as [u16 namelen][name][u16 valuelen][value]... - the same format the
@@ -699,4 +711,9 @@ void ih2_free(ih2_conn *c)
 const char *ih2_strerror(int error_code)
 {
     return nghttp2_strerror(error_code);
+}
+
+uint32_t ih2_abi(void)
+{
+    return IH2_ABI;
 }

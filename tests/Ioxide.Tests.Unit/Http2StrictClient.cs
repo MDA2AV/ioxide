@@ -122,6 +122,9 @@ internal sealed class StrictClient : IDuplexPipe, IDisposable
         Assert.True(run.Wait(5_000), "connection wound down");
     }
 
+    /// <summary>End the input, as a peer's FIN does, without waiting for the connection.</summary>
+    public void EndInput() => _input.Writer.Complete();
+
     public void Dispose() => Connection.Dispose();
 
     private static byte[] FrameHeaderBytes(int length, byte type, byte flags, int streamId) =>

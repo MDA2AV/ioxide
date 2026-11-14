@@ -19,8 +19,9 @@ internal static class OffReactorH2FixTests
     // Past the initial windows on both stacks, so the body arrives only if credit flows mid-flight.
     private static readonly byte[] Upload = Pattern(1024 * 1024);
 
-    // The nghttp2 twins' 65,535: these test where calls run, and a 256 KiB window outruns the receive queue behind a pool hop.
+    // 65,535 on both stacks: these test where calls run, and a 256 KiB window outruns the receive queue behind a pool hop.
     private static readonly Http2Options RfcWindow = new() { InitialWindowSize = 65535 };
+    private static readonly Nghttp2Options NgRfcWindow = new() { InitialWindowSize = 65535 };
 
     public static void Register(Runner runner)
     {
@@ -52,7 +53,7 @@ internal static class OffReactorH2FixTests
             })));
 
         runner.Test("h2 over a pipe that completes on the thread pool (nghttp2): an upload is echoed whole, read, answered and written on the reactor", () =>
-            AssertPoolPipe((pipe, calls) => new Nghttp2Connection(pipe).RunAsync(request =>
+            AssertPoolPipe((pipe, calls) => new Nghttp2Connection(pipe, NgRfcWindow).RunAsync(request =>
             {
                 calls.Note();
                 return new Nghttp2Response { Status = 200, Body = request.Body.ToArray() };
@@ -73,7 +74,7 @@ internal static class OffReactorH2FixTests
                 Echo(calls, body.ReadAsync, () => writer.WriteHeaders(new Http2Response { Status = 200 }), writer, writer.FlushAsync))));
 
         runner.Test("h2 RunAsync begun on the thread pool (nghttp2): an upload read and echoed from the pool arrives whole, served on the reactor", () =>
-            AssertLateStart((pipe, calls) => new Nghttp2Connection(pipe).RunAsync((_, body, writer) =>
+            AssertLateStart((pipe, calls) => new Nghttp2Connection(pipe, NgRfcWindow).RunAsync((_, body, writer) =>
                 Echo(calls, body.ReadAsync, () => writer.WriteHeaders(new Nghttp2Response { Status = 200 }), writer, writer.FlushAsync))));
     }
 
