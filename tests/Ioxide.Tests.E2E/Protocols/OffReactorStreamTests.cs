@@ -142,13 +142,13 @@ internal static class OffReactorStreamTests
                 ThrowFirst(calls, status => writer.WriteHeaders(new Http3Response { Status = status })))));
 
         // A handler can also reset its stream without throwing (#572): that reset is connection work too.
-        runner.Test("h2 off-reactor (http2): a stream aborted from the thread pool is reset from the reactor, and the connection serves on", () =>
+        runner.Test("h2 off-reactor (http2): ResetStreamAsync from the thread pool resets the stream from the reactor, and the connection serves on", () =>
             AssertH2Throws((pipe, calls) => new Http2Connection(pipe).RunAsync((_, writer) =>
-                AbortFirst(calls, status => writer.WriteHeaders(new Http2Response { Status = status }), () => writer.AbortAsync()))));
+                ResetFirst(calls, status => writer.WriteHeaders(new Http2Response { Status = status }), () => writer.ResetStreamAsync()))));
 
-        runner.Test("h3 off-reactor (nghttp3): a stream aborted from the thread pool is reset from the reactor, and the connection serves on", () =>
+        runner.Test("h3 off-reactor (nghttp3): ResetStreamAsync from the thread pool resets the stream from the reactor, and the connection serves on", () =>
             AssertH3Throws((conn, calls) => new Nghttp3Connection(conn).RunAsync((_, writer) =>
-                AbortFirst(calls, status => writer.WriteHeaders(new Nghttp3Response { Status = status }), () => writer.AbortAsync()))));
+                ResetFirst(calls, status => writer.WriteHeaders(new Nghttp3Response { Status = status }), () => writer.ResetStreamAsync()))));
     }
 
     /// <summary>
@@ -240,15 +240,15 @@ internal static class OffReactorStreamTests
         writeHeaders(202);
     }
 
-    // The first request is aborted from the pool, after its headers; the next is answered normally.
-    private static async ValueTask AbortFirst(Calls calls, Action<int> writeHeaders, Func<ValueTask> abort)
+    // The first request's stream is reset from the pool, after its headers; the next is answered normally.
+    private static async ValueTask ResetFirst(Calls calls, Action<int> writeHeaders, Func<ValueTask> reset)
     {
         await LeaveReactor();
         calls.Note();
         if (Interlocked.Increment(ref calls.Requests) == 1)
         {
             writeHeaders(200);
-            await abort();
+            await reset();
             return;
         }
         writeHeaders(202);

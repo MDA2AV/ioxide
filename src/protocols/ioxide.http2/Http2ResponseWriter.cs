@@ -19,7 +19,7 @@ namespace ioxide.http2;
 /// response longer than the peer's window possible at all. The buffered path hands whatever its
 /// windows cannot take yet to one of these, so it waits the same way.
 /// </summary>
-/// <remarks>One caller at a time, on any thread, though <see cref="AbortAsync"/> may cut in: what reaches the connection runs on its reactor.</remarks>
+/// <remarks>One caller at a time, on any thread, though <see cref="ResetStreamAsync"/> may cut in: what reaches the connection runs on its reactor.</remarks>
 public sealed class Http2ResponseWriter : IBufferWriter<byte>
 {
     private const int DefaultChunk = 16 * 1024;
@@ -55,7 +55,7 @@ public sealed class Http2ResponseWriter : IBufferWriter<byte>
     /// <summary>The stream this response belongs to.</summary>
     public int StreamId => _streamId;
 
-    /// <summary>True once the response has ended: its body finished and END_STREAM sent, or its stream reset by <see cref="AbortAsync"/>.</summary>
+    /// <summary>True once the response has ended: its body finished and END_STREAM sent, or its stream reset by <see cref="ResetStreamAsync"/>.</summary>
     public bool IsCompleted => _completed;
 
     /// <summary>
@@ -217,7 +217,7 @@ public sealed class Http2ResponseWriter : IBufferWriter<byte>
     /// only until the handler returns, after which it can serve another stream, so a task the
     /// handler started has to be done with it by then.
     /// </remarks>
-    public async ValueTask AbortAsync(uint errorCode = Http2ErrorCode.InternalError)
+    public async ValueTask ResetStreamAsync(uint errorCode = Http2ErrorCode.InternalError)
     {
         if (_completed)
         {
@@ -262,7 +262,7 @@ public sealed class Http2ResponseWriter : IBufferWriter<byte>
     /// answer; after them only RST_STREAM is - END_STREAM would pass a truncated body off as whole.
     /// </summary>
     internal ValueTask FailAsync()
-        => _completed || !_headersSent ? CompleteAsync() : AbortAsync(Http2Error.InternalError);
+        => _completed || !_headersSent ? CompleteAsync() : ResetStreamAsync(Http2Error.InternalError);
 
     private static readonly FlushResult PeerGone = new(isCanceled: false, isCompleted: true);
 
@@ -289,7 +289,7 @@ public sealed class Http2ResponseWriter : IBufferWriter<byte>
 
     private async ValueTask<FlushResult> FlushCoreAsync(bool endStream)
     {
-        // Ahead of the headers check and the switch: an abort may have come before the headers, or after the reactor stopped.
+        // Ahead of the headers check and the switch: ResetStreamAsync may have come before the headers, or after the reactor stopped.
         if (_completed)
         {
             return PeerGone;
@@ -413,7 +413,7 @@ public sealed class Http2ResponseWriter : IBufferWriter<byte>
 
             await credited;
 
-            // An abort from another task drops what is staged, and SendStaged would report nothing left as sent.
+            // ResetStreamAsync from another task drops what is staged, and SendStaged would report nothing left as sent.
             if (!_connection.IsResponseLive(_streamId))
             {
                 _staged = 0;

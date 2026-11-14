@@ -46,7 +46,7 @@ public sealed record Nghttp3Options
     /// still has to be ended. It can also be told of the stack's own failure to complete a
     /// streamed response once its handler has returned, as stderr was. A handler that cannot
     /// finish its response need not throw to have the stream reset -
-    /// <see cref="Nghttp3ResponseWriter.AbortAsync"/> does that, and is no fault.
+    /// <see cref="Nghttp3ResponseWriter.ResetStreamAsync"/> does that, and is no fault.
     /// </remarks>
     public Action<Nghttp3Request, Exception>? OnHandlerFault { get; init; }
 }

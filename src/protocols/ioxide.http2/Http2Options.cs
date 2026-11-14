@@ -52,7 +52,7 @@ public sealed record Http2Options
     /// still has to be ended. It can also be told of the stack's own failure to finish a response
     /// once its handler has returned - a transport that refused the write, say - as stderr was. A
     /// handler that cannot finish its response need not throw to have the stream reset -
-    /// <see cref="Http2ResponseWriter.AbortAsync"/> does that, and is no fault.
+    /// <see cref="Http2ResponseWriter.ResetStreamAsync"/> does that, and is no fault.
     /// </remarks>
     public Action<Http2Request, Exception>? OnHandlerFault { get; init; }
 }

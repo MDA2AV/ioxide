@@ -19,7 +19,7 @@ namespace ioxide.nghttp3;
 /// blocks cannot. They are recycled as soon as nghttp3 reports them written, which is what keeps
 /// memory bounded by the flush size rather than by the response.
 /// </summary>
-/// <remarks>One caller at a time, on any thread, though <see cref="AbortAsync"/> may cut in: what reaches the connection runs on its reactor.</remarks>
+/// <remarks>One caller at a time, on any thread, though <see cref="ResetStreamAsync"/> may cut in: what reaches the connection runs on its reactor.</remarks>
 public sealed class Nghttp3ResponseWriter : IBufferWriter<byte>
 {
     // One in-flight chunk is enough to keep the pump fed: nghttp3 copies a chunk out on the write
@@ -60,7 +60,7 @@ public sealed class Nghttp3ResponseWriter : IBufferWriter<byte>
     private bool _gone;        // the peer stopped reading, or the stream closed under the handler
 
     // The stream was reset rather than ended. Not _completed: that tells a pull to send the FIN.
-    private bool _aborted;
+    private bool _streamReset;
 
     // Headers written off the reactor, submitted by the next flush or the completion, which run on it.
     private Nghttp3Response? _unsent;
@@ -89,7 +89,7 @@ public sealed class Nghttp3ResponseWriter : IBufferWriter<byte>
         _headersSent = false;
         _completed = false;
         _gone = false;
-        _aborted = false;
+        _streamReset = false;
         _unsent = null;
         HandlerRunning = false;
 
@@ -101,8 +101,8 @@ public sealed class Nghttp3ResponseWriter : IBufferWriter<byte>
     /// <summary>The stream this response belongs to.</summary>
     public long StreamId => _streamId;
 
-    /// <summary>True once the response has ended: its body fully produced and handed over, or its stream reset by <see cref="AbortAsync"/>.</summary>
-    public bool IsCompleted => _completed || _aborted;
+    /// <summary>True once the response has ended: its body fully produced and handed over, or its stream reset by <see cref="ResetStreamAsync"/>.</summary>
+    public bool IsCompleted => _completed || _streamReset;
 
     /// <summary>True once the response headers have been handed to nghttp3.</summary>
     internal bool HeadersSent => _headersSent;
@@ -255,7 +255,7 @@ public sealed class Nghttp3ResponseWriter : IBufferWriter<byte>
     /// </returns>
     public async ValueTask<FlushResult> FlushAsync()
     {
-        // Ahead of the headers check and the switch: an abort may have come before the headers, or after the reactor stopped.
+        // Ahead of the headers check and the switch: ResetStreamAsync may have come before the headers, or after the reactor stopped.
         if (IsCompleted)
         {
             return PeerGone;
@@ -306,7 +306,7 @@ public sealed class Nghttp3ResponseWriter : IBufferWriter<byte>
     /// </summary>
     public async ValueTask CompleteAsync()
     {
-        if (_completed || _aborted)
+        if (_completed || _streamReset)
         {
             return;
         }
@@ -370,13 +370,13 @@ public sealed class Nghttp3ResponseWriter : IBufferWriter<byte>
     /// done with it by then.
     /// </remarks>
     /// <exception cref="ArgumentOutOfRangeException"><paramref name="errorCode"/> is past 2^62 - 1.</exception>
-    public ValueTask AbortAsync(ulong errorCode = Nghttp3ErrorCode.InternalError)
+    public ValueTask ResetStreamAsync(ulong errorCode = Nghttp3ErrorCode.InternalError)
     {
         ArgumentOutOfRangeException.ThrowIfGreaterThan(errorCode, MaxErrorCode);
-        return _completed || _aborted ? default : AbortOnReactorAsync(errorCode);
+        return _completed || _streamReset ? default : ResetStreamOnReactorAsync(errorCode);
     }
 
-    private async ValueTask AbortOnReactorAsync(ulong errorCode)
+    private async ValueTask ResetStreamOnReactorAsync(ulong errorCode)
     {
         try
         {
@@ -385,24 +385,24 @@ public sealed class Nghttp3ResponseWriter : IBufferWriter<byte>
         catch (ObjectDisposedException)
         {
             // The reactor stopped, and the connection with it: nothing to reset, and a cleanup call must not throw over its caller.
-            _aborted = true;
+            _streamReset = true;
             return;
         }
-        Abort(errorCode);
+        ResetStream(errorCode);
     }
 
     /// <summary>
     /// The reset itself, on the reactor: the handler's own, or the stack's for a handler that threw
     /// once its headers were out.
     /// </summary>
-    internal void Abort(ulong errorCode)
+    internal void ResetStream(ulong errorCode)
     {
-        if (_completed || _aborted)
+        if (_completed || _streamReset)
         {
             return;
         }
 
-        _aborted = true;
+        _streamReset = true;
         _staged = 0;
         _unsent = null;
 
