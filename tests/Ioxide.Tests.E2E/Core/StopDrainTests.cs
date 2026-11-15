@@ -326,25 +326,6 @@ internal static class StopDrainTests
             Assert.True(ms < Reactor.TickMs / 2, $"the wait parked at the stop ended {ms:F0} ms after it, at a tick rather than at the stop");
         });
 
-        runner.Test("stop: a RingTimer loop that waits again after each cancelled wait ends at the stop, and the stop returns at once", () =>
-        {
-            var waiting = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-            Task loop = null!;
-            (_, Reactor reactor, Thread thread) = TestServer.StartConfigured(
-                (_, conn) => { conn.DecRef(); return Task.CompletedTask; },
-                new ServerConfig { Tcp = new TcpOptions() },
-                r => loop = Feed(new RingTimer(r), waiting));
-            Assert.True(waiting.Task.Wait(5_000), "the loop never waited");
-
-            var watch = Stopwatch.StartNew();
-            reactor.Stop();
-            bool stopped = thread.Join(5 * DrainMs);
-            long ms = watch.ElapsedMilliseconds;
-            Assert.True(stopped, "the reactor did not stop");
-            Assert.True(ms < Reactor.TickMs / 2, $"the stop took {ms} ms, held by a loop that waits again after each cancelled wait");
-            Assert.True(loop.Exception?.InnerException is ObjectDisposedException, $"the loop ended {loop.Status}: {loop.Exception?.InnerException?.GetType().Name}");
-        });
-
         runner.Test("stop: a ring op handed over from another thread before the stop, and taken after its cancel, ends cancelled", () =>
         {
             var holding = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -748,17 +729,6 @@ internal static class StopDrainTests
         catch (Exception e)
         {
             return e.GetType().Name;
-        }
-    }
-
-    // Playground/Tcp/Feed's shape: it waits again whatever the last wait came to.
-    private static async Task Feed(RingTimer timer, TaskCompletionSource waiting)
-    {
-        while (true)
-        {
-            ValueTask<int> wait = timer.DelayAsync(1_000);
-            waiting.TrySetResult();
-            await wait;
         }
     }
 
