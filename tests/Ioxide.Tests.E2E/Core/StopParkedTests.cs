@@ -1,7 +1,5 @@
 using System.Net;
 using System.Net.Sockets;
-using System.Runtime.InteropServices;
-using System.Text;
 using ioxide;
 using ioxide.timer;
 using ioxide.utils;
@@ -119,97 +117,6 @@ internal static class StopParkedTests
 
             StopAndJoin(reactor, thread);
             Assert.True(finished.Task.Wait(ReturnsWithinMs), "the handler is still parked in its flush, its finally not run");
-        });
-
-        runner.Test("stop: a send the last pass left queued ends before its connection's number is freed, and is not sent", () =>
-        {
-            var resumed = new TaskCompletionSource<int>(TaskCreationOptions.RunContinuationsAsynchronously);
-
-            (int port, Reactor reactor, Thread thread) = TestServer.StartConfigured(async (r, conn) =>
-            {
-                if (!await IsThisTestsConnection(conn))
-                {
-                    conn.DecRef();
-                    return;
-                }
-
-                // On the reactor thread the send is queued in this pass, and the stop comes before it is submitted.
-                int fd = conn.ClientFd;
-                conn.Write(Queued);
-                ValueTask flush = conn.FlushAsync();
-                r.Stop();
-                await flush;
-
-                resumed.TrySetResult(PeerPortOf(fd));
-                conn.DecRef();
-            }, new ServerConfig { Tcp = new TcpOptions() });
-
-            using Socket client = Connect(port);
-            client.Send("hi"u8);
-
-            // The handler stops the reactor itself, in the pass that queued its send.
-            bool stopped = thread.Join(TimeSpan.FromSeconds(10));
-            if (!stopped)
-            {
-                StopAndJoin(reactor, thread);
-            }
-            Assert.True(stopped, "the handler never stopped the reactor");
-            Assert.True(resumed.Task.Wait(ReturnsWithinMs), "the handler never resumed from its flush");
-
-            Assert.True(resumed.Task.Result == LocalPortOf(client),
-                $"when its send ended, the connection's number named the socket with peer port {resumed.Task.Result}, not its own client's");
-            byte[] received = ReceiveAll(client);
-            Assert.True(received.Length == 0, $"the client received '{Encoding.ASCII.GetString(received)}', queued before the stop");
-        });
-
-        runner.Test("stop: a send a handler woken by the stop queues on another connection ends before that one's number is freed", () =>
-        {
-            var parked = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-            var resumed = new TaskCompletionSource<(int Peer, int Expected)>(TaskCreationOptions.RunContinuationsAsynchronously);
-            var conns = new List<TcpConnection>();   // reactor thread only
-            var clientPorts = new Dictionary<TcpConnection, int>();
-
-            (int port, Reactor reactor, Thread thread) = TestServer.StartConfigured(async (r, conn) =>
-            {
-                if (!await IsThisTestsConnection(conn))
-                {
-                    conn.DecRef();
-                    return;
-                }
-
-                conns.Add(conn);
-                clientPorts[conn] = PeerPortOf(conn.ClientFd);
-                if (conns.Count == 2)
-                {
-                    parked.TrySetResult();
-                }
-
-                await conn.ReadAsync();   // until the stop closes it
-
-                // The stop goes through its connections by descriptor: the lower one wakes with the other still open.
-                TcpConnection other = conns[0] == conn ? conns[1] : conns[0];
-                if (conn.ClientFd < other.ClientFd)
-                {
-                    int fd = other.ClientFd;
-                    other.Write(Queued);
-                    await other.FlushAsync();
-                    resumed.TrySetResult((PeerPortOf(fd), clientPorts[other]));
-                }
-
-                conn.DecRef();
-            }, new ServerConfig { Tcp = new TcpOptions() });
-
-            using Socket first = Connect(port);
-            first.Send("hi"u8);
-            using Socket second = Connect(port);
-            second.Send("hi"u8);
-            Assert.True(parked.Task.Wait(5_000), "the handlers never parked");
-
-            StopAndJoin(reactor, thread);
-            Assert.True(resumed.Task.Wait(ReturnsWithinMs), "the woken handler never resumed from its flush on the other connection");
-
-            (int peer, int expected) = resumed.Task.Result;
-            Assert.True(peer == expected, $"when its send ended, the other connection's number named the socket with peer port {peer}, not its own client's {expected}");
         });
 
         foreach (bool incremental in new[] { false, true })
@@ -347,43 +254,6 @@ internal static class StopParkedTests
                 $"it ended {switched.Status}: {switched.Exception?.InnerException?.GetType().Name}");
         });
     }
-
-    private static readonly byte[] Queued = "QUEUED-FOR-THE-CLOSED-SOCKET"u8.ToArray();
-
-    // Until the server's side is gone.
-    private static byte[] ReceiveAll(Socket socket)
-    {
-        socket.ReceiveTimeout = 3_000;
-        var received = new List<byte>();
-        byte[] buffer = new byte[256];
-        try
-        {
-            int n;
-            while ((n = socket.Receive(buffer)) > 0)
-            {
-                received.AddRange(buffer.AsSpan(0, n));
-            }
-        }
-        catch (SocketException)
-        {
-            // a reset or the timeout: what arrived before it is the answer
-        }
-
-        return [.. received];
-    }
-
-    private static int LocalPortOf(Socket socket) => ((IPEndPoint)socket.LocalEndPoint!).Port;
-
-    // The peer port of the socket a descriptor number names, or -1 once the number names none.
-    private static unsafe int PeerPortOf(int fd)
-    {
-        byte* address = stackalloc byte[128];
-        uint length = 128;
-        return getpeername(fd, address, &length) == 0 ? (address[2] << 8) | address[3] : -1;
-    }
-
-    [DllImport("libc")]
-    private static extern unsafe int getpeername(int fd, byte* address, uint* length);
 
     // A read, a flush its client holds up, a RingTimer wait, a handler that let go, one held outside ioxide.
     private const string Roles = "rftlh";

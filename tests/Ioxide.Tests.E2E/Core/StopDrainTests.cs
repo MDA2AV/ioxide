@@ -105,11 +105,13 @@ internal static class StopDrainTests
                     TcpConnection conn = holding.Task.Result;
                     client.Send(Payload);
                     Assert.True(SpinWait.SpinUntil(() => !RecvOf(conn).IsEmpty(), 5_000), "the client's bytes were never queued");
+                    string socket = SocketOf(conn.ClientFd);
 
                     var watch = Stopwatch.StartNew();
                     reactor.Stop();
                     Assert.True(thread.Join(5 * DrainMs), "the stop never ended, with a handler that never lets go");
                     Assert.True(watch.ElapsedMilliseconds >= DrainMs - 100, $"the stop ended after {watch.ElapsedMilliseconds} ms, before its deadline");
+                    Assert.True(SocketOf(conn.ClientFd) == socket, $"after the stop fd {conn.ClientFd} names {SocketOf(conn.ClientFd)}, not the {socket} its handler still holds");
                     Assert.True(HasWriteBuffer(conn), "the stop freed the write slab of a connection its handler still holds");
                     Assert.True(HasReceiveMemory(reactor, conn, incremental), "the stop freed the receive memory a connection its handler still holds points into");
 
@@ -721,6 +723,9 @@ internal static class StopDrainTests
     private const int FGetFd = 1;
 
     private static bool IsOpen(int fd) => fcntl(fd, FGetFd) != -1;
+
+    // What a descriptor number names, as socket:[inode], or "nothing" once it is closed.
+    private static string SocketOf(int fd) => new FileInfo($"/proc/self/fd/{fd}").LinkTarget ?? "nothing";
 
     [DllImport("libc", SetLastError = true)]
     private static extern int fcntl(int fd, int command);
