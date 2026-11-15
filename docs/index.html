@@ -5657,7 +5657,7 @@ foreach (Thread thread in threads)
 {
     thread.Join();
 }</code></pre>
-    <p class="ex-foot">Both at once, which is the shape a proxy needs: <code>/echo</code> reads a chunk and writes a chunk, so neither the upload nor the download is ever held whole. The two directions are separate parameters - a body reader for the read side, a writer for the write side - because they solve different problems and most servers want exactly one of them. Mirrors <label for="tab-h3csstream" class="ex-jump">h3 &middot; request + response streamed</label>; the difference is HTTP/2's shared connection window, which a handler that stops reading holds down for every other stream on the connection.</p>
+    <p class="ex-foot">Both at once, which is the shape a proxy needs: <code>/echo</code> reads a chunk and writes a chunk, so neither the upload nor the download is ever held whole. The two directions are separate parameters - a body reader for the read side, a writer for the write side - because they solve different problems and most servers want exactly one of them. Mirrors <label for="tab-h3csstream" class="ex-jump">h3 &middot; request + response streamed</label>. The server keeps its own connection window open, so a handler that stops reading stalls only its own stream's upload.</p>
   </div>
   <div class="pane pane-h2ng">
     <div class="pane-head">
