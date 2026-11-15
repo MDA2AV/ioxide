@@ -358,10 +358,10 @@ internal static class TcpTimeoutTests
             Assert.Equal((long)body.Length, total);
         });
 
-        runner.Test("tcp/exit: a handler that lets go after its reactor stopped leaves a reused fd alone",
+        runner.Test("tcp/exit: a handler that lets go after its reactor stopped finds its descriptor still its own, so its release reaches no other socket",
             () => ReleaseAfterStop(static conn => conn.DecRef()));
 
-        runner.Test("tcp/half-close: a ShutdownWrite after its reactor stopped leaves a reused fd alone",
+        runner.Test("tcp/half-close: a ShutdownWrite after its reactor stopped finds its descriptor still its own, so it reaches no other socket",
             () => ReleaseAfterStop(static conn =>
             {
                 conn.ShutdownWrite();
@@ -722,8 +722,8 @@ internal static class TcpTimeoutTests
 
     private static bool IsOpen(int fd) => fcntl(fd, FGetFd) != -1;
 
-    // Teardown closes every fd without releasing the reactor's ref, so a later release still sees a
-    // live connection. Its FIN must not reach whichever socket took the number since.
+    // The stop shuts a connection its handler still holds down but leaves its number taken, so a release after it, a
+    // FIN included, can reach no socket opened since.
     private static void ReleaseAfterStop(Action<TcpConnection> release)
     {
         var captured = new TaskCompletionSource<TcpConnection>(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -749,7 +749,7 @@ internal static class TcpTimeoutTests
             Tcp = new TcpOptions { WriteSlabSize = 16 * 1024, PoolMax = 64, RecvQueueEntries = 64 },
         });
 
-        var listener = new TcpListener(IPAddress.Loopback, 0);   // opened first, so not the number under test
+        var listener = new TcpListener(IPAddress.Loopback, 0);
         listener.Start();
 
         using var client = new TcpClient();
@@ -758,26 +758,23 @@ internal static class TcpTimeoutTests
         Assert.True(captured.Task.Wait(5_000), "the handler never saw the test's connection");
         int fd = captured.Task.Result.ClientFd;
 
-        reactor.Stop();
-        Assert.True(thread.Join(5_000), "the reactor did not stop");
-
-        // Linux hands out the lowest free number, so fd is reused by one of the next sockets.
         var keep = new List<Socket>();
-        Socket? victim = null, peer = null;
-        for (int i = 0; i < 64 && victim is null; i++)
-        {
-            var c = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp);
-            c.Connect((IPEndPoint)listener.LocalEndpoint);
-            Socket a = listener.AcceptSocket();
-            if ((int)c.Handle == fd) { victim = c; peer = a; }
-            else if ((int)a.Handle == fd) { victim = a; peer = c; }
-            else { keep.Add(c); keep.Add(a); }
-        }
-
         try
         {
-            Assert.True(victim is not null, $"fd {fd} was not handed out again within 64 sockets");
-            peer!.ReceiveTimeout = 2_000;
+            reactor.Stop();
+            Assert.True(thread.Join(5_000), "the reactor did not stop");
+            Assert.True(IsOpen(fd), $"the stop closed fd {fd}, which a handler still holding its connection can reach");
+
+            // Linux hands out the lowest free number, so a number the stop had freed goes to one of the next sockets.
+            for (int i = 0; i < 64; i++)
+            {
+                var c = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp);
+                c.Connect((IPEndPoint)listener.LocalEndpoint);
+                Socket a = listener.AcceptSocket();
+                keep.Add(c);
+                keep.Add(a);
+                Assert.True((int)c.Handle != fd && (int)a.Handle != fd, $"fd {fd} was handed out again while its handler still held it");
+            }
 
             gate.TrySetResult();
             Assert.True(released.Task.Wait(5_000), "the handler never released");
@@ -785,20 +782,20 @@ internal static class TcpTimeoutTests
             string outcome;
             try
             {
-                victim!.Send("b"u8.ToArray());
-                outcome = peer.Receive(new byte[1]) == 1 ? "ok" : "eof on the unrelated socket";
+                keep[0].Send("b"u8.ToArray());
+                keep[1].ReceiveTimeout = 2_000;
+                outcome = keep[1].Receive(new byte[1]) == 1 ? "ok" : "eof on an unrelated socket";
             }
             catch (SocketException e)
             {
-                outcome = $"the unrelated socket failed: {e.SocketErrorCode}";
+                outcome = $"an unrelated socket failed: {e.SocketErrorCode}";
             }
             Assert.Equal("ok", outcome);
         }
         finally
         {
+            gate.TrySetResult();
             foreach (Socket k in keep) k.Dispose();
-            victim?.Dispose();
-            peer?.Dispose();
             listener.Stop();
         }
     }

@@ -9,8 +9,7 @@ using ioxide.utils;
 namespace Ioxide.Tests;
 
 /// <summary>
-/// What a stop does to what is waiting on the reactor. Teardown closes a live connection's socket and leaves the
-/// object, without marking it closed, and nothing drains the handoff queues afterwards.
+/// What a stop does to what is waiting on the reactor, and to what is called on it after.
 /// </summary>
 internal static class StopParkedTests
 {
@@ -122,10 +121,9 @@ internal static class StopParkedTests
             Assert.True(finished.Task.Wait(ReturnsWithinMs), "the handler is still parked in its flush, its finally not run");
         });
 
-        runner.Test("stop: a send the last pass left queued goes to its own client, not to the socket that takes its number", () =>
+        runner.Test("stop: a send the last pass left queued ends before its connection's number is freed, and is not sent", () =>
         {
-            using var taker = new NumberTaker();
-            var resumed = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var resumed = new TaskCompletionSource<int>(TaskCreationOptions.RunContinuationsAsynchronously);
 
             (int port, Reactor reactor, Thread thread) = TestServer.StartConfigured(async (r, conn) =>
             {
@@ -135,19 +133,16 @@ internal static class StopParkedTests
                     return;
                 }
 
-                // On the reactor thread the send is queued in this pass, and the stop ends the loop before it is submitted.
+                // On the reactor thread the send is queued in this pass, and the stop comes before it is submitted.
                 int fd = conn.ClientFd;
                 conn.Write(Queued);
                 ValueTask flush = conn.FlushAsync();
                 r.Stop();
                 await flush;
 
-                // Resumed by the stop with the socket closed: another socket takes the number, and the ring is entered.
-                taker.Take(fd);
-                EnterTheRing(r);
-                resumed.TrySetResult();
+                resumed.TrySetResult(PeerPortOf(fd));
                 conn.DecRef();
-            }, new ServerConfig { Tcp = new TcpOptions(), OpSlots = 4 });
+            }, new ServerConfig { Tcp = new TcpOptions() });
 
             using Socket client = Connect(port);
             client.Send("hi"u8);
@@ -161,17 +156,18 @@ internal static class StopParkedTests
             Assert.True(stopped, "the handler never stopped the reactor");
             Assert.True(resumed.Task.Wait(ReturnsWithinMs), "the handler never resumed from its flush");
 
-            taker.AssertNothingReceived();
+            Assert.True(resumed.Task.Result == LocalPortOf(client),
+                $"when its send ended, the connection's number named the socket with peer port {resumed.Task.Result}, not its own client's");
             byte[] received = ReceiveAll(client);
-            Assert.True(received.AsSpan().SequenceEqual(Queued), $"the client received '{Encoding.ASCII.GetString(received)}'");
+            Assert.True(received.Length == 0, $"the client received '{Encoding.ASCII.GetString(received)}', queued before the stop");
         });
 
-        runner.Test("stop: a send a handler woken by the stop queues on another connection goes to that client, not to the socket that takes its number", () =>
+        runner.Test("stop: a send a handler woken by the stop queues on another connection ends before that one's number is freed", () =>
         {
-            using var taker = new NumberTaker();
             var parked = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-            var resumed = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var resumed = new TaskCompletionSource<(int Peer, int Expected)>(TaskCreationOptions.RunContinuationsAsynchronously);
             var conns = new List<TcpConnection>();   // reactor thread only
+            var clientPorts = new Dictionary<TcpConnection, int>();
 
             (int port, Reactor reactor, Thread thread) = TestServer.StartConfigured(async (r, conn) =>
             {
@@ -182,6 +178,7 @@ internal static class StopParkedTests
                 }
 
                 conns.Add(conn);
+                clientPorts[conn] = PeerPortOf(conn.ClientFd);
                 if (conns.Count == 2)
                 {
                     parked.TrySetResult();
@@ -196,14 +193,11 @@ internal static class StopParkedTests
                     int fd = other.ClientFd;
                     other.Write(Queued);
                     await other.FlushAsync();
-
-                    taker.Take(fd);
-                    EnterTheRing(r);
-                    resumed.TrySetResult();
+                    resumed.TrySetResult((PeerPortOf(fd), clientPorts[other]));
                 }
 
                 conn.DecRef();
-            }, new ServerConfig { Tcp = new TcpOptions(), OpSlots = 4 });
+            }, new ServerConfig { Tcp = new TcpOptions() });
 
             using Socket first = Connect(port);
             first.Send("hi"u8);
@@ -214,9 +208,8 @@ internal static class StopParkedTests
             StopAndJoin(reactor, thread);
             Assert.True(resumed.Task.Wait(ReturnsWithinMs), "the woken handler never resumed from its flush on the other connection");
 
-            taker.AssertNothingReceived();
-            byte[] received = [.. ReceiveAll(first), .. ReceiveAll(second)];
-            Assert.True(received.AsSpan().SequenceEqual(Queued), $"the clients received '{Encoding.ASCII.GetString(received)}'");
+            (int peer, int expected) = resumed.Task.Result;
+            Assert.True(peer == expected, $"when its send ended, the other connection's number named the socket with peer port {peer}, not its own client's {expected}");
         });
 
         foreach (bool incremental in new[] { false, true })
@@ -357,16 +350,7 @@ internal static class StopParkedTests
 
     private static readonly byte[] Queued = "QUEUED-FOR-THE-CLOSED-SOCKET"u8.ToArray();
 
-    // With OpSlots = 4 the fifth wait grows the op table, which first submits whatever is queued.
-    private static void EnterTheRing(Reactor reactor)
-    {
-        for (int i = 0; i < 8; i++)
-        {
-            _ = new RingTimer(reactor).DelayAsync(600_000);
-        }
-    }
-
-    // Until the server's side is gone, which the ring's teardown ends.
+    // Until the server's side is gone.
     private static byte[] ReceiveAll(Socket socket)
     {
         socket.ReceiveTimeout = 3_000;
@@ -388,58 +372,18 @@ internal static class StopParkedTests
         return [.. received];
     }
 
-    // A socket put on a descriptor number the stop freed, as the next accept or open anywhere in the process would
-    // be: what the kernel then sends on that number reaches this socket's peer.
-    private sealed class NumberTaker : IDisposable
+    private static int LocalPortOf(Socket socket) => ((IPEndPoint)socket.LocalEndPoint!).Port;
+
+    // The peer port of the socket a descriptor number names, or -1 once the number names none.
+    private static unsafe int PeerPortOf(int fd)
     {
-        private readonly Socket _listener = new(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp);
-        private readonly Socket _peer = new(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp);
-        private readonly Socket _accepted;
-        private int _number = -1;
-        private int _dup2Result;
-
-        public NumberTaker()
-        {
-            _listener.Bind(new IPEndPoint(IPAddress.Loopback, 0));
-            _listener.Listen(1);
-            _peer.Connect(_listener.LocalEndPoint!);
-            _accepted = _listener.Accept();
-        }
-
-        // From the handler, on the reactor thread, so it throws nothing.
-        public void Take(int number)
-        {
-            _number = number;
-            _dup2Result = dup2((int)_accepted.SafeHandle.DangerousGetHandle(), number);
-        }
-
-        public void AssertNothingReceived()
-        {
-            Assert.True(_dup2Result == _number, $"dup2 onto {_number} returned {_dup2Result}");
-
-            bool readable = _peer.Poll(200_000, SelectMode.SelectRead);
-            int bytes = readable ? _peer.Available : 0;
-            Assert.True(bytes == 0, $"the socket that took number {_number} received {bytes} bytes queued for the one the stop closed");
-        }
-
-        public void Dispose()
-        {
-            if (_number >= 0 && _dup2Result == _number)
-            {
-                close(_number);
-            }
-
-            _accepted.Dispose();
-            _peer.Dispose();
-            _listener.Dispose();
-        }
-
-        [DllImport("libc", SetLastError = true)]
-        private static extern int dup2(int oldFd, int newFd);
-
-        [DllImport("libc")]
-        private static extern int close(int fd);
+        byte* address = stackalloc byte[128];
+        uint length = 128;
+        return getpeername(fd, address, &length) == 0 ? (address[2] << 8) | address[3] : -1;
     }
+
+    [DllImport("libc")]
+    private static extern unsafe int getpeername(int fd, byte* address, uint* length);
 
     // A read, a flush its client holds up, a RingTimer wait, a handler that let go, one held outside ioxide.
     private const string Roles = "rftlh";

@@ -191,17 +191,14 @@ public sealed unsafe partial class Reactor : IRingHost
         }
     }
 
-    // At stop, each once the kernel is done with it. A waiter that submits again reuses its slot, past this loop.
-    private void CompleteParkedOps()
+    // The stop's: each op still in the table ends through its own completion, as a cancelled one does while running.
+    private void CancelClientOps()
     {
-        int slots = _opTargets.Length;
-        for (int slot = 0; slot < slots; slot++)
+        for (int slot = 0; slot < _opTargets.Length; slot++)
         {
-            if (_opTargets[slot] is { } target && CancelAndWait(Tag(KindClient, 0, slot)))
+            if (_opTargets[slot] != null)
             {
-                _opTargets[slot] = null;
-                _opFree[_opFreeTop++] = slot;
-                target.Complete(-ECANCELED);
+                SubmitCancel(Tag(KindClient, 0, slot));
             }
         }
     }
