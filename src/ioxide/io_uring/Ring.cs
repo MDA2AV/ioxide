@@ -227,9 +227,6 @@ public sealed unsafe class Ring : IDisposable
         return &_sqes[slot];
     }
 
-    /// <summary>SQEs handed out and not yet taken by the kernel.</summary>
-    public uint SqPending => _sqeTail - Volatile.Read(ref *_sqHead);
-
     public int SubmitAndWait(uint waitFor) => SubmitAndWait(waitFor, -1);
 
     /// <summary>

@@ -1,3 +1,4 @@
+using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using ioxide.tls;
 using static ioxide.Native;
@@ -121,23 +122,63 @@ public sealed unsafe partial class Reactor
         { } address => address.ToString(),
     };
 
-    // Still on the reactor thread, in dependency order: sockets close while the ring is alive
-    // (in-flight ops surface as errors/cancels and are dropped), the ring fd goes next, and native
-    // memory the kernel could reference is freed only after that.
+    // How long a stop waits for its handlers to let go of their connections and for its ring ops to end.
+    private const int StopDrainMs = 1_000;
+
+    // The stop's first pass closes everything; the passes after it run as usual until nothing is held or the deadline.
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private bool Stopped(ref long deadlineMs)
+    {
+        if (deadlineMs == 0)
+        {
+            deadlineMs = Native.MonotonicMs + StopDrainMs;
+            // Left queued past the closes, an entry would reach whatever takes its socket's number; a failed prep ends a submit early.
+            while (_ring.SubmitAndWait(0) > 0)
+            {
+            }
+            CloseAll();
+            DrainPostQ();   // what the stoppers and the closes woke: posted here, past the pass's own drain
+            CancelClientOps();
+        }
+
+        return (_tcpLive == 0 && _opFreeTop == _opTargets.Length) || Native.MonotonicMs >= deadlineMs;
+    }
+
+    // The clients stop, then every socket closes, ending every read, write and wait on one; Teardown runs it for a
+    // loop that faulted.
+    private void CloseAll()
+    {
+        RunStoppers();
+        CloseTcpListeners();
+        CloseTcpConnections();
+        TeardownQuic();
+        CloseUdpFds();
+    }
+
+    // Once, though CloseAll runs again in Teardown; one that throws must not leave the others unrun.
+    private void RunStoppers()
+    {
+        List<Action>? stoppers = _stoppers;
+        _stoppers = null;
+        foreach (Action stopper in stoppers ?? [])
+        {
+            try
+            {
+                stopper();
+            }
+            catch (Exception e)
+            {
+                Console.Error.WriteLine($"[r{_id}] stopper faulted: {e.Message}");
+            }
+        }
+    }
+
+    // Everything the reactor owns is freed here, on its thread, but what a handler still holds and what it can reach.
     private void Teardown(bool startFailed)
     {
         // A faulted loop never set it: UdpSendTo sends directly from here, as the ring may never be submitted again.
         _stopRequested = true;
-
-        // Every connection closed to its handler first, then the queue sent while each socket it names is still its
-        // own: left queued, a later submit would send it to whatever took the number (#531).
-        MarkAcceptedTcpConnectionsClosed();
-        bool submitted = !startFailed && SubmitQueued();
-
-        CloseTcpListeners();
-        TeardownQuic();
-        CloseUdpFds();
-        CloseAcceptedTcpSockets();
+        CloseAll();
 
         // Taken away before it is closed, and its writers waited out: closing under one would
         // free the number and let that writer's 8 bytes land in whatever socket took it next.
@@ -152,15 +193,6 @@ public sealed unsafe partial class Reactor
             }
             close(wakeFd);
         }
-
-        // While the ring is still mapped; what a waiter submits again can't name a socket this stop closed. With the SQ
-        // not emptied nothing is cancelled: the kernel may still take what is left there.
-        ReleaseAcceptedTcpConnections(canCancel: submitted);
-        if (submitted)
-        {
-            CompleteParkedOps();
-        }
-        ReturnReleasedTcpConnections();
 
         if (_opTimespecs != null)
         {
@@ -186,23 +218,25 @@ public sealed unsafe partial class Reactor
             _ring.Dispose();
         }
 
-        // Pooled connections are past their last send (#250) and their incremental ring is unregistered,
-        // so their slabs can go, the ones the stop returned included. One a handler still holds stays (#223).
+        // Pooled connections are past their last send (#250) and their incremental ring is unregistered.
         while (_pool.TryPop(out TcpConnection? pooled))
         {
             pooled.Dispose();
         }
 
-        // Shared provided-buffer ring (incremental mode allocates per connection instead).
-        if (_bufRing != null)
+        // What a connection still held has queued, and what its reader took, points into the shared slab.
+        if (_tcpLive == 0)
         {
-            NativeMemory.AlignedFree(_bufRing);
-            _bufRing = null;
-        }
-        if (_bufSlab != null)
-        {
-            NativeMemory.AlignedFree(_bufSlab);
-            _bufSlab = null;
+            if (_bufRing != null)
+            {
+                NativeMemory.AlignedFree(_bufRing);
+                _bufRing = null;
+            }
+            if (_bufSlab != null)
+            {
+                NativeMemory.AlignedFree(_bufSlab);
+                _bufSlab = null;
+            }
         }
         FreeUdpMemory();
 
@@ -216,32 +250,6 @@ public sealed unsafe partial class Reactor
         {
             service.Free();
         }
-    }
-
-    // True once the kernel has taken everything queued, a few tries allowed: a cancel can't find what never reached it.
-    private bool SubmitQueued()
-    {
-        for (int attempt = 0; attempt < 16 && _ring.SqPending > 0; attempt++)
-        {
-            _ring.SubmitAndWait(0);
-        }
-
-        return _ring.SqPending == 0;
-    }
-
-    // True once the kernel is done with the request this tag names: cancelled, finished, or never submitted. A
-    // request running in an io-wq worker is waited for, 1 s at most.
-    private bool CancelAndWait(ulong userData)
-    {
-        var reg = new io_uring_sync_cancel_reg
-        {
-            addr    = userData,
-            fd      = -1,
-            timeout = new __kernel_timespec { tv_sec = 1 },
-        };
-        int result = io_uring_register(_ring.Fd, IORING_REGISTER_SYNC_CANCEL, &reg, 1);
-
-        return result == 0 || result == -ENOENT;
     }
 
     // Both are no-ops unless that ring was registered: incremental mode leaves _bufRing null (one
@@ -261,15 +269,22 @@ public sealed unsafe partial class Reactor
         }
     }
 
-    // Set cross-thread by Stop(); the loop checks it at the top of each iteration and exits, after which
-    // Run() tears the ring down on this (the reactor) thread - mandatory for a single-issuer ring.
+    // Set cross-thread by Stop(); the loop checks it once a pass, and the teardown that follows the loop runs on this
+    // (the reactor) thread - mandatory for a single-issuer ring.
     private volatile bool _stopRequested;
 
     /// <summary>
-    /// Requests the reactor to stop. Safe to call from any thread. The loop finishes its current
-    /// iteration and exits, then <see cref="Run"/> closes the listeners and wake fd and disposes the
-    /// io_uring ring on the reactor thread (a single-issuer / DEFER_TASKRUN ring must be torn down on the
-    /// thread that owns it). Join the reactor thread after calling this to await teardown.
+    /// Requests the reactor to stop. Safe to call from any thread. From then on a ring op submitted on
+    /// the reactor throws <see cref="ObjectDisposedException"/>. On its next pass the reactor runs the
+    /// stoppers its clients registered (<see cref="AddStopper"/>), closes its listeners, aborts every
+    /// connection, so its peer gets a reset and nothing still queued is sent (a kTLS connection is shut
+    /// down instead, and what it queued may still go out), and cancels every ring op
+    /// once, so every handler's reads, writes and waits end. The loop then runs on, posts and switches
+    /// included, until every connection has been let go and every ring op has completed, or about a
+    /// second has passed, and <see cref="Run"/> frees all the reactor owns on its thread. A connection a
+    /// handler still holds by then stays allocated, its descriptor and the receive memory it can reach
+    /// included, and what it calls on the reactor after that fails or reports the connection closed.
+    /// Join the reactor thread after calling this to await the teardown.
     /// </summary>
     public void Stop()
     {
