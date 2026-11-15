@@ -425,14 +425,20 @@ public sealed unsafe partial class Reactor
         _acceptPaused.Clear();   // the sweep would arm them again on numbers the stop closed
     }
 
-    // As the sweep ends one it condemns: its completions, or the sweep for a recv parked on a buffer, then let it go.
+    // As the sweep ends one it condemns, then aborted: connect to AF_UNSPEC is tcp_disconnect, which resets the peer and
+    // drops the send queue, so every send on it completes now, zero-copy notifications included.
     private void CloseTcpConnections()
     {
+        sockaddr_in unspec = default;
         for (int fd = 0; fd < _connections.Length; fd++)
         {
-            if (_connections[fd] is { SweepClosed: false } conn)
+            if (_connections[fd] is { } conn)
             {
-                TcpSweepClose(conn);
+                if (!conn.SweepClosed)
+                {
+                    TcpSweepClose(conn);
+                }
+                connect(fd, &unspec, (uint)sizeof(sockaddr_in));
             }
         }
     }

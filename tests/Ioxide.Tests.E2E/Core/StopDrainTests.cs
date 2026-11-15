@@ -391,6 +391,53 @@ internal static class StopDrainTests
             }
         });
 
+        runner.Test("stop: a zero-copy response its client never reads ends at the stop: the flush returns, the handler lets go, the stop ends at once and the write slab is freed", () =>
+        {
+            var flushing = new TaskCompletionSource<TcpConnection>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var finished = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            byte[] response = new byte[8 << 20];   // more than both sockets' buffers hold
+
+            (int port, Reactor reactor, Thread thread) = TestServer.StartConfigured(async (_, conn) =>
+            {
+                if (!await IsThisTestsConnection(conn))
+                {
+                    conn.DecRef();
+                    return;
+                }
+
+                try
+                {
+                    conn.Write(response);
+                    ValueTask flush = conn.FlushAsync();
+                    flushing.TrySetResult(conn);
+                    await flush;
+                }
+                finally
+                {
+                    finished.TrySetResult();
+                    conn.DecRef();
+                }
+            }, new ServerConfig { Tcp = new TcpOptions { ZeroCopySend = true } });
+
+            using var client = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp);
+            client.ReceiveBufferSize = 4096;   // takes little, and never reads
+            client.Connect(IPAddress.Loopback, port);
+            client.Send("hi"u8);
+            Assert.True(flushing.Task.Wait(5_000), "the handler never flushed");
+            TcpConnection conn = flushing.Task.Result;
+            Thread.Sleep(200);   // the kernel has the send, parked on the client's closed window
+            Assert.True(!finished.Task.IsCompleted, "the flush ended before the stop, so nothing held it");
+
+            var watch = Stopwatch.StartNew();
+            reactor.Stop();
+            bool stopped = thread.Join(5 * DrainMs);
+            long ms = watch.ElapsedMilliseconds;
+            Assert.True(stopped, "the reactor did not stop");
+            Assert.True(finished.Task.IsCompleted, "the handler's flush never returned");
+            Assert.True(ms < Reactor.TickMs / 2, $"the stop took {ms} ms, held by a send its client never reads");
+            Assert.True(!HasWriteBuffer(conn), "the write slab of the connection outlived the stop");
+        });
+
         runner.Test("stop: the stoppers run on the reactor thread before its connections close, and one that throws leaves the rest to run", () =>
         {
             var parked = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
