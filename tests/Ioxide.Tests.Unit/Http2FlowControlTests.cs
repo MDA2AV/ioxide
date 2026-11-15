@@ -186,11 +186,12 @@ internal static class Http2FlowControlTests
             client.Close(run);
         });
 
+        // The window's step is the padded body's payload: its padding-only frame completes it on arrival, the handler parked on its next read.
         runner.Test("h2 flow: padding on a streamed body is credited", () =>
         {
             var read = new Tally();
 
-            using var client = new StrictClient();
+            using var client = new StrictClient(new Http2Options { InitialWindowSize = 4 * PaddedBodyPayload });
             Task run = client.Connection.RunAsync(async (_, body, writer) =>
             {
                 await ReadAll(body, read);
@@ -198,8 +199,12 @@ internal static class Http2FlowControlTests
             });
 
             client.ReleaseFlush();
-            client.Feed([.. Open(), .. Post(1), .. PaddedBody(1)]);
+            byte[] padded = PaddedBody(1);
+            int first = padded.Length - (9 + 256);                   // the frame with the body, then the one of nothing but padding
+            client.Feed([.. Open(), .. Post(1), .. padded[..first]]);
             List<Frame> frames = client.Drain();
+            client.Feed(padded[first..]);
+            frames.AddRange(client.Drain());
 
             Assert.Equal(1000L, read.Bytes);
             int credited = Credit(frames, 1);
@@ -213,7 +218,7 @@ internal static class Http2FlowControlTests
 
         runner.Test("h2 flow: padding on the buffered path is credited in full", () =>
         {
-            using var client = new StrictClient(new Http2Options());
+            using var client = new StrictClient(new Http2Options { InitialWindowSize = 4 * PaddedBodyPayload });
             Task run = client.Connection.RunAsync(_ => new Http2Response { Status = 200 });
 
             client.ReleaseFlush();
@@ -225,10 +230,10 @@ internal static class Http2FlowControlTests
             client.Close(run);
         });
 
-        // Its connection share was counted on arrival, and the stream is gone, so the reset is credited nothing.
+        // Its connection share was counted on arrival, and the stream is gone, so the reset is credited nothing. The window's step is one frame.
         runner.Test("h2 flow: a DATA frame past MaxRequestBytes resets its stream, and only the frames taken are credited", () =>
         {
-            using var client = new StrictClient(new Http2Options { MaxRequestBytes = 20_000 });
+            using var client = new StrictClient(new Http2Options { MaxRequestBytes = 20_000, InitialWindowSize = 4 * 16384 });
             Task run = client.Connection.RunAsync(_ => new Http2Response { Status = 200 });
 
             client.ReleaseFlush();
