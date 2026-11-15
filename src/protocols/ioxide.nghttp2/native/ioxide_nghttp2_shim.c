@@ -180,6 +180,18 @@ static int on_stream_close(nghttp2_session *session, int32_t stream_id, uint32_t
     return 0;
 }
 
+/* Asks a client to stop uploading once its answer is out (RFC 9113 8.1); nghttp2 would send a reset queued sooner ahead of the body. */
+static int on_frame_send(nghttp2_session *session, const nghttp2_frame *frame, void *user_data)
+{
+    (void)user_data;
+    if ((frame->hd.type == NGHTTP2_HEADERS || frame->hd.type == NGHTTP2_DATA) &&
+        (frame->hd.flags & NGHTTP2_FLAG_END_STREAM) != 0 &&
+        nghttp2_session_get_stream_remote_close(session, frame->hd.stream_id) == 0) {
+        return nghttp2_submit_rst_stream(session, NGHTTP2_FLAG_NONE, frame->hd.stream_id, NGHTTP2_NO_ERROR);
+    }
+    return 0;
+}
+
 /* nghttp2 drops a response whose header block is past its limit (64 KiB) with no frame on the wire, which would leave
  * the stream open for good. Only that error: a stream already gone is not to be reset again (RFC 9113 5.4.2). */
 static int on_frame_not_send(nghttp2_session *session, const nghttp2_frame *frame, int lib_error_code, void *user_data)
@@ -273,6 +285,10 @@ static ih2_conn *ih2_new(ih2_callbacks cbs, void *user, int server, int manual_f
     nghttp2_session_callbacks_set_on_data_chunk_recv_callback(callbacks, on_data_chunk_recv);
     nghttp2_session_callbacks_set_on_stream_close_callback(callbacks, on_stream_close);
     nghttp2_session_callbacks_set_on_frame_not_send_callback(callbacks, on_frame_not_send);
+    if (server && manual_flow) {
+        /* Only a body-reader handler answers before its request ends, and only manual flow reports that reset's close. */
+        nghttp2_session_callbacks_set_on_frame_send_callback(callbacks, on_frame_send);
+    }
 
     int rv;
     if (manual_flow) {
