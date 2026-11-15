@@ -133,6 +133,7 @@ public sealed unsafe partial class Reactor
         {
             deadlineMs = Native.MonotonicMs + StopDrainMs;
             CloseAll();
+            DrainPostQ();   // what the stoppers and the closes woke: posted here, past the pass's own drain
             CancelClientOps();
             AddTicker(CancelClientOps);   // an op submitted while the stop drains ends within a tick
         }
@@ -140,13 +141,33 @@ public sealed unsafe partial class Reactor
         return (_tcpLive == 0 && _opFreeTop == _opTargets.Length) || Native.MonotonicMs >= deadlineMs;
     }
 
-    // Every socket closes, ending every read, write and wait on one; Teardown runs it for a loop that faulted.
+    // The clients stop, then every socket closes, ending every read, write and wait on one; Teardown runs it for a
+    // loop that faulted.
     private void CloseAll()
     {
+        RunStoppers();
         CloseTcpListeners();
         CloseTcpConnections();
         TeardownQuic();
         CloseUdpFds();
+    }
+
+    // Once, though CloseAll runs again in Teardown; one that throws must not leave the others unrun.
+    private void RunStoppers()
+    {
+        List<Action>? stoppers = _stoppers;
+        _stoppers = null;
+        foreach (Action stopper in stoppers ?? [])
+        {
+            try
+            {
+                stopper();
+            }
+            catch (Exception e)
+            {
+                Console.Error.WriteLine($"[r{_id}] stopper faulted: {e.Message}");
+            }
+        }
     }
 
     // Everything the reactor owns is freed here, on its thread, but what a handler still holds and what it can reach.

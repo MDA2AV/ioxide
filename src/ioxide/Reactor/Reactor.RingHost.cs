@@ -53,6 +53,17 @@ public sealed unsafe partial class Reactor : IRingHost
 
     internal void OwnTlsService(TlsService service) => (_tlsServices ??= []).Add(service);
 
+    // One per client started on this reactor, several of one type included: the stop runs them first, once.
+    private List<Action>? _stoppers;
+
+    /// <summary>
+    /// Register a callback the reactor runs once on its thread when it stops, before it closes its
+    /// listeners and connections. Call from <c>OnStart</c>. A client started on the reactor disposes
+    /// itself there: it closes its idle connections, fails the requests waiting on it and frees what
+    /// it holds, while the reactor can still run what that wakes.
+    /// </summary>
+    public void AddStopper(Action stopper) => (_stoppers ??= []).Add(stopper);
+
     /// <summary>
     /// Runs on the reactor thread before the loop starts - open ring-native clients here.
     /// </summary>

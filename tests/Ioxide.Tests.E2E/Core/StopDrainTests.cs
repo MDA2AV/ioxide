@@ -389,6 +389,47 @@ internal static class StopDrainTests
             }
         });
 
+        runner.Test("stop: the stoppers run on the reactor thread before its connections close, and one that throws leaves the rest to run", () =>
+        {
+            var parked = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            bool closed = false;
+            var ran = new List<string>();
+
+            (int port, Reactor reactor, Thread thread) = TestServer.StartConfigured(async (_, conn) =>
+            {
+                if (!await IsThisTestsConnection(conn))
+                {
+                    conn.DecRef();
+                    return;
+                }
+
+                try
+                {
+                    parked.TrySetResult();
+                    await conn.ReadAsync();
+                    closed = true;
+                }
+                finally
+                {
+                    conn.DecRef();
+                }
+            }, new ServerConfig { Tcp = new TcpOptions() }, r =>
+            {
+                r.AddStopper(() => ran.Add($"on the reactor {Reactor.Current == r}, its connection closed {closed}"));
+                r.AddStopper(() => throw new InvalidOperationException("a stopper that throws"));
+                r.AddStopper(() => ran.Add("the next one"));
+            });
+
+            using Socket client = Connect(port);
+            client.Send("hi"u8);
+            Assert.True(parked.Task.Wait(5_000), "the handler never parked");
+
+            reactor.Stop();
+            Assert.True(thread.Join(ReturnsWithinMs), "the reactor did not stop");
+            Assert.Equal("on the reactor True, its connection closed False; the next one", string.Join("; ", ran));
+            Assert.True(closed, "the stop never closed the connection to its handler");
+        });
+
         runner.Test("stop: from the stop on its listener refuses connections, while a handler still holds one", () =>
         {
             var holding = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
