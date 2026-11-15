@@ -2,6 +2,7 @@ using System.Buffers;
 using System.Net;
 using ioxide;
 using ioxide.http2;
+using ioxide.http3;
 using ioxide.nghttp3;
 using ioxide.ngtcp2;
 
@@ -16,7 +17,7 @@ internal static class EarlyAnswerTests
     // A control's upload, read whole by its handler.
     private const long ReadUpload = 8L << 20;
 
-    // Measured stops are 64 KiB on h2, the connection window, and 192 KiB on h3; these leave room for a slow box.
+    // Measured stops are up to 320 KiB on h2, the stream window and what the client had buffered, and 192 KiB on h3; these leave room for a slow box.
     private const long H2Stopped = 512L << 10;
     private const long H3Stopped = 1L << 20;
 
@@ -41,6 +42,9 @@ internal static class EarlyAnswerTests
 
         byte[] bufferedAnswer = Pattern(8 * 1024);
 
+        // Past the client's 64 KiB stream window, so the rest waits on the credit it gives as it reads.
+        byte[] parkedAnswer = Pattern(256 * 1024);
+
         runner.Test("h2 early answer: a streamed 413 to an upload arrives whole, and the client stops uploading", () =>
         {
             int port = StartH2(connection => connection.RunAsync((_, _, writer) => AnswerAsync(writer, h2Answer)));
@@ -54,6 +58,14 @@ internal static class EarlyAnswerTests
                 new ValueTask<Http2Response>(new Http2Response { Status = 413, Body = bufferedAnswer })));
             using HttpClient client = H2Client();
             AssertAnsweredAndStopped(client, $"http://127.0.0.1:{port}/", bufferedAnswer, H2Stopped);
+        });
+
+        runner.Test("h2 early answer: a buffered 413 that waits on the client's credit arrives whole to a client that reads while it uploads, and the client stops uploading", () =>
+        {
+            int port = StartH2(connection => connection.RunAsync((_, _) =>
+                new ValueTask<Http2Response>(new Http2Response { Status = 413, Body = parkedAnswer })));
+            using HttpClient client = H2Client();
+            AssertAnsweredAndStopped(client, $"http://127.0.0.1:{port}/", parkedAnswer, H2Stopped, duplex: true);
         });
 
         runner.Test("control: h2 an upload its handler reads to the end is sent whole and answered", () =>
@@ -103,6 +115,39 @@ internal static class EarlyAnswerTests
             using HttpClient client = H3Client();
             AssertReadWhole(client, $"https://127.0.0.1:{port}/");
         }, skip: !h3);
+
+        runner.Test("h3 early answer (ioxide.http3): a streamed 413 to an upload arrives whole, and the client stops uploading", () =>
+        {
+            int port = StartHttp3(connection => connection.RunAsync(async (_, _, writer) =>
+            {
+                writer.WriteHeaders(new Http3Response { Status = 413 });
+                writer.Write(h3Answer);
+                await writer.CompleteAsync();
+            }));
+            using HttpClient client = H3Client();
+            AssertAnsweredAndStopped(client, $"https://127.0.0.1:{port}/", h3Answer, H3Stopped);
+        }, skip: !h3);
+
+        runner.Test("h3 early answer (ioxide.http3): a buffered 413 to an upload arrives whole, and the client stops uploading", () =>
+        {
+            int port = StartHttp3(connection => connection.RunAsync((_, _) =>
+                new ValueTask<Http3Response>(new Http3Response { Status = 413, Body = bufferedAnswer })));
+            using HttpClient client = H3Client();
+            AssertAnsweredAndStopped(client, $"https://127.0.0.1:{port}/", bufferedAnswer, H3Stopped);
+        }, skip: !h3);
+
+        runner.Test("control: h3 (ioxide.http3) an upload its handler reads to the end is sent whole and answered", () =>
+        {
+            int port = StartHttp3(connection => connection.RunAsync(async (_, body, writer) =>
+            {
+                long read = await ReadAllAsync(body.ReadAsync);
+                writer.WriteHeaders(new Http3Response { Status = 200 });
+                writer.Write(System.Text.Encoding.ASCII.GetBytes($"read {read}"));
+                await writer.CompleteAsync();
+            }));
+            using HttpClient client = H3Client();
+            AssertReadWhole(client, $"https://127.0.0.1:{port}/");
+        }, skip: !h3);
     }
 
     // The shim's own client, so these run where msquic is missing.
@@ -123,18 +168,40 @@ internal static class EarlyAnswerTests
                         await writer.CompleteAsync();
                     })
                     : connection.RunAsync((_, _) => new ValueTask<Nghttp3Response>(new Nghttp3Response { Status = 413, Body = answer })));
+                AssertRawAnsweredAndStopped(port, answer);
+            });
 
-                using RawH3Client client = ConnectRaw(port);
-                client.OpenRequestStream();
-                Assert.True(client.TryWrite([.. RawH3Client.RequestHeaders("POST"), .. RawH3Client.DataFrameHeader(Upload)], fin: false),
-                    "the request's headers were refused");
-
-                long sent = UploadUntilStopped(client);
-                Assert.True(sent < H3Stopped, $"the client uploaded {sent} bytes to a handler that read none of them: nothing asked it to stop");
-                Assert.True(client.WaitForFin(timeoutMs: 5000), "the answer never ended");
-                AssertBody(answer, DataPayload(client.Received));
+            runner.Test($"h3 early answer (ioxide.http3, raw client): a {(stream ? "streamed" : "buffered")} 413 to an upload still arriving arrives whole, and the upload stops", () =>
+            {
+                int port = StartHttp3(connection => stream
+                    ? connection.RunAsync(async (_, _, writer) =>
+                    {
+                        writer.WriteHeaders(new Http3Response { Status = 413 });
+                        writer.Write(answer);
+                        await writer.CompleteAsync();
+                    })
+                    : connection.RunAsync((_, _) => new ValueTask<Http3Response>(new Http3Response { Status = 413, Body = answer })));
+                AssertRawAnsweredAndStopped(port, answer);
             });
         }
+
+        runner.Test("h3 early answer (ioxide.http3, raw client): a buffered 413 its handler finished off the reactor arrives whole, and the upload stops", () =>
+        {
+            // Released from the test's thread, so the stack submits the answer from a reactor post, outside the pass that read the request.
+            var parked = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var answered = new TaskCompletionSource();
+            int port = StartHttp3(connection => connection.RunAsync(async (_, _) =>
+            {
+                parked.TrySetResult();
+                await answered.Task;
+                return new Http3Response { Status = 413, Body = answer };
+            }));
+            AssertRawAnsweredAndStopped(port, answer, beforeUpload: client =>
+            {
+                Assert.True(client.WaitFor(parked.Task, timeoutMs: 5000), "the handler never ran");
+                answered.SetResult();
+            });
+        });
 
         runner.Test("h3 early answer (nghttp3, raw client): a client that refused the answer is still asked to stop uploading once its handler returns", () =>
         {
@@ -153,20 +220,26 @@ internal static class EarlyAnswerTests
                 await refused.Task;
                 returned.TrySetResult((await writer.FlushAsync()).IsCompleted);
             }));
+            AssertRefusedStillStopped(port, refused, returned.Task);
+        });
 
-            using RawH3Client client = ConnectRaw(port);
-            client.OpenRequestStream();
-            Assert.True(client.TryWrite([.. RawH3Client.RequestHeaders("POST"), .. RawH3Client.DataFrameHeader(Upload), .. new byte[16 * 1024]], fin: false),
-                "the request's headers were refused");
-            client.StopSending(H3RequestCancelled);
-            Assert.True(client.WaitForReset(timeoutMs: 5000) == H3RequestCancelled, "the server never answered the refusal with RESET_STREAM");
-
-            refused.SetResult();
-            Assert.True(client.WaitFor(returned.Task, timeoutMs: 10_000), "the handler never returned");
-            Assert.True(returned.Task.Result, "the handler was never told the client refused its answer");
-
-            long sent = UploadUntilStopped(client);
-            Assert.True(sent < H3Stopped, $"the client uploaded {sent} more bytes after the handler returned: nothing asked it to stop");
+        runner.Test("h3 early answer (ioxide.http3, raw client): a client that refused the answer is still asked to stop uploading once its handler returns", () =>
+        {
+            var refused = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var returned = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+            int port = StartHttp3(connection => connection.RunAsync(async (_, _, writer) =>
+            {
+                writer.WriteHeaders(new Http3Response { Status = 413 });
+                for (int i = 0; i < 128; i++)
+                {
+                    answer.CopyTo(writer.GetSpan(answer.Length));
+                    writer.Advance(answer.Length);
+                    await writer.FlushAsync();
+                }
+                await refused.Task;
+                returned.TrySetResult((await writer.FlushAsync()).IsCompleted);
+            }));
+            AssertRefusedStillStopped(port, refused, returned.Task);
         });
 
         runner.Test("h3 early answer (nghttp3): a transport that ends the connection inside StopReading leaves nghttp3 nothing to call", () =>
@@ -191,9 +264,42 @@ internal static class EarlyAnswerTests
         });
     }
 
-    private static void AssertAnsweredAndStopped(HttpClient client, string url, byte[] answer, long stopped)
+    // The raw client uploads to a handler that answers without reading: the answer arrives whole, and the upload stops.
+    private static void AssertRawAnsweredAndStopped(int port, byte[] answer, Action<RawH3Client>? beforeUpload = null)
     {
-        var upload = new CountedUpload(Upload);
+        using RawH3Client client = ConnectRaw(port);
+        client.OpenRequestStream();
+        Assert.True(client.TryWrite([.. RawH3Client.RequestHeaders("POST"), .. RawH3Client.DataFrameHeader(Upload)], fin: false),
+            "the request's headers were refused");
+        beforeUpload?.Invoke(client);
+
+        long sent = UploadUntilStopped(client);
+        Assert.True(sent < H3Stopped, $"the client uploaded {sent} bytes to a handler that read none of them: nothing asked it to stop");
+        Assert.True(client.WaitForFin(timeoutMs: 5000), "the answer never ended");
+        AssertBody(answer, DataPayload(client.Received));
+    }
+
+    // The client refuses the answer with STOP_SENDING, then the handler returns: its upload is still stopped.
+    private static void AssertRefusedStillStopped(int port, TaskCompletionSource refused, Task<bool> returned)
+    {
+        using RawH3Client client = ConnectRaw(port);
+        client.OpenRequestStream();
+        Assert.True(client.TryWrite([.. RawH3Client.RequestHeaders("POST"), .. RawH3Client.DataFrameHeader(Upload), .. new byte[16 * 1024]], fin: false),
+            "the request's headers were refused");
+        client.StopSending(H3RequestCancelled);
+        Assert.True(client.WaitForReset(timeoutMs: 5000) == H3RequestCancelled, "the server never answered the refusal with RESET_STREAM");
+
+        refused.SetResult();
+        Assert.True(client.WaitFor(returned, timeoutMs: 10_000), "the handler never returned");
+        Assert.True(returned.Result, "the handler was never told the client refused its answer");
+
+        long sent = UploadUntilStopped(client);
+        Assert.True(sent < H3Stopped, $"the client uploaded {sent} more bytes after the handler returned: nothing asked it to stop");
+    }
+
+    private static void AssertAnsweredAndStopped(HttpClient client, string url, byte[] answer, long stopped, bool duplex = false)
+    {
+        ICountedUpload upload = duplex ? new DuplexUpload(Upload) : new CountedUpload(Upload);
         Task<(HttpStatusCode Status, byte[] Body)> answered = PostAsync(client, url, upload);
 
         Assert.True(answered.Wait(100_000), "the answer never arrived");
@@ -217,11 +323,11 @@ internal static class EarlyAnswerTests
     }
 
     // The answer, once the upload has ended as well: at its last byte, or where the client gave up on the rest.
-    private static async Task<(HttpStatusCode Status, byte[] Body)> PostAsync(HttpClient client, string url, CountedUpload upload)
+    private static async Task<(HttpStatusCode Status, byte[] Body)> PostAsync(HttpClient client, string url, ICountedUpload upload)
     {
         try
         {
-            using HttpResponseMessage response = await client.PostAsync(url, upload);
+            using HttpResponseMessage response = await client.PostAsync(url, (HttpContent)upload);
             byte[] body = await response.Content.ReadAsByteArrayAsync();
 
             // Held open until then: disposing it would have the client cancel the upload itself.
@@ -316,12 +422,16 @@ internal static class EarlyAnswerTests
             }
         });
 
-    private static int StartH3(Func<Nghttp3Connection, Task> serve)
+    private static int StartH3(Func<Nghttp3Connection, Task> serve) => StartQuic(conn => serve(new Nghttp3Connection(conn)));
+
+    private static int StartHttp3(Func<Http3Connection, Task> serve) => StartQuic(conn => serve(new Http3Connection(conn)));
+
+    private static int StartQuic(Func<QuicConnection, Task> serve)
     {
         (string certPath, string keyPath) = TestCert.Ensure();
         var engine = TestServer.Own(new QuicEngine(certPath, keyPath, cidLength: 8, alpn: ["h3"]));
         (_, int udpPort) = TestServer.StartDatagram(onDatagram: null, quicFactory: engine.CreateFactory(),
-            quicHandle: (_, conn) => serve(new Nghttp3Connection(conn)));
+            quicHandle: (_, conn) => serve(conn));
         return udpPort;
     }
 
@@ -372,8 +482,16 @@ internal static class EarlyAnswerTests
         return bytes;
     }
 
+    // How far an upload got, and when it ended, whichever content sent it.
+    private interface ICountedUpload
+    {
+        long Sent { get; }
+
+        Task<long> Ended { get; }
+    }
+
     // A StreamContent, so not duplex: over HTTP/3 the client finishes its upload before it hands over the answer.
-    private sealed class CountedUpload : StreamContent
+    private sealed class CountedUpload : StreamContent, ICountedUpload
     {
         private readonly Source _source;
         private readonly TaskCompletionSource<long> _ended = new(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -403,6 +521,41 @@ internal static class EarlyAnswerTests
             {
                 _ended.TrySetResult(Sent);
             }
+        }
+    }
+
+    // Not a StreamContent, so duplex: over HTTP/2 the client reads, and credits, the answer while it still uploads.
+    private sealed class DuplexUpload(long size) : HttpContent, ICountedUpload
+    {
+        private readonly TaskCompletionSource<long> _ended = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private long _sent;
+
+        public long Sent => Interlocked.Read(ref _sent);
+
+        public Task<long> Ended => _ended.Task;
+
+        protected override async Task SerializeToStreamAsync(Stream stream, TransportContext? context)
+        {
+            byte[] chunk = new byte[64 * 1024];
+            try
+            {
+                while (Sent < size)
+                {
+                    int count = (int)Math.Min(chunk.Length, size - Sent);
+                    await stream.WriteAsync(chunk.AsMemory(0, count));
+                    Interlocked.Add(ref _sent, count);
+                }
+            }
+            finally
+            {
+                _ended.TrySetResult(Sent);
+            }
+        }
+
+        protected override bool TryComputeLength(out long length)
+        {
+            length = size;
+            return true;
         }
     }
 

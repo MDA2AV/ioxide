@@ -89,6 +89,43 @@ internal static class HttpClientConnectTests
             }
         });
 
+        runner.Test("httpclient h1: a connect its reactor's stop cancels, and the one to the next address it goes on to, both end with the stop", () =>
+        {
+            // Two addresses whose full accept queues drop the SYN, so neither connect ends unless the stop ends it.
+            using var first = new TcpListener(IPAddress.Parse("127.0.0.3"), 0);
+            first.Start(0);
+            int port = ((IPEndPoint)first.LocalEndpoint).Port;
+            using var second = new TcpListener(IPAddress.Parse("127.0.0.4"), port);
+            second.Start(0);
+            Socket[] queued = [.. FillAcceptQueue((IPEndPoint)first.LocalEndpoint), .. FillAcceptQueue((IPEndPoint)second.LocalEndpoint)];
+
+            try
+            {
+                var started = new TaskCompletionSource<Task>(TaskCreationOptions.RunContinuationsAsynchronously);
+                (_, Reactor reactor, Thread thread) = TestServer.StartConfigured(
+                    (_, connection) => { connection.DecRef(); return Task.CompletedTask; },
+                    new ServerConfig { Tcp = new TcpOptions() },
+                    r => started.SetResult(ClientTransport.ConnectAsync(r, [IPAddress.Parse("127.0.0.3"), IPAddress.Parse("127.0.0.4")],
+                        (ushort)port, tls: null, serverName: null, connectTimeoutMs: 0).AsTask()));
+
+                Task connect = started.Task.Result;
+                Thread.Sleep(200);   // the first connect reaches the kernel, which holds it
+                Assert.True(!connect.IsCompleted, $"the connect ended before the stop: {connect.Status}");
+
+                reactor.Stop();
+                Assert.True(((IAsyncResult)connect).AsyncWaitHandle.WaitOne(3_000), "the connect is still waiting 3 s after its reactor was stopped");
+                Assert.True(thread.Join(3_000), "the reactor did not stop");
+                Assert.True(connect.IsFaulted, $"the connect ended {connect.Status}, connected to an address that never answers");
+            }
+            finally
+            {
+                foreach (Socket socket in queued)
+                {
+                    socket.Dispose();
+                }
+            }
+        });
+
         runner.Test("httpclient h1: an idle connection past MaxLifetimeMs is replaced by the sweep", () =>
         {
             int clientPort = 0;

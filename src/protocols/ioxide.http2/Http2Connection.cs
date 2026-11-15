@@ -87,6 +87,9 @@ public sealed partial class Http2Connection : IDisposable
     // A new stream's receive window: InitialWindowSize, but no less than the 65535 a peer uses until it has our SETTINGS.
     private int _initialStreamWindow;
 
+    // What a stream consumes before it is credited: a quarter of its window, but at most the 65,535 a peer counts until it applies our SETTINGS, so any window it counts holds a step.
+    private readonly int _creditStep;
+
     // The reactor this connection is served on; null when it runs without one, as over a test pipe.
     private Reactor? _reactor;
 
@@ -102,6 +105,7 @@ public sealed partial class Http2Connection : IDisposable
         _options = options ?? new Http2Options();
         _decoder = new HpackDecoder();
         _initialStreamWindow = Math.Max(_options.InitialWindowSize, DefaultWindow);
+        _creditStep = Math.Clamp(_options.InitialWindowSize / 4, 1, DefaultWindow);
     }
 
     /// <summary>Convenience for cleartext h2c: wraps the connection in its own duplex pipe.</summary>
@@ -193,7 +197,9 @@ public sealed partial class Http2Connection : IDisposable
             // already waiting on them.
             WriteSettings();
             CreditConnection(MaxWindow - DefaultWindow);   // SETTINGS size streams only; this opens the connection (RFC 9113 6.9.2)
-            await FlushPassAsync();
+
+            // Begun off the reactor it waits for this flush, which a TCP pipe completes on the reactor, so its first read is made there and learns it.
+            await (_reactor is null ? FlushAsync() : FlushPassAsync());
 
             while (!IsBroken)
             {
@@ -331,9 +337,15 @@ public sealed partial class Http2Connection : IDisposable
             // there is no Task to allocate.
             if (inFlight.IsCompletedSuccessfully)
             {
+                Http2Response response = inFlight.Result;
                 try
                 {
-                    WriteResponse(pending.StreamId, inFlight.Result);
+                    WriteResponse(pending.StreamId, response);
+                }
+                catch (NullReferenceException exception) when (response is null)
+                {
+                    // A null answer throws before anything is staged; anything else may tear a frame, so it ends the connection.
+                    AnswerFault(request, pending.StreamId, exception);
                 }
                 finally
                 {
@@ -369,17 +381,22 @@ public sealed partial class Http2Connection : IDisposable
             await new ReactorSwitch(_reactor);
             // Nobody can observe this task, so an escaping exception would vanish silently and the
             // peer would wait on a stream that is never coming.
-            ReportHandlerFault(request, exception);
-
-            if (!IsBroken)
-            {
-                WriteResponse(pending.StreamId, new Http2Response { Status = 500 });
-            }
+            AnswerFault(request, pending.StreamId, exception);
         }
         finally
         {
             RetireStream(pending);
             await MaybeFlushAsync();
+        }
+    }
+
+    // A handler that threw, or answered with a response that cannot be written, gets a 500 on its own stream.
+    private void AnswerFault(Http2Request request, int streamId, Exception exception)
+    {
+        ReportHandlerFault(request, exception);
+        if (!IsBroken)
+        {
+            WriteResponse(streamId, new Http2Response { Status = 500 });
         }
     }
 
@@ -471,16 +488,31 @@ public sealed partial class Http2Connection : IDisposable
         return pending;
     }
 
-    /// <summary>Return a read chunk's credit to its stream alone: the connection was charged for it on arrival.</summary>
-    internal void CreditBody(int streamId, int length)
+    /// <summary>A chunk was read: its stream alone is credited once a step is consumed, as the connection was charged for it on arrival.</summary>
+    internal void CreditBody(int streamId)
     {
-        if (length <= 0 || IsBroken || !_streams.TryGetValue(streamId, out PendingRequest? pending) || pending.RequestEnded)
+        if (IsBroken || !_streams.TryGetValue(streamId, out PendingRequest? pending) || pending.RequestEnded)
         {
             return;
         }
 
-        CreditStream(pending, length);
-        FlushCredit();
+        if (CreditConsumed(pending))
+        {
+            FlushCredit();
+        }
+    }
+
+    // Received and not yet credited, less what the reader still holds: the window is what bounds the unread bytes, so they are never credited.
+    private bool CreditConsumed(PendingRequest pending)
+    {
+        int consumed = _initialStreamWindow - pending.ReceiveWindow - (pending.BodyReader?.Unread ?? 0);
+        if (consumed < _creditStep)
+        {
+            return false;
+        }
+
+        CreditStream(pending, consumed);
+        return true;
     }
 
     // Every WINDOW_UPDATE the server sends goes through these two, which add back exactly what they grant.

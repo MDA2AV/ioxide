@@ -82,6 +82,11 @@ public sealed unsafe partial class Reactor
         SpinWait sw = default;
         while (!_returnQ.TryEnqueue(bid))
         {
+            // Nothing drains the queue past the stop.
+            if (_postsClosed)
+            {
+                return;
+            }
             sw.SpinOnce();
         }
         // Without the wake, a queued return waits for an unrelated CQE; if the ring
@@ -152,12 +157,8 @@ public sealed unsafe partial class Reactor
         }
         close(fd);
         conn.Clear();
-        ReturnToPool(conn);
-    }
 
-    // A cleared connection: kept for the next accept, or its memory freed right here once the pool is full.
-    private void ReturnToPool(TcpConnection conn)
-    {
+        // Kept for the next accept, or its memory freed right here once the pool is full.
         if (_pool.Count < _poolMax)
         {
             _pool.Push(conn);
@@ -166,6 +167,7 @@ public sealed unsafe partial class Reactor
         {
             conn.Dispose();
         }
+        _tcpLive--;
     }
 
 #endregion

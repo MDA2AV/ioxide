@@ -134,6 +134,95 @@ internal static class Http2EarlyAnswerTests
 
             client.Close(run);
         });
+
+        runner.Test("h2 early answer: a buffered response that cannot be written, from a handler that never parked, is answered 500, and the reset follows it", () =>
+        {
+            using var client = new StrictClient();
+            Task run = client.Connection.RunAsync((_, _) => new ValueTask<Http2Response>((Http2Response)null!));
+
+            client.ReleaseFlush();
+            client.Feed([.. Open(), .. Post(1), .. Data(1, 1000, endStream: false)]);
+            List<Frame> frames = client.Drain();
+
+            Assert.True(!run.IsCompleted, "the connection ended on a null response");
+            AssertAnsweredThenStopped(frames, streamId: 1, 500, "");
+
+            client.Close(run);
+        });
+
+        runner.Test("h2: a synchronous handler's response that cannot be written is answered 500 on its own stream, the host is told, and the next stream is served", () =>
+        {
+            var faults = new List<string>();
+            using var client = new StrictClient(new Http2Options { OnHandlerFault = (request, fault) => faults.Add($"stream {request.StreamId}: {fault.GetType().Name}") });
+            Task run = client.Connection.RunAsync(request => request.StreamId == 1 ? null! : Http2Response.Text("ok"));
+
+            client.ReleaseFlush();
+            client.Feed([.. Open(), .. Get(1), .. Get(3)]);
+            List<Frame> frames = client.Drain();
+
+            Assert.True(!run.IsCompleted, "the connection ended on a null response");
+            List<Frame> stream = frames.Where(f => f.StreamId == 1).ToList();
+            Assert.True(stream is [{ Type: Frame.Headers, EndStream: true }],
+                $"stream 1 was sent [{string.Join(", ", stream.Select(f => $"type {f.Type} flags 0x{f.Flags:x}"))}], not one HEADERS that ends it");
+            Assert.Equal(500, Status(stream));
+            Assert.Equal("ok", Encoding.UTF8.GetString(Frame.Body(frames, 3)));
+            Assert.Equal("stream 1: NullReferenceException", string.Join(", ", faults));
+
+            client.Close(run);
+        });
+
+        runner.Test("h2: a write refused partway through a synchronous handler's answer ends the connection, and no torn frame goes out", () =>
+        {
+            using var client = new StrictClient();
+            int buffers = -1;
+            bool refused = false;
+            client.OnBuffer = () =>
+            {
+                // The second buffer of stream 1's answer is its header block's, behind a frame header already staged.
+                if (buffers >= 0 && ++buffers == 2)
+                {
+                    refused = true;
+                    throw new OutOfMemoryException("the write slab cannot grow");
+                }
+            };
+            Task run = client.Connection.RunAsync(request =>
+            {
+                if (request.StreamId == 1)
+                {
+                    buffers = 0;
+                }
+                return Http2Response.Text("ok");
+            });
+
+            client.ReleaseFlush();
+            client.Feed([.. Open(), .. Get(1), .. Get(3)]);
+
+            Assert.True(refused, "the test never refused a write");
+            Assert.True(run.Wait(5_000), "the connection served on after stream 1's HEADERS frame header was staged without its block");
+            List<Frame> frames = client.Drain();
+            Assert.True(frames.All(f => f.StreamId is not (1 or 3)),
+                $"frames went out on the streams of a torn pass: [{string.Join(", ", frames.Select(f => $"stream {f.StreamId} type {f.Type}"))}]");
+        });
+
+        runner.Test("h2 early answer: a buffered answer that waited on the client's credit, its request still arriving, is followed by RST_STREAM(NO_ERROR) once its END_STREAM is out", () =>
+        {
+            string answer = new('x', 32 * 1024);                    // twice the client's window for it, so the rest waits on its credit
+
+            using var client = new StrictClient();
+            Task run = client.Connection.RunAsync((_, _) => new ValueTask<Http2Response>(Http2Response.Text(answer, 413)));
+
+            client.ReleaseFlush();
+            client.Feed([.. Open((InitialWindowSize, 16384)), .. WindowUpdate(0, 1 << 20), .. Post(1), .. Data(1, 1000, endStream: false)]);
+            List<Frame> frames = client.Drain();
+            Assert.True(!frames.Any(f => f.StreamId == 1 && (f.EndStream || f.Type == RstStreamFrame)),
+                "the answer ended, or its stream was reset, before the client had credited the rest of it");
+
+            client.Feed([.. Data(1, 16384, endStream: false), .. WindowUpdate(1, 1 << 20)]);   // a client that reads its answer while it uploads
+            frames.AddRange(client.Drain());
+            AssertAnsweredThenStopped(frames, streamId: 1, 413, answer);
+
+            client.Close(run);
+        });
     }
 
     private static void RegisterControls(Runner runner)
@@ -199,6 +288,30 @@ internal static class Http2EarlyAnswerTests
 
             client.Close(run);
         });
+        runner.Test("control: a buffered answer that waited on the client's credit, to a request that had ended, is not followed by a reset", () =>
+        {
+            string answer = new('x', 32 * 1024);
+
+            // With a body reader the request is still in the stream table when its answer parks; without one it left at its END_STREAM.
+            foreach (bool reader in new[] { true, false })
+            {
+                using var client = new StrictClient();
+                Task run = reader
+                    ? client.Connection.RunAsync((_, _) => new ValueTask<Http2Response>(Http2Response.Text(answer, 413)))
+                    : client.Connection.RunAsync(_ => Http2Response.Text(answer, 413));
+
+                client.ReleaseFlush();
+                client.Feed([.. Open((InitialWindowSize, 16384)), .. WindowUpdate(0, 1 << 20), .. Post(1), .. Data(1, 1000, endStream: true)]);
+                List<Frame> frames = client.Drain();
+                Assert.True(!frames.Any(f => f.StreamId == 1 && f.EndStream), "the answer ended before the client had credited the rest of it");
+
+                client.Feed(WindowUpdate(1, 1 << 20));
+                frames.AddRange(client.Drain());
+                AssertAnsweredNotReset(frames, answer);
+
+                client.Close(run);
+            }
+        });
     }
 
     private static void RegisterCredit(Runner runner)
@@ -222,9 +335,8 @@ internal static class Http2EarlyAnswerTests
             client.Close(run);
         });
 
-        runner.Test("h2 early answer: an upload still arriving while a buffered answer is parked on credit is credited on its stream", () =>
+        runner.Test("h2 early answer: an upload still arriving behind a buffered answer parked on credit is credited nothing, and a client that credits the answer gets it whole", () =>
         {
-            // A client that credits its answer only once its upload ends can then end it.
             byte[] answer = new byte[64 * 1024];
 
             using var client = new StrictClient();
@@ -235,14 +347,16 @@ internal static class Http2EarlyAnswerTests
             List<Frame> frames = client.Drain();
             Assert.Equal(16384, Frame.Body(frames, 1).Length);   // one stream window, then parked
 
-            client.Feed(Data(1, 16384, endStream: false));
-            List<Frame> credited = client.Drain();
-            Assert.Equal(16384, Credit(credited, 1));
+            // Its handler is done with the request, so what still arrives is dropped and its window stays shut.
+            client.Feed(Fill(1, 4 * 16384));
+            List<Frame> dropped = client.Drain();
+            Assert.Equal(0, Credit(dropped, 1));
 
-            client.Feed(WindowUpdate(1, 1 << 20));
-            frames.AddRange(credited);
+            client.Feed(WindowUpdate(1, 1 << 20));               // a client that reads its answer while it uploads
+            frames.AddRange(dropped);
             frames.AddRange(client.Drain());
-            Assert.Equal(answer.Length, Frame.Body(frames, 1).Length);
+            Assert.True(Frame.Body(frames, 1).Length == answer.Length && frames.Last(f => f is { Type: Frame.Data, StreamId: 1 }).EndStream,
+                $"the answer came to {Frame.Body(frames, 1).Length} of {answer.Length} bytes once the client credited it");
 
             client.Close(run);
         });

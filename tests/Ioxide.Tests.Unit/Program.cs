@@ -34,12 +34,15 @@ internal static class Program
         Http2HeaderListTests.Register(runner);
         Nghttp2HeaderListTests.Register(runner);
         Nghttp2OversizedResponseTests.Register(runner);
+        Nghttp2NullAnswerTests.Register(runner);
         Http2RequestHeaderTests.Register(runner);
         Http2RequestReuseTests.Register(runner);
         Nghttp2RequestReuseTests.Register(runner);
+        Nghttp2HasBodyTests.Register(runner);
         Http2StreamedBodyTests.Register(runner);
         Http2FlowControlTests.Register(runner);
         Http2ReceiveWindowTests.Register(runner);
+        Http2CreditStepTests.Register(runner);
         Http2BufferedCreditTests.Register(runner);
         Http2EarlyAnswerTests.Register(runner);
         Http2EarlyAnswerGuardTests.Register(runner);
@@ -57,6 +60,7 @@ internal static class Program
         SpillSegmentTests.Register(runner);
         RecvQueueExtendTests.Register(runner);
         StoppedPostTests.Register(runner);
+        StoppedReturnTests.Register(runner);
         HttpClientGrowthTests.Register(runner);
 
         return runner.Summary();

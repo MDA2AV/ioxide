@@ -149,8 +149,12 @@ public unsafe partial class QuicEngineConnection
         }
     }
 
+    /// <inheritdoc />
+    /// <exception cref="ArgumentOutOfRangeException"><paramref name="applicationErrorCode"/> is past 2^62 - 1, the most QUIC can carry.</exception>
     public override void ResetStream(long streamId, ulong applicationErrorCode)
     {
+        // Ahead of everything, so a refused reset leaves the stream as it was.
+        ArgumentOutOfRangeException.ThrowIfGreaterThan(applicationErrorCode, Ngtcp2.NGTCP2_MAX_VARINT);
         if (_closed)
         {
             return;
@@ -169,8 +173,11 @@ public unsafe partial class QuicEngineConnection
         FlushConnection();
     }
 
+    /// <inheritdoc />
+    /// <exception cref="ArgumentOutOfRangeException"><paramref name="applicationErrorCode"/> is past 2^62 - 1, the most QUIC can carry.</exception>
     public override void StopReading(long streamId, ulong applicationErrorCode)
     {
+        ArgumentOutOfRangeException.ThrowIfGreaterThan(applicationErrorCode, Ngtcp2.NGTCP2_MAX_VARINT);
         if (_closed)
         {
             return;

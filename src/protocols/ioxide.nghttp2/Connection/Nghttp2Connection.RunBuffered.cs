@@ -1,5 +1,6 @@
 using System.Buffers;
 using System.IO.Pipelines;
+using System.Runtime.CompilerServices;
 
 namespace ioxide.nghttp2;
 
@@ -174,7 +175,7 @@ public sealed partial class Nghttp2Connection
             {
                 try
                 {
-                    SubmitResponse(pending.StreamId, inFlight.Result);
+                    SubmitAnswer(pending.StreamId, inFlight.Result);
                 }
                 finally
                 {
@@ -210,18 +211,37 @@ public sealed partial class Nghttp2Connection
             await new ReactorSwitch(_reactor);
             // Nobody can observe this task, so an escaping exception would vanish silently and the
             // peer would wait on a stream that is never coming.
-            Console.Error.WriteLine(
-                $"[ioxide.nghttp2] request handler faulted: {exception.GetBaseException().Message}");
-
-            if (!IsBroken)
-            {
-                SubmitResponse(pending.StreamId, new Nghttp2Response { Status = 500 });
-            }
+            AnswerFault(pending.StreamId, exception);
         }
         finally
         {
             Retire(pending);
             await FlushEgressAsync();
+        }
+    }
+
+    // A null answer has submitted nothing, so it gets what a handler that threw gets. Tested, not caught: a catch
+    // around the submit stops the JIT inlining its P/Invoke.
+    private void SubmitAnswer(int streamId, Nghttp2Response response)
+    {
+        if (response is null)
+        {
+            AnswerFault(streamId, new NullReferenceException());
+            return;
+        }
+        SubmitResponse(streamId, response);
+    }
+
+    // A handler that threw, or answered null, gets a 500 on its own stream. Out of line, as only a fault comes here.
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private void AnswerFault(int streamId, Exception exception)
+    {
+        Console.Error.WriteLine(
+            $"[ioxide.nghttp2] request handler faulted: {exception.GetBaseException().Message}");
+
+        if (!IsBroken)
+        {
+            SubmitResponse(streamId, new Nghttp2Response { Status = 500 });
         }
     }
 }

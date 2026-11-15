@@ -5,7 +5,8 @@ public sealed unsafe partial class Reactor
 {
     private void Loop()
     {
-        while (!_stopRequested)
+        long stopDeadlineMs = 0;
+        while (true)
         {
             ClearWakePending();
             if (_incremental) DrainReturnQIncremental();
@@ -16,6 +17,12 @@ public sealed unsafe partial class Reactor
             DrainPostQ();
             RearmStarvedRecvs();
             QuicFireDueTimers();
+
+            // After the drains, so a stop whose last connection one of them let go of ends without a wait.
+            if (_stopRequested && Stopped(ref stopDeadlineMs))
+            {
+                return;
+            }
 
             // The transient three, which the loop carries on from: a signal, the kernel short of
             // resources, and overflow entries it could not flush - the CQ drain below is what EBUSY

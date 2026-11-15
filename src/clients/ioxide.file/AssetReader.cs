@@ -41,7 +41,8 @@ public sealed unsafe class AssetReader : IDisposable
     /// <summary>
     /// Build a per-reactor reader pool and register it as a service
     /// (<c>GetService&lt;RingPool&lt;AssetReader&gt;&gt;()</c>). <paramref name="readers"/> bounds
-    /// concurrent reads; size <paramref name="bufferBytes"/> for the largest asset.
+    /// concurrent reads; size <paramref name="bufferBytes"/> for the largest asset. The reactor's stop
+    /// disposes the pool, and with it each reader once it is back.
     /// </summary>
     public static RingPool<AssetReader> CreatePool(Reactor reactor, int readers, int bufferBytes)
     {
@@ -52,6 +53,7 @@ public sealed unsafe class AssetReader : IDisposable
         }
 
         reactor.AddService(pool);
+        reactor.AddStopper(pool.Dispose);
         return pool;
     }
 

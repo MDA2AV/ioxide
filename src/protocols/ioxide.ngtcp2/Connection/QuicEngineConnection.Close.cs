@@ -5,8 +5,11 @@ namespace ioxide.ngtcp2;
 /// datagram, then the same teardown as every other death.</summary>
 public unsafe partial class QuicEngineConnection
 {
+    /// <inheritdoc />
+    /// <exception cref="ArgumentOutOfRangeException"><paramref name="applicationErrorCode"/> is past 2^62 - 1, the most QUIC can carry.</exception>
     public override void Close(ulong applicationErrorCode)
     {
+        ArgumentOutOfRangeException.ThrowIfGreaterThan(applicationErrorCode, Ngtcp2.NGTCP2_MAX_VARINT);
         if (_closed)
         {
             return;

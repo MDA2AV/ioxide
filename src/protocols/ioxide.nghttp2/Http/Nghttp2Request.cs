@@ -8,10 +8,6 @@ namespace ioxide.nghttp2;
 /// The memories point into an arena owned by the connection and are valid for the duration of the
 /// handler call. Copy anything you keep past it: a request whose body arrived whole is itself reused
 /// for a later stream on the same connection once its handler is done.
-///
-/// No <c>HasBody</c> yet, unlike <c>Http2Request</c>: the native shim reports the end of the headers
-/// without their END_STREAM flag, so HEADERS that end the stream look the same here as HEADERS
-/// followed by one empty DATA frame that does.
 /// </summary>
 public sealed class Nghttp2Request
 {
@@ -41,6 +37,21 @@ public sealed class Nghttp2Request
 
     /// <summary>Request body, empty when there was none - or when it is being streamed.</summary>
     public ReadOnlyMemory<byte> Body { get; internal set; }
+
+    /// <summary>
+    /// False when the HEADERS that opened the stream also ended it, as a GET's do, so no body
+    /// follows. True when they did not: the body is the DATA up to END_STREAM, whether or not a
+    /// <c>content-length</c> announced it, and it may still turn out empty.
+    /// </summary>
+    /// <remarks>
+    /// <c>content-length</c> cannot answer this. HTTP/2 does not require it, and a body of unknown
+    /// length - one <c>HttpClient</c> streams, or <c>fetch</c> sends from a <c>ReadableStream</c> -
+    /// arrives without one. This is read off the HEADERS instead, so it is settled before a handler
+    /// that takes an <see cref="Nghttp2BodyReader"/> is dispatched, never changes while the body
+    /// arrives, and means the same whether the body is streamed or assembled in <see cref="Body"/>.
+    /// An END_STREAM on an empty DATA frame after the HEADERS ends a body that is empty.
+    /// </remarks>
+    public bool HasBody { get; internal set; }
 
     // The body as it arrives, for a handler that takes a body reader - which is how it is handed one.
     internal Nghttp2BodyReader? BodyReader { get; set; }

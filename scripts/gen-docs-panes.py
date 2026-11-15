@@ -380,8 +380,8 @@ PANES = {
         "write side - because they solve different "
         "problems and most servers want exactly one of them. Mirrors "
         "<label for=\"tab-h3csstream\" class=\"ex-jump\">h3 &middot; request + response "
-        "streamed</label>; the difference is HTTP/2's shared connection window, which a handler "
-        "that stops reading holds down for every other stream on the connection."),
+        "streamed</label>. The server keeps its own connection window open, so a handler that "
+        "stops reading stalls only its own stream's upload."),
     "h2ng": (
         "Http2/Nghttp2Buffered", "HTTP/2 &middot; nghttp2", "ioxide + ioxide.nghttp2",
         ["curl --http2-prior-knowledge http://127.0.0.1:8080/"],

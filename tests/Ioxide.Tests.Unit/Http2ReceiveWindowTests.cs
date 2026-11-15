@@ -284,13 +284,14 @@ internal static class Http2ReceiveWindowTests
             client.Feed([.. Open(), .. Post(1), .. Get(3)]);          // stream 3's answer leaves on this pass's flush, which the peer does not take
             Assert.Equal(1, client.PendingFlushes);
 
-            client.Feed([.. Data(1, 16384, endStream: false), .. Data(1, 16384, endStream: false), .. Ping()]);
-            Assert.True(read.Bytes == 2 * 16384,
-                $"behind the stalled flush the handler read {read.Bytes} of the {2 * 16384} bytes sent after it");
+            const int Sent = 4 * 16384;                               // a step of credit, so the reads have some to queue
+            client.Feed([.. Fill(1, Sent), .. Ping()]);
+            Assert.True(read.Bytes == Sent,
+                $"behind the stalled flush the handler read {read.Bytes} of the {Sent} bytes sent after it");
             Assert.Equal(1, client.PendingFlushes);                   // what the frames produced waits behind it
 
             List<Frame> frames = client.Drain();
-            Assert.Equal(2 * 16384, Credit(frames, 1));
+            Assert.Equal(Sent, Credit(frames, 1));
             Assert.True(frames.Any(f => f is { Type: PingFrame, Flags: 1 }), "the PING read behind the stalled flush was never answered");
 
             client.Feed(Data(1, 0, endStream: true));

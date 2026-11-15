@@ -41,6 +41,7 @@ public sealed class RingHttpClient : IDisposable
         var client = new RingHttpClient(reactor, options ?? new RingHttpClientOptions());
         reactor.AddService(client);
         reactor.AddTicker(client.Sweep);
+        reactor.AddStopper(client.Dispose);
         return client;
     }
 
@@ -119,10 +120,7 @@ public sealed class RingHttpClient : IDisposable
 
     private HttpClientPool PoolFor(Uri url)
     {
-        if (_disposed)
-        {
-            throw new HttpClientException("client is disposed");
-        }
+        ObjectDisposedException.ThrowIf(_disposed, this);
 
         // An IPv6 address goes to the pool bare; a name in its DNS form.
         string host = url.HostNameType == UriHostNameType.IPv6 ? url.DnsSafeHost : url.IdnHost;
@@ -160,8 +158,9 @@ public sealed class RingHttpClient : IDisposable
         }
     }
 
-    /// <summary>Close every origin's idle connections; requests in flight finish first, as with the pool.
-    /// Called from another thread, it is queued to the reactor and returns.</summary>
+    /// <summary>Close every origin's idle connections and free the TLS context; requests in flight finish
+    /// first, and those waiting fail with <see cref="ObjectDisposedException"/>, as with the pool. Called
+    /// from another thread, it is queued to the reactor and returns. Its reactor's stop disposes it.</summary>
     public void Dispose()
     {
         // The origins and their pools are the reactor's.
