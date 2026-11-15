@@ -8,7 +8,8 @@ namespace Ioxide.Tests;
 /// <summary>
 /// A whole-response HTTP/2 handler that throws, on both stacks. Throwing from its task or before it
 /// has one - as every synchronous handler does - answers 500 on its own stream, and every other
-/// stream on the connection carries on.
+/// stream on the connection carries on. On ioxide.http2 so does a handler that answers null, which
+/// cannot be written.
 /// </summary>
 internal static class Http2BufferedFaultTests
 {
@@ -44,10 +45,35 @@ internal static class Http2BufferedFaultTests
                 Assert.True(Volatile.Read(ref server.Connections) == 1, WholeConnection(server));
             });
         }
+
+        runner.Test("h2 fault (ioxide.http2): a synchronous handler that answers null answers 500, and the connection serves on", () =>
+        {
+            var server = new FaultServer();
+            int port = Start(native: false, server, synchronous: true);
+            using HttpClient client = H2Client();
+
+            Assert.Equal("500: ", Fetch(client, port, "/null"));
+            Assert.Equal("200: ok", Fetch(client, port, "/ok"));
+            Assert.True(Volatile.Read(ref server.Connections) == 1, WholeConnection(server));
+        });
+
+        runner.Test("h2 fault (ioxide.http2): a request in flight beside a handler that answers null without parking is answered", () =>
+        {
+            var server = new FaultServer();
+            int port = Start(native: false, server, synchronous: false);
+            using HttpClient client = H2Client();
+
+            Task<HttpResponseMessage> slow = client.GetAsync($"http://127.0.0.1:{port}/slow");
+            Assert.True(server.SlowArrived.Task.Wait(5_000), "/slow never reached its handler");
+
+            Assert.Equal("500: ", Fetch(client, port, "/null"));
+            Assert.Equal("200: slow", Describe(slow));
+            Assert.True(Volatile.Read(ref server.Connections) == 1, WholeConnection(server));
+        });
     }
 
     private static string WholeConnection(FaultServer server)
-        => $"{server.Connections} connections served requests: the handler that threw took its whole connection down";
+        => $"{server.Connections} connections served requests: the handler's fault took its whole connection down";
 
     private sealed class FaultServer
     {
@@ -56,9 +82,10 @@ internal static class Http2BufferedFaultTests
         public bool BoomSeen;
     }
 
-    // "/boom" throws before the handler returns, "/slow" parks until "/boom" has been dispatched,
-    // anything else answers "ok". Synchronous serves through the synchronous overload; otherwise
-    // through the asynchronous one, with a lambda that is not async and so throws before its task.
+    // "/boom" throws before the handler returns, on ioxide.http2 "/null" answers null without parking,
+    // "/slow" parks until either has been dispatched, anything else answers "ok". Synchronous serves
+    // through the synchronous overload; otherwise through the asynchronous one, with a lambda that
+    // is not async and so throws, or answers, before its task.
     private static int Start(bool native, FaultServer server, bool synchronous)
         => TestServer.Start(async (reactor, conn) =>
         {
@@ -83,10 +110,10 @@ internal static class Http2BufferedFaultTests
                     await (synchronous
                         ? connection.RunAsync(request => Answer(request.Path) is { } body
                             ? new Http2Response { Status = 200, Body = body }
-                            : throw new InvalidOperationException("the handler failed"))
+                            : IsNull(request.Path) ? null! : throw new InvalidOperationException("the handler failed"))
                         : connection.RunAsync(request => Answer(request.Path) is { } body
                             ? Park(timer, server, body, b => new Http2Response { Status = 200, Body = b })
-                            : throw new InvalidOperationException("the handler failed")));
+                            : IsNull(request.Path) ? new ValueTask<Http2Response>((Http2Response)null!) : throw new InvalidOperationException("the handler failed")));
                 }
             }
             finally
@@ -94,7 +121,7 @@ internal static class Http2BufferedFaultTests
                 conn.DecRef();
             }
 
-            // null for "/boom", noted first so a parked "/slow" knows it went through.
+            // null for "/boom" and "/null", noted first so a parked "/slow" knows it went through.
             byte[]? Answer(ReadOnlyMemory<byte> path)
             {
                 if (!counted)
@@ -103,13 +130,15 @@ internal static class Http2BufferedFaultTests
                     Interlocked.Increment(ref server.Connections);
                 }
                 string at = System.Text.Encoding.ASCII.GetString(path.Span);
-                if (at == "/boom")
+                if (at is "/boom" or "/null")
                 {
                     server.BoomSeen = true;
                     return null;
                 }
                 return at == "/slow" ? "slow"u8.ToArray() : "ok"u8.ToArray();
             }
+
+            static bool IsNull(ReadOnlyMemory<byte> path) => path.Span.SequenceEqual("/null"u8);
         });
 
     private static async ValueTask<T> Park<T>(RingTimer timer, FaultServer server, byte[] body, Func<byte[], T> respond)

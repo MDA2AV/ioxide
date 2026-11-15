@@ -293,6 +293,54 @@ internal static class AffinityTests
             static async Task YieldTo(Reactor r) => await ReactorSwitch.Yield(r);
         });
 
+        runner.Test("affinity: once Run has returned, the thread that ran the reactor is not its reactor's, so a yield or a ring op from it fails as from any other", () =>
+        {
+            Reactor reactor = Bare();
+            using var started = new ManualResetEventSlim();
+            reactor.OnStart = _ => started.Set();
+
+            StoppedView? seen = null;
+            var thread = new Thread(() =>
+            {
+                reactor.Run();
+                seen = StoppedView.From(reactor);
+            }) { IsBackground = true, Name = "affinity-ran-the-reactor" };
+            thread.Start();
+
+            Assert.True(started.Wait(TimeSpan.FromSeconds(10)), "the reactor never started");
+            reactor.Stop();
+            Assert.True(thread.Join(TimeSpan.FromSeconds(10)), "the reactor did not stop");
+            seen!.AssertStopped("the thread that ran it");
+        });
+
+        runner.Test("affinity: a new thread the runtime gives a stopped reactor thread's managed id is not the reactor's", () =>
+        {
+            // A dead thread's id goes back to the runtime once its Thread object is collected, among those of every
+            // other thread that died since, in no set order.
+            (Reactor reactor, int deadId) = RunAndStop();
+            Collect();
+
+            StoppedView? seen = null;
+            var spawned = new List<Thread>();   // each held, so its id is not handed out again
+            while (seen is null && spawned.Count < 4096)
+            {
+                var thread = new Thread(() =>
+                {
+                    if (Environment.CurrentManagedThreadId == deadId)
+                    {
+                        seen = StoppedView.From(reactor);
+                    }
+                });
+                thread.Start();
+                thread.Join();
+                spawned.Add(thread);
+            }
+            GC.KeepAlive(spawned);
+
+            Assert.True(seen is not null, $"control: none of {spawned.Count} new threads was given id {deadId}, so nothing was tested");
+            seen!.AssertStopped($"a new thread given its id {deadId}");
+        });
+
         runner.Test("affinity: handoffs from another thread share one eventfd write until the loop's next pass", () =>
         {
             // Only posts shared a wake: a buffer return, a flush, a recycle or a client op handed over
@@ -378,6 +426,87 @@ internal static class AffinityTests
     private sealed class NoCompletion : IRingCompletion
     {
         public void Complete(int result) { }
+    }
+
+    // A reactor with no transport: it runs, and stops, without a port.
+    private static Reactor Bare() => new(0, new ServerConfig { ReactorCount = 1, Tcp = null, Udp = null, RecvBufferSize = 4096, RecvSlots = 64 });
+
+    private static void Collect()
+    {
+        for (int i = 0; i < 3; i++)
+        {
+            GC.Collect();
+            GC.WaitForPendingFinalizers();
+        }
+    }
+
+    // Not inlined, so nothing in the test's frame keeps the reactor's Thread object, which holds on to its id.
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static (Reactor Reactor, int ThreadId) RunAndStop()
+    {
+        Reactor reactor = Bare();
+        int threadId = 0;
+        var started = new ManualResetEventSlim();
+        reactor.OnStart = _ =>
+        {
+            threadId = Environment.CurrentManagedThreadId;
+            started.Set();
+        };
+
+        var thread = new Thread(reactor.Run) { IsBackground = true, Name = "affinity-stopped-reactor" };
+        thread.Start();
+        Assert.True(started.Wait(TimeSpan.FromSeconds(10)), "the reactor never started");
+        reactor.Stop();
+        Assert.True(thread.Join(TimeSpan.FromSeconds(10)), "the reactor did not stop");
+        return (reactor, threadId);
+    }
+
+    // A stopped reactor as one thread sees it. The yield and the ring op are made only from a thread neither check takes
+    // for the reactor's: on the reactor's own path the op reaches the ring the teardown unmapped.
+    private sealed class StoppedView
+    {
+        private bool _onReactorThread;
+        private bool _current;
+        private Task? _yielded;
+        private Exception? _submitted;
+
+        public static StoppedView From(Reactor reactor)
+        {
+            var view = new StoppedView
+            {
+                _onReactorThread = reactor.OnReactorThread,
+                _current = ReferenceEquals(Reactor.Current, reactor),
+            };
+
+            if (!view._onReactorThread && !view._current)
+            {
+                view._yielded = YieldTo(reactor);
+                try
+                {
+                    reactor.SubmitTimeout(1_000_000, new NoCompletion());
+                }
+                catch (Exception e)
+                {
+                    view._submitted = e;
+                }
+            }
+
+            return view;
+
+            static async Task YieldTo(Reactor r) => await ReactorSwitch.Yield(r);
+        }
+
+        public void AssertStopped(string who)
+        {
+            Assert.True(!_onReactorThread, $"{who} passes OnReactorThread for the stopped reactor");
+            Assert.True(!_current, $"Reactor.Current on {who} is still the stopped reactor");
+            Assert.True(((IAsyncResult)_yielded!).AsyncWaitHandle.WaitOne(TimeSpan.FromSeconds(5)),
+                $"a yield to the stopped reactor from {who} never resumed");
+            Assert.True(_yielded.Exception?.InnerException is ObjectDisposedException,
+                $"a yield to the stopped reactor from {who} ended {_yielded.Status}: {_yielded.Exception?.InnerException?.GetType().Name}");
+            Assert.True(_submitted is ObjectDisposedException,
+                $"a ring op on the stopped reactor from {who} ended in {_submitted?.GetType().Name ?? "no exception"}");
+        }
     }
 
     // Each counter on its own line, so the race's own bookkeeping does not share one with the flag.

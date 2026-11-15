@@ -37,6 +37,7 @@ internal static class Program
         GcTests.Register(runner);
         RingTimerTests.Register(runner);
         StopParkedTests.Register(runner);
+        StopDrainTests.Register(runner);
         UdpTests.Register(runner);
         QuicTests.Register(runner);
         QuicEngineTests.Register(runner);
@@ -50,6 +51,7 @@ internal static class Program
         // Areas reserved for the failing-test review pass; empty until one lands.
         QuicIdentityCapTests.Register(runner);
         QuicTeardownWireTests.Register(runner);
+        QuicErrorCodeTests.Register(runner);
         QuicReadTimeoutTests.Register(runner);
         QuicUnansweredStreamTests.Register(runner);
         QuicDeferredFaultTests.Register(runner);
@@ -91,6 +93,7 @@ internal static class Program
         KestrelBindFailureTests.Register(runner);
         KestrelAddressParityTests.Register(runner);
         KestrelBadRecordTests.Register(runner);
+        KestrelReactorStopTests.Register(runner);
 
         return runner.Summary();
     }

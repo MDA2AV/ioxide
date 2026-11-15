@@ -447,7 +447,7 @@ internal static class ReactorSetupTeardownTests
             using var released = new CountdownEvent(2);
             using var bothIn = new CountdownEvent(2);
 
-            (int port, Reactor reactor, Thread thread) = TestServer.StartConfigured(async (_, conn) =>
+            (int port, Reactor reactor, Thread thread) = TestServer.StartConfigured(async (r, conn) =>
             {
                 RecvSnapshot snapshot = await conn.ReadAsync();
                 Wire.ReadPath(conn, snapshot);
@@ -464,8 +464,9 @@ internal static class ReactorSetupTeardownTests
                     Wire.ReadPath(conn, snapshot);
                 }
 
-                conn.DecRef();   // the reactor already let go: this recycles it, here
-                released.Signal();
+                // Woken inside the reactor's recv teardown, which recycles the connection after the handler returns: signal from the next pass.
+                conn.DecRef();
+                r.ScheduleOnReactor(static e => ((CountdownEvent)e!).Signal(), released);
             }, new ServerConfig { Tcp = new TcpOptions { PoolMax = 1 } });
 
             try

@@ -72,6 +72,7 @@ internal sealed class StrictClient : IDuplexPipe, IDisposable
     public PipeWriter Output => _writer;
 
     public int PendingFlushes => _writer.PendingFlushes;
+    public Action? OnBuffer { get => _writer.OnBuffer; set => _writer.OnBuffer = value; }
     public byte[] ReleaseFlush() => _writer.ReleaseFlush();
     public void FaultFlush() => _writer.FaultFlush();
     public void ReportPeerClosed() => _writer.ReportPeerClosed();
@@ -145,9 +146,13 @@ internal sealed class StrictWriter : PipeWriter
 
     public int PendingFlushes => _inFlight.Count;
 
+    /// <summary>Runs before each buffer is handed out; a test throws from it to refuse a write, as a transport whose slab cannot grow does.</summary>
+    public Action? OnBuffer { get; set; }
+
     public override Memory<byte> GetMemory(int sizeHint = 0)
     {
         ThrowIfFlushing();
+        OnBuffer?.Invoke();
         EnsureScratch(sizeHint);
         return _scratch;
     }
@@ -155,6 +160,7 @@ internal sealed class StrictWriter : PipeWriter
     public override Span<byte> GetSpan(int sizeHint = 0)
     {
         ThrowIfFlushing();
+        OnBuffer?.Invoke();
         EnsureScratch(sizeHint);
         return _scratch;
     }

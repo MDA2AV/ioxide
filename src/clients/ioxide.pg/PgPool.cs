@@ -10,7 +10,7 @@ namespace ioxide.pg;
 /// Safe to call from any thread. The pool belongs to its reactor and takes no lock: a query made on
 /// another thread moves to the reactor first, and completes there.
 /// </remarks>
-public sealed class PgPool
+public sealed class PgPool : IDisposable
 {
     // Bound the slow-path wait so a pool that can't reach Postgres fails fast with a clear error
     // instead of parking queries forever; each attempt drives one coalesced connect try.
@@ -22,6 +22,7 @@ public sealed class PgPool
     private int _next;
     private int _opening;                          // in-flight connect attempts (coalesces opens)
     private long _reopenAtMs;                       // jittered backoff gate for background replenishment
+    private bool _disposed;
 
     // Slow-path queries waiting for an open attempt to finish, one completion each: a task awaited by several
     // resumes only the first inline and sends the rest through the thread pool.
@@ -43,6 +44,7 @@ public sealed class PgPool
         }
         reactor.AddService(pool);
         reactor.AddTicker(pool.Sweep);   // per-command timeout sweep + background replenishment
+        reactor.AddStopper(pool.Dispose);
         return pool;
     }
 
@@ -58,6 +60,11 @@ public sealed class PgPool
         try
         {
             PgConnection connection = await PgConnection.ConnectAsync(_host, _options);
+            if (_disposed)
+            {
+                connection.Dispose();
+                return;
+            }
             _connections.Add(connection);
             _reopenAtMs = 0;   // healthy - allow immediate replenishment
         }
@@ -69,15 +76,20 @@ public sealed class PgPool
         finally
         {
             _opening--;
-            // Wake every slow-path waiter whether the attempt succeeded or failed, so a run of
-            // failures surfaces as a fast error instead of a permanent hang. All are taken out
-            // before any is woken, so one that waits again waits for the next attempt.
-            TaskCompletionSource[] waiters = [.. _openWaiters];
-            _openWaiters.Clear();
-            foreach (TaskCompletionSource waiter in waiters)
-            {
-                waiter.TrySetResult();
-            }
+            // Whether the attempt succeeded or failed, so a run of failures surfaces as a fast error
+            // instead of a permanent hang.
+            WakeOpenWaiters();
+        }
+    }
+
+    // All are taken out before any is woken, so one that waits again waits for the next attempt.
+    private void WakeOpenWaiters()
+    {
+        TaskCompletionSource[] waiters = [.. _openWaiters];
+        _openWaiters.Clear();
+        foreach (TaskCompletionSource waiter in waiters)
+        {
+            waiter.TrySetResult();
         }
     }
 
@@ -157,6 +169,7 @@ public sealed class PgPool
         await new ReactorSwitch(_host);
         for (int attempt = 1; ; attempt++)
         {
+            ObjectDisposedException.ThrowIf(_disposed, this);
             PgConnection? c = Pick();
             if (c != null)
             {
@@ -183,6 +196,11 @@ public sealed class PgPool
     // Reactor-thread ticker (~250 ms): time out stuck connections and replenish toward PoolSize.
     private void Sweep()
     {
+        if (_disposed)
+        {
+            return;   // AddTicker has no removal
+        }
+
         long now = Native.MonotonicMs;
 
         int timeoutMs = _options.CommandTimeoutMs;
@@ -210,4 +228,28 @@ public sealed class PgPool
     }
 
     private static int BackoffMs() => 200 + Random.Shared.Next(400);   // jittered ~200-600 ms
+
+    /// <summary>
+    /// Close the connections and stop replenishing: queries in flight fail with the connection, and those
+    /// waiting for one, and any made after, with <see cref="ObjectDisposedException"/>. Called from another
+    /// thread, it is queued to the reactor and returns. A pool from <see cref="Start"/> is disposed by its
+    /// reactor's stop.
+    /// </summary>
+    public void Dispose()
+    {
+        // The connections and the waiters are the reactor's.
+        if (!_host.OnReactorThread)
+        {
+            _host.ScheduleOnReactor(static pool => ((PgPool)pool!).Dispose(), this);
+            return;
+        }
+
+        _disposed = true;
+        foreach (PgConnection connection in _connections)
+        {
+            connection.Dispose();
+        }
+        _connections.Clear();
+        WakeOpenWaiters();   // each fails at the disposed check
+    }
 }

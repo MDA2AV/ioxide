@@ -84,6 +84,75 @@ internal static class Http3BodyTests
             AssertServed(Pattern(256 * 1024), chunk: -1);
         });
 
+        runner.Test("h3 body: once the staging block is full, a hintless GetSpan is handed at least as much as it holds", () =>
+        {
+            // The BCL's Write asks for no size between spans, and a block grown by the ask alone handed it one byte at a time.
+            byte[] file = Pattern(128 * 1024);
+            int held = 0;
+            int handedOut = 0;
+
+            AssertServedBy(file, (writer, body) =>
+            {
+                // Each span is filled whole, so every ask after the first comes to a full block.
+                for (int at = 0; at < body.Length;)
+                {
+                    Span<byte> span = writer.GetSpan();
+                    if (span.Length < at && held == 0)
+                    {
+                        handedOut = span.Length;
+                        Volatile.Write(ref held, at);
+                    }
+
+                    int take = Math.Min(span.Length, body.Length - at);
+                    body.AsSpan(at, take).CopyTo(span);
+                    writer.Advance(take);
+                    at += take;
+                }
+
+                return writer.CompleteAsync();
+            });
+
+            Assert.True(Volatile.Read(ref held) == 0,
+                $"a hintless GetSpan on a staging block full with {held} bytes was handed {handedOut}");
+        });
+
+        runner.Test("h3 body: a hintless GetMemory is handed a whole chunk, not the pool's smallest array", () =>
+        {
+            // A stream reads only as much as it is handed, so a 16-byte array copied the body in 16 bytes at a time.
+            byte[] file = Pattern(64 * 1024);
+            int smallest = int.MaxValue;
+
+            AssertServedBy(file, async (writer, body) =>
+            {
+                using var source = new MemoryStream(body, writable: false);
+
+                while (true)
+                {
+                    Memory<byte> memory = writer.GetMemory();
+                    Volatile.Write(ref smallest, Math.Min(smallest, memory.Length));
+
+                    int read = await source.ReadAsync(memory);
+                    if (read == 0)
+                    {
+                        break;
+                    }
+
+                    writer.Advance(read);
+                }
+
+                await writer.CompleteAsync();
+            });
+
+            Assert.True(Volatile.Read(ref smallest) >= 16 * 1024,
+                $"a hintless GetMemory was handed {smallest} bytes, not a 16384-byte chunk");
+        });
+
+        runner.Test("h3 body: a 4 MiB body written in one call and staged whole arrives whole", () =>
+        {
+            // Eight growths of the staging block, each carrying over everything staged before it.
+            AssertServed(Pattern(4 * 1024 * 1024), chunk: 0);
+        });
+
         runner.Test("h3 body: a buffer held across an await survives the flush that follows", () =>
         {
             // The reason GetMemory cannot simply point at the native staging block. A caller holds
