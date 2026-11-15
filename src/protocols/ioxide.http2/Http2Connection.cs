@@ -193,7 +193,9 @@ public sealed partial class Http2Connection : IDisposable
             // already waiting on them.
             WriteSettings();
             CreditConnection(MaxWindow - DefaultWindow);   // SETTINGS size streams only; this opens the connection (RFC 9113 6.9.2)
-            await FlushPassAsync();
+
+            // Begun off the reactor it waits for this flush, which a TCP pipe completes on the reactor, so its first read is made there and learns it.
+            await (_reactor is null ? FlushAsync() : FlushPassAsync());
 
             while (!IsBroken)
             {
