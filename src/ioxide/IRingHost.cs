@@ -8,7 +8,8 @@ namespace ioxide;
 ///
 /// Buffers cross as <see cref="nint"/> because pointers can't survive an await. Safe from any
 /// thread (off-reactor callers are marshalled). Results: bytes transferred (0 for connect), or a
-/// negative errno.
+/// negative errno. From the reactor's stop on, a submission throws <see cref="ObjectDisposedException"/>,
+/// and the stop cancels each one it already had.
 /// </summary>
 public interface IRingHost
 {

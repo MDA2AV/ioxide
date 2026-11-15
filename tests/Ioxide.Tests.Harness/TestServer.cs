@@ -464,7 +464,7 @@ public static class TestServer
             bool held = holdLast is not null && shard == reactorCount - 1;
             var reactor = new Reactor(shard, config)
             {
-                TcpHandle = static (_, _) => Task.CompletedTask,
+                TcpHandle = static (_, conn) => { conn.DecRef(); return Task.CompletedTask; },
                 QuicHandle = quicHandle,
                 OnStart = held ? _ => lastStarted?.Set() : _ => ready.Signal(),
             };
@@ -555,7 +555,7 @@ public static class TestServer
         var started = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var reactor = new Reactor(0, config)
         {
-            TcpHandle = static (_, _) => Task.CompletedTask,
+            TcpHandle = static (_, conn) => { conn.DecRef(); return Task.CompletedTask; },
             QuicHandle = quicHandle,
             OnDatagram = onDatagram,
             OnStart = _ => started.TrySetResult(),

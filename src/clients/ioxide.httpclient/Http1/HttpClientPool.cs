@@ -62,6 +62,7 @@ public sealed class HttpClientPool : IDisposable
         }
         reactor.AddService(pool);
         reactor.AddTicker(pool.Sweep);
+        reactor.AddStopper(pool.Dispose);
         return pool;
     }
 
@@ -145,8 +146,7 @@ public sealed class HttpClientPool : IDisposable
         {
             if (_disposed)
             {
-                throw new HttpClientException(
-                    $"pool for {_options.Host}:{_options.Port} is disposed");
+                throw new ObjectDisposedException(nameof(HttpClientPool), $"pool for {_options.Host}:{_options.Port} is disposed");
             }
 
             // Newest first: a recently used connection is the one most likely still warm at the
@@ -332,8 +332,10 @@ public sealed class HttpClientPool : IDisposable
     /// <summary>
     /// Close the idle connections and stop replenishing. Connections currently checked out by an
     /// in-flight request are not touched - the request owns them, and they are dropped by
-    /// <see cref="Release"/> when it finishes, because a disposed pool takes nothing back. Called
-    /// from another thread, it is queued to the reactor and returns.
+    /// <see cref="Release"/> when it finishes, because a disposed pool takes nothing back. The requests
+    /// waiting for a connection, and any made after, fail with <see cref="ObjectDisposedException"/>.
+    /// Called from another thread, it is queued to the reactor and returns. A pool from
+    /// <see cref="Start"/> is disposed by its reactor's stop.
     /// </summary>
     public void Dispose()
     {

@@ -550,7 +550,7 @@ public sealed unsafe partial class Reactor
             m->msg_controllen = 0;
         }
 
-        // Once a stop is requested no loop pass may submit an SQE: send now, or on a full socket not at all.
+        // The stop closes its sockets before a queued SQE would reach them: send now, or on a full socket not at all.
         if (_stopRequested)
         {
             long sent = sendmsg(socketFd, m, MSG_DONTWAIT);
@@ -605,11 +605,12 @@ public sealed unsafe partial class Reactor
     // closed, once the kernel holds no references into them (same discipline as the buffer slab).
     private void CloseUdpFds()
     {
-        foreach (int fd in _udpFds)
+        for (int i = 0; i < _udpFds.Length; i++)
         {
-            if (fd >= 0)
+            if (_udpFds[i] >= 0)
             {
-                close(fd);
+                close(_udpFds[i]);
+                _udpFds[i] = -1;   // a recv still armed then completes as a released pin's does, and is not armed again
             }
         }
     }

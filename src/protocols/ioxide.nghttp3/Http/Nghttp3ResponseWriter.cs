@@ -202,7 +202,8 @@ public sealed class Nghttp3ResponseWriter : IBufferWriter<byte>
     /// </remarks>
     public Memory<byte> GetMemory(int sizeHint = 0)
     {
-        int want = sizeHint <= 0 ? 1 : sizeHint;
+        // A chunk, not the pool's 16-byte array: a stream copied in reads only as much as it is handed.
+        int want = sizeHint <= 0 ? DefaultChunk : sizeHint;
 
         if (_memoryScratch is null || _memoryScratch.Length < want)
         {
@@ -484,7 +485,8 @@ public sealed class Nghttp3ResponseWriter : IBufferWriter<byte>
             return;
         }
 
-        int capacity = Math.Max(needed, DefaultChunk);
+        // At least doubled: grown by the ask alone, each hintless GetSpan the BCL's Write makes recopied everything staged.
+        int capacity = (int)Math.Min(int.MaxValue, Math.Max(needed, Math.Max(DefaultChunk, 2L * _stagingCapacity)));
         byte* grown = (byte*)NativeMemory.Alloc((nuint)capacity);
 
         if (_staging != null)

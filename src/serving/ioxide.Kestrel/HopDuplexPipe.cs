@@ -1,5 +1,6 @@
 using System.Buffers;
 using System.IO.Pipelines;
+using Microsoft.AspNetCore.Connections;
 using ioxide;
 using ioxide.tls;
 using ioxide.utils;
@@ -38,12 +39,11 @@ internal sealed class HopDuplexPipe : IDuplexPipe, IAsyncDisposable
     public PipeReader Input => _input;
     public PipeWriter Output => _outbound.Writer;
 
-    public HopDuplexPipe(TcpConnection conn, Reactor reactor, TlsSession? tls = null)
+    public HopDuplexPipe(TcpConnection conn, ReactorPipeScheduler scheduler, TlsSession? tls = null)
     {
         _conn = conn;
-        _reactor = reactor;
+        _reactor = scheduler.Reactor;
         _tls = tls;
-        var scheduler = new ReactorPipeScheduler(reactor);
 
         // Reader schedulers = the reactor: Kestrel's HTTP parse (inbound reader) and the send pump
         // (outbound reader) both run on the reactor thread.
@@ -61,7 +61,7 @@ internal sealed class HopDuplexPipe : IDuplexPipe, IAsyncDisposable
             resumeWriterThreshold: OutboundResumeBytes,
             useSynchronizationContext: false));
 
-        _input = new ReactorPinReader(_inbound.Reader, reactor);
+        _input = new ReactorPinReader(_inbound.Reader, _reactor);
     }
 
     /// <summary>Launches the recv and send pumps. Must be called on the reactor thread.</summary>
@@ -93,6 +93,11 @@ internal sealed class HopDuplexPipe : IDuplexPipe, IAsyncDisposable
                     FlushResult ifr = await writer.FlushAsync();
                     if (ifr.IsCompleted || ifr.IsCanceled)
                     {
+                        return;
+                    }
+                    if (ReactorStopped)
+                    {
+                        fault = StoppedError();
                         return;
                     }
                 }
@@ -142,6 +147,12 @@ internal sealed class HopDuplexPipe : IDuplexPipe, IAsyncDisposable
                 {
                     break;
                 }
+                if (ReactorStopped)
+                {
+                    // The slices still queued point into receive buffers its teardown freed: dropped, so a fault, as for an overflow.
+                    fault = StoppedError();
+                    break;
+                }
             }
         }
         catch (Exception e)
@@ -157,6 +168,12 @@ internal sealed class HopDuplexPipe : IDuplexPipe, IAsyncDisposable
             await writer.CompleteAsync(fault);
         }
     }
+
+    // A pump resumes off its reactor only once that has stopped, closing the socket and freeing the receive buffers still
+    // queued. Reactor.Current rather than OnReactorThread: a dead thread's managed id is handed out again.
+    private bool ReactorStopped => Reactor.Current != _reactor;
+
+    private static ConnectionAbortedException StoppedError() => new("The reactor serving this connection has stopped.");
 
     private static unsafe void CopySlice(in SpscRecvRing.Item item, PipeWriter writer)
     {
@@ -182,6 +199,13 @@ internal sealed class HopDuplexPipe : IDuplexPipe, IAsyncDisposable
             {
                 ReadResult rr = await reader.ReadAsync();
                 ReadOnlySequence<byte> buffer = rr.Buffer;
+
+                if (ReactorStopped)
+                {
+                    // Nothing will send it, and the completed pipe tells Kestrel the connection is gone.
+                    reader.AdvanceTo(buffer.End);
+                    break;
+                }
 
                 if (!buffer.IsEmpty)
                 {

@@ -66,6 +66,24 @@ public static class TcpSockets
         }
     }
 
+    /// <summary>
+    /// What the kernel still holds for <paramref name="connection"/>: bytes it sent that the peer has not acknowledged,
+    /// and bytes it received that nothing has read yet. Null once it is gone from the table.
+    /// </summary>
+    public static (long Unacked, long Unread)? Queues(Connection connection)
+    {
+        foreach (string[] row in Rows())
+        {
+            if (row[1] == connection.Local && row[2] == connection.Remote)
+            {
+                string[] queues = row[4].Split(':');
+                return (Convert.ToInt64(queues[0], 16), Convert.ToInt64(queues[1], 16));
+            }
+        }
+
+        return null;
+    }
+
     // Columns: sl, local_address, rem_address, st, tx:rx queues, tr:when, retrnsmt, uid, timeout, inode.
     private static IEnumerable<string[]> Rows()
         => File.ReadAllLines("/proc/net/tcp")

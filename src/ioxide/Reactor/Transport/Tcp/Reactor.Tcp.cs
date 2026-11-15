@@ -218,6 +218,16 @@ public sealed unsafe partial class Reactor
     // for the reactor's lifetime, so it predicts perfectly.
     private void OnTcpAcceptCompletion(int listenFd, int res, bool more)
     {
+        // From the stop on nothing is accepted, nor a listener armed again: the stop closed them.
+        if (_stopRequested)
+        {
+            if (res >= 0)
+            {
+                close(res);
+            }
+            return;
+        }
+
         if (res >= 0)
         {
             int clientFd = res;
@@ -252,6 +262,7 @@ public sealed unsafe partial class Reactor
             conn.UseZc = _zeroCopySend;   // config default; kTLS overrides to plain on handshake
             Track(clientFd, conn);
             conn.InitRefs();
+            _tcpLive++;
             conn.ListenerPort = PortOf(listenFd);
             conn.BindSendOpFlags(_sendOpFlags);   // TcpOptions.SendWaitAll; the kTLS handoff clears it
             SubmitRecvMultishot(clientFd, (ushort)conn.Generation, bgid);
@@ -400,86 +411,35 @@ public sealed unsafe partial class Reactor
 
     private void CloseTcpListeners()
     {
-        foreach (int listenFd in _listenFds)
+        for (int i = 0; i < _listenFds.Length; i++)
         {
-            if (listenFd >= 0)
+            if (_listenFds[i] >= 0)
             {
                 // Shut down first: the armed multishot accept holds the socket until the ring's deferred
                 // cancel, about 50 ms after the ring goes, and the port stays bound and accepting until then.
-                shutdown(listenFd, SHUT_RDWR);
-                close(listenFd);
+                shutdown(_listenFds[i], SHUT_RDWR);
+                close(_listenFds[i]);
+                _listenFds[i] = -1;
             }
         }
+        _acceptPaused.Clear();   // the sweep would arm them again on numbers the stop closed
     }
 
-    // Before any socket closes (#531): a parked read, or a flush the kernel doesn't have, resumes while the number is
-    // still its own, and a flush started after it, on any connection, sends nothing.
-    private void MarkAcceptedTcpConnectionsClosed()
+    // As the sweep ends one it condemns, then aborted: connect to AF_UNSPEC is tcp_disconnect, which resets the peer and
+    // drops the send queue, so every send on it completes now, zero-copy notifications included. A kTLS socket refuses
+    // the abort and ends by the shutdown alone, which is enough: it never sends zero-copy.
+    private void CloseTcpConnections()
     {
+        sockaddr_in unspec = default;
         for (int fd = 0; fd < _connections.Length; fd++)
         {
             if (_connections[fd] is { } conn)
             {
-                // A handler letting go later must not shut down whatever socket gets the number next.
-                conn.SuppressFin();
-                conn.MarkClosed();
-            }
-        }
-    }
-
-    // Close any still-open accepted sockets (the connection table is indexed by fd) so they don't
-    // leak when a host is disposed and recreated many times in one process - e.g. across a test run.
-    private void CloseAcceptedTcpSockets()
-    {
-        for (int fd = 0; fd < _connections.Length; fd++)
-        {
-            if (_connections[fd] != null)
-            {
-                close(fd);
-            }
-        }
-    }
-
-    // A flush the kernel had ends only once the kernel is done with its send (#221). A zero-copy one may still have its
-    // pages held until a notification nothing will read, so that connection leaves the table here and keeps its slab.
-    private void ReleaseAcceptedTcpConnections(bool canCancel)
-    {
-        for (int fd = 0; fd < _connections.Length; fd++)
-        {
-            if (_connections[fd] is { } conn && canCancel && conn.FlushSubmitted
-                && CancelAndWait(Tag(KindTcpSend, (ushort)conn.Generation, fd)))
-            {
-                conn.CompleteFlush();
-                if (conn.UseZc)
+                if (!conn.SweepClosed)
                 {
-                    _connections[fd] = null;
+                    TcpSweepClose(conn);
                 }
-            }
-        }
-    }
-
-    // Once every wake is done, while the ring is open: a connection its handler let go of goes back to the pool as a
-    // recycle would, and the teardown's last step frees it. One a handler still holds, or whose send the kernel may
-    // still be reading, keeps its memory, as a write into it would land in freed memory (#223).
-    private void ReturnReleasedTcpConnections()
-    {
-        for (int fd = 0; fd < _connections.Length; fd++)
-        {
-            if (_connections[fd] is not { } conn)
-            {
-                continue;
-            }
-
-            _connections[fd] = null;
-            if (conn.HandlerReleased && !conn.FlushSubmitted)
-            {
-                if (_incremental)
-                {
-                    TeardownConnectionBufRing(conn);
-                }
-
-                conn.Clear();
-                ReturnToPool(conn);
+                connect(fd, &unspec, (uint)sizeof(sockaddr_in));
             }
         }
     }

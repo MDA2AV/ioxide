@@ -15,7 +15,17 @@ internal sealed partial class IoxideTransport
         foreach (IPAddress address in addresses)
         {
             RingSocket ringSocket = RingSocket.CreateTcp(reactor, address.AddressFamily);
-            Task<int> connect = ringSocket.ConnectAsync(address, (ushort)port).AsTask();
+            Task<int> connect;
+            try
+            {
+                connect = ringSocket.ConnectAsync(address, (ushort)port).AsTask();
+            }
+            catch
+            {
+                ringSocket.Dispose();   // refused by a stopped reactor, which a reconnect keeps trying
+                throw;
+            }
+
             int result;
             try
             {

@@ -28,6 +28,10 @@
     <ProjectReference Include="../../ioxide/ioxide.csproj" />
   </ItemGroup>
 
+  <ItemGroup>
+    <InternalsVisibleTo Include="Ioxide.Tests.E2E" />
+  </ItemGroup>
+
 
   <ItemGroup>
     <!-- .NET 11 added System.Net.Security.TlsSession (SYSLIB5007, experimental). Every file here

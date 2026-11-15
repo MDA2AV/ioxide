@@ -25,7 +25,8 @@ internal static class Http2StreamedRequestTests
             var gate = new TaskCompletionSource();
             var chunks = new List<int>();
 
-            using var peer = new Peer(new Http2Options());
+            // A 4,000-byte window is credited in steps of a quarter of it: the two chunks make one.
+            using var peer = new Peer(new Http2Options { InitialWindowSize = 4000 });
             Task run = peer.Connection.RunAsync(async (_, body) =>
             {
                 await gate.Task;                       // hold the body unread, like a slow consumer
@@ -137,7 +138,8 @@ internal static class Http2StreamedRequestTests
             int seen = -1;
             bool? hasBody = null;
 
-            using var peer = new Peer(new Http2Options());
+            // A 1,600-byte window is credited in steps of 400: the first frame makes one.
+            using var peer = new Peer(new Http2Options { InitialWindowSize = 1600 });
             Task run = peer.Connection.RunAsync(request =>     // no body reader: the body comes whole
             {
                 seen = request.Body.Length;

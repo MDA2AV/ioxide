@@ -70,14 +70,15 @@ public sealed class PgConnection : IDisposable
         RingSocket socket = RingSocket.CreateTcp(host);
         var connection = new PgConnection(host, socket, options.MaxReceiveBytes);
         var deadline = new OpenDeadline(socket);
-        if (options.CommandTimeoutMs > 0)
-        {
-            host.SubmitTimeout(options.CommandTimeoutMs * 1_000_000L, deadline);
-        }
-
         bool connected = false;
         try
         {
+            // Inside the try: refused at a stop, it must still free the socket and the buffers.
+            if (options.CommandTimeoutMs > 0)
+            {
+                host.SubmitTimeout(options.CommandTimeoutMs * 1_000_000L, deadline);
+            }
+
             int rc = await socket.ConnectAsync(options.Host, options.Port);
             if (rc < 0)
             {
