@@ -91,7 +91,7 @@ public sealed unsafe partial class Reactor
     }
 
     // Record the owning thread: off-reactor callers detect themselves and go through the handoff
-    // queues. Thread-lifetime; nothing to uninstall.
+    // queues. Teardown takes both back, as the runtime gives a dead thread's id to a new one.
     private void BindReactorThread()
     {
         _reactorThreadId = Environment.CurrentManagedThreadId;
@@ -250,6 +250,11 @@ public sealed unsafe partial class Reactor
         {
             service.Free();
         }
+
+        // No thread is the reactor's from here: not this one, which may run on, nor a new one given its id once this one's
+        // Thread object is collected. -1 is no thread's id and not 0, so a caller still hands off, and finds it stopped.
+        _reactorThreadId = -1;
+        t_current = null;
     }
 
     // Both are no-ops unless that ring was registered: incremental mode leaves _bufRing null (one
