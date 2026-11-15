@@ -426,7 +426,8 @@ public sealed unsafe partial class Reactor
     }
 
     // As the sweep ends one it condemns, then aborted: connect to AF_UNSPEC is tcp_disconnect, which resets the peer and
-    // drops the send queue, so every send on it completes now, zero-copy notifications included.
+    // drops the send queue, so every send on it completes now, zero-copy notifications included. A kTLS socket refuses
+    // the abort and ends by the shutdown alone, which is enough: it never sends zero-copy.
     private void CloseTcpConnections()
     {
         sockaddr_in unspec = default;

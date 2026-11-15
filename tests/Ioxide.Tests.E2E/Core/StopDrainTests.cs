@@ -701,6 +701,26 @@ internal static class StopDrainTests
                 release.TrySetResult();
             }
         });
+
+        runner.Test("stop: a datagram queued in the pass that stops the reactor is sent before the stop closes its socket", () =>
+        {
+            int udpPort = TestServer.NextPort();
+            (_, _, Thread thread) = TestServer.StartConfigured(
+                (_, conn) => { conn.DecRef(); return Task.CompletedTask; },
+                new ServerConfig { Tcp = new TcpOptions(), Udp = new UdpOptions { Ports = [(ushort)udpPort] } },
+                r => r.OnDatagram = static (Reactor reactor, in UdpDatagram d) =>
+                {
+                    reactor.UdpSendTo(d.SocketFd, d.PeerAddr, d.PeerAddrLen, d.Payload);
+                    reactor.Stop();   // in the pass that queued the reply, where a stop from another thread can land too
+                });
+
+            using var udp = new Socket(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp);
+            udp.Connect(IPAddress.Loopback, udpPort);   // takes a reply from the reactor's own socket only
+            udp.Send("last"u8);
+            var reply = new byte[16];
+            Assert.True(udp.Poll(5_000_000, SelectMode.SelectRead) && udp.Receive(reply) == 4, "the reply queued in the pass that stopped the reactor was never sent");
+            Assert.True(thread.Join(ReturnsWithinMs), "the reactor did not stop");
+        });
     }
 
     private static readonly byte[] Payload = [.. Enumerable.Range(0, 1000).Select(i => (byte)('a' + i % 26))];

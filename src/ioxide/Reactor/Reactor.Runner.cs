@@ -132,6 +132,10 @@ public sealed unsafe partial class Reactor
         if (deadlineMs == 0)
         {
             deadlineMs = Native.MonotonicMs + StopDrainMs;
+            // Left queued past the closes, an entry would reach whatever takes its socket's number; a failed prep ends a submit early.
+            while (_ring.SubmitAndWait(0) > 0)
+            {
+            }
             CloseAll();
             DrainPostQ();   // what the stoppers and the closes woke: posted here, past the pass's own drain
             CancelClientOps();
@@ -273,7 +277,8 @@ public sealed unsafe partial class Reactor
     /// Requests the reactor to stop. Safe to call from any thread. From then on a ring op submitted on
     /// the reactor throws <see cref="ObjectDisposedException"/>. On its next pass the reactor runs the
     /// stoppers its clients registered (<see cref="AddStopper"/>), closes its listeners, aborts every
-    /// connection, so its peer gets a reset and nothing still queued is sent, and cancels every ring op
+    /// connection, so its peer gets a reset and nothing still queued is sent (a kTLS connection is shut
+    /// down instead, and what it queued may still go out), and cancels every ring op
     /// once, so every handler's reads, writes and waits end. The loop then runs on, posts and switches
     /// included, until every connection has been let go and every ring op has completed, or about a
     /// second has passed, and <see cref="Run"/> frees all the reactor owns on its thread. A connection a
