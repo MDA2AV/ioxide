@@ -1,3 +1,5 @@
+using System.Runtime.CompilerServices;
+
 namespace ioxide.nghttp3;
 
 /// <summary>
@@ -78,7 +80,7 @@ public sealed partial class Nghttp3Connection
                 response = new Nghttp3Response { Status = 500 };
             }
 
-            QueueResponse(request.StreamId, response);
+            QueueAnswer(request, response);
             ReleaseRequest(request);   // sync handler returned - the contract just ended
         }
         _readyStreamIds.Clear();
@@ -113,7 +115,7 @@ public sealed partial class Nghttp3Connection
             if (pending.IsCompletedSuccessfully)
             {
                 RetireBody(request);
-                QueueResponse(streamId, pending.Result);   // fast path: the handler never awaited
+                QueueAnswer(request, pending.Result);   // fast path: the handler never awaited
                 RequestHandled(request);
             }
             else
@@ -141,13 +143,12 @@ public sealed partial class Nghttp3Connection
         }
 
         await new ReactorSwitch(Reactor);   // back on the reactor, wherever the handler finished
-        long streamId = request.StreamId;
         request.HandlerDone = true;
         RetireBody(request);
 
         if (_nghttp3Handle != 0 && !_protocolFailed)
         {
-            QueueResponse(streamId, response);
+            QueueAnswer(request, response);
             PumpEgress();
         }
         StopReadingIfAnsweredEarly(request);
@@ -157,5 +158,25 @@ public sealed partial class Nghttp3Connection
         {
             ReleaseRequest(request);
         }
+    }
+
+    // A null answer has submitted nothing, so it gets what a handler that threw gets. Tested, not caught: a catch
+    // around the submit stops the JIT inlining its P/Invoke.
+    private void QueueAnswer(Nghttp3Request request, Nghttp3Response response)
+    {
+        if (response is null)
+        {
+            AnswerNull(request);
+            return;
+        }
+        QueueResponse(request.StreamId, response);
+    }
+
+    // Out of line, as only a handler that answered null comes here.
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private void AnswerNull(Nghttp3Request request)
+    {
+        ReportHandlerFault(request, new NullReferenceException());
+        QueueResponse(request.StreamId, new Nghttp3Response { Status = 500 });
     }
 }

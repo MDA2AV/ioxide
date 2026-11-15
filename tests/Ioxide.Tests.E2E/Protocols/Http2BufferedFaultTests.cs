@@ -8,8 +8,8 @@ namespace Ioxide.Tests;
 /// <summary>
 /// A whole-response HTTP/2 handler that throws, on both stacks. Throwing from its task or before it
 /// has one - as every synchronous handler does - answers 500 on its own stream, and every other
-/// stream on the connection carries on. On ioxide.http2 so does a handler that answers null, which
-/// cannot be written.
+/// stream on the connection carries on. So does a handler that answers null, which cannot be
+/// written.
 /// </summary>
 internal static class Http2BufferedFaultTests
 {
@@ -44,32 +44,32 @@ internal static class Http2BufferedFaultTests
                 Assert.Equal("200: slow", Describe(slow));
                 Assert.True(Volatile.Read(ref server.Connections) == 1, WholeConnection(server));
             });
+
+            runner.Test($"h2 fault ({stack}): a synchronous handler that answers null answers 500, and the connection serves on", () =>
+            {
+                var server = new FaultServer();
+                int port = Start(ng, server, synchronous: true);
+                using HttpClient client = H2Client();
+
+                Assert.Equal("500: ", Fetch(client, port, "/null"));
+                Assert.Equal("200: ok", Fetch(client, port, "/ok"));
+                Assert.True(Volatile.Read(ref server.Connections) == 1, WholeConnection(server));
+            });
+
+            runner.Test($"h2 fault ({stack}): a request in flight beside a handler that answers null without parking is answered", () =>
+            {
+                var server = new FaultServer();
+                int port = Start(ng, server, synchronous: false);
+                using HttpClient client = H2Client();
+
+                Task<HttpResponseMessage> slow = client.GetAsync($"http://127.0.0.1:{port}/slow");
+                Assert.True(server.SlowArrived.Task.Wait(5_000), "/slow never reached its handler");
+
+                Assert.Equal("500: ", Fetch(client, port, "/null"));
+                Assert.Equal("200: slow", Describe(slow));
+                Assert.True(Volatile.Read(ref server.Connections) == 1, WholeConnection(server));
+            });
         }
-
-        runner.Test("h2 fault (ioxide.http2): a synchronous handler that answers null answers 500, and the connection serves on", () =>
-        {
-            var server = new FaultServer();
-            int port = Start(native: false, server, synchronous: true);
-            using HttpClient client = H2Client();
-
-            Assert.Equal("500: ", Fetch(client, port, "/null"));
-            Assert.Equal("200: ok", Fetch(client, port, "/ok"));
-            Assert.True(Volatile.Read(ref server.Connections) == 1, WholeConnection(server));
-        });
-
-        runner.Test("h2 fault (ioxide.http2): a request in flight beside a handler that answers null without parking is answered", () =>
-        {
-            var server = new FaultServer();
-            int port = Start(native: false, server, synchronous: false);
-            using HttpClient client = H2Client();
-
-            Task<HttpResponseMessage> slow = client.GetAsync($"http://127.0.0.1:{port}/slow");
-            Assert.True(server.SlowArrived.Task.Wait(5_000), "/slow never reached its handler");
-
-            Assert.Equal("500: ", Fetch(client, port, "/null"));
-            Assert.Equal("200: slow", Describe(slow));
-            Assert.True(Volatile.Read(ref server.Connections) == 1, WholeConnection(server));
-        });
     }
 
     private static string WholeConnection(FaultServer server)
@@ -82,7 +82,7 @@ internal static class Http2BufferedFaultTests
         public bool BoomSeen;
     }
 
-    // "/boom" throws before the handler returns, on ioxide.http2 "/null" answers null without parking,
+    // "/boom" throws before the handler returns, "/null" answers null without parking,
     // "/slow" parks until either has been dispatched, anything else answers "ok". Synchronous serves
     // through the synchronous overload; otherwise through the asynchronous one, with a lambda that
     // is not async and so throws, or answers, before its task.
@@ -99,10 +99,10 @@ internal static class Http2BufferedFaultTests
                     await (synchronous
                         ? connection.RunAsync(request => Answer(request.Path) is { } body
                             ? new Nghttp2Response { Status = 200, Body = body }
-                            : throw new InvalidOperationException("the handler failed"))
+                            : IsNull(request.Path) ? null! : throw new InvalidOperationException("the handler failed"))
                         : connection.RunAsync(request => Answer(request.Path) is { } body
                             ? Park(timer, server, body, b => new Nghttp2Response { Status = 200, Body = b })
-                            : throw new InvalidOperationException("the handler failed")));
+                            : IsNull(request.Path) ? new ValueTask<Nghttp2Response>((Nghttp2Response)null!) : throw new InvalidOperationException("the handler failed")));
                 }
                 else
                 {
