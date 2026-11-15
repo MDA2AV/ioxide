@@ -50,6 +50,7 @@ internal static class Program
         // Areas reserved for the failing-test review pass; empty until one lands.
         QuicIdentityCapTests.Register(runner);
         QuicTeardownWireTests.Register(runner);
+        QuicErrorCodeTests.Register(runner);
         QuicReadTimeoutTests.Register(runner);
         QuicUnansweredStreamTests.Register(runner);
         QuicDeferredFaultTests.Register(runner);
