@@ -358,16 +358,6 @@ internal static class TcpTimeoutTests
             Assert.Equal((long)body.Length, total);
         });
 
-        runner.Test("tcp/exit: a handler that lets go after its reactor stopped leaves a reused fd alone",
-            () => ReleaseAfterStop(static conn => conn.DecRef()));
-
-        runner.Test("tcp/half-close: a ShutdownWrite after its reactor stopped leaves a reused fd alone",
-            () => ReleaseAfterStop(static conn =>
-            {
-                conn.ShutdownWrite();
-                conn.DecRef();
-            }));
-
         runner.Test("tcp/half-close: ShutdownWrite ends the response now, and the read side stays open", () =>
         {
             // HTTP's Connection: close. The handler keeps the connection after its last response, so
@@ -721,87 +711,6 @@ internal static class TcpTimeoutTests
     private const int FGetFd = 1;
 
     private static bool IsOpen(int fd) => fcntl(fd, FGetFd) != -1;
-
-    // Teardown closes every fd without releasing the reactor's ref, so a later release still sees a
-    // live connection. Its FIN must not reach whichever socket took the number since.
-    private static void ReleaseAfterStop(Action<TcpConnection> release)
-    {
-        var captured = new TaskCompletionSource<TcpConnection>(TaskCreationOptions.RunContinuationsAsynchronously);
-        var gate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-        var released = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-
-        (int port, Reactor reactor, Thread thread) = TestServer.StartConfigured(async (_, conn) =>
-        {
-            if (!await IsThisTestsConnection(conn))
-            {
-                conn.DecRef();
-                return;
-            }
-
-            captured.TrySetResult(conn);
-            await gate.Task.ConfigureAwait(false);   // released off the reactor, after it stopped
-            release(conn);
-            released.TrySetResult();
-        }, new ServerConfig
-        {
-            RecvBufferSize = 4096,
-            RecvSlots = 256,
-            Tcp = new TcpOptions { WriteSlabSize = 16 * 1024, PoolMax = 64, RecvQueueEntries = 64 },
-        });
-
-        var listener = new TcpListener(IPAddress.Loopback, 0);   // opened first, so not the number under test
-        listener.Start();
-
-        using var client = new TcpClient();
-        client.Connect("127.0.0.1", port);
-        client.GetStream().Write("hi"u8);
-        Assert.True(captured.Task.Wait(5_000), "the handler never saw the test's connection");
-        int fd = captured.Task.Result.ClientFd;
-
-        reactor.Stop();
-        Assert.True(thread.Join(5_000), "the reactor did not stop");
-
-        // Linux hands out the lowest free number, so fd is reused by one of the next sockets.
-        var keep = new List<Socket>();
-        Socket? victim = null, peer = null;
-        for (int i = 0; i < 64 && victim is null; i++)
-        {
-            var c = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp);
-            c.Connect((IPEndPoint)listener.LocalEndpoint);
-            Socket a = listener.AcceptSocket();
-            if ((int)c.Handle == fd) { victim = c; peer = a; }
-            else if ((int)a.Handle == fd) { victim = a; peer = c; }
-            else { keep.Add(c); keep.Add(a); }
-        }
-
-        try
-        {
-            Assert.True(victim is not null, $"fd {fd} was not handed out again within 64 sockets");
-            peer!.ReceiveTimeout = 2_000;
-
-            gate.TrySetResult();
-            Assert.True(released.Task.Wait(5_000), "the handler never released");
-
-            string outcome;
-            try
-            {
-                victim!.Send("b"u8.ToArray());
-                outcome = peer.Receive(new byte[1]) == 1 ? "ok" : "eof on the unrelated socket";
-            }
-            catch (SocketException e)
-            {
-                outcome = $"the unrelated socket failed: {e.SocketErrorCode}";
-            }
-            Assert.Equal("ok", outcome);
-        }
-        finally
-        {
-            foreach (Socket k in keep) k.Dispose();
-            victim?.Dispose();
-            peer?.Dispose();
-            listener.Stop();
-        }
-    }
 
     /// <summary>
     /// Reads until this connection delivers actual bytes, and says whether it ever did.

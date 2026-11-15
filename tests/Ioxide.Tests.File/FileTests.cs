@@ -1,4 +1,6 @@
+using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
+using ioxide;
 using ioxide.file;
 
 namespace Ioxide.Tests;
@@ -56,6 +58,36 @@ internal static class FileTests
             Assert.Equal(BigAsset, body);
         });
 
+        runner.Test("file: a reactor's stop disposes its reader pools: an idle reader is freed, a renter waiting and a rent made after fail with ObjectDisposedException, and a reader given back after is freed", () =>
+        {
+            AssetReader idle = null!, held = null!;
+            RingPool<AssetReader> busy = null!;
+            Task<string> waiting = null!;
+            (_, Reactor reactor, Thread thread) = TestServer.StartConfigured(
+                static (_, conn) => { conn.DecRef(); return Task.CompletedTask; },
+                new ServerConfig { Tcp = new TcpOptions() },
+                r =>
+                {
+                    RingPool<AssetReader> quiet = AssetReader.CreatePool(r, readers: 1, bufferBytes: 4096);
+                    idle = quiet.RentAsync().Result;   // idle readers are handed out at once
+                    quiet.Return(idle);
+
+                    busy = AssetReader.CreatePool(r, readers: 1, bufferBytes: 4096);
+                    held = busy.RentAsync().Result;
+                    waiting = EndOf(busy.RentAsync);
+                });
+
+            reactor.Stop();
+            Assert.True(thread.Join(10_000), "the reactor did not stop");
+            string waited = waiting.Wait(5_000) ? waiting.Result : "still waiting";
+            busy.Return(held);
+            Task<string> late = EndOf(busy.RentAsync);
+            string after = late.Wait(5_000) ? late.Result : "still waiting";
+
+            Assert.Equal("idle freed: True, waiting: ObjectDisposedException, given back after the stop freed: True, rent after: ObjectDisposedException",
+                $"idle freed: {DisposedOf(idle) != 0}, waiting: {waited}, given back after the stop freed: {DisposedOf(held) != 0}, rent after: {after}");
+        });
+
         runner.Test("file: a child process does not inherit a RingFile's descriptor", () =>
         {
             string dir = SampleAssets();
@@ -83,6 +115,23 @@ internal static class FileTests
             Assert.True(held.Contains(control), "control: the child did not inherit a plain file descriptor, so a leak would go unseen");
             Assert.True(!held.Contains(target), "the child inherited the RingFile's descriptor");
         });
+    }
+
+    [UnsafeAccessor(UnsafeAccessorKind.Field, Name = "_disposed")]
+    private static extern ref int DisposedOf(AssetReader reader);
+
+    // How a rent ended: the type of what it threw, or that it got a reader.
+    private static async Task<string> EndOf(Func<ValueTask<AssetReader>> rent)
+    {
+        try
+        {
+            await rent();
+            return "rented";
+        }
+        catch (Exception e)
+        {
+            return e.GetType().Name;
+        }
     }
 
     [DllImport("libc")]

@@ -25,6 +25,9 @@ public sealed partial class Http3Connection
     private readonly Http3Options _options;
     private bool _fatal;
 
+    // RFC 9114 H3_NO_ERROR: what a STOP_SENDING carries when the response did not need the rest of the request.
+    private const ulong H3NoError = 0x0100;
+
     // RFC 9114 section 8.1. The code a protocol error closes the connection with.
     private const ulong H3GeneralProtocolError = 0x0101;
     private const ulong H3ClosedCriticalStream = 0x0104;
@@ -90,7 +93,7 @@ public sealed partial class Http3Connection
         public int HeadersLen;
 
         public bool HeadersDone;                        // first HEADERS decoded (later ones = trailers)
-        public bool Finished;                           // fin seen and processed
+        public bool Finished;                           // fin seen and processed, or the stream reset by this side
 
         // The stream was paced, so the engine credited none of what arrived since: the parser
         // credits whatever it does not hand to the reader. That includes what it drops after
@@ -714,6 +717,7 @@ public sealed partial class Http3Connection
                 Console.Error.WriteLine($"[ioxide.http3] request handler faulted: {e.GetBaseException().Message}");
                 RetireBody(rs);
                 Submit(sid, new Http3Response { Status = 500 });
+                StopReadingIfAnsweredEarly(rs);
                 Recycle(rs);
                 continue;
             }
@@ -723,6 +727,7 @@ public sealed partial class Http3Connection
                 RetireBody(rs);
                 Http3Response response = pending.Result;   // once: a ValueTask is consumed by reading it
                 SubmitAnswer(sid, response);
+                StopReadingIfAnsweredEarly(rs);
                 Recycle(rs);
             }
             else
@@ -753,6 +758,7 @@ public sealed partial class Http3Connection
             return;
         }
         SubmitAnswer(rs.Request.StreamId, resp);
+        StopReadingIfAnsweredEarly(rs);
         Recycle(rs);
     }
 
@@ -803,6 +809,27 @@ public sealed partial class Http3Connection
         {
             _quicConnection.SetStreamPaced(rs.Request.StreamId, false);
         }
+    }
+
+    // Once the response is handed over: STOP_SENDING with H3_NO_ERROR stops an upload still arriving and leaves the client the response (RFC 9114 4.1).
+    private void StopReadingIfAnsweredEarly(ReqStream rs)
+    {
+        // Its fin or this side's reset ended the read side, and the peer's reset or the stream's close took it out of _requests.
+        if (rs.Finished || IsBroken || !_requests.ContainsKey(rs.Request.StreamId))
+        {
+            return;
+        }
+        _quicConnection.StopReading(rs.Request.StreamId, H3NoError);
+    }
+
+    // A streamed response's reset, which stops its request's read side as well.
+    internal void ResetResponse(long streamId, ulong code)
+    {
+        if (_requests.TryGetValue(streamId, out ReqStream? rs))
+        {
+            rs.Finished = true;
+        }
+        _quicConnection.ResetStream(streamId, code);
     }
 
     // --- egress --------------------------------------------------------------------------------

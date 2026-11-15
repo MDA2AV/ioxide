@@ -28,6 +28,8 @@ public sealed unsafe class TlsClientContext : IDisposable
 
     internal nint Handle => _ctx;
 
+    internal bool IsDisposed => _disposed;
+
     internal TlsClientOptions Options { get; }
 
     private TlsClientContext(nint ctx, TlsClientOptions options)

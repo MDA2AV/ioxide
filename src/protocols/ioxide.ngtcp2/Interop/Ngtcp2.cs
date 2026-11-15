@@ -173,6 +173,9 @@ internal static unsafe class Ngtcp2
         long streamId, Vec* data, nuint dataCount, int fin,
         long* pConsumed, ulong ts);
 
+    // RFC 9000 16: an application error code is a varint, and ngtcp2's encoder asserts, aborting the process, on one past this.
+    internal const ulong NGTCP2_MAX_VARINT = (1UL << 62) - 1;
+
     [DllImport(Lib)] internal static extern nint iq_conn_close(
         nint conn, ulong appErrorCode, byte* dest, nuint destLen, ulong ts);
 

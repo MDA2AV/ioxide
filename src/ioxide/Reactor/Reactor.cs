@@ -78,6 +78,9 @@ public sealed unsafe partial class Reactor
     private readonly int _poolMax;
     private readonly Stack<TcpConnection> _pool;
 
+    // Accepted and not yet recycled, in the table or not: a stop runs on until none is left.
+    private int _tcpLive;
+
     // Every TcpConnection life on this reactor takes the next value, so two lives never share a generation (#416).
     private int _tcpGeneration;
 
@@ -98,7 +101,6 @@ public sealed unsafe partial class Reactor
     private const int EAGAIN = 11;
     private const int EBUSY  = 16;
     private const int ETIME  = 62;
-    private const int ENOENT = 2;
 
     public Reactor(int id, ServerConfig config)
     {

@@ -156,6 +156,7 @@ internal static class OffReactorH2FixTests
         AssertEcho(client, port);
         calls.AssertAllOff();
         transport.AssertOnReactor();
+        transport.AssertPrefaceFirst();
     }
 
     // Reads the first chunk, then parks for the next until the teardown wakes it: where that ran is the verdict.
@@ -289,12 +290,15 @@ internal static class OffReactorH2FixTests
     /// flushes complete on the thread pool, as a default Pipe completes a read, and a flush it held back,
     /// there. With fromReactorRead a connection counts once a read of its completes on the reactor: begun on
     /// the pool it writes its SETTINGS from there, before it can know its reactor, and the harness's listen
-    /// probe, closed by then, never learns it.
+    /// probe, closed by then, never learns it. Such a connection makes no read until that flush is done, whose
+    /// completion brings it to the reactor: a read made before, from the pool, completes there at once when the
+    /// client sent its request with the preface.
     /// </summary>
     private sealed class Transport(bool viaPool, bool fromReactorRead)
     {
         private int _off;
         private int _faultReads;
+        private int _readsBeforePreface;
 
         // From now on a read that completes throws, on the thread pool, as a pipe whose writer failed does.
         public void FaultReads() => Volatile.Write(ref _faultReads, 1);
@@ -304,6 +308,10 @@ internal static class OffReactorH2FixTests
         public void AssertOnReactor() =>
             Assert.True(Volatile.Read(ref _off) == 0, $"the transport was only called from its reactor ({_off} calls from elsewhere)");
 
+        public void AssertPrefaceFirst() =>
+            Assert.True(Volatile.Read(ref _readsBeforePreface) == 0,
+                $"the connection read only once its SETTINGS were out ({_readsBeforePreface} reads made before that flush completed)");
+
         // One connection's transport.
         private sealed class Duplex : IDuplexPipe
         {
@@ -311,6 +319,7 @@ internal static class OffReactorH2FixTests
             private readonly Transport _owner;
             private readonly bool _viaPool;
             private int _counting;
+            private int _prefaceOut;
 
             public Duplex(IDuplexPipe inner, Reactor reactor, Transport owner, bool viaPool, bool counting)
             {
@@ -330,6 +339,15 @@ internal static class OffReactorH2FixTests
                 if (Volatile.Read(ref _counting) == 1 && !_reactor.OnReactorThread)
                 {
                     Interlocked.Increment(ref _owner._off);
+                }
+            }
+
+            public void NoteRead()
+            {
+                Note();
+                if (Volatile.Read(ref _prefaceOut) == 0)
+                {
+                    Interlocked.Increment(ref _owner._readsBeforePreface);
                 }
             }
 
@@ -354,6 +372,7 @@ internal static class OffReactorH2FixTests
             public async ValueTask<FlushResult> Flush(ValueTask<FlushResult> pending)
             {
                 FlushResult flushed = await pending;
+                Volatile.Write(ref _prefaceOut, 1);
                 if (_viaPool)
                 {
                     await LeaveReactor();
@@ -366,13 +385,13 @@ internal static class OffReactorH2FixTests
         {
             public override ValueTask<ReadResult> ReadAsync(CancellationToken cancellationToken = default)
             {
-                owner.Note();
+                owner.NoteRead();
                 return owner.Read(inner.ReadAsync(cancellationToken));
             }
 
             public override bool TryRead(out ReadResult result)
             {
-                owner.Note();
+                owner.NoteRead();
                 return inner.TryRead(out result);
             }
 

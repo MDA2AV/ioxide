@@ -41,6 +41,7 @@ internal static class Program
         Http2StreamedBodyTests.Register(runner);
         Http2FlowControlTests.Register(runner);
         Http2ReceiveWindowTests.Register(runner);
+        Http2CreditStepTests.Register(runner);
         Http2BufferedCreditTests.Register(runner);
         Http2EarlyAnswerTests.Register(runner);
         Http2EarlyAnswerGuardTests.Register(runner);
@@ -57,6 +58,7 @@ internal static class Program
         SpillSegmentTests.Register(runner);
         RecvQueueExtendTests.Register(runner);
         StoppedPostTests.Register(runner);
+        StoppedReturnTests.Register(runner);
         HttpClientGrowthTests.Register(runner);
 
         return runner.Summary();

@@ -208,7 +208,7 @@ public sealed class Http3ResponseWriter : IBufferWriter<byte>
         _staged = 0;
         if (!_gone)
         {
-            _quic.ResetStream(_streamId, H3InternalError);   // never on a stream the peer already stopped
+            _connection.ResetResponse(_streamId, H3InternalError);   // never on a stream the peer already stopped
         }
 
         if (_staging.Length > 0)

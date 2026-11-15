@@ -137,6 +137,11 @@ public sealed unsafe partial class Reactor
         SpinWait sw = default;
         while (!_returnQInc!.TryEnqueue(packed))
         {
+            // Nothing drains the queue past the stop.
+            if (_postsClosed)
+            {
+                return;
+            }
             sw.SpinOnce();
         }
         Wake();

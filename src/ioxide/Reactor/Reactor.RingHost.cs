@@ -53,6 +53,17 @@ public sealed unsafe partial class Reactor : IRingHost
 
     internal void OwnTlsService(TlsService service) => (_tlsServices ??= []).Add(service);
 
+    // One per client started on this reactor, several of one type included: the stop runs them first, once.
+    private List<Action>? _stoppers;
+
+    /// <summary>
+    /// Register a callback the reactor runs once on its thread when it stops, before it closes its
+    /// listeners and connections. Call from <c>OnStart</c>. A client started on the reactor disposes
+    /// itself there: it closes its idle connections, fails the requests waiting on it and frees what
+    /// it holds, while the reactor can still run what that wakes.
+    /// </summary>
+    public void AddStopper(Action stopper) => (_stoppers ??= []).Add(stopper);
+
     /// <summary>
     /// Runs on the reactor thread before the loop starts - open ring-native clients here.
     /// </summary>
@@ -66,8 +77,11 @@ public sealed unsafe partial class Reactor : IRingHost
     /// <summary>
     /// Raised on the reactor's own thread when it is ending because of a fault rather than a
     /// <see cref="Stop"/> - a kernel that refuses to create the ring included. It runs before the
-    /// teardown: the listeners, connections and ring are closed only once it returns. Handle it to
-    /// log, restart, or bring the process down deliberately.
+    /// teardown, which drains nothing: once it returns, the clients started on the reactor stop, its
+    /// listeners close and its connections are aborted, and the ring and what nothing holds are freed.
+    /// A connection still open stays allocated until the process exits, its descriptor and the
+    /// receive memory it can reach included, since no completion will let it go. Handle it to log,
+    /// restart, or bring the process down deliberately.
     /// </summary>
     /// <remarks>
     /// Without a handler the exception propagates out of <see cref="Run"/>, which on a bare
@@ -124,6 +138,7 @@ public sealed unsafe partial class Reactor : IRingHost
             return;
         }
 
+        ObjectDisposedException.ThrowIf(_stopRequested, this);
         SubmitTimeoutCore(nanoseconds, completion);
     }
 
@@ -154,6 +169,7 @@ public sealed unsafe partial class Reactor : IRingHost
             return;
         }
 
+        ObjectDisposedException.ThrowIf(_stopRequested, this);
         SubmitClientOpCore(opcode, fd, buffer, length, offset, completion);
     }
 
@@ -165,8 +181,8 @@ public sealed unsafe partial class Reactor : IRingHost
     [MethodImpl(MethodImplOptions.NoInlining)]
     private void HandOff(byte opcode, int fd, nint buffer, int length, long offset, IRingCompletion completion)
     {
-        // Nothing submits it after a stop. Throwing, as a ReactorSwitch does, also ends a loop that ignores an error result.
-        ObjectDisposedException.ThrowIf(_postsClosed, this);
+        // From the stop on nothing is submitted. Throwing, as a ReactorSwitch does, also ends a loop that ignores an error result.
+        ObjectDisposedException.ThrowIf(_stopRequested, this);
 
         _remoteOps.Enqueue(new RemoteOp(opcode, fd, buffer, length, offset, completion));
         Wake();
@@ -191,17 +207,14 @@ public sealed unsafe partial class Reactor : IRingHost
         }
     }
 
-    // At stop, each once the kernel is done with it. A waiter that submits again reuses its slot, past this loop.
-    private void CompleteParkedOps()
+    // The stop's: each op still in the table ends through its own completion, as a cancelled one does while running.
+    private void CancelClientOps()
     {
-        int slots = _opTargets.Length;
-        for (int slot = 0; slot < slots; slot++)
+        for (int slot = 0; slot < _opTargets.Length; slot++)
         {
-            if (_opTargets[slot] is { } target && CancelAndWait(Tag(KindClient, 0, slot)))
+            if (_opTargets[slot] != null)
             {
-                _opTargets[slot] = null;
-                _opFree[_opFreeTop++] = slot;
-                target.Complete(-ECANCELED);
+                SubmitCancel(Tag(KindClient, 0, slot));
             }
         }
     }
@@ -234,9 +247,14 @@ public sealed unsafe partial class Reactor : IRingHost
     {
         while (_remoteOps.TryDequeue(out RemoteOp op))
         {
+            // Handed over before the stop and taken after it: submitted now, it could miss the stop's one cancel.
+            if (_stopRequested)
+            {
+                op.Completion.Complete(-ECANCELED);
+            }
             // The only place the two submissions have to be told apart, and off the hot path:
             // once per cross-thread handover, not once per op.
-            if (op.Opcode == IORING_OP_TIMEOUT)
+            else if (op.Opcode == IORING_OP_TIMEOUT)
             {
                 SubmitTimeoutCore(op.Offset, op.Completion);
             }

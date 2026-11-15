@@ -467,14 +467,23 @@ public sealed partial class Http2Connection
         rest.CopyTo(writer.GetSpan(rest.Length));
         writer.Advance(rest.Length);
 
-        _ = CompleteParkedAsync(writer);
+        // Read before the retire takes the stream out of _streams, which leaves a request still arriving here for the rest's end to reset.
+        bool arriving = _streams.TryGetValue(streamId, out PendingRequest? pending) && !pending.RequestEnded;
+        _ = CompleteParkedAsync(writer, arriving);
     }
 
-    private async Task CompleteParkedAsync(Http2ResponseWriter writer)
+    private async Task CompleteParkedAsync(Http2ResponseWriter writer, bool arriving)
     {
         try
         {
             await writer.CompleteAsync();
+
+            // After its END_STREAM, so the client keeps the answer and stops uploading (RFC 9113 8.1); not once the stream is reset.
+            if (arriving && IsResponseLive(writer.StreamId))
+            {
+                ResetStream(writer.StreamId, Http2Error.NoError);
+                await MaybeFlushAsync();
+            }
         }
         catch
         {

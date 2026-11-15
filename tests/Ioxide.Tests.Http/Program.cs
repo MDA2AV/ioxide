@@ -20,6 +20,7 @@ internal static class Program
         HttpClientRequestHeadTests.Register(runner);
         HttpClientConnectTests.Register(runner);
         RingHttpClientTests.Register(runner);
+        HttpClientStopTests.Register(runner);
         HttpClientChunkedTests.Register(runner);
         HttpClientResponseLimitTests.Register(runner);
         HttpClientHttp10Tests.Register(runner);
