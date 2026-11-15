@@ -77,8 +77,11 @@ public sealed unsafe partial class Reactor : IRingHost
     /// <summary>
     /// Raised on the reactor's own thread when it is ending because of a fault rather than a
     /// <see cref="Stop"/> - a kernel that refuses to create the ring included. It runs before the
-    /// teardown: the listeners, connections and ring are closed only once it returns. Handle it to
-    /// log, restart, or bring the process down deliberately.
+    /// teardown, which drains nothing: once it returns, the clients started on the reactor stop, its
+    /// listeners close and its connections are aborted, and the ring and what nothing holds are freed.
+    /// A connection still open stays allocated until the process exits, its descriptor and the
+    /// receive memory it can reach included, since no completion will let it go. Handle it to log,
+    /// restart, or bring the process down deliberately.
     /// </summary>
     /// <remarks>
     /// Without a handler the exception propagates out of <see cref="Run"/>, which on a bare
