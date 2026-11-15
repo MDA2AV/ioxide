@@ -38,6 +38,7 @@ internal static class Program
         Http2RequestHeaderTests.Register(runner);
         Http2RequestReuseTests.Register(runner);
         Nghttp2RequestReuseTests.Register(runner);
+        Nghttp2HasBodyTests.Register(runner);
         Http2StreamedBodyTests.Register(runner);
         Http2FlowControlTests.Register(runner);
         Http2ReceiveWindowTests.Register(runner);

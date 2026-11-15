@@ -112,15 +112,22 @@ public sealed partial class Nghttp2Connection
     }
 
     [UnmanagedCallersOnly]
-    private static unsafe void CallbackEndHeaders(void* user, int streamId)
+    private static unsafe void CallbackEndHeaders(void* user, int streamId, int endStream)
     {
         try
         {
+            Nghttp2Connection connection = From(user);
+            if (!connection._pending.TryGetValue(streamId, out PendingRequest? pending))
+            {
+                return;
+            }
+
+            // Or-ed in, so trailers cannot clear it: a block after the first must end the stream (RFC 9113 8.1), and nghttp2 resets one that does not.
+            pending.HasBody |= endStream == 0;
+
             // A buffered request is not dispatchable until the stream ends, because a body may still
             // follow. A streamed one is dispatched here, once: trailers end a header block too.
-            Nghttp2Connection connection = From(user);
-            if (connection._streamBodies &&
-                connection._pending.TryGetValue(streamId, out PendingRequest? pending) && pending.BodyReader is null)
+            if (connection._streamBodies && pending.BodyReader is null)
             {
                 pending.BodyReader = new Nghttp2BodyReader(connection, streamId);
                 connection._readyThisPass.Enqueue(pending);

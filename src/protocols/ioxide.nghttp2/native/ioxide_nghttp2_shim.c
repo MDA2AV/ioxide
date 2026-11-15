@@ -36,7 +36,8 @@ typedef struct ih2_callbacks {
     void (*on_header)(void *user, int32_t stream_id,
                       const uint8_t *name, size_t namelen,
                       const uint8_t *value, size_t valuelen);
-    void (*on_end_headers)(void *user, int32_t stream_id);
+    /* end_stream: the block came with END_STREAM, so no DATA follows it. */
+    void (*on_end_headers)(void *user, int32_t stream_id, int end_stream);
     void (*on_data)(void *user, int32_t stream_id, const uint8_t *data, size_t datalen);
     void (*on_end_stream)(void *user, int32_t stream_id);
     /* Stream died without completing (RST_STREAM, GOAWAY, connection error). */
@@ -138,7 +139,8 @@ static int on_frame_recv(nghttp2_session *session, const nghttp2_frame *frame, v
          frame->headers.cat == NGHTTP2_HCAT_RESPONSE ||
          frame->headers.cat == NGHTTP2_HCAT_HEADERS) &&
         c->cbs.on_end_headers != NULL) {
-        c->cbs.on_end_headers(c->user, frame->hd.stream_id);
+        /* The HEADERS frame's own flag: nghttp2 merges only END_HEADERS in from a CONTINUATION (RFC 9113 6.10). */
+        c->cbs.on_end_headers(c->user, frame->hd.stream_id, (frame->hd.flags & NGHTTP2_FLAG_END_STREAM) != 0);
     }
 
     /* END_STREAM can ride a HEADERS frame (bodyless response) or a DATA frame. */
