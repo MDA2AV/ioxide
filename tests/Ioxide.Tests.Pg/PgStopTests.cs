@@ -82,6 +82,25 @@ internal static class PgStopTests
             Assert.Equal("waiting: ObjectDisposedException, connections closed: 1",
                 $"waiting: {(waiting.Wait(5_000) ? waiting.Result : "still waiting")}, connections closed: {ClosedWithin(ref closed, 1)}");
         });
+
+        runner.Test("pg: a connection opened on a stopping reactor fails with ObjectDisposedException and leaves no socket open", () =>
+        {
+            string outcome = "the stopper never ran";
+            (_, Reactor reactor, Thread thread) = TestServer.StartConfigured(
+                (_, connection) => { connection.DecRef(); return Task.CompletedTask; },
+                new ServerConfig { Tcp = new TcpOptions() },
+                r => r.AddStopper(() =>
+                {
+                    // On the reactor once its stop has begun, as a handler the stop wakes would open one.
+                    int before = FdCount.Stable();
+                    Task<PgConnection>[] opens = [.. Enumerable.Range(0, 8).Select(_ => PgConnection.ConnectAsync(r, Options(TestServer.DeadPort()) with { CommandTimeoutMs = 5_000 }))];
+                    outcome = $"{opens[^1].Exception?.InnerException?.GetType().Name ?? opens[^1].Status.ToString()}, sockets left open: {FdCount.Stable() - before}";
+                }));
+
+            reactor.Stop();
+            Assert.True(thread.Join(10_000), "the reactor did not stop");
+            Assert.Equal("ObjectDisposedException, sockets left open: 0", outcome);
+        });
     }
 
     private static async Task<string> DisposedWhileOpening(Reactor r, Func<int> accepted, Func<int> closed, ManualResetEventSlim answer, int port)
