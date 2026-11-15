@@ -109,6 +109,8 @@ internal static class StopDrainTests
 
                     var watch = Stopwatch.StartNew();
                     reactor.Stop();
+                    Assert.True(SpinWait.SpinUntil(() => conn.IsClosed, 5_000), "the stop never closed the connection");
+                    Assert.Throws<ObjectDisposedException>(() => _ = new RingTimer(reactor).DelayAsync(600_000), nameof(Reactor));   // during the drain too
                     Assert.True(thread.Join(5 * DrainMs), "the stop never ended, with a handler that never lets go");
                     Assert.True(watch.ElapsedMilliseconds >= DrainMs - 100, $"the stop ended after {watch.ElapsedMilliseconds} ms, before its deadline");
                     Assert.True(SocketOf(conn.ClientFd) == socket, $"after the stop fd {conn.ClientFd} names {SocketOf(conn.ClientFd)}, not the {socket} its handler still holds");
@@ -263,11 +265,11 @@ internal static class StopDrainTests
             }
         });
 
-        runner.Test("stop: a ring op parked at the stop ends at once, and the one its completion submits again ends too", () =>
+        runner.Test("stop: a ring op parked at the stop ends at once, and one its completion submits again throws ObjectDisposedException", () =>
         {
             var parked = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-            var handler = new TaskCompletionSource<(int, int)>(TaskCreationOptions.RunContinuationsAsynchronously);
-            var background = new TaskCompletionSource<(int, int)>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var handler = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var background = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
             using var stopNow = new ManualResetEventSlim();
             long stoppedAt = 0, firstEndedAt = 0;
 
@@ -288,12 +290,7 @@ internal static class StopDrainTests
                     Volatile.Write(ref firstEndedAt, Stopwatch.GetTimestamp());
 
                     // Inline in the completion the stop gives, as a retry would.
-                    int b = await timer.DelayAsync(600_000);
-                    handler.TrySetResult((a, b));
-                }
-                catch (Exception e)
-                {
-                    handler.TrySetException(e);
+                    handler.TrySetResult($"{a}, then {await WaitAgain(timer)}");
                 }
                 finally
                 {
@@ -303,7 +300,7 @@ internal static class StopDrainTests
             {
                 _ = WaitTwice(new RingTimer(r), background);   // a wait no connection holds
 
-                // Stopped from a tick, so the next one, which repeats the stop's cancel, is a whole tick away.
+                // Stopped from a tick, so a cancel left to a later tick would be a whole tick away.
                 r.AddTicker(() =>
                 {
                     if (stopNow.IsSet && Volatile.Read(ref stoppedAt) == 0)
@@ -319,14 +316,80 @@ internal static class StopDrainTests
             Assert.True(parked.Task.Wait(5_000), "the handler never parked");
 
             stopNow.Set();
-            Assert.True(handler.Task.Wait(ReturnsWithinMs), "the handler's wait submitted again from the one the stop ended never completed");
-            Assert.True(background.Task.Wait(ReturnsWithinMs), "the wait no connection holds, submitted again from the one the stop ended, never completed");
+            Assert.True(handler.Task.Wait(ReturnsWithinMs), "the handler's wait parked at the stop, or the one after it, never ended");
+            Assert.True(background.Task.Wait(ReturnsWithinMs), "the wait no connection holds, or the one after it, never ended");
             Assert.True(thread.Join(ReturnsWithinMs), "the reactor did not stop");
-            Assert.Equal((-ECANCELED, -ECANCELED), handler.Task.Result);
-            Assert.Equal((-ECANCELED, -ECANCELED), background.Task.Result);
+            Assert.Equal($"{-ECANCELED}, then ObjectDisposedException", handler.Task.Result);
+            Assert.Equal($"{-ECANCELED}, then ObjectDisposedException", background.Task.Result);
 
             double ms = Stopwatch.GetElapsedTime(Volatile.Read(ref stoppedAt), Volatile.Read(ref firstEndedAt)).TotalMilliseconds;
             Assert.True(ms < Reactor.TickMs / 2, $"the wait parked at the stop ended {ms:F0} ms after it, at a tick rather than at the stop");
+        });
+
+        runner.Test("stop: a RingTimer loop that waits again after each cancelled wait ends at the stop, and the stop returns at once", () =>
+        {
+            var waiting = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            Task loop = null!;
+            (_, Reactor reactor, Thread thread) = TestServer.StartConfigured(
+                (_, conn) => { conn.DecRef(); return Task.CompletedTask; },
+                new ServerConfig { Tcp = new TcpOptions() },
+                r => loop = Feed(new RingTimer(r), waiting));
+            Assert.True(waiting.Task.Wait(5_000), "the loop never waited");
+
+            var watch = Stopwatch.StartNew();
+            reactor.Stop();
+            bool stopped = thread.Join(5 * DrainMs);
+            long ms = watch.ElapsedMilliseconds;
+            Assert.True(stopped, "the reactor did not stop");
+            Assert.True(ms < Reactor.TickMs / 2, $"the stop took {ms} ms, held by a loop that waits again after each cancelled wait");
+            Assert.True(loop.Exception?.InnerException is ObjectDisposedException, $"the loop ended {loop.Status}: {loop.Exception?.InnerException?.GetType().Name}");
+        });
+
+        runner.Test("stop: a ring op handed over from another thread before the stop, and taken after its cancel, ends cancelled", () =>
+        {
+            var holding = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            (int port, Reactor reactor, Thread thread) = TestServer.StartConfigured(async (_, conn) =>
+            {
+                if (!await IsThisTestsConnection(conn))
+                {
+                    conn.DecRef();
+                    return;
+                }
+
+                holding.TrySetResult();
+                await release.Task.ConfigureAwait(false);   // held, so the stop runs on past its first pass
+                conn.DecRef();
+            }, new ServerConfig { Tcp = new TcpOptions() });
+
+            using var paused = new ManualResetEventSlim();
+            using var resume = new ManualResetEventSlim();
+            try
+            {
+                using Socket client = Connect(port);
+                client.Send("hi"u8);
+                Assert.True(holding.Task.Wait(5_000), "the handler never ran");
+
+                // Held in this pass's posts, past its ops: what is handed over now is taken in the next pass.
+                reactor.ScheduleOnReactor(_ =>
+                {
+                    paused.Set();
+                    resume.Wait(5_000);
+                }, null);
+                Assert.True(paused.Wait(5_000), "the reactor never ran the post");
+                Task<int> wait = new RingTimer(reactor).DelayAsync(600_000).AsTask();
+                reactor.Stop();
+                resume.Set();
+
+                Assert.True(wait.Wait(ReturnsWithinMs), "a wait handed over before the stop, and taken after its cancel, never ended");
+                Assert.Equal(-ECANCELED, wait.Result);
+            }
+            finally
+            {
+                resume.Set();
+                release.TrySetResult();
+            }
+            Assert.True(thread.Join(ReturnsWithinMs), "the reactor did not stop");
         });
 
         runner.Test("stop: buffers a handler gives back from another thread during the stop are taken", () =>
@@ -649,11 +712,34 @@ internal static class StopDrainTests
         ? new ServerConfig { Incremental = new IncrementalOptions { MaxConnections = 16 }, Tcp = new TcpOptions() }
         : new ServerConfig { RecvBufferSize = 4096, RecvSlots = 256, Tcp = new TcpOptions() };
 
-    private static async Task WaitTwice(RingTimer timer, TaskCompletionSource<(int, int)> results)
+    private static async Task WaitTwice(RingTimer timer, TaskCompletionSource<string> results)
     {
         int a = await timer.DelayAsync(600_000);
-        int b = await timer.DelayAsync(600_000);
-        results.TrySetResult((a, b));
+        results.TrySetResult($"{a}, then {await WaitAgain(timer)}");
+    }
+
+    // What a second wait came to: its result, or the type of what it threw.
+    private static async Task<string> WaitAgain(RingTimer timer)
+    {
+        try
+        {
+            return (await timer.DelayAsync(600_000)).ToString();
+        }
+        catch (Exception e)
+        {
+            return e.GetType().Name;
+        }
+    }
+
+    // Playground/Tcp/Feed's shape: it waits again whatever the last wait came to.
+    private static async Task Feed(RingTimer timer, TaskCompletionSource waiting)
+    {
+        while (true)
+        {
+            ValueTask<int> wait = timer.DelayAsync(1_000);
+            waiting.TrySetResult();
+            await wait;
+        }
     }
 
     // Each item checked to lie in receive memory still allocated before a byte of it is read: freed, it can fault.

@@ -135,6 +135,7 @@ public sealed unsafe partial class Reactor : IRingHost
             return;
         }
 
+        ObjectDisposedException.ThrowIf(_stopRequested, this);
         SubmitTimeoutCore(nanoseconds, completion);
     }
 
@@ -165,6 +166,7 @@ public sealed unsafe partial class Reactor : IRingHost
             return;
         }
 
+        ObjectDisposedException.ThrowIf(_stopRequested, this);
         SubmitClientOpCore(opcode, fd, buffer, length, offset, completion);
     }
 
@@ -176,8 +178,8 @@ public sealed unsafe partial class Reactor : IRingHost
     [MethodImpl(MethodImplOptions.NoInlining)]
     private void HandOff(byte opcode, int fd, nint buffer, int length, long offset, IRingCompletion completion)
     {
-        // Nothing submits it after a stop. Throwing, as a ReactorSwitch does, also ends a loop that ignores an error result.
-        ObjectDisposedException.ThrowIf(_postsClosed, this);
+        // From the stop on nothing is submitted. Throwing, as a ReactorSwitch does, also ends a loop that ignores an error result.
+        ObjectDisposedException.ThrowIf(_stopRequested, this);
 
         _remoteOps.Enqueue(new RemoteOp(opcode, fd, buffer, length, offset, completion));
         Wake();
@@ -242,9 +244,14 @@ public sealed unsafe partial class Reactor : IRingHost
     {
         while (_remoteOps.TryDequeue(out RemoteOp op))
         {
+            // Handed over before the stop and taken after it: submitted now, it could miss the stop's one cancel.
+            if (_stopRequested)
+            {
+                op.Completion.Complete(-ECANCELED);
+            }
             // The only place the two submissions have to be told apart, and off the hot path:
             // once per cross-thread handover, not once per op.
-            if (op.Opcode == IORING_OP_TIMEOUT)
+            else if (op.Opcode == IORING_OP_TIMEOUT)
             {
                 SubmitTimeoutCore(op.Offset, op.Completion);
             }

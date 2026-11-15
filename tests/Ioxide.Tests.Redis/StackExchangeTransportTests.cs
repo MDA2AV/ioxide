@@ -49,6 +49,37 @@ internal static class StackExchangeTransportTests
             Assert.Equal("RedisConnectionException", Get(redis, run, "/stranded"));
         }, because: "StackExchange.Redis reports transport closes only for Stream-backed connections");
 
+        // StackExchange.Redis reconnects through the tunnel while its multiplexer lives, its reactor stopped or not.
+        runner.Test("redis over SE.Redis: a connect through the tunnel of a stopped reactor is refused with ObjectDisposedException and leaves no socket open", () =>
+        {
+            (_, Reactor reactor, Thread thread) = TestServer.StartConfigured(
+                (_, connection) => { connection.DecRef(); return Task.CompletedTask; }, new ServerConfig { Tcp = new TcpOptions() });
+            reactor.Stop();
+            Assert.True(thread.Join(10_000), "the reactor did not stop");
+
+            var tunnel = new IoxideTunnel(reactor);
+            var endpoint = new System.Net.IPEndPoint(System.Net.IPAddress.Loopback, TestServer.DeadPort());
+#pragma warning disable SER009   // the transport seam, which StackExchange.Redis drives on a reconnect
+            var tls = new StackExchange.Redis.Configuration.TlsOptions(new ConfigurationOptions());
+            int before = FdCount.Stable();
+            string outcome = "";
+            for (int i = 0; i < 8; i++)
+            {
+                try
+                {
+                    tunnel.ConnectTransportAsync(endpoint, ConnectionType.Interactive, tls, CancellationToken.None).AsTask().Wait();
+                    outcome = "connected";
+                }
+                catch (AggregateException e)
+                {
+                    outcome = e.InnerException!.GetType().Name;
+                }
+            }
+#pragma warning restore SER009
+
+            Assert.Equal("ObjectDisposedException, sockets left open: 0", $"{outcome}, sockets left open: {FdCount.Stable() - before}");
+        });
+
         runner.Test("redis over SE.Redis: TLS is refused with the transport's reason, not a timeout", () =>
         {
             string body = Get(redis, run, "/tls");

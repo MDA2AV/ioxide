@@ -135,7 +135,6 @@ public sealed unsafe partial class Reactor
             CloseAll();
             DrainPostQ();   // what the stoppers and the closes woke: posted here, past the pass's own drain
             CancelClientOps();
-            AddTicker(CancelClientOps);   // an op submitted while the stop drains ends within a tick
         }
 
         return (_tcpLive == 0 && _opFreeTop == _opTargets.Length) || Native.MonotonicMs >= deadlineMs;
@@ -271,14 +270,16 @@ public sealed unsafe partial class Reactor
     private volatile bool _stopRequested;
 
     /// <summary>
-    /// Requests the reactor to stop. Safe to call from any thread. On its next pass the reactor closes
-    /// every listener and connection and cancels every ring op, so every handler's reads, writes and
-    /// waits end, and nothing flushed from then on reaches a peer. The loop then runs on, posts and
-    /// switches included, until every connection has been let go and every ring op has completed, or
-    /// about a second has passed, and <see cref="Run"/> frees all the reactor owns on its thread. A
-    /// connection a handler still holds by then stays allocated, with the receive memory it can reach,
-    /// and what it calls on the reactor after that fails or reports the connection closed. Join the
-    /// reactor thread after calling this to await the teardown.
+    /// Requests the reactor to stop. Safe to call from any thread. From then on a ring op submitted on
+    /// the reactor throws <see cref="ObjectDisposedException"/>. On its next pass the reactor runs the
+    /// stoppers its clients registered (<see cref="AddStopper"/>), closes its listeners, aborts every
+    /// connection, so its peer gets a reset and nothing still queued is sent, and cancels every ring op
+    /// once, so every handler's reads, writes and waits end. The loop then runs on, posts and switches
+    /// included, until every connection has been let go and every ring op has completed, or about a
+    /// second has passed, and <see cref="Run"/> frees all the reactor owns on its thread. A connection a
+    /// handler still holds by then stays allocated, its descriptor and the receive memory it can reach
+    /// included, and what it calls on the reactor after that fails or reports the connection closed.
+    /// Join the reactor thread after calling this to await the teardown.
     /// </summary>
     public void Stop()
     {

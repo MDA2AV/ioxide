@@ -35,7 +35,7 @@ internal static class HttpClientStopTests
                 new HttpClientOptions { Port = (ushort)origin.Port, PoolSize = 1, AcquireTimeoutMs = 30_000 }));
 
             // The first answer hands the one connection to the second request, whose continuation is posted, and the
-            // stop comes in that same pass.
+            // stop comes in that same pass: the second takes the connection and its send is refused.
             (Task<string> second, Task<string> third) = RunOnReactor(reactor, async () =>
             {
                 ValueTask<HttpClientResponse> first = pool.GetAsync("/");
@@ -47,7 +47,7 @@ internal static class HttpClientStopTests
             });
             Assert.True(thread.Join(10_000), "the reactor did not stop");
 
-            Assert.Equal("second: answered 200, third: ObjectDisposedException, origin connections closed: 1 of 1",
+            Assert.Equal("second: ObjectDisposedException, third: ObjectDisposedException, origin connections closed: 1 of 1",
                 $"second: {Ended(second)}, third: {Ended(third)}, origin connections closed: {origin.ClosedOf(1)}");
         });
 

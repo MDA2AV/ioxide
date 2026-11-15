@@ -46,6 +46,7 @@ public sealed unsafe partial class TcpConnection
     /// looks for -EPIPE.
     /// </returns>
     /// <exception cref="InvalidOperationException">A flush is in flight, or another file read is.</exception>
+    /// <exception cref="ObjectDisposedException">The reactor is stopping.</exception>
     /// <exception cref="ArgumentOutOfRangeException">
     /// <paramref name="len"/> is negative, or so large that the write position plus <paramref name="len"/>
     /// passes <see cref="int.MaxValue"/>.
