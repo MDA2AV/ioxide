@@ -65,10 +65,9 @@ internal sealed class IoxideConnectionListener : IConnectionListener
 
         for (var i = 0; i < reactorCount; i++)
         {
-            var reactor = new Reactor(i, cfg)
-            {
-                TcpHandle = HandleConnectionAsync,
-            };
+            var reactor = new Reactor(i, cfg);
+            var scheduler = new ReactorPipeScheduler(reactor);
+            reactor.TcpHandle = (_, conn) => HandleConnectionAsync(scheduler, conn);
             // Per-reactor startup, on the reactor's own thread: start the TLS service if configured, then
             // run the user's hook (PgPool.Start, AssetReader.CreatePool, ...).
             var tls = _tlsOptions;
@@ -129,8 +128,9 @@ internal sealed class IoxideConnectionListener : IConnectionListener
     }
 
     // Runs on the reactor thread, fire-and-forget, once per accepted connection.
-    private async Task HandleConnectionAsync(Reactor reactor, TcpConnection conn)
+    private async Task HandleConnectionAsync(ReactorPipeScheduler scheduler, TcpConnection conn)
     {
+        Reactor reactor = scheduler.Reactor;
         var id = Interlocked.Increment(ref _connectionCounter);
 
         // TLS handshake (TLS endpoints only) runs here on the reactor thread, before Kestrel sees the
@@ -150,7 +150,7 @@ internal sealed class IoxideConnectionListener : IConnectionListener
             }
         }
 
-        var ctx = new IoxideConnectionContext(conn, reactor, EndPoint, id, session);
+        var ctx = new IoxideConnectionContext(conn, scheduler, EndPoint, id, session);
 
         if (!_accepted.Writer.TryWrite(ctx))
         {
