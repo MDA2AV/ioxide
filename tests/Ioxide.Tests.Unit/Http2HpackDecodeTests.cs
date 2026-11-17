@@ -40,6 +40,15 @@ internal static class Http2HpackDecodeTests
             Assert.True(served.Count == 0, $"the handler was handed: {string.Join(", ", served)}");
         });
 
+        runner.Test("h2 hpack: a dynamic table size update after a literal field ends the connection with COMPRESSION_ERROR", () =>
+        {
+            // The literal kinds count as fields too, not only fully indexed ones.
+            (string goAway, List<string> served) = Exchange([.. Get, .. Field(0x1f), 0x20]);
+            Assert.True(goAway == "COMPRESSION_ERROR",
+                $"a size update after the literal x-a was taken, and the server wrote [{goAway}]");
+            Assert.True(served.Count == 0, $"the handler was handed: {string.Join(", ", served)}");
+        });
+
         runner.Test("h2 hpack: control: two size updates that open the block are both taken", () =>
         {
             // RFC 7541 4.2: the smallest size the table went through, then the final one, both ahead of the first field.
@@ -69,6 +78,15 @@ internal static class Http2HpackDecodeTests
             (string goAway, List<string> served) = Exchange([.. Get, .. Field(0x18)]);
             Assert.True(goAway == "COMPRESSION_ERROR",
                 $"padding 000 after 'a' was taken as the end of the string, and the server wrote [{goAway}] (RFC 7541 5.2 wants the bits of EOS, all ones)");
+            Assert.True(served.Count == 0, $"the handler was handed: {string.Join(", ", served)}");
+        });
+
+        runner.Test("h2 hpack: Huffman padding that ends in a one but is not all ones ends the connection with COMPRESSION_ERROR", () =>
+        {
+            // 0x1d is 'a' then 101: every padding bit has to be a 1, not only the last.
+            (string goAway, List<string> served) = Exchange([.. Get, .. Field(0x1d)]);
+            Assert.True(goAway == "COMPRESSION_ERROR",
+                $"padding 101 after 'a' was taken as the end of the string, and the server wrote [{goAway}]");
             Assert.True(served.Count == 0, $"the handler was handed: {string.Join(", ", served)}");
         });
 
