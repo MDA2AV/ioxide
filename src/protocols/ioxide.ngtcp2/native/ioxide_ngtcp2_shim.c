@@ -1405,6 +1405,25 @@ uint32_t iq_abi(void)
 
 /* ---- connection ------------------------------------------------------------------------- */
 
+/* The server's collected_extensions: ngtcp2's, plus the refusal it leaves out. RFC 9001 8.2 makes a
+ * ClientHello without quic_transport_parameters a missing_extension alert, but ngtcp2's picotls glue
+ * hands the extension on only when it is there and returns 0 when it is not, so picotls finished the
+ * handshake without the client's transport parameters. A server learns its negotiated version from
+ * them, and ngtcp2 checks they came only once the handshake completes - by then the first 1-RTT
+ * packet had already gone through assert(conn->negotiated_version) and aborted the process. picotls
+ * calls this with whatever it collected, an empty list included, so a ClientHello carrying only the
+ * draft codepoint (0xffa5), which collect_extension never asks for, is refused here too. */
+static int iq_collected_extensions(ptls_t *ptls, ptls_handshake_properties_t *properties,
+                                   ptls_raw_extension_t *extensions)
+{
+    for (ptls_raw_extension_t *ext = extensions; ext->type != UINT16_MAX; ++ext) {
+        if (ext->type == NGTCP2_TLSEXT_QUIC_TRANSPORT_PARAMETERS_V1) {
+            return ngtcp2_crypto_picotls_collected_extensions(ptls, properties, extensions);
+        }
+    }
+    return PTLS_ALERT_MISSING_EXTENSION;
+}
+
 /* Validate the first datagram of a new connection and build the server conn for it.
  * scid_out receives the connection ID this server minted (engine->cidlen bytes) so the caller
  * can register the route. shard / shard_count identify the reactor calling this, and are stamped
@@ -1539,6 +1558,7 @@ iq_conn *iq_accept(iq_engine *e,
         free(c);
         return NULL;
     }
+    c->cptls.handshake_properties.collected_extensions = iq_collected_extensions;
 
     ngtcp2_conn_set_tls_native_handle(c->conn, &c->cptls);
     ngtcp2_ccerr_default(&c->last_error);
