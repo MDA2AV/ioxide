@@ -262,22 +262,14 @@ public sealed partial class Http2Connection
             DiscardHeaderBlock(header, block);
             return;
         }
-        else if (pending.BodyReader is { } reader)
+        else if (pending.BodyReader is not null)
         {
             // Trailers for a request already being served: its arena backs what the handler holds,
-            // so the block is decoded aside and dropped, and only its END_STREAM is kept.
+            // so the block is decoded aside, checked and dropped, and only its END_STREAM is kept (EndTrailers).
             _discardBlock.StreamId = header.StreamId;
+            _discardTrailers = true;
+            _discardEndsStream = (header.Flags & FrameFlags.EndStream) != 0;
             DiscardHeaderBlock(header, block);
-            if ((header.Flags & FrameFlags.EndStream) != 0)
-            {
-                if (!pending.BodyFits(ended: true))
-                {
-                    RefuseBody(pending);
-                    return;
-                }
-                pending.RequestEnded = true;
-                reader.End();
-            }
             return;
         }
         else if ((header.Flags & FrameFlags.EndStream) == 0)
@@ -374,14 +366,62 @@ public sealed partial class Http2Connection
         _discardBlock.StreamId = 0;
         uint reset = _discardReset;
         _discardReset = Http2Error.RefusedStream;
+        bool trailers = _discardTrailers;
+        _discardTrailers = false;
+
+        bool decoded = DecodeHeaderBlock(_discardBlock, discard: true);
+        bool malformed = _discardBlock.Malformed;
+        _discardBlock.Malformed = false;
+
+        if (!decoded)
+        {
+            return;
+        }
+
+        if (trailers)
+        {
+            EndTrailers(streamId, malformed);
+            return;
+        }
 
         // Only a new id was refused; nothing of another stream can arrive mid-block to move the
         // highest. Trailers are not reset: REFUSED_STREAM says the request went unprocessed.
-        if (DecodeHeaderBlock(_discardBlock, discard: true) && streamId > _highestStream)
+        if (streamId > _highestStream)
         {
             ResetStream(streamId, reset);
             _highestStream = streamId;   // refused, but used
         }
+    }
+
+    /// <summary>
+    /// The trailers of a request with a body reader, decoded. RFC 9113 8.1 makes them malformed when
+    /// they carry a pseudo-header or a field no request may (<see cref="PendingRequest.CheckDiscarded"/>),
+    /// and when they do not end the stream, since nothing may follow them. Either is refused as a body
+    /// that misses its content-length is (<see cref="RefuseBody"/>): the handler hears of it at its
+    /// next read, and nothing more goes out on the stream. Otherwise their END_STREAM ends the body.
+    /// </summary>
+    private void EndTrailers(int streamId, bool malformed)
+    {
+        // A handler done with the request while its trailers arrived has retired the stream already.
+        if (!_streams.TryGetValue(streamId, out PendingRequest? pending) || pending.BodyReader is not { } reader)
+        {
+            return;
+        }
+
+        if (malformed || !_discardEndsStream)
+        {
+            reader.Abort(malformed ? "the request's trailers were malformed" : "the request's trailers did not end its stream");
+            ResetOpenStream(streamId, Http2Error.ProtocolError);
+            return;
+        }
+
+        if (!pending.BodyFits(ended: true))
+        {
+            RefuseBody(pending);
+            return;
+        }
+        pending.RequestEnded = true;
+        reader.End();
     }
 
     /// <summary>
@@ -452,7 +492,8 @@ public sealed partial class Http2Connection
             // The request rides as state, so the sink is a static lambda and no closure is made per block.
             int limit = _options.MaxHeaderListSize;
             _decoder.Decode(block, _headerScratch, (Pending: pending, Limit: limit),
-                discard ? static (_, _, _) => { } : static (state, name, value) => state.Pending.AddHeader(name, value, state.Limit));
+                discard ? static (state, name, value) => state.Pending.CheckDiscarded(name, value)
+                        : static (state, name, value) => state.Pending.AddHeader(name, value, state.Limit));
 
             if (pending.HeaderListSize > limit)
             {
@@ -462,7 +503,12 @@ public sealed partial class Http2Connection
 
             pending.ClearHeaderBlock();
             pending.HeadersDone = true;
-            pending.ClosePseudoHeaders();
+
+            if (discard)
+            {
+                return true;   // nothing kept, so nothing to refuse here: whoever discarded it reads Malformed
+            }
+            pending.EndHeaderBlock();
 
             // A block that ends the stream ends the body with it, so the DATA before it - none, for
             // the block that opens the request - has to be all the content-length declared.
@@ -896,8 +942,9 @@ public sealed partial class Http2Connection
         public (int Offset, int Length) Scheme;
         public (int Offset, int Length) Authority;
 
-        // A pseudo-header out of place, or a content-length that is no number or comes twice: the
-        // stream is reset once the block is decoded, never dispatched.
+        // A pseudo-header out of place or missing, a field no HTTP/2 request may carry, or a
+        // content-length that is no number or comes twice: the stream is reset once the block is
+        // decoded, never dispatched.
         public bool Malformed;
 
         // What the content-length says the DATA comes to, -1 without one, and what it has come to so
@@ -963,6 +1010,7 @@ public sealed partial class Http2Connection
             }
 
             ClosePseudoHeaders();
+            Malformed |= IsMalformedField(name, value);
             (int Offset, int Length) nameRange = Append(name);
             (int Offset, int Length) valueRange = Append(value);
             _fields.Add((nameRange.Offset, nameRange.Length, valueRange.Offset, valueRange.Length));
@@ -994,6 +1042,54 @@ public sealed partial class Http2Connection
         }
 
         public void ClosePseudoHeaders() => _pseudoSeen |= PseudoClosed;
+
+        /// <summary>
+        /// A block is decoded. The one that opens the request has to have carried what RFC 9113 8.3.1
+        /// requires of a request: a :method, a :scheme and a :path that is not empty - or, for a
+        /// CONNECT, an :authority and neither of the others (8.5). Trailers carry none (8.1).
+        /// </summary>
+        public void EndHeaderBlock()
+        {
+            if (!_requestDecoded)
+            {
+                bool connect = _arena.AsSpan(Method.Offset, Method.Length).SequenceEqual("CONNECT"u8);
+                Malformed |= connect
+                    ? (_pseudoSeen & (2 | 4 | 8)) != 8
+                    : (_pseudoSeen & (1 | 2 | 4)) != (1 | 2 | 4) || Path.Length == 0;
+            }
+            _requestDecoded = true;
+            ClosePseudoHeaders();
+        }
+
+        // The block that opens the request has been decoded: later ones are trailers.
+        private bool _requestDecoded;
+
+        /// <summary>A field of a block decoded aside, trailers among them: checked as trailers, and not kept.</summary>
+        public void CheckDiscarded(ReadOnlySpan<byte> name, ReadOnlySpan<byte> value)
+            => Malformed |= (name.Length > 0 && name[0] == (byte)':') || IsMalformedField(name, value);
+
+        /// <summary>
+        /// RFC 9113 8.2.1: a field name is lowercase. 8.2.2: HTTP/2 carries no connection-specific
+        /// field, which the framing replaced, and a te only of "trailers". Each of these reaching a
+        /// handler, or a proxy behind it, is what a request smuggled past the framing looks like.
+        /// </summary>
+        private static bool IsMalformedField(ReadOnlySpan<byte> name, ReadOnlySpan<byte> value)
+        {
+            if (name.IndexOfAnyInRange((byte)'A', (byte)'Z') >= 0)
+            {
+                return true;
+            }
+
+            return name.Length switch
+            {
+                2  => name.SequenceEqual("te"u8) && !value.SequenceEqual("trailers"u8),
+                7  => name.SequenceEqual("upgrade"u8),
+                10 => name.SequenceEqual("connection"u8) || name.SequenceEqual("keep-alive"u8),
+                16 => name.SequenceEqual("proxy-connection"u8),
+                17 => name.SequenceEqual("transfer-encoding"u8),
+                _  => false,
+            };
+        }
 
         public void AppendBody(ReadOnlySpan<byte> data)
         {
@@ -1081,6 +1177,7 @@ public sealed partial class Http2Connection
 
             Malformed = false;
             _pseudoSeen = 0;
+            _requestDecoded = false;
             ContentLength = -1;
             BodyReceived = 0;
             ClearHeaderBlock();
