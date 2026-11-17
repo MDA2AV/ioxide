@@ -30,10 +30,9 @@ namespace Ioxide.Tests;
 /// refusal mean something is that the same hello with one host_name - and the same hello whose
 /// second list entry is of another name_type - are both served by the same server.
 ///
-/// No test asserts WHICH alert was sent, because the shim cannot carry one: it closes with
-/// ngtcp2_ccerr_set_liberr(NGTCP2_ERR_CRYPTO), which infers PROTOCOL_VIOLATION, so every TLS alert
-/// this server raises reaches the peer as the same code. What is asserted is the branch taken -
-/// closed, retried, or answered - which is the part the alert would only have annotated.
+/// A refusal is asserted to close with the TLS alert as CRYPTO_ERROR (RFC 9001 4.8): the exact alert
+/// where the shim chooses it (decode_error for two host names), and a CRYPTO_ERROR of any alert where
+/// picotls does. Before #638 every alert reached the peer as PROTOCOL_VIOLATION.
 /// </remarks>
 internal static class QuicSniHostileTests
 {
@@ -60,8 +59,8 @@ internal static class QuicSniHostileTests
             using var raw = new RawInitial(udpPort);
             RawInitial.Reply reply = raw.Exchange(Hello(raw, [("alpha.test", 0), ("beta.test", 0)]));
 
-            Assert.True(reply.Closed,
-                "a ClientHello carrying two host_name entries must be refused, and the peer told so; " +
+            Assert.True(reply.Closed && reply.CloseError == CryptoError(Alert.DecodeError),
+                "a ClientHello carrying two host_name entries must be refused with decode_error; " +
                 $"instead the server {Describe(reply)}");
             Assert.True(!reply.SawServerHello,
                 "a ClientHello carrying two host_name entries was answered with a ServerHello - the " +
@@ -110,8 +109,8 @@ internal static class QuicSniHostileTests
             using var raw = new RawInitial(udpPort);
             RawInitial.Reply reply = raw.Exchange(Hello(raw, [("alpha.test\0evil.test", 0)]));
 
-            Assert.True(reply.Closed && !reply.SawServerHello,
-                $"a host name containing a NUL must not start a handshake; the server {Describe(reply)}");
+            Assert.True(reply.Closed && !reply.SawServerHello && IsCryptoError(reply.CloseError),
+                $"a host name containing a NUL must be refused with a TLS alert; the server {Describe(reply)}");
         });
 
         runner.Test("sni/quic: an empty host name is refused", () =>
@@ -124,8 +123,8 @@ internal static class QuicSniHostileTests
             using var raw = new RawInitial(udpPort);
             RawInitial.Reply reply = raw.Exchange(Hello(raw, [("", 0)]));
 
-            Assert.True(reply.Closed && !reply.SawServerHello,
-                $"an empty host_name must not start a handshake; the server {Describe(reply)}");
+            Assert.True(reply.Closed && !reply.SawServerHello && IsCryptoError(reply.CloseError),
+                $"an empty host_name must be refused with a TLS alert; the server {Describe(reply)}");
         });
 
         runner.Test("sni/quic: a ClientHello with no server_name extension is served", () =>
@@ -176,7 +175,7 @@ internal static class QuicSniHostileTests
 
             RawInitial.Reply second = raw.Exchange(Hello(raw, [("beta.test", 0)]));
 
-            Assert.True(second.Closed && !second.SawServerHello,
+            Assert.True(second.Closed && !second.SawServerHello && IsCryptoError(second.CloseError),
                 "the second ClientHello asked for beta.test where the first asked for alpha.test, and " +
                 "the certificate was already chosen from the first - the server should have refused " +
                 $"the change instead of continuing; it {Describe(second)}");
@@ -257,7 +256,7 @@ internal static class QuicSniHostileTests
     /// <param name="transportParameters">Which transport parameters extension to carry, if any; the
     /// parameters themselves are the same whichever codepoint carries them.</param>
     internal static byte[] Hello(RawInitial raw, (string Name, byte Type)[] names, bool withKeyShare = true,
-        TransportParameters transportParameters = TransportParameters.V1)
+        TransportParameters transportParameters = TransportParameters.V1, string alpn = "h3")
     {
         var b = new Buf();
         b.U8(0x01);                                   // client_hello
@@ -296,7 +295,8 @@ internal static class QuicSniHostileTests
         b.U16(0x0010);                                // application_layer_protocol_negotiation
         int a = b.Mark(2);
         int alist = b.Mark(2);
-        b.U8(2).Raw("h3"u8);
+        byte[] protocol = Encoding.ASCII.GetBytes(alpn);
+        b.U8(protocol.Length).Raw(protocol);
         b.Fill(alist, 2);
         b.Fill(a, 2);
 
@@ -334,6 +334,19 @@ internal static class QuicSniHostileTests
         b.Fill(msg, 3);
         return b.ToArray();
     }
+
+    /// <summary>TLS alerts (RFC 8446 6) this file expects a refusal to carry.</summary>
+    internal static class Alert
+    {
+        public const byte DecodeError = 50;
+        public const byte MissingExtension = 109;
+        public const byte NoApplicationProtocol = 120;
+    }
+
+    /// <summary>The QUIC transport error a TLS alert is sent as (RFC 9001 4.8).</summary>
+    internal static ulong CryptoError(byte alert) => 0x100ul + alert;
+
+    internal static bool IsCryptoError(ulong code) => code is >= 0x100 and <= 0x1ff;
 
     /// <summary>What the server actually did, for a failure message that names it.</summary>
     internal static string Describe(RawInitial.Reply r)

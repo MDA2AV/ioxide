@@ -37,8 +37,9 @@ internal static class QuicTransportParameterTests
                         transportParameters: transportParameters));
                 }
 
-                Assert.True(refused.Closed && !refused.SawServerHello,
-                    $"a ClientHello {label} must be refused with missing_extension (RFC 9001 8.2); " +
+                Assert.True(refused.Closed && !refused.SawServerHello
+                            && refused.CloseError == QuicSniHostileTests.CryptoError(QuicSniHostileTests.Alert.MissingExtension),
+                    $"a ClientHello {label} must be refused with missing_extension, CRYPTO_ERROR 0x16d (RFC 9001 8.2); " +
                     $"instead the server {QuicSniHostileTests.Describe(refused)}");
 
                 using var control = new RawInitial(udpPort);
@@ -49,5 +50,19 @@ internal static class QuicTransportParameterTests
                     $"well-formed one with a ServerHello; it {QuicSniHostileTests.Describe(answered)}");
             });
         }
+
+        runner.Test("quic: a ClientHello offering no ALPN the server serves is refused with no_application_protocol", () =>
+        {
+            // RFC 9001 8.1. The alert is the shim's own choice (iq_on_client_hello), and the close carries it.
+            int udpPort = QuicSniHostileTests.Serve(QuicSniHostileTests.NewEngine());
+
+            using var raw = new RawInitial(udpPort);
+            RawInitial.Reply refused = raw.Exchange(QuicSniHostileTests.Hello(raw, [("alpha.test", 0)], alpn: "h2"));
+
+            Assert.True(refused.Closed && !refused.SawServerHello
+                        && refused.CloseError == QuicSniHostileTests.CryptoError(QuicSniHostileTests.Alert.NoApplicationProtocol),
+                $"a ClientHello offering only h2 to an h3 server must be refused with no_application_protocol, " +
+                $"CRYPTO_ERROR 0x178; instead the server {QuicSniHostileTests.Describe(refused)}");
+        });
     }
 }
