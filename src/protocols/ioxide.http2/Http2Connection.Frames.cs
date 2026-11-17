@@ -101,16 +101,72 @@ public sealed partial class Http2Connection
             case FrameType.Settings:     HandleSettings(header, payload); break;
             case FrameType.WindowUpdate: HandleWindowUpdate(header, payload); break;
             case FrameType.Ping:         HandlePing(header, payload); break;
-            case FrameType.RstStream:    HandleRstStream(header); break;
+            case FrameType.RstStream:    HandleRstStream(header, payload); break;
+            case FrameType.Priority:     HandlePriority(header, payload); break;
             case FrameType.GoAway:       _failed = true; break;
 
-            // PRIORITY carries no obligation, and PUSH_PROMISE cannot arrive at a server. Both are
-            // ignored rather than treated as errors, which is what the RFC asks of a receiver.
-            case FrameType.Priority:
-            case FrameType.PushPromise:
+            // RFC 9113 8.4: a server never receives a push, so a client that sends one is broken.
+            case FrameType.PushPromise:  GoAway(Http2Error.ProtocolError); break;
+
+            // RFC 9113 4.1: a frame of a type nobody knows is ignored.
             default:
                 break;
         }
+    }
+
+    /// <summary>
+    /// PRIORITY carries no obligation (RFC 9113 5.3.2), so its signal is ignored, but not its framing:
+    /// it always names a stream, and it is five octets long (6.3). A stream that depends on itself is
+    /// refused too: RFC 9113 dropped the rule with the priority scheme, but RFC 7540 5.3.1 made it a
+    /// stream error, and nghttp2 still refuses one.
+    /// </summary>
+    private void HandlePriority(in FrameHeader header, ReadOnlySpan<byte> payload)
+    {
+        if (header.StreamId == 0)
+        {
+            GoAway(Http2Error.ProtocolError);
+            return;
+        }
+
+        if (payload.Length != 5)
+        {
+            RefusePriority(header.StreamId, Http2Error.FrameSizeError);
+            return;
+        }
+
+        if (DependsOn(payload) == header.StreamId)
+        {
+            RefusePriority(header.StreamId, Http2Error.ProtocolError);
+        }
+    }
+
+    // A stream error, but PRIORITY may name an idle stream, which no RST_STREAM may (RFC 9113 6.4): the
+    // connection answers for it then.
+    private void RefusePriority(int streamId, uint errorCode)
+    {
+        if (streamId > _highestStream)
+        {
+            GoAway(errorCode);
+        }
+        else
+        {
+            ResetOpenStream(streamId, errorCode);
+        }
+    }
+
+    // The stream a priority's five octets name, its exclusive bit aside.
+    private static int DependsOn(ReadOnlySpan<byte> priority)
+        => (int)(BinaryPrimitives.ReadUInt32BigEndian(priority) & 0x7FFFFFFF);
+
+    /// <summary>
+    /// A stream error on a stream that may be serving already: its body reader ends, and its response
+    /// finds the stream gone, as after the peer's own reset - nothing may follow a reset (RFC 9113 5.1).
+    /// </summary>
+    private void ResetOpenStream(int streamId, uint errorCode)
+    {
+        _responseWindows.Remove(streamId);
+        ResetStream(streamId, errorCode);
+        ReleaseCreditWaiters(streamId);   // a writer parked on credit wakes to find the stream gone
     }
 
     private void HandleHeaders(in FrameHeader header, ReadOnlySpan<byte> payload)
@@ -141,6 +197,7 @@ public sealed partial class Http2Connection
             block = block[..^padding];
         }
 
+        bool selfDependent = false;
         if ((header.Flags & FrameFlags.Priority) != 0)
         {
             if (block.Length < 5)
@@ -148,7 +205,22 @@ public sealed partial class Http2Connection
                 GoAway(Http2Error.FrameSizeError);
                 return;
             }
+            selfDependent = DependsOn(block) == header.StreamId;
             block = block[5..];
+        }
+
+        if (selfDependent)
+        {
+            // Refused like a malformed request (see HandlePriority): decoded aside to keep HPACK in
+            // step, and whatever the stream was doing ends. A new one is reset once its block is in.
+            if (_streams.ContainsKey(header.StreamId))
+            {
+                ResetOpenStream(header.StreamId, Http2Error.ProtocolError);
+            }
+            _discardBlock.StreamId = header.StreamId;
+            _discardReset = Http2Error.ProtocolError;
+            DiscardHeaderBlock(header, block);
+            return;
         }
 
         if (!_streams.TryGetValue(header.StreamId, out PendingRequest? pending))
@@ -251,12 +323,14 @@ public sealed partial class Http2Connection
 
         int streamId = _discardBlock.StreamId;
         _discardBlock.StreamId = 0;
+        uint reset = _discardReset;
+        _discardReset = Http2Error.RefusedStream;
 
         // Only a new id was refused; nothing of another stream can arrive mid-block to move the
         // highest. Trailers are not reset: REFUSED_STREAM says the request went unprocessed.
         if (DecodeHeaderBlock(_discardBlock, discard: true) && streamId > _highestStream)
         {
-            ResetStream(streamId, Http2Error.RefusedStream);
+            ResetStream(streamId, reset);
             _highestStream = streamId;   // refused, but used
         }
     }
@@ -470,9 +544,7 @@ public sealed partial class Http2Connection
             ? "the request body ran past its content-length"
             : $"the request body ended {pending.ContentLength - pending.BodyReceived} bytes short of its content-length");
 
-        _responseWindows.Remove(streamId);
-        ResetStream(streamId, Http2Error.ProtocolError);
-        ReleaseCreditWaiters(streamId);   // a writer parked on credit wakes to find the stream gone
+        ResetOpenStream(streamId, Http2Error.ProtocolError);
     }
 
     private void TryComplete(PendingRequest pending)
@@ -497,8 +569,21 @@ public sealed partial class Http2Connection
 
     private void HandleSettings(in FrameHeader header, ReadOnlySpan<byte> payload)
     {
+        // RFC 9113 6.5: SETTINGS are the connection's, and an ACK says only that ours were applied.
+        if (header.StreamId != 0)
+        {
+            GoAway(Http2Error.ProtocolError);
+            return;
+        }
+
         if ((header.Flags & FrameFlags.Ack) != 0)
         {
+            if (payload.Length != 0)
+            {
+                GoAway(Http2Error.FrameSizeError);
+                return;
+            }
+
             // Our SETTINGS acknowledged: the peer has resized its open streams by them, and sizes new ones by them (RFC 9113 6.9.2).
             int delta = _options.InitialWindowSize - _initialStreamWindow;
             if (delta != 0)
@@ -527,6 +612,15 @@ public sealed partial class Http2Connection
 
             switch (id)
             {
+                case Http2Setting.EnablePush:
+                    // Nothing here pushes, so the value says nothing to us, but it is a flag (6.5.2).
+                    if (value > 1)
+                    {
+                        GoAway(Http2Error.ProtocolError);
+                        return;
+                    }
+                    break;
+
                 case Http2Setting.InitialWindowSize:
                     if (value > int.MaxValue)
                     {
@@ -627,6 +721,11 @@ public sealed partial class Http2Connection
 
     private void HandlePing(in FrameHeader header, ReadOnlySpan<byte> payload)
     {
+        if (header.StreamId != 0)
+        {
+            GoAway(Http2Error.ProtocolError);   // RFC 9113 6.7: a PING is the connection's
+            return;
+        }
         if (payload.Length != 8)
         {
             GoAway(Http2Error.FrameSizeError);
@@ -644,8 +743,20 @@ public sealed partial class Http2Connection
         Stage(frame);
     }
 
-    private void HandleRstStream(in FrameHeader header)
+    private void HandleRstStream(in FrameHeader header, ReadOnlySpan<byte> payload)
     {
+        // RFC 9113 6.4: it always names a stream, and carries one error code.
+        if (header.StreamId == 0)
+        {
+            GoAway(Http2Error.ProtocolError);
+            return;
+        }
+        if (payload.Length != 4)
+        {
+            GoAway(Http2Error.FrameSizeError);
+            return;
+        }
+
         if (_streams.Remove(header.StreamId, out PendingRequest? pending))
         {
             Discard(pending);   // the peer gave up; there is nobody to answer
