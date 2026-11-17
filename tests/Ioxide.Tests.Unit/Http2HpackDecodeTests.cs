@@ -12,7 +12,7 @@ namespace Ioxide.Tests;
 /// </summary>
 internal static class Http2HpackDecodeTests
 {
-    private const byte Headers = 0x1, GoAway = 0x7;
+    private const byte Headers = 0x1, GoAway = 0x7, Continuation = 0x9;
     private const byte EndStream = 0x1, EndHeaders = 0x4;
     private const uint CompressionError = 0x9;
 
@@ -37,6 +37,23 @@ internal static class Http2HpackDecodeTests
             (string goAway, List<string> served) = Exchange([Get[0], 0x20, Get[1], Get[2]]);
             Assert.True(goAway == "COMPRESSION_ERROR",
                 $"a size update after :method was taken, and the server wrote [{goAway}] (RFC 7541 4.2 allows one only at the start of a block)");
+            Assert.True(served.Count == 0, $"the handler was handed: {string.Join(", ", served)}");
+        });
+
+        runner.Test("h2 hpack: control: two size updates that open the block are both taken", () =>
+        {
+            // RFC 7541 4.2: the smallest size the table went through, then the final one, both ahead of the first field.
+            (string goAway, List<string> served) = Exchange([0x20, 0x3f, 0xe1, 0x1f, .. Get]);
+            Assert.Equal("", goAway);
+            Assert.True(served.SequenceEqual(["1"]), $"the handler was handed: {string.Join(", ", served)}");
+        });
+
+        runner.Test("h2 hpack: a size update in a CONTINUATION, after a field in its HEADERS, ends the connection with COMPRESSION_ERROR", () =>
+        {
+            // One block in two frames is still one block: the update comes after :method whichever frame carries it.
+            (string goAway, List<string> served) = Exchange([Get[0]], [0x20, Get[1], Get[2]]);
+            Assert.True(goAway == "COMPRESSION_ERROR",
+                $"a size update after :method, in the CONTINUATION of its block, was taken, and the server wrote [{goAway}]");
             Assert.True(served.Count == 0, $"the handler was handed: {string.Join(", ", served)}");
         });
 
@@ -66,7 +83,7 @@ internal static class Http2HpackDecodeTests
     }
 
     // One GET on stream 1 with the given block; what GOAWAY came back, and what was served ("stream name=value ...").
-    private static (string GoAway, List<string> Served) Exchange(byte[] block)
+    private static (string GoAway, List<string> Served) Exchange(byte[] block, byte[]? continuation = null)
     {
         using var client = new StrictClient();
         var served = new List<string>();
@@ -83,7 +100,15 @@ internal static class Http2HpackDecodeTests
         client.SendRequests();
         client.Drain();
 
-        client.Feed(Http2FlowControlTests.FrameBytes(Headers, EndHeaders | EndStream, 1, block));
+        if (continuation is null)
+        {
+            client.Feed(Http2FlowControlTests.FrameBytes(Headers, EndHeaders | EndStream, 1, block));
+        }
+        else
+        {
+            client.Feed(Http2FlowControlTests.FrameBytes(Headers, EndStream, 1, block));
+            client.Feed(Http2FlowControlTests.FrameBytes(Continuation, EndHeaders, 1, continuation));
+        }
         List<Frame> frames = client.Drain();
         client.Close(run);
 
