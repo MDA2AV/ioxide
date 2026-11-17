@@ -27,6 +27,7 @@ internal sealed class HpackDecoder
     {
         int position = 0;
         int scratchUsed = 0;
+        bool fieldSeen = false;   // a size update may only open the block (RFC 7541 4.2)
 
         while (position < block.Length)
         {
@@ -37,6 +38,7 @@ internal sealed class HpackDecoder
                 // 1xxxxxxx - fully indexed: both name and value come from a table.
                 int index = (int)ReadInteger(block, ref position, 7);
                 Lookup(index, out ReadOnlySpan<byte> name, out ReadOnlySpan<byte> value);
+                fieldSeen = true;
                 onHeader(state, name, value);
                 continue;
             }
@@ -46,6 +48,10 @@ internal sealed class HpackDecoder
 
             if (sizeUpdate)
             {
+                if (fieldSeen)
+                {
+                    throw new HpackException("dynamic table size update after a field of the block");
+                }
                 int newSize = (int)ReadInteger(block, ref position, 5);
                 _table.Resize(newSize);
                 continue;
@@ -72,6 +78,7 @@ internal sealed class HpackDecoder
                 _table.Add(headerName, headerValue);
             }
 
+            fieldSeen = true;
             onHeader(state, headerName, headerValue);
         }
     }
