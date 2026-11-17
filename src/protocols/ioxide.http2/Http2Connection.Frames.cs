@@ -144,7 +144,7 @@ public sealed partial class Http2Connection
     // connection answers for it then.
     private void RefusePriority(int streamId, uint errorCode)
     {
-        if (streamId > _highestStream)
+        if (IsIdle(streamId))
         {
             GoAway(errorCode);
         }
@@ -171,7 +171,8 @@ public sealed partial class Http2Connection
 
     private void HandleHeaders(in FrameHeader header, ReadOnlySpan<byte> payload)
     {
-        if (header.StreamId == 0)
+        // RFC 9113 5.1.1: a client opens odd streams only, and a server that pushes nothing has no even ones.
+        if (header.StreamId == 0 || (header.StreamId & 1) == 0)
         {
             GoAway(Http2Error.ProtocolError);
             return;
@@ -209,11 +210,18 @@ public sealed partial class Http2Connection
             block = block[5..];
         }
 
+        bool open = _streams.TryGetValue(header.StreamId, out PendingRequest? pending);
+        if (!open && header.StreamId <= _highestStream)
+        {
+            HandleHeadersOnClosed(header, block);
+            return;
+        }
+
         if (selfDependent)
         {
             // Refused like a malformed request (see HandlePriority): decoded aside to keep HPACK in
             // step, and whatever the stream was doing ends. A new one is reset once its block is in.
-            if (_streams.ContainsKey(header.StreamId))
+            if (open)
             {
                 ResetOpenStream(header.StreamId, Http2Error.ProtocolError);
             }
@@ -223,11 +231,9 @@ public sealed partial class Http2Connection
             return;
         }
 
-        if (!_streams.TryGetValue(header.StreamId, out PendingRequest? pending))
+        if (!open)
         {
-            // An id at or below one already opened opens nothing (RFC 9113 5.1.1) - it is trailers
-            // for a request already answered - so it is decoded like a refused block, but not reset.
-            if (header.StreamId <= _highestStream || _streams.Count >= _options.MaxConcurrentStreams)
+            if (_streams.Count >= _options.MaxConcurrentStreams)
             {
                 // Past the limit we advertised. The block still has to be DECODED - HPACK is one
                 // stream across the whole connection, so skipping it would desynchronise every
@@ -245,6 +251,16 @@ public sealed partial class Http2Connection
             // Only the block that opens a stream can say there is no body. An END_STREAM on a later
             // one ends trailers, which come after a body, empty or not.
             pending.HasBody = (header.Flags & FrameFlags.EndStream) == 0;
+        }
+        else if (pending!.RequestEnded)
+        {
+            // Half-closed (remote): the peer has ended the request, and may send nothing more on it
+            // but WINDOW_UPDATE, PRIORITY and RST_STREAM (RFC 9113 5.1). Decoded aside, as HPACK
+            // must be, and nothing of it reaches a handler.
+            ResetOpenStream(header.StreamId, Http2Error.StreamClosed);
+            _discardBlock.StreamId = header.StreamId;
+            DiscardHeaderBlock(header, block);
+            return;
         }
         else if (pending.BodyReader is { } reader)
         {
@@ -298,6 +314,39 @@ public sealed partial class Http2Connection
             pending.RequestEnded = true;
             pending.BodyReader?.End();
             TryComplete(pending);
+        }
+    }
+
+    /// <summary>
+    /// HEADERS on a stream at or below the highest the client opened, and no longer open (RFC 9113 5.1).
+    /// One this side reset, or stopped reading, is still on its way, which the peer could not have
+    /// known: its block is decoded and dropped, as HPACK must be. One the peer itself closed, by its
+    /// END_STREAM or its RST_STREAM, is its error: of the stream while the response is still going,
+    /// and of the connection once it has closed both ways. One never opened, or closed too long ago
+    /// to be remembered, is an unexpected stream id (5.1.1).
+    /// </summary>
+    private void HandleHeadersOnClosed(in FrameHeader header, ReadOnlySpan<byte> block)
+    {
+        switch (ClosedHow(header.StreamId))
+        {
+            case ClosedByUs:
+                _discardBlock.StreamId = header.StreamId;
+                DiscardHeaderBlock(header, block);
+                return;
+
+            case ClosedByPeer when _responseWindows.ContainsKey(header.StreamId):
+                ResetOpenStream(header.StreamId, Http2Error.StreamClosed);
+                _discardBlock.StreamId = header.StreamId;
+                DiscardHeaderBlock(header, block);
+                return;
+
+            case ClosedByPeer:
+                GoAway(Http2Error.StreamClosed);
+                return;
+
+            default:
+                GoAway(Http2Error.ProtocolError);
+                return;
         }
     }
 
@@ -435,7 +484,7 @@ public sealed partial class Http2Connection
 
     private void HandleData(in FrameHeader header, ReadOnlySpan<byte> payload)
     {
-        if (header.StreamId == 0 || header.StreamId > _highestStream)
+        if (header.StreamId == 0 || IsIdle(header.StreamId))
         {
             GoAway(Http2Error.ProtocolError);   // RFC 9113 6.1: DATA always belongs to a stream, and 5.1: never an idle one
             return;
@@ -478,7 +527,29 @@ public sealed partial class Http2Connection
 
         if (!_streams.TryGetValue(header.StreamId, out PendingRequest? pending))
         {
-            return;   // done with its request, so owed no credit, behind a buffered answer still parked on credit too
+            // Past the peer's END_STREAM or its RST_STREAM it is the peer's error (RFC 9113 5.1): of the
+            // stream while the response is still going, and of the connection once the stream has
+            // closed both ways. Otherwise this side is done with the request, so the frame is owed no
+            // credit, behind a buffered answer still parked on credit too.
+            if (ClosedHow(header.StreamId) == ClosedByPeer)
+            {
+                if (_responseWindows.ContainsKey(header.StreamId))
+                {
+                    ResetOpenStream(header.StreamId, Http2Error.StreamClosed);
+                }
+                else
+                {
+                    GoAway(Http2Error.StreamClosed);
+                }
+            }
+            return;
+        }
+
+        // Half-closed (remote): after its END_STREAM, not a byte more reaches the body reader.
+        if (pending.RequestEnded)
+        {
+            ResetOpenStream(header.StreamId, Http2Error.StreamClosed);
+            return;
         }
 
         // Past its window is a stream error (6.9), and its response stops with it; an empty frame may still end it (6.9.1).
@@ -563,6 +634,7 @@ public sealed partial class Http2Connection
 
         // Its window moves with it: a WINDOW_UPDATE finds a stream by _streams only until here.
         _streams.Remove(pending.StreamId);
+        RememberClosed(pending.StreamId, ClosedByPeer);   // half-closed (remote), and closed once answered
         _responseWindows[pending.StreamId] = pending.SendWindow;
         _ready.Enqueue(pending);
     }
@@ -674,6 +746,12 @@ public sealed partial class Http2Connection
             return;
         }
 
+        if (header.StreamId != 0 && IsIdle(header.StreamId))
+        {
+            GoAway(Http2Error.ProtocolError);   // RFC 9113 5.1: nothing but HEADERS and PRIORITY on an idle stream
+            return;
+        }
+
         int increment = (int)(BinaryPrimitives.ReadUInt32BigEndian(payload) & 0x7FFFFFFF);
         if (increment == 0)
         {
@@ -756,9 +834,15 @@ public sealed partial class Http2Connection
             GoAway(Http2Error.FrameSizeError);
             return;
         }
+        if (IsIdle(header.StreamId))
+        {
+            GoAway(Http2Error.ProtocolError);   // RFC 9113 5.1: nothing but HEADERS and PRIORITY on an idle stream
+            return;
+        }
 
         if (_streams.Remove(header.StreamId, out PendingRequest? pending))
         {
+            RememberClosed(header.StreamId, ClosedByPeer);
             Discard(pending);   // the peer gave up; there is nobody to answer
         }
 

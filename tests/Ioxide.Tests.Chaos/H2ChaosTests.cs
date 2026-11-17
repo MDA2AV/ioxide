@@ -124,21 +124,29 @@ internal static class H2ChaosTests
             }));
 
             // Control: at or below the highest id opened a stream is closed, not idle - stream 1 by
-            // opening 3 (RFC 9113 5.1.1), stream 3 once answered - and its DATA is still dropped.
+            // opening 3 (RFC 9113 5.1.1) - and its DATA is still dropped.
             Assert.Equal("HEADERS 3", H2cClient.Verdict(port, c =>
             {
                 c.RequestHeadersOnly(streamId: 3, endHeaders: true, endStream: false);
                 c.WriteFrame(0x0, flags: 0, streamId: 1, "x"u8);
                 c.WriteFrame(0x0, flags: 0x1, streamId: 3, []);
             }));
+
+            // A stream answered after the client's END_STREAM is closed too, but by the client, whose
+            // DATA after it is its error (RFC 9113 5.1, a MUST in RFC 7540): STREAM_CLOSED, not PROTOCOL_ERROR.
             using (var client = new H2cClient(port))
             {
                 client.Open();
                 client.Request(streamId: 3);
                 Assert.True(client.AwaitResponse(streamId: 3), "server did not answer stream 3");
                 client.WriteFrame(0x0, flags: 0x1, streamId: 3, "x"u8);
-                client.Request(streamId: 5);
-                Assert.True(client.AwaitResponse(streamId: 5), "DATA on a stream already answered ended the connection");
+                string verdict;
+                do
+                {
+                    verdict = client.AwaitVerdict();   // past the rest of the answer
+                }
+                while (verdict == "DATA 3");
+                Assert.Equal("GOAWAY STREAM_CLOSED", verdict);
             }
 
             AssertServes(port);

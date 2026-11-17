@@ -68,6 +68,17 @@ public sealed partial class Http2Connection : IDisposable
     // opens nothing (RFC 9113 5.1.1).
     private int _highestStream;
 
+    // Streams closed lately, and how, for the frames that still arrive on them (RFC 9113 5.1): an id
+    // the peer closed, by its END_STREAM or its RST_STREAM, and an id this side reset or stopped
+    // reading, negated. A ring, the newest over the oldest, so it is bounded whatever the peer does,
+    // and looked up only for a frame on a stream that is not open. RFC 9113 5.1 lets a receiver
+    // limit how long it remembers a stream it reset; past that, DATA is dropped and HEADERS are an
+    // unexpected stream id.
+    private readonly int[] _closedStreams = new int[ClosedStreamMemory];
+    private int _closedNext;
+    private const int ClosedStreamMemory = 128;
+    private const int ClosedByPeer = 1, ClosedByUs = 2;
+
     // The handler takes a body reader: a request is dispatched at END_HEADERS, its body to follow.
     private bool _streamBodies;
 
@@ -446,6 +457,11 @@ public sealed partial class Http2Connection : IDisposable
         {
             ResetStream(pending.StreamId, Http2Error.NoError);
         }
+        else if (live)
+        {
+            // Its END_STREAM is in, or, behind a buffered rest parked on credit, the upload is dropped until the rest's own reset.
+            RememberClosed(pending.StreamId, pending.RequestEnded ? ClosedByPeer : ClosedByUs);
+        }
 
         Recycle(pending);
 
@@ -455,6 +471,22 @@ public sealed partial class Http2Connection : IDisposable
             _ = FlushDetachedAsync();
         }
     }
+
+    private void RememberClosed(int streamId, int how)
+    {
+        _closedStreams[_closedNext] = how == ClosedByUs ? -streamId : streamId;
+        _closedNext = (_closedNext + 1) % ClosedStreamMemory;
+    }
+
+    // ClosedByUs wins: once this side has reset a stream, whatever follows is dropped, whoever ended it first.
+    private int ClosedHow(int streamId)
+    {
+        ReadOnlySpan<int> closed = _closedStreams;
+        return closed.Contains(-streamId) ? ClosedByUs : closed.Contains(streamId) ? ClosedByPeer : 0;
+    }
+
+    // RFC 9113 5.1.1: a stream the client has not opened yet, or one only a server could, which this one never does.
+    private bool IsIdle(int streamId) => streamId > _highestStream || (streamId & 1) == 0;
 
     // Kept unless the pool is full or a peer's header lines grew its lists; only the reactor rents.
     private void Recycle(PendingRequest pending)
