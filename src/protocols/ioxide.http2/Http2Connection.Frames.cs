@@ -1043,7 +1043,7 @@ public sealed partial class Http2Connection
         // RFC 9113 8.3: each at most once and ahead of every regular field; 8.1: none in trailers.
         private (int Offset, int Length) Pseudo(int seen, ReadOnlySpan<byte> value)
         {
-            Malformed |= (_pseudoSeen & (seen | PseudoClosed)) != 0;
+            Malformed |= (_pseudoSeen & (seen | PseudoClosed)) != 0 || IsMalformedValue(value);
             _pseudoSeen |= seen;
             return Append(value);
         }
@@ -1052,8 +1052,9 @@ public sealed partial class Http2Connection
 
         /// <summary>
         /// A block is decoded. The one that opens the request has to have carried what RFC 9113 8.3.1
-        /// requires of a request: a :method, a :scheme and a :path that is not empty - or, for a
-        /// CONNECT, an :authority and neither of the others (8.5). Trailers carry none (8.1).
+        /// requires of a request: a :method, a :scheme and a :path, none of them empty - or, for a
+        /// CONNECT, an :authority that is not empty and neither :scheme nor :path (8.5). Trailers
+        /// carry none (8.1).
         /// </summary>
         public void EndHeaderBlock()
         {
@@ -1061,8 +1062,8 @@ public sealed partial class Http2Connection
             {
                 bool connect = _arena.AsSpan(Method.Offset, Method.Length).SequenceEqual("CONNECT"u8);
                 Malformed |= connect
-                    ? (_pseudoSeen & (2 | 4 | 8)) != 8
-                    : (_pseudoSeen & (1 | 2 | 4)) != (1 | 2 | 4) || Path.Length == 0;
+                    ? (_pseudoSeen & (2 | 4 | 8)) != 8 || Authority.Length == 0
+                    : (_pseudoSeen & (1 | 2 | 4)) != (1 | 2 | 4) || Method.Length == 0 || Scheme.Length == 0 || Path.Length == 0;
             }
             _requestDecoded = true;
             ClosePseudoHeaders();
@@ -1076,20 +1077,25 @@ public sealed partial class Http2Connection
             => Malformed |= (name.Length > 0 && name[0] == (byte)':') || IsMalformedField(name, value);
 
         /// <summary>
-        /// RFC 9113 8.2.1: a field name is lowercase. 8.2.2: HTTP/2 carries no connection-specific
-        /// field, which the framing replaced, and a te only of "trailers". Each of these reaching a
-        /// handler, or a proxy behind it, is what a request smuggled past the framing looks like.
+        /// RFC 9113 8.2.1: a field name is visible ASCII and lowercase, and its value is no field
+        /// value of its own (<see cref="IsMalformedValue"/>). 8.2.2: HTTP/2 carries no
+        /// connection-specific field, which the framing replaced, and a te only of "trailers". Each of
+        /// these reaching a handler, or a proxy behind it, is what a request smuggled past the framing
+        /// looks like: an HTTP/1.1 hop would read "x-a: b\r\ntransfer-encoding: chunked" as two lines.
         /// </summary>
         private static bool IsMalformedField(ReadOnlySpan<byte> name, ReadOnlySpan<byte> value)
         {
-            if (name.IndexOfAnyInRange((byte)'A', (byte)'Z') >= 0)
+            if (name.IsEmpty
+                || name.IndexOfAnyExceptInRange((byte)0x21, (byte)0x7E) >= 0
+                || name.IndexOfAnyInRange((byte)'A', (byte)'Z') >= 0
+                || IsMalformedValue(value))
             {
                 return true;
             }
 
             return name.Length switch
             {
-                2  => name.SequenceEqual("te"u8) && !value.SequenceEqual("trailers"u8),
+                2  => name.SequenceEqual("te"u8) && !System.Text.Ascii.EqualsIgnoreCase(value, "trailers"u8),   // as nghttp2 compares it
                 7  => name.SequenceEqual("upgrade"u8),
                 10 => name.SequenceEqual("connection"u8) || name.SequenceEqual("keep-alive"u8),
                 16 => name.SequenceEqual("proxy-connection"u8),
@@ -1097,6 +1103,11 @@ public sealed partial class Http2Connection
                 _  => false,
             };
         }
+
+        // RFC 9113 8.2.1: no NUL, CR or LF anywhere in a value, and no space or tab at either end of it.
+        private static bool IsMalformedValue(ReadOnlySpan<byte> value)
+            => value.IndexOfAny((byte)0, (byte)'\r', (byte)'\n') >= 0
+               || (value.Length > 0 && (value[0] is (byte)' ' or (byte)'\t' || value[^1] is (byte)' ' or (byte)'\t'));
 
         public void AppendBody(ReadOnlySpan<byte> data)
         {

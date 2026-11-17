@@ -73,7 +73,7 @@ internal static class Http2MalformedRequestTests
     private static byte[] Field(string name, string value) => Http2TrailerTests.Field(name, value);
 
     // The block on stream 1, a GET on stream 3 naming the inserted field, then `last` on stream 5, if given.
-    private static List<string> Serve(byte[] block, out List<Frame> frames, bool withReader, byte[]? last = null)
+    internal static List<string> Serve(byte[] block, out List<Frame> frames, bool withReader, byte[]? last = null)
     {
         using var client = new StrictClient();
         var served = new List<string>();
