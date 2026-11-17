@@ -51,7 +51,9 @@ internal static class Program
         Http2PeerClosedFlushTests.Register(runner);
         Http2StreamResetTests.Register(runner);
         Http2ControlFrameTests.Register(runner);
+        Http2PriorityResetTests.Register(runner);
         Http2StreamStateTests.Register(runner);
+        Http2ClosedStreamTests.Register(runner);
         Http2MalformedRequestTests.Register(runner);
         Http2MalformedTrailerTests.Register(runner);
         HpackEncodeTests.Register(runner);
