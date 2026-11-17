@@ -140,17 +140,19 @@ public sealed partial class Http2Connection
         }
     }
 
-    // A stream error, but PRIORITY may name an idle stream, which no RST_STREAM may (RFC 9113 6.4): the
-    // connection answers for it then.
+    // A stream error, but PRIORITY may name a stream never opened - an idle one, an even one, or one
+    // skipped below the highest - which no RST_STREAM may name (RFC 9113 6.4), and which nothing here
+    // tells from one closed long ago. Only a stream still live is reset; for any other the connection
+    // answers.
     private void RefusePriority(int streamId, uint errorCode)
     {
-        if (streamId > _highestStream)
+        if (_streams.ContainsKey(streamId) || _responseWindows.ContainsKey(streamId))
         {
-            GoAway(errorCode);
+            ResetOpenStream(streamId, errorCode);
         }
         else
         {
-            ResetOpenStream(streamId, errorCode);
+            GoAway(errorCode);
         }
     }
 

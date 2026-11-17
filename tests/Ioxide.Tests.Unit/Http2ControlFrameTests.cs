@@ -147,7 +147,7 @@ internal static class Http2ControlFrameTests
     private static byte[] Frame(byte type, int flags, int streamId, ReadOnlySpan<byte> payload)
         => Http2FlowControlTests.FrameBytes(type, (byte)flags, streamId, payload);
 
-    private static string Fields(Http2Request request)
+    internal static string Fields(Http2Request request)
     {
         var fields = new List<string>();
         foreach (KeyValuePair<ReadOnlyMemory<byte>, ReadOnlyMemory<byte>> field in request.Headers.AsSpan())
