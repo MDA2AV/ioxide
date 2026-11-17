@@ -68,16 +68,23 @@ public sealed partial class Http2Connection : IDisposable
     // opens nothing (RFC 9113 5.1.1).
     private int _highestStream;
 
-    // Streams closed lately, and how, for the frames that still arrive on them (RFC 9113 5.1): an id
-    // the peer closed, by its END_STREAM or its RST_STREAM, and an id this side reset or stopped
-    // reading, negated. A ring, the newest over the oldest, so it is bounded whatever the peer does,
-    // and looked up only for a frame on a stream that is not open. RFC 9113 5.1 lets a receiver
-    // limit how long it remembers a stream it reset; past that, DATA is dropped and HEADERS are an
-    // unexpected stream id.
-    private readonly int[] _closedStreams = new int[ClosedStreamMemory];
+    // Streams closed lately, and how, for the frames that still arrive on them (RFC 9113 5.1): each an
+    // id with its ClosedBy kind above it. A ring, the newest over the oldest, so it is bounded whatever
+    // the peer does, and looked up only for a frame on a stream that is not open. RFC 9113 5.1 lets a
+    // receiver limit how long it remembers a stream it reset, and a stream past the ring is treated
+    // as one this side reset: its DATA and HEADERS are dropped, so a client whose frames were simply
+    // late is never refused for them.
+    private readonly long[] _closedStreams = new long[ClosedStreamMemory];
     private int _closedNext;
     private const int ClosedStreamMemory = 128;
-    private const int ClosedByPeer = 1, ClosedByUs = 2;
+    private const int ClosedByPeer = 1, ClosedByPeerReset = 2, ClosedByUs = 3;
+
+    // Ranges of ids the client skipped as it opened higher ones, so never opened: HEADERS on one is an
+    // unexpected stream id (RFC 9113 5.1.1). A ring of the latest, packed low id over high id; a
+    // client that skips more often than it holds is let off rather than refused.
+    private readonly long[] _skippedStreams = new long[SkippedRanges];
+    private int _skippedNext;
+    private const int SkippedRanges = 16;
 
     // The handler takes a body reader: a request is dispatched at END_HEADERS, its body to follow.
     private bool _streamBodies;
@@ -474,15 +481,47 @@ public sealed partial class Http2Connection : IDisposable
 
     private void RememberClosed(int streamId, int how)
     {
-        _closedStreams[_closedNext] = how == ClosedByUs ? -streamId : streamId;
+        _closedStreams[_closedNext] = ((long)how << 32) | (uint)streamId;
         _closedNext = (_closedNext + 1) % ClosedStreamMemory;
     }
 
-    // ClosedByUs wins: once this side has reset a stream, whatever follows is dropped, whoever ended it first.
+    // ClosedByUs wins: once this side has reset a stream, whatever follows is dropped, whoever ended it
+    // first. Then the peer's reset over its END_STREAM. Zero for a stream past the ring, or never opened.
     private int ClosedHow(int streamId)
     {
-        ReadOnlySpan<int> closed = _closedStreams;
-        return closed.Contains(-streamId) ? ClosedByUs : closed.Contains(streamId) ? ClosedByPeer : 0;
+        ReadOnlySpan<long> closed = _closedStreams;
+        for (int how = ClosedByUs; how >= ClosedByPeer; how--)
+        {
+            if (closed.Contains(((long)how << 32) | (uint)streamId))
+            {
+                return how;
+            }
+        }
+        return 0;
+    }
+
+    // A new stream: every id the client skipped to reach it is one it can never open (RFC 9113 5.1.1).
+    private void OpenStreamId(int streamId)
+    {
+        int next = _highestStream == 0 ? 1 : _highestStream + 2;
+        if (streamId > next)
+        {
+            _skippedStreams[_skippedNext] = ((long)next << 32) | (uint)(streamId - 2);
+            _skippedNext = (_skippedNext + 1) % SkippedRanges;
+        }
+        _highestStream = streamId;
+    }
+
+    private bool NeverOpened(int streamId)
+    {
+        foreach (long range in _skippedStreams)
+        {
+            if (range != 0 && streamId >= (int)(range >> 32) && streamId <= (int)range)
+            {
+                return true;
+            }
+        }
+        return false;
     }
 
     // RFC 9113 5.1.1: a stream the client has not opened yet, or one only a server could, which this one never does.

@@ -248,7 +248,7 @@ public sealed partial class Http2Connection
 
             pending = RentPending(header.StreamId);
             _streams[header.StreamId] = pending;
-            _highestStream = header.StreamId;
+            OpenStreamId(header.StreamId);
 
             // Only the block that opens a stream can say there is no body. An END_STREAM on a later
             // one ends trailers, which come after a body, empty or not.
@@ -321,34 +321,46 @@ public sealed partial class Http2Connection
 
     /// <summary>
     /// HEADERS on a stream at or below the highest the client opened, and no longer open (RFC 9113 5.1).
-    /// One this side reset, or stopped reading, is still on its way, which the peer could not have
-    /// known: its block is decoded and dropped, as HPACK must be. One the peer itself closed, by its
-    /// END_STREAM or its RST_STREAM, is its error: of the stream while the response is still going,
-    /// and of the connection once it has closed both ways. One never opened, or closed too long ago
-    /// to be remembered, is an unexpected stream id (5.1.1).
+    /// One the peer itself closed is its error (<see cref="RefuseOnPeerClosed"/>). One the client
+    /// skipped, and so never opened, is an unexpected stream id (5.1.1). Any other - one this side
+    /// reset or stopped reading, or one closed too long ago to be remembered - is still on its way,
+    /// which the peer could not have known. A block not refused with the connection is decoded and
+    /// dropped, as HPACK must be.
     /// </summary>
     private void HandleHeadersOnClosed(in FrameHeader header, ReadOnlySpan<byte> block)
     {
-        switch (ClosedHow(header.StreamId))
+        int how = ClosedHow(header.StreamId);
+        if (how is ClosedByPeer or ClosedByPeerReset)
         {
-            case ClosedByUs:
-                _discardBlock.StreamId = header.StreamId;
-                DiscardHeaderBlock(header, block);
-                return;
+            RefuseOnPeerClosed(header.StreamId, how);
+        }
+        else if (how == 0 && NeverOpened(header.StreamId))
+        {
+            GoAway(Http2Error.ProtocolError);
+        }
 
-            case ClosedByPeer when _responseWindows.ContainsKey(header.StreamId):
-                ResetOpenStream(header.StreamId, Http2Error.StreamClosed);
-                _discardBlock.StreamId = header.StreamId;
-                DiscardHeaderBlock(header, block);
-                return;
+        if (!_failed)
+        {
+            _discardBlock.StreamId = header.StreamId;
+            DiscardHeaderBlock(header, block);
+        }
+    }
 
-            case ClosedByPeer:
-                GoAway(Http2Error.StreamClosed);
-                return;
-
-            default:
-                GoAway(Http2Error.ProtocolError);
-                return;
+    /// <summary>
+    /// DATA or HEADERS on a stream the peer closed are its error (RFC 9113 5.1), of the stream after its
+    /// RST_STREAM or while the response is still going, and of the connection once its END_STREAM and
+    /// ours have closed the stream both ways - a MAY in RFC 9113, a MUST in RFC 7540. After the reset
+    /// the stream is this side's, so what follows is dropped.
+    /// </summary>
+    private void RefuseOnPeerClosed(int streamId, int how)
+    {
+        if (how == ClosedByPeerReset || _responseWindows.ContainsKey(streamId))
+        {
+            ResetOpenStream(streamId, Http2Error.StreamClosed);
+        }
+        else
+        {
+            GoAway(Http2Error.StreamClosed);
         }
     }
 
@@ -382,7 +394,7 @@ public sealed partial class Http2Connection
         if (DecodeHeaderBlock(_discardBlock, discard: true) && streamId > _highestStream)
         {
             ResetStream(streamId, reset);
-            _highestStream = streamId;   // refused, but used
+            OpenStreamId(streamId);   // refused, but used
         }
     }
 
@@ -529,20 +541,13 @@ public sealed partial class Http2Connection
 
         if (!_streams.TryGetValue(header.StreamId, out PendingRequest? pending))
         {
-            // Past the peer's END_STREAM or its RST_STREAM it is the peer's error (RFC 9113 5.1): of the
-            // stream while the response is still going, and of the connection once the stream has
-            // closed both ways. Otherwise this side is done with the request, so the frame is owed no
-            // credit, behind a buffered answer still parked on credit too.
-            if (ClosedHow(header.StreamId) == ClosedByPeer)
+            // Past the peer's END_STREAM or its RST_STREAM it is the peer's error. Otherwise this side is
+            // done with the request, so the frame is owed no credit, behind a buffered answer still
+            // parked on credit too.
+            int how = ClosedHow(header.StreamId);
+            if (how is ClosedByPeer or ClosedByPeerReset)
             {
-                if (_responseWindows.ContainsKey(header.StreamId))
-                {
-                    ResetOpenStream(header.StreamId, Http2Error.StreamClosed);
-                }
-                else
-                {
-                    GoAway(Http2Error.StreamClosed);
-                }
+                RefuseOnPeerClosed(header.StreamId, how);
             }
             return;
         }
@@ -844,7 +849,7 @@ public sealed partial class Http2Connection
 
         if (_streams.Remove(header.StreamId, out PendingRequest? pending))
         {
-            RememberClosed(header.StreamId, ClosedByPeer);
+            RememberClosed(header.StreamId, ClosedByPeerReset);
             Discard(pending);   // the peer gave up; there is nobody to answer
         }
 

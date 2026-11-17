@@ -61,12 +61,13 @@ internal static class Http2StreamStateTests
             Assert.True(served.SequenceEqual([5]), $"the handler was handed: {string.Join(", ", served)}");
         });
 
-        runner.Test("h2 stream states: a DATA after the peer's RST_STREAM ends the connection", () =>
+        // RFC 9113 5.1: after the peer's RST_STREAM, a stream error; the stream is then this side's, so a second frame is dropped.
+        runner.Test("h2 stream states: a DATA after the peer's RST_STREAM resets the stream with STREAM_CLOSED, once, and the connection goes on", () =>
         {
-            (List<Frame> frames, List<int> served) = Exchange([], [.. Post(1), .. Frame(RstStream, 0, 1, [0, 0, 0, 8]), .. Frame(Data, EndStream, 1, [1])]);
+            (List<Frame> frames, List<int> served) = Exchange([], [.. Post(1), .. Frame(RstStream, 0, 1, [0, 0, 0, 8]), .. Frame(Data, 0, 1, [1]), .. Frame(Data, EndStream, 1, [1])]);
 
-            Assert.Equal("GOAWAY 1 0x5", Http2ControlFrameTests.Errors(frames));
-            Assert.Equal(0, served.Count);
+            Assert.Equal("RST_STREAM 1 0x5", Http2ControlFrameTests.Errors(frames));
+            Assert.True(served.SequenceEqual([7]), $"the handler was handed: {string.Join(", ", served)}");
         });
 
         // The issue's own case: no content-length, so nothing else would tell the reader the bytes are not the body's.
