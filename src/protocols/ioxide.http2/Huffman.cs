@@ -125,6 +125,7 @@ internal static class Huffman
         int node = 0;
         int written = 0;
         int depth = 0;   // bits consumed since the last emitted symbol (padding validity check)
+        bool ones = true;   // and whether every one of them was a 1, as EOS's prefix is
 
         foreach (byte b in input)
         {
@@ -133,6 +134,7 @@ internal static class Huffman
                 int bit = (b >> i) & 1;
                 int next = Tree[node * 2 + bit];
                 depth++;
+                ones &= bit == 1;
                 if (next < 0)
                 {
                     if (written >= output.Length)
@@ -142,6 +144,7 @@ internal static class Huffman
                     output[written++] = (byte)(-next - 1);
                     node = 0;
                     depth = 0;
+                    ones = true;
                 }
                 else
                 {
@@ -154,8 +157,8 @@ internal static class Huffman
             }
         }
 
-        // Trailing bits must be a prefix of EOS (all ones) and shorter than a byte.
-        return depth > 7 ? -1 : written;
+        // Trailing bits must be a prefix of EOS (all ones) and shorter than a byte (RFC 7541 5.2).
+        return depth > 7 || !ones ? -1 : written;
     }
 
     /// <summary>Worst-case decoded size (shortest code is 5 bits: 8/5 expansion).</summary>
