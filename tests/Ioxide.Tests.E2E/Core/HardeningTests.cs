@@ -363,7 +363,7 @@ internal static class HardeningTests
             // The unfixed reactor died in that accept and closed held on its way down.
             GetOk(held);
             using TcpClient fresh = ConnectServing(port, TimeSpan.FromSeconds(10));
-        }, skip: !TestServer.KernelAtLeast(6, 12) || HoldsIpcLock());
+        }, skip: !TestServer.KernelAtLeast(6, 12) || HoldsIpcLock() || RegistersRingAtZeroMemlock());
     }
 
     /// <summary>
@@ -760,6 +760,45 @@ internal static class HardeningTests
     {
         string? caps = File.ReadLines("/proc/self/status").FirstOrDefault(l => l.StartsWith("CapEff:", StringComparison.Ordinal));
         return caps is not null && (Convert.ToUInt64(caps["CapEff:".Length..].Trim(), 16) & (1UL << 14)) != 0;
+    }
+
+    // A kernel that registers the ring at a zero limit leaves nothing to refuse (GitHub's ubuntu-26.04 on
+    // 7.0.0-1020-azure). Asked as the incremental accept asks: a 4-entry ring on its own page.
+    private static unsafe bool RegistersRingAtZeroMemlock()
+    {
+        if (getrlimit(RlimitMemlock, out RLimit original) != 0)
+        {
+            return false;   // the test asks again, and fails on it
+        }
+
+        int page = Environment.SystemPageSize;
+        using Ring ring = Ring.Create(8);
+        byte* memory = (byte*)NativeMemory.AlignedAlloc((nuint)page, (nuint)page);
+        NativeMemory.Clear(memory, (nuint)page);
+        int ret = -1;
+        try
+        {
+            var none = new RLimit { Cur = 0, Max = original.Max };
+            if (setrlimit(RlimitMemlock, in none) == 0)
+            {
+                var reg = new Native.io_uring_buf_reg
+                {
+                    ring_addr = (ulong)memory, ring_entries = 4, bgid = 1, flags = Native.IOU_PBUF_RING_INC,
+                };
+                ret = Native.io_uring_register(ring.Fd, Native.IORING_REGISTER_PBUF_RING, &reg, 1);
+            }
+        }
+        finally
+        {
+            setrlimit(RlimitMemlock, in original);
+            if (ret == 0)
+            {
+                var reg = new Native.io_uring_buf_reg { bgid = 1 };
+                Native.io_uring_register(ring.Fd, Native.IORING_UNREGISTER_PBUF_RING, &reg, 1);
+            }
+            NativeMemory.AlignedFree(memory);
+        }
+        return ret == 0;
     }
 
     // Closed without an answer: EOF, or a reset when the request was still unread at the close.
