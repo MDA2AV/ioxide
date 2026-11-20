@@ -208,7 +208,7 @@ internal static class QuicSniHostileTests
 
     /// <summary>Default localhost certificate, plus alpha.test and beta.test by name - the same
     /// shape <see cref="QuicSniTests"/> uses, so a name here is one the engine really holds.</summary>
-    private static QuicEngine NewEngine()
+    internal static QuicEngine NewEngine()
     {
         (string cert, string key) = TestCert.Ensure();
         (string alphaCert, string alphaKey) = TestCert.EnsureNamed("alpha.test");
@@ -220,7 +220,7 @@ internal static class QuicSniHostileTests
         return engine;
     }
 
-    private static int Serve(QuicEngine engine)
+    internal static int Serve(QuicEngine engine)
     {
         // The engine outlives the test body only as far as the reactor does; Runner stops every
         // test server when the test ends, and nothing here ever completes a handshake anyway.
@@ -233,6 +233,19 @@ internal static class QuicSniHostileTests
         return udpPort;
     }
 
+    /// <summary>Which quic_transport_parameters extension a hand-built ClientHello carries.</summary>
+    internal enum TransportParameters
+    {
+        /// <summary>The RFC 9001 extension, 0x39, as every real client sends it.</summary>
+        V1,
+
+        /// <summary>The same parameters under the draft-era codepoint 0xffa5 only.</summary>
+        DraftOnly,
+
+        /// <summary>No transport parameters at all.</summary>
+        None,
+    }
+
     /// <summary>
     /// One ClientHello, differing from the next only in its ServerNameList. Everything else - the
     /// cipher suite, the groups, the signature algorithms, the ALPN, the QUIC transport parameters
@@ -241,7 +254,10 @@ internal static class QuicSniHostileTests
     /// <param name="names">(name, name_type) pairs for the server_name extension; empty omits it.</param>
     /// <param name="withKeyShare">false sends an EMPTY client_shares list, which is what forces the
     /// server to answer with a HelloRetryRequest instead of a ServerHello.</param>
-    internal static byte[] Hello(RawInitial raw, (string Name, byte Type)[] names, bool withKeyShare = true)
+    /// <param name="transportParameters">Which transport parameters extension to carry, if any; the
+    /// parameters themselves are the same whichever codepoint carries them.</param>
+    internal static byte[] Hello(RawInitial raw, (string Name, byte Type)[] names, bool withKeyShare = true,
+        TransportParameters transportParameters = TransportParameters.V1)
     {
         var b = new Buf();
         b.U8(0x01);                                   // client_hello
@@ -299,16 +315,20 @@ internal static class QuicSniHostileTests
         b.U8(2).U16(0x0304);
         b.Fill(v, 2);
 
-        b.U16(0x0039);                                // quic_transport_parameters (v1)
-        int tp = b.Mark(2);
-        b.U8(0x0f).U8(raw.Scid.Length).Raw(raw.Scid);            // initial_source_connection_id
-        b.U8(0x04).U8(4).Raw([0x80, 0x10, 0x00, 0x00]);          // initial_max_data
-        b.U8(0x05).U8(4).Raw([0x80, 0x01, 0x00, 0x00]);          // initial_max_stream_data_bidi_local
-        b.U8(0x06).U8(4).Raw([0x80, 0x01, 0x00, 0x00]);          // ...bidi_remote
-        b.U8(0x07).U8(4).Raw([0x80, 0x01, 0x00, 0x00]);          // ...uni
-        b.U8(0x08).U8(1).U8(0x10);                               // initial_max_streams_bidi
-        b.U8(0x09).U8(1).U8(0x10);                               // initial_max_streams_uni
-        b.Fill(tp, 2);
+        if (transportParameters != TransportParameters.None)
+        {
+            // quic_transport_parameters (v1), or the draft codepoint a pre-RFC client sent instead
+            b.U16(transportParameters == TransportParameters.V1 ? 0x0039 : 0xffa5);
+            int tp = b.Mark(2);
+            b.U8(0x0f).U8(raw.Scid.Length).Raw(raw.Scid);            // initial_source_connection_id
+            b.U8(0x04).U8(4).Raw([0x80, 0x10, 0x00, 0x00]);          // initial_max_data
+            b.U8(0x05).U8(4).Raw([0x80, 0x01, 0x00, 0x00]);          // initial_max_stream_data_bidi_local
+            b.U8(0x06).U8(4).Raw([0x80, 0x01, 0x00, 0x00]);          // ...bidi_remote
+            b.U8(0x07).U8(4).Raw([0x80, 0x01, 0x00, 0x00]);          // ...uni
+            b.U8(0x08).U8(1).U8(0x10);                               // initial_max_streams_bidi
+            b.U8(0x09).U8(1).U8(0x10);                               // initial_max_streams_uni
+            b.Fill(tp, 2);
+        }
 
         b.Fill(exts, 2);
         b.Fill(msg, 3);

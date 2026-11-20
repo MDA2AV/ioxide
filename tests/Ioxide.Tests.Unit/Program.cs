@@ -55,6 +55,7 @@ internal static class Program
         Http2StreamStateTests.Register(runner);
         Http2ClosedStreamTests.Register(runner);
         HpackEncodeTests.Register(runner);
+        Http2HpackDecodeTests.Register(runner);
         QpackStaticEncodeTests.Register(runner);
         AlpnSelectTests.Register(runner);
         KeylogSecretTests.Register(runner);
