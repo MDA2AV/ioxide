@@ -1750,11 +1750,20 @@ ngtcp2_ssize iq_conn_close(iq_conn *c, uint64_t app_error_code,
 /* Engine-initiated close: the peer is told which TRANSPORT error ended this, translated from the
  * ngtcp2 library error code, instead of the connection simply going quiet and the peer waiting out
  * its idle timeout. Returns <= 0 when there is nothing to send - notably in draining and closing
- * state, where a CONNECTION_CLOSE would be a reply to one the peer already sent. */
+ * state, where a CONNECTION_CLOSE would be a reply to one the peer already sent.
+ * A handshake the TLS stack refused is the exception: ngtcp2_ccerr_set_liberr infers PROTOCOL_VIOLATION
+ * for NGTCP2_ERR_CRYPTO, as for any error it has no case for, while the alert the stack raised is held by
+ * the conn. RFC 9001 4.8 has it sent as CRYPTO_ERROR (0x100 + alert), as ngtcp2's own examples do. The
+ * managed side passes some codes negated, so either sign is taken. */
 ngtcp2_ssize iq_conn_close_liberr(iq_conn *c, int liberr,
                                   uint8_t *dest, size_t destlen, uint64_t ts)
 {
-    ngtcp2_ccerr_set_liberr(&c->last_error, liberr, NULL, 0);
+    uint8_t alert = ngtcp2_conn_get_tls_alert2(c->conn);
+    if ((liberr == NGTCP2_ERR_CRYPTO || liberr == -NGTCP2_ERR_CRYPTO) && alert != 0) {
+        ngtcp2_ccerr_set_tls_alert(&c->last_error, alert, NULL, 0);
+    } else {
+        ngtcp2_ccerr_set_liberr(&c->last_error, liberr, NULL, 0);
+    }
     return ngtcp2_conn_write_connection_close(c->conn, &c->path, NULL, dest, destlen,
                                               &c->last_error, ts);
 }
