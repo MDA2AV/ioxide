@@ -338,7 +338,9 @@ public sealed partial class Http2Connection
     {
         Span<byte> frame = stackalloc byte[FrameHeader.Size + 8];
         new FrameHeader(8, FrameType.GoAway, FrameFlags.None, 0).Write(frame);
-        BinaryPrimitives.WriteUInt32BigEndian(frame[FrameHeader.Size..], 0);       // last stream id
+        // RFC 9113 6.8: the highest stream that was or might be processed, so the client knows which of its
+        // requests it may retry elsewhere. Refused ones are among them, and REFUSED_STREAM already said so.
+        BinaryPrimitives.WriteUInt32BigEndian(frame[FrameHeader.Size..], (uint)_highestStream);
         BinaryPrimitives.WriteUInt32BigEndian(frame[(FrameHeader.Size + 4)..], errorCode);
         Stage(frame);
         _failed = true;

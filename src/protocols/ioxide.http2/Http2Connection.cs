@@ -57,6 +57,10 @@ public sealed partial class Http2Connection : IDisposable
     // with another stream's frames, so one of these is enough.
     private readonly PendingRequest _discardBlock = new();
 
+    // What a new stream whose block is discarded is reset with once that block is decoded:
+    // REFUSED_STREAM past the concurrency limit, PROTOCOL_ERROR for one refused as malformed.
+    private uint _discardReset = Http2Error.RefusedStream;
+
     // The stream whose header block is still open, or 0.
     private int _headerBlockStream;
 
