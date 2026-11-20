@@ -58,6 +58,7 @@ internal static class Program
         Http2MalformedTrailerTests.Register(runner);
         Http2FieldValidityTests.Register(runner);
         HpackEncodeTests.Register(runner);
+        Http2HpackDecodeTests.Register(runner);
         QpackStaticEncodeTests.Register(runner);
         AlpnSelectTests.Register(runner);
         KeylogSecretTests.Register(runner);
