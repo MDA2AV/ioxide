@@ -544,6 +544,7 @@ public sealed class H2cClient : IDisposable
         {
             0x1 => "PROTOCOL_ERROR",
             0x3 => "FLOW_CONTROL_ERROR",
+            0x5 => "STREAM_CLOSED",
             0x7 => "REFUSED_STREAM",
             0x9 => "COMPRESSION_ERROR",
             _ => $"0x{code:x}",

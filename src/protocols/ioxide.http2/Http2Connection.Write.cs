@@ -327,6 +327,7 @@ public sealed partial class Http2Connection
         {
             Discard(pending);
         }
+        RememberClosed(streamId, ClosedByUs);   // what the peer sends before it hears of this is dropped (RFC 9113 5.1)
 
         Span<byte> frame = stackalloc byte[FrameHeader.Size + 4];
         new FrameHeader(4, FrameType.RstStream, FrameFlags.None, streamId).Write(frame);
