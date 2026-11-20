@@ -61,6 +61,10 @@ public sealed partial class Http2Connection : IDisposable
     // REFUSED_STREAM past the concurrency limit, PROTOCOL_ERROR for one refused as malformed.
     private uint _discardReset = Http2Error.RefusedStream;
 
+    // The block discarded is trailers of a request with a body reader, and whether its HEADERS ended the stream.
+    private bool _discardTrailers;
+    private bool _discardEndsStream;
+
     // The stream whose header block is still open, or 0.
     private int _headerBlockStream;
 
