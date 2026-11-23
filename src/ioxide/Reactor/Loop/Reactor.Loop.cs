@@ -12,6 +12,7 @@ public sealed unsafe partial class Reactor
             if (_incremental) DrainReturnQIncremental();
             else DrainReturnQ();
             DrainFlushQ();
+            DrainFinQ();
             DrainRecycleQ();
             DrainRemoteOps();
             DrainPostQ();

@@ -71,15 +71,25 @@ public sealed unsafe partial class Reactor
         }
     }
 
-    // The kernel is done with the slab: complete the flush, then any teardown that waited for it.
+    // The kernel is done with the slab: complete the flush, then any teardown that waited for it, or
+    // else the FIN that did - asked for behind this flush, by a handler that let go or by ShutdownWrite.
     private void FinishSend(TcpConnection conn, int fd)
     {
+        int generation = conn.Generation;
         conn.CompleteFlush();
 
         if (conn.CloseAfterSend)
         {
             _connections[fd] = null;
             conn.ReleaseReactorRef();
+            return;
+        }
+
+        // CompleteFlush resumed the flush's caller inline, so this is still the same life only if the
+        // generation says so. The sweep used to send this FIN, up to a tick (250 ms) after the flush.
+        if (conn.FinWanted && conn.Generation == generation)
+        {
+            conn.SendFinBehindFlush();
         }
     }
 

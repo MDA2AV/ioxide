@@ -49,7 +49,7 @@ public sealed unsafe partial class TcpConnection
 
     private int _readTimeoutDisabled;
     private long _finSentMs;
-    private int _finSent;   // 0, 1 sent (or suppressed), 2 asked for behind a flush - the sweep sends it
+    private int _finSent;   // 0, 1 sent (or suppressed), 2 asked for behind a flush - its completion sends it
 
     /// <summary>
     /// Set once the sweep has shut this connection down, so the next tick skips it instead of
@@ -141,10 +141,10 @@ public sealed unsafe partial class TcpConnection
         }
 
         // Before the decrement, while our ref keeps the fd from being recycled. A FIN now would cut
-        // a flush in flight short, so the sweep sends that one once it completes.
-        if (Volatile.Read(ref _refs) == 2 && !FlushOutstanding)
+        // a flush in flight short, so that one is left to the flush's completion.
+        if (Volatile.Read(ref _refs) == 2)
         {
-            SendFin();
+            SendFinOrDefer();
         }
 
         ReleaseRef();
@@ -181,23 +181,66 @@ public sealed unsafe partial class TcpConnection
     internal bool FinWanted => Volatile.Read(ref _finSent) == 2;
 
     /// <summary>
+    /// The FIN now, or - with a flush in flight, which a FIN would cut short - asked for behind that
+    /// flush, for its final completion to send. Any thread.
+    /// </summary>
+    /// <remarks>
+    /// The ask is decided on the reactor (<see cref="AskFinBehindFlush"/>): inline when this is the
+    /// reactor thread, through its queue when it is not. The flush completes on the reactor too, so
+    /// the ask and the completion are ordered by one thread instead of raced across two - a caller
+    /// here could otherwise see the flush in flight, the reactor complete it and look for an ask
+    /// before this one landed, and the FIN wait for nothing. Nothing may be written once the FIN is
+    /// asked for (<see cref="ShutdownWrite"/>, or a handler that let go), so no flush armed after the
+    /// ask can need waiting for.
+    /// </remarks>
+    private void SendFinOrDefer()
+    {
+        if (!FlushOutstanding)
+        {
+            SendFin();
+            return;
+        }
+
+        _reactor.EnqueueFinBehindFlush(this, ClientFd, Generation);
+    }
+
+    /// <summary>
+    /// Reactor thread: the FIN asked for behind a flush. Sent now when that flush is already over -
+    /// an ask that came through the queue can arrive after its completion - and otherwise left asked
+    /// for, for <see cref="SendFinBehindFlush"/>.
+    /// </summary>
+    internal void AskFinBehindFlush()
+    {
+        if (!FlushOutstanding)
+        {
+            SendFin();
+            return;
+        }
+
+        Interlocked.CompareExchange(ref _finSent, 2, 0);   // not over a FIN already sent or suppressed
+    }
+
+    /// <summary>
+    /// Reactor thread, from the completion that ends a flush, and from the sweep as a backstop: the
+    /// FIN asked for behind it. A flush armed before the ask and still in flight keeps it for its own
+    /// completion, which comes later on this thread.
+    /// </summary>
+    internal void SendFinBehindFlush()
+    {
+        if (FinWanted && !FlushOutstanding)
+        {
+            SendFin();
+        }
+    }
+
+    /// <summary>
     /// Half-close: the peer gets a FIN once what has been flushed is out, and the connection stays -
     /// its read side open, its descriptor still released by <see cref="DecRef"/>. For a protocol layer
     /// that is done sending (HTTP's <c>Connection: close</c>). Nothing may be written after it.
     /// A flush still in flight keeps the FIN until it is done; a connection the reactor already tore
     /// down gets none. Reactor thread only (#211).
     /// </summary>
-    public void ShutdownWrite()
-    {
-        if (!FlushOutstanding)
-        {
-            SendFin();
-        }
-        else
-        {
-            Interlocked.CompareExchange(ref _finSent, 2, 0);
-        }
-    }
+    public void ShutdownWrite() => SendFinOrDefer();
 
     /// <summary>
     /// Take this connection off the read timeout for the rest of its life - for an adapter whose

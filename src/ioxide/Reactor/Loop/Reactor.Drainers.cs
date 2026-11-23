@@ -9,6 +9,7 @@ public sealed unsafe partial class Reactor
 {
     private readonly Mpsc<ushort> _returnQ = new(1 << 14);
     private readonly Mpsc<ulong>  _flushQ  = new(1 << 12);   // (gen << 32) | fd
+    private readonly Mpsc<ulong>  _finQ    = new(1 << 12);   // (gen << 32) | fd: FINs asked for behind a flush
 
     // Recycle must run on the reactor (buf_ring + pool are reactor-owned). TcpConnection is a
     // ref type, so this queue is a ConcurrentQueue rather than the unmanaged Mpsc<T>.
@@ -208,6 +209,34 @@ public sealed unsafe partial class Reactor
                 continue;
             }
             SubmitFlush(conn, fd, gen);
+        }
+    }
+
+    // A FIN asked for with a flush in flight (TcpConnection.SendFinOrDefer), decided where the flush
+    // completes. The caller still holds its ref, so the fd and generation are this life's.
+    internal void EnqueueFinBehindFlush(TcpConnection conn, int fd, int gen)
+    {
+        if (Environment.CurrentManagedThreadId == _reactorThreadId)
+        {
+            conn.AskFinBehindFlush();
+            return;
+        }
+        ulong packed = ((ulong)(ushort)gen << 32) | (uint)fd;
+        SpinWait sw = default;
+        while (!_finQ.TryEnqueue(packed))
+        {
+            sw.SpinOnce();
+        }
+        Wake();
+    }
+
+    // A connection gone by now was torn down by the reactor, which sends no FIN; the gen check also
+    // drops an ask whose fd was reused before the queue drained.
+    private void DrainFinQ()
+    {
+        while (_finQ.TryDequeue(out ulong packed))
+        {
+            ConnAt((int)(uint)packed, (ushort)(packed >> 32))?.AskFinBehindFlush();
         }
     }
 
