@@ -11,6 +11,10 @@ public sealed unsafe partial class TcpConnection
 
     public int ClientFd { get; private set; }
 
+    // Where the reactor's table holds this connection, and what the tags of its operations name: taken at
+    // accept (Reactor.Track), kept until recycle. Before the first, -1, which finds nothing.
+    internal int Slot = -1;
+
     /// <summary>The listener port this connection was accepted on; set per accept.</summary>
     public ushort ListenerPort { get; internal set; }
 
@@ -194,7 +198,7 @@ public sealed unsafe partial class TcpConnection
         }
         else if (Interlocked.CompareExchange(ref _writeShutdown, 2, 0) == 0)   // not over one made, suppressed or already deferred
         {
-            _reactor.DeferWriteShutdown(ClientFd, Generation);
+            _reactor.DeferWriteShutdown(Slot, Generation);
         }
     }
 

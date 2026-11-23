@@ -12,42 +12,42 @@ namespace ioxide;
 /// </summary>
 public sealed unsafe partial class Reactor
 {
-    private void SubmitRecvMultishot(int fd, ushort gen, ushort bgid)
+    private void SubmitRecvMultishot(TcpConnection conn, ushort gen, ushort bgid)
     {
         IoUringSqe* sqe = GetSqeOrFlush();
         Unsafe.InitBlockUnaligned(sqe, 0, 64);
         sqe->opcode    = IORING_OP_RECV;
         sqe->flags     = IOSQE_BUFFER_SELECT;
         sqe->ioprio    = IORING_RECV_MULTISHOT;
-        sqe->fd        = fd;
+        sqe->fd        = conn.ClientFd;
         sqe->buf_index = bgid;
-        sqe->user_data = Tag(KindTcpRecv, gen, fd);
+        sqe->user_data = Tag(KindTcpRecv, gen, conn.Slot);
     }
 
-    private void SubmitSend(TcpConnection conn, int fd, ushort gen, byte* buf, uint len, uint opFlags)
+    private void SubmitSend(TcpConnection conn, ushort gen, byte* buf, uint len, uint opFlags)
     {
         IoUringSqe* sqe = GetSqeOrFlush();
         Unsafe.InitBlockUnaligned(sqe, 0, 64);
         sqe->opcode    = conn.UseZc ? IORING_OP_SEND_ZC : IORING_OP_SEND;
-        sqe->fd        = fd;
+        sqe->fd        = conn.ClientFd;
         sqe->addr      = (ulong)buf;
         sqe->len       = len;
         sqe->op_flags  = opFlags;   // MSG_WAITALL by default; cleared for kTLS
-        sqe->user_data = Tag(KindTcpSend, gen, fd);
+        sqe->user_data = Tag(KindTcpSend, gen, conn.Slot);
     }
 
     // Vectored send: one SQE gathers every write segment (primary + overflow) from the iovec the
     // connection prepared in BuildIovec. Plain SENDMSG (no zero-copy) for the segmented path.
-    private void SubmitSendMsg(TcpConnection conn, int fd, ushort gen)
+    private void SubmitSendMsg(TcpConnection conn, ushort gen)
     {
         IoUringSqe* sqe = GetSqeOrFlush();
         Unsafe.InitBlockUnaligned(sqe, 0, 64);
         sqe->opcode    = IORING_OP_SENDMSG;
-        sqe->fd        = fd;
+        sqe->fd        = conn.ClientFd;
         sqe->addr      = (ulong)conn.MsgHdr;
         sqe->len       = 1;
         sqe->op_flags  = conn.SendOpFlags;   // MSG_WAITALL
-        sqe->user_data = Tag(KindTcpSend, gen, fd);
+        sqe->user_data = Tag(KindTcpSend, gen, conn.Slot);
     }
 
     private void SubmitAcceptMultishot(int listenFd)
@@ -82,7 +82,7 @@ public sealed unsafe partial class Reactor
 
     private const int ENOBUFS = 105;
 
-    // Connections whose multishot recv died on -ENOBUFS, packed (gen << 32 | fd), both modes (#93).
+    // Connections whose multishot recv died on -ENOBUFS, packed (gen << 32 | slot), both modes (#93).
     // RearmStarvedRecvs re-arms them from the loop, gated on _buffersReturned - handler
     // continuations run inline in CQE dispatch, so buffers can return BEFORE the batch's trailing
     // -ENOBUFS is even seen; a per-return flag observed at the loop top misses neither ordering.
@@ -91,12 +91,12 @@ public sealed unsafe partial class Reactor
 
     // Shared mode: one reactor-wide provided-buffer ring; every CQE consumes a whole buffer, so
     // the EOF and stale paths must hand it straight back to the shared pool.
-    private void OnTcpRecvCompletionShared(int fd, ushort gen, int res, uint flags)
+    private void OnTcpRecvCompletionShared(int slot, ushort gen, int res, uint flags)
     {
         bool   hasBuf = (flags & IORING_CQE_F_BUFFER) != 0;
         ushort bid    = hasBuf ? (ushort)(flags >> IORING_CQE_BUFFER_SHIFT) : (ushort)0;
 
-        TcpConnection? conn = ConnAt(fd, gen);
+        TcpConnection? conn = ConnAt(slot, gen);
 
         if (res == -ENOBUFS)
         {
@@ -105,7 +105,7 @@ public sealed unsafe partial class Reactor
             // return to the group.
             if (conn != null)
             {
-                ParkStarvedRecv(conn, fd, gen);
+                ParkStarvedRecv(conn, gen);
             }
             return;
         }
@@ -119,14 +119,14 @@ public sealed unsafe partial class Reactor
             }
             if (conn != null)
             {
-                CloseFromRecv(conn, fd);
+                CloseFromRecv(conn);
             }
             return;
         }
 
         if (conn == null)
         {
-            // Stale CQE from the fd's previous tenant.
+            // Stale CQE from the slot's previous tenant.
             if (hasBuf)
             {
                 ReturnBufferDirect(bid);
@@ -138,27 +138,27 @@ public sealed unsafe partial class Reactor
         byte* ptr = hasBuf ? _bufSlab + (nuint)bid * (nuint)_recvBufferSize : null;
         if (!conn.Complete(res, bid, hasBuf, ptr))
         {
-            CloseFromRecvOverflow(conn, fd, gen);
+            CloseFromRecvOverflow(conn, gen);
             return;
         }
 
         if ((flags & IORING_CQE_F_MORE) == 0)
         {
-            SubmitRecvMultishot(fd, gen, BgId);
+            SubmitRecvMultishot(conn, gen, BgId);
         }
     }
 
     // Incremental mode: per-connection IOU_PBUF_RING_INC ring - the kernel keeps appending into
     // one bid at a running offset, so instead of returning buffers per CQE this tracks
     // offset/refcount/kernel-done per buffer (the ring is freed wholesale in Recycle).
-    private void OnTcpRecvCompletionIncremental(int fd, ushort gen, int res, uint flags)
+    private void OnTcpRecvCompletionIncremental(int slot, ushort gen, int res, uint flags)
     {
         bool   more    = (flags & IORING_CQE_F_MORE)     != 0;
         bool   hasBuf  = (flags & IORING_CQE_F_BUFFER)   != 0;
         bool   bufMore = (flags & IORING_CQE_F_BUF_MORE) != 0;
         ushort bid     = hasBuf ? (ushort)(flags >> IORING_CQE_BUFFER_SHIFT) : (ushort)0;
 
-        TcpConnection? conn = ConnAt(fd, gen);
+        TcpConnection? conn = ConnAt(slot, gen);
 
         if (res == -ENOBUFS)
         {
@@ -166,7 +166,7 @@ public sealed unsafe partial class Reactor
             // still holds buffers (#93). Park; the loop re-arms once a buffer recycles.
             if (conn != null)
             {
-                ParkStarvedRecv(conn, fd, gen);
+                ParkStarvedRecv(conn, gen);
             }
             return;
         }
@@ -176,7 +176,7 @@ public sealed unsafe partial class Reactor
             // Peer EOF / recv error - the per-conn ring is freed in Recycle.
             if (conn != null)
             {
-                CloseFromRecv(conn, fd);
+                CloseFromRecv(conn);
             }
             return;
         }
@@ -203,14 +203,14 @@ public sealed unsafe partial class Reactor
             conn.RefCount![bid]++;
             if (!conn.Complete(res, bid, hasBuffer: true, ptr))
             {
-                CloseFromRecvOverflow(conn, fd, gen);
+                CloseFromRecvOverflow(conn, gen);
                 return;
             }
         }
 
         if (!more)
         {
-            SubmitRecvMultishot(fd, gen, conn.Bgid);
+            SubmitRecvMultishot(conn, gen, conn.Bgid);
         }
     }
 
@@ -260,12 +260,11 @@ public sealed unsafe partial class Reactor
             }
 
             conn.UseZc = _zeroCopySend;   // config default; kTLS overrides to plain on handshake
-            Track(clientFd, conn);
+            Track(conn);
             conn.InitRefs();
-            _tcpLive++;
             conn.ListenerPort = PortOf(listenFd);
             conn.BindSendOpFlags(_sendOpFlags);   // TcpOptions.SendWaitAll; the kTLS handoff clears it
-            SubmitRecvMultishot(clientFd, (ushort)conn.Generation, bgid);
+            SubmitRecvMultishot(conn, (ushort)conn.Generation, bgid);
 
             _ = RunHandlerAsync(conn);
         }
@@ -296,7 +295,7 @@ public sealed unsafe partial class Reactor
 
     // Recv-side teardown, shared by both modes. With a send in the kernel the reactor keeps its ref
     // and the table slot, so the slab cannot be recycled under it; FinishSend lets go (#221).
-    private void CloseFromRecv(TcpConnection conn, int fd)
+    private void CloseFromRecv(TcpConnection conn)
     {
         conn.SuppressWriteShutdown();
 
@@ -307,27 +306,27 @@ public sealed unsafe partial class Reactor
             return;
         }
 
-        _connections[fd] = null;
+        Untrack(conn);
         conn.MarkClosed();
         conn.ReleaseReactorRef();
     }
 
     // Recv-queue overflow - tear down rather than zombify. The multishot recv is still armed
     // (F_MORE was set), so it is also cancelled by exact user_data.
-    private void CloseFromRecvOverflow(TcpConnection conn, int fd, ushort gen)
+    private void CloseFromRecvOverflow(TcpConnection conn, ushort gen)
     {
-        SubmitCancel(Tag(KindTcpRecv, gen, fd));
-        CloseFromRecv(conn, fd);
+        SubmitCancel(Tag(KindTcpRecv, gen, conn.Slot));
+        CloseFromRecv(conn);
     }
 
-    private void ParkStarvedRecv(TcpConnection conn, int fd, ushort gen)
+    private void ParkStarvedRecv(TcpConnection conn, ushort gen)
     {
         conn.ReadParkedMs = NowMs;   // the peer sent; the wait is ours, so the clock restarts
         if (conn.HandlerReleased)
         {
             ReturnReleasedBuffers(conn);
         }
-        _recvStarved.Add(((ulong)gen << 32) | (uint)fd);
+        _recvStarved.Add(((ulong)gen << 32) | (uint)conn.Slot);
     }
 
     // Nobody will read a connection its handler let go, and its recv needs a buffer to reach the peer's close, which
@@ -352,12 +351,12 @@ public sealed unsafe partial class Reactor
 
         for (int i = 0; i < _recvStarved.Count; i++)
         {
-            int    fd  = (int)(uint)_recvStarved[i];
-            ushort gen = (ushort)(_recvStarved[i] >> 32);
-            TcpConnection? conn = ConnAt(fd, gen);
+            int    slot = (int)(uint)_recvStarved[i];
+            ushort gen  = (ushort)(_recvStarved[i] >> 32);
+            TcpConnection? conn = ConnAt(slot, gen);
             if (conn != null)
             {
-                SubmitRecvMultishot(fd, gen, _incremental ? conn.Bgid : BgId);
+                SubmitRecvMultishot(conn, gen, _incremental ? conn.Bgid : BgId);
             }
             // stale entries (recycled connections) just drop
         }
@@ -431,15 +430,15 @@ public sealed unsafe partial class Reactor
     private void CloseTcpConnections()
     {
         sockaddr_in unspec = default;
-        for (int fd = 0; fd < _connections.Length; fd++)
+        foreach (TcpConnection? conn in _slots.AsSpan(0, _slotsUsed))
         {
-            if (_connections[fd] is { } conn)
+            if (conn is not null)
             {
                 if (!conn.SweepClosed)
                 {
                     TcpSweepClose(conn);
                 }
-                connect(fd, &unspec, (uint)sizeof(sockaddr_in));
+                connect(conn.ClientFd, &unspec, (uint)sizeof(sockaddr_in));
             }
         }
     }

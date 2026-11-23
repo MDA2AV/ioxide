@@ -364,7 +364,7 @@ internal static class AffinityTests
                 for (int i = 0; i < 100; i++)
                 {
                     reactor.EnqueueReturnQ(0);
-                    reactor.EnqueueReturnQIncremental(3, 0, 0);
+                    EnqueueReturnQIncremental(reactor, 3, 0, 0);
                     EnqueueFlush(reactor, 3, 0);
                     EnqueueRecycle(reactor, conn);
                     reactor.SubmitRecv(3, 0, 0, completion);
@@ -406,8 +406,11 @@ internal static class AffinityTests
     [UnsafeAccessor(UnsafeAccessorKind.Method, Name = "InitIncremental")]
     private static extern void InitIncremental(Reactor reactor);
 
+    [UnsafeAccessor(UnsafeAccessorKind.Method, Name = "EnqueueReturnQIncremental")]
+    private static extern void EnqueueReturnQIncremental(Reactor reactor, int slot, ushort gen, ushort bid);
+
     [UnsafeAccessor(UnsafeAccessorKind.Method, Name = "EnqueueFlush")]
-    private static extern void EnqueueFlush(Reactor reactor, int fd, int gen);
+    private static extern void EnqueueFlush(Reactor reactor, int slot, int gen);
 
     [UnsafeAccessor(UnsafeAccessorKind.Method, Name = "EnqueueRecycle")]
     private static extern void EnqueueRecycle(Reactor reactor, TcpConnection conn);

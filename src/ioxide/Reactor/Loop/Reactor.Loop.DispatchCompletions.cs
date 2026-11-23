@@ -10,12 +10,12 @@ public sealed unsafe partial class Reactor
 
     // Shared by both dispatchers. Handles plain SEND (one CQE) and SEND_ZC (a data CQE carrying
     // IORING_CQE_F_MORE, then a separate IORING_CQE_F_NOTIF once the kernel releases the slab).
-    private void OnSendCompletion(int fd, ushort gen, int res, uint cqeFlags)
+    private void OnSendCompletion(int slot, ushort gen, int res, uint cqeFlags)
     {
-        TcpConnection? conn = ConnAt(fd, gen);
+        TcpConnection? conn = ConnAt(slot, gen);
         if (conn == null)
         {
-            return;   // stale CQE - never touch the fd's new tenant
+            return;   // stale CQE - never touch the slot's new tenant
         }
 
         // Zero-copy buffer-release notification: the kernel is done with the slab. Recycle once the
@@ -24,7 +24,7 @@ public sealed unsafe partial class Reactor
         {
             if (--conn.ZcNotifPending == 0 && conn.WriteHead >= conn.WriteInFlight)
             {
-                FinishSend(conn, fd);
+                FinishSend(conn);
             }
             return;
         }
@@ -33,7 +33,7 @@ public sealed unsafe partial class Reactor
         {
             // Failed: nothing more goes out. A zero-copy send still posts its notif, so the
             // teardown runs from FinishSend once the kernel has let go of the slab.
-            SubmitCancel(Tag(KindTcpRecv, gen, fd));   // the multishot recv is still armed
+            SubmitCancel(Tag(KindTcpRecv, gen, conn.Slot));   // the multishot recv is still armed
             conn.CloseAfterSend = true;
             conn.SuppressWriteShutdown();
             conn.MarkClosed();
@@ -55,11 +55,11 @@ public sealed unsafe partial class Reactor
             if (conn.FlushVectored)
             {
                 conn.AdvanceIov(res);   // trim the iovec past the bytes just sent
-                SubmitSendMsg(conn, fd, gen);
+                SubmitSendMsg(conn, gen);
             }
             else
             {
-                SubmitSend(conn, fd, gen, conn.WriteBuffer + conn.WriteHead, (uint)(conn.WriteInFlight - conn.WriteHead), conn.SendOpFlags);
+                SubmitSend(conn, gen, conn.WriteBuffer + conn.WriteHead, (uint)(conn.WriteInFlight - conn.WriteHead), conn.SendOpFlags);
             }
             return;
         }
@@ -67,18 +67,18 @@ public sealed unsafe partial class Reactor
         // Data fully sent: a ZC send still waits for its outstanding notif(s).
         if (conn.ZcNotifPending == 0)
         {
-            FinishSend(conn, fd);
+            FinishSend(conn);
         }
     }
 
     // The kernel is done with the slab: complete the flush, then any teardown that waited for it.
-    private void FinishSend(TcpConnection conn, int fd)
+    private void FinishSend(TcpConnection conn)
     {
         conn.CompleteFlush();
 
         if (conn.CloseAfterSend)
         {
-            _connections[fd] = null;
+            Untrack(conn);
             conn.ReleaseReactorRef();
         }
     }

@@ -6,7 +6,7 @@ namespace ioxide;
 public sealed unsafe partial class Reactor
 {
     // Cancel by exact user_data so a dead connection's multishot recv can't keep
-    // consuming buffers or race the fd's next tenant.
+    // consuming buffers or race the slot's next tenant.
     private void SubmitCancel(ulong targetUserData)
     {
         IoUringSqe* sqe = GetSqeOrFlush();

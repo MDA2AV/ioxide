@@ -57,11 +57,10 @@ internal static unsafe class SendClockTests
 
     private static bool SweepCuts(int state, int agoMs)
     {
-        const int Fd = 7;
         Reactor reactor = NeverRunning();
         TcpConnection conn = Connection(reactor);
         conn.InitRefs();
-        TableOf(reactor)[Fd] = conn;
+        Track(reactor, conn);
         InProgressOf(conn) = 1;
         ArmedOf(conn) = state;
         ListenerOf(conn) = new Listener();   // what a close signals, for a flush the reactor has not claimed
@@ -70,7 +69,7 @@ internal static unsafe class SendClockTests
 
         bool cut = conn.SweepClosed;
         Assert.Equal(cut, conn.IsClosed);
-        TableOf(reactor)[Fd] = null;
+        Untrack(reactor, conn);
         conn.Dispose();
         return cut;
     }
@@ -105,8 +104,11 @@ internal static unsafe class SendClockTests
     [UnsafeAccessor(UnsafeAccessorKind.Field, Name = "_flushListener")]
     private static extern ref IFlushListener? ListenerOf(TcpConnection conn);
 
-    [UnsafeAccessor(UnsafeAccessorKind.Field, Name = "_connections")]
-    private static extern ref TcpConnection?[] TableOf(Reactor reactor);
+    [UnsafeAccessor(UnsafeAccessorKind.Method, Name = "Track")]
+    private static extern void Track(Reactor reactor, TcpConnection conn);
+
+    [UnsafeAccessor(UnsafeAccessorKind.Method, Name = "Untrack")]
+    private static extern void Untrack(Reactor reactor, TcpConnection conn);
 
     [UnsafeAccessor(UnsafeAccessorKind.Method, Name = "TcpSweep")]
     private static extern void Sweep(Reactor reactor);

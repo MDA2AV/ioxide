@@ -27,7 +27,7 @@ public sealed unsafe partial class TcpConnection
     {
         if (IncrementalMode)
         {
-            _reactor.EnqueueReturnQIncremental(ClientFd, item.Gen, item.Bid);
+            _reactor.EnqueueReturnQIncremental(Slot, item.Gen, item.Bid);
         }
         else
         {

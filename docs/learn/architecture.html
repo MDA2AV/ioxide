@@ -113,15 +113,18 @@
     <p>Every SQE carries its routing in <code>user_data</code>:</p>
 <pre><code class="language-plaintext">[63:56] kind     accept · recv · send · wake · client · cancel · timer
 [47:32] gen      the connection's generation at submit time
-[31:0]  fd       (or the client-op slot)</code></pre>
-    <p>Dispatch is an array index (<code>connections[fd]</code> - fds are small dense integers, so
-    an array beats hashing) plus a generation check. The generation is what makes fd reuse safe:
-    when a connection dies, its fd number is immediately reusable, and a straggler CQE from the
-    old life would otherwise reach the new tenant. Stale generation → the CQE is dropped and its
-    buffer returned. The same guard rides the flush queue and incremental buffer returns.</p>
+[31:0]  slot     the connection's (accept: the listener's fd; client: the op's slot)</code></pre>
+    <p>Dispatch is an array index (<code>slots[slot]</code>) plus a generation check. A connection
+    takes a slot when it is accepted and gives it back when it is recycled, for the next one
+    accepted, so the table is only as long as the most connections the reactor has held at once. An
+    fd would not do for an index: fds are numbered across the process, so every reactor's table
+    would be as long as the highest one open anywhere. The generation is what makes slot reuse safe:
+    a straggler CQE from the old life would otherwise reach the new tenant. Stale generation → the
+    CQE is dropped and its buffer returned. The same guard rides the flush queue and incremental
+    buffer returns.</p>
     <p>Teardown also submits an <code>ASYNC_CANCEL</code> for the connection's multishot recv
     (matched by exact user_data), so a dead connection can't keep consuming buffers or race the
-    fd's next tenant. If a connection's recv queue overflows - the handler isn't draining - the
+    slot's next tenant. If a connection's recv queue overflows - the handler isn't draining - the
     reactor cancels and tears it down rather than leaving it zombied.</p>
     <p>Client ops (<code>kind = client</code>) skip the connection table entirely: the low 32 bits
     index a slot table holding the <a href="clients.html">submission's completion object</a>.</p>
@@ -149,8 +152,8 @@
     starts at 2 on accept; each owner releases once - the reactor on EOF/error, the handler via
     <code>conn.DecRef()</code> on exit (exactly once, in a <code>finally</code>). Whoever reaches
     zero hands the connection to the reactor for recycling: cancel the multishot recv, return
-    leftover buffers, close the fd, bump the generation (invalidating stale awaiters and queued
-    work), reset state, and push to the pool (capped by <code>PoolMax</code>; beyond it, native
+    leftover buffers, close the fd, give back the slot, bump the generation (invalidating stale
+    awaiters and queued work), reset state, and push to the pool (capped by <code>PoolMax</code>; beyond it, native
     memory is freed). Pooled connections keep their slab and buffer-ring allocations across
     lives.</p>
 

@@ -66,6 +66,7 @@ internal static class Program
         AdapterParkTests.Register(runner);
         WaiterSlotTests.Register(runner);
         SendClockTests.Register(runner);
+        ConnectionSlotTests.Register(runner);
         SpillSegmentTests.Register(runner);
         RecvQueueExtendTests.Register(runner);
         StoppedPostTests.Register(runner);
