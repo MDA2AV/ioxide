@@ -103,6 +103,45 @@ internal static class ConnectionSlotTests
                 conn.Dispose();
             }
         });
+
+        RegisterWalk(runner, "tick", TcpSweep);
+        RegisterWalk(runner, "stop", CloseTcpConnections);
+    }
+
+    // Both walks, over a table that has grown twice and has gaps at its start, all through it and at its end.
+    private static void RegisterWalk(Runner runner, string walk, Action<Reactor> run)
+    {
+        runner.Test($"slots: the {walk}'s walk reaches every connection in a table that has grown and has gaps, and none out of it", () =>
+        {
+            const int Count = 2_500;
+            var reactor = new Reactor(0, new ServerConfig { ReactorCount = 1, Tcp = new TcpOptions { SendTimeoutMs = 500, ReadTimeoutMs = 0 }, Udp = null });
+            var conns = new TcpConnection[Count];
+            for (int i = 0; i < Count; i++)
+            {
+                TcpConnection conn = conns[i] = Tracked(reactor);
+                conn.InitRefs();
+                InProgressOf(conn) = 1;   // a flush the kernel has had for ten seconds
+                ArmedOf(conn) = 2;
+                conn.FlushArmedMs = Native.MonotonicMs - 10_000;
+            }
+
+            bool InTable(int i) => i % 3 == 1 && i < Count - 100;
+            for (int i = 0; i < Count; i++)
+            {
+                if (!InTable(i))
+                {
+                    Recycled(reactor, conns[i]);
+                }
+            }
+
+            run(reactor);
+
+            for (int i = 0; i < Count; i++)
+            {
+                Assert.True(conns[i].SweepClosed == InTable(i), $"connection {i}, in the table: {InTable(i)}, closed: {conns[i].SweepClosed}");
+                conns[i].Dispose();
+            }
+        });
     }
 
     private static Reactor NeverRunning() => new(0, new ServerConfig { ReactorCount = 1, Tcp = new TcpOptions(), Udp = null });
@@ -137,6 +176,18 @@ internal static class ConnectionSlotTests
 
     [UnsafeAccessor(UnsafeAccessorKind.Method, Name = "get_TcpLive")]
     private static extern int LiveOf(Reactor reactor);
+
+    [UnsafeAccessor(UnsafeAccessorKind.Method, Name = "TcpSweep")]
+    private static extern void TcpSweep(Reactor reactor);
+
+    [UnsafeAccessor(UnsafeAccessorKind.Method, Name = "CloseTcpConnections")]
+    private static extern void CloseTcpConnections(Reactor reactor);
+
+    [UnsafeAccessor(UnsafeAccessorKind.Field, Name = "_flushInProgress")]
+    private static extern ref int InProgressOf(TcpConnection conn);
+
+    [UnsafeAccessor(UnsafeAccessorKind.Field, Name = "_flushArmed")]
+    private static extern ref int ArmedOf(TcpConnection conn);
 
     [UnsafeAccessor(UnsafeAccessorKind.Method, Name = "ConnAt")]
     private static extern TcpConnection? ConnAt(Reactor reactor, int slot, ushort gen);

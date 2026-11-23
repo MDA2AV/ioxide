@@ -435,7 +435,7 @@ internal static class CoreTests
             // FlushAsync armed the flush, then reset the signal its caller waits on. A close on the reactor in
             // between released the armed flush into that reset, so the caller waited forever. The window is a
             // few instructions wide: each round races one off-reactor flush against one close on the reactor,
-            // on a connection never accepted (fd -1, so its queued flush finds no table entry, as a closed one's).
+            // on a connection never accepted (slot -1, so its queued flush finds no table entry, as a closed one's).
             (_, Reactor reactor, _) = TestServer.StartConfigured(
                 static (_, conn) => { conn.DecRef(); return Task.CompletedTask; },
                 new ServerConfig

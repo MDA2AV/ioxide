@@ -165,6 +165,79 @@ internal static class SlotTests
             }
         });
 
+        // Whatever carries a slot carries all of it: the tags, and the queues of flushes and of buffers handed back, so
+        // the handler does both off the reactor. The ring of a connection of its own is run through several times over.
+        foreach ((string name, ServerConfig config, bool skip) in new[]
+        {
+            ("shared ring", Shared(new TcpOptions()), false),
+            ("ring per connection", new ServerConfig { Tcp = new TcpOptions(), Incremental = new IncrementalOptions { MaxConnections = 64, RecvSlots = 2, RecvBufferSize = 256 } }, !incremental),
+        })
+        {
+            runner.Test($"slots: one past 65,535 is served like any other ({name})", () =>
+            {
+                const int Held = 70_000;
+                int lowest = int.MaxValue;
+                (int port, Reactor _, Thread _) = TestServer.StartConfigured(async (_, conn) =>
+                {
+                    InterlockedMin(ref lowest, SlotOf(conn));
+                    try
+                    {
+                        while (true)
+                        {
+                            RecvSnapshot snapshot = await conn.ReadAsync();
+                            await Task.Yield();
+                            int got = 0;
+                            while (conn.TryGetItem(snapshot, out SpscRecvRing.Item item))
+                            {
+                                if (item.HasBuffer)
+                                {
+                                    got += item.AsSpan().Length;
+                                    conn.ReturnBuffer(in item);
+                                }
+                            }
+                            if (got == 0)
+                            {
+                                return;
+                            }
+                            conn.Write(Encoding.ASCII.GetBytes(new string('x', got)));
+                            await conn.FlushAsync();
+                        }
+                    }
+                    finally
+                    {
+                        conn.DecRef();
+                    }
+                }, config, onStart: reactor =>
+                {
+                    // As it is once that many connections have come and gone: the highest slots are taken first.
+                    SlotsOf(reactor) = new TcpConnection?[Held];
+                    UsedOf(reactor) = Held;
+                    for (int slot = 0; slot < Held; slot++)
+                    {
+                        FreeOf(reactor).Push(slot);
+                    }
+                });
+
+                string token = new('x', 100);
+                var clients = Enumerable.Range(0, 8).Select(_ => Connect(port)).ToList();
+                try
+                {
+                    foreach (Socket client in clients)
+                    {
+                        for (int round = 0; round < 20; round++)
+                        {
+                            Assert.Equal(token, Exchange(client, token));
+                        }
+                    }
+                    Assert.True(Volatile.Read(ref lowest) > ushort.MaxValue, $"one was given slot {lowest}, so this proved nothing");
+                }
+                finally
+                {
+                    clients.ForEach(client => client.Dispose());
+                }
+            }, skip: skip);
+        }
+
         // The answer each client gets is the one its own connection was asked for, through a reactor that gives the same
         // slots to one after another, with handlers that let go and flush on another thread.
         foreach ((string name, ServerConfig config, bool skip) in new[]
@@ -259,6 +332,19 @@ internal static class SlotTests
         finally
         {
             conn.DecRef();
+        }
+    }
+
+    private static void InterlockedMin(ref int target, int value)
+    {
+        for (int seen = Volatile.Read(ref target); value < seen;)
+        {
+            int now = Interlocked.CompareExchange(ref target, value, seen);
+            if (now == seen)
+            {
+                return;
+            }
+            seen = now;
         }
     }
 
@@ -359,6 +445,12 @@ internal static class SlotTests
 
     [UnsafeAccessor(UnsafeAccessorKind.Field, Name = "_slotsUsed")]
     private static extern ref int UsedOf(Reactor reactor);
+
+    [UnsafeAccessor(UnsafeAccessorKind.Field, Name = "_freeSlots")]
+    private static extern ref Stack<int> FreeOf(Reactor reactor);
+
+    [UnsafeAccessor(UnsafeAccessorKind.Field, Name = "Slot")]
+    private static extern ref int SlotOf(TcpConnection connection);
 
     [UnsafeAccessor(UnsafeAccessorKind.Field, Name = "_generation")]
     private static extern ref int GenerationOf(TcpConnection connection);
