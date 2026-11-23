@@ -114,26 +114,27 @@ public sealed unsafe partial class Reactor
         _buffersReturned = true;   // lets the loop re-arm recvs parked on -ENOBUFS (#93)
     }
 
-    // Return queue payload: fd in the high 32 bits, gen in the next 16, bid in the low 16.
-    private static ulong PackReturn(int fd, ushort gen, ushort bid)
-        => ((ulong)(uint)fd << 32) | ((ulong)gen << 16) | bid;
+    // Return queue payload: slot in the high 32 bits, gen in the next 16, bid in the low 16.
+    private static ulong PackReturn(int slot, ushort gen, ushort bid)
+        => ((ulong)(uint)slot << 32) | ((ulong)gen << 16) | bid;
 
-    private static void UnpackReturn(ulong packed, out int fd, out ushort gen, out ushort bid)
+    private static void UnpackReturn(ulong packed, out int slot, out ushort gen, out ushort bid)
     {
-        fd  = (int)(packed >> 32);
-        gen = (ushort)((packed >> 16) & 0xFFFF);
-        bid = (ushort)(packed & 0xFFFF);
+        slot = (int)(packed >> 32);
+        gen  = (ushort)((packed >> 16) & 0xFFFF);
+        bid  = (ushort)(packed & 0xFFFF);
     }
 
-    // Safe from any thread.
-    public void EnqueueReturnQIncremental(int fd, ushort gen, ushort bid)
+    // Safe from any thread. Not for callers outside the runtime, which have no slot to give: a handler
+    // returns through TcpConnection.ReturnBuffer.
+    internal void EnqueueReturnQIncremental(int slot, ushort gen, ushort bid)
     {
         if (Environment.CurrentManagedThreadId == _reactorThreadId)
         {
-            ApplyReturnIncremental(fd, gen, bid);
+            ApplyReturnIncremental(slot, gen, bid);
             return;
         }
-        ulong packed = PackReturn(fd, gen, bid);
+        ulong packed = PackReturn(slot, gen, bid);
         SpinWait sw = default;
         while (!_returnQInc!.TryEnqueue(packed))
         {
@@ -151,15 +152,15 @@ public sealed unsafe partial class Reactor
     {
         while (_returnQInc!.TryDequeue(out ulong packed))
         {
-            UnpackReturn(packed, out int fd, out ushort gen, out ushort bid);
-            ApplyReturnIncremental(fd, gen, bid);
+            UnpackReturn(packed, out int slot, out ushort gen, out ushort bid);
+            ApplyReturnIncremental(slot, gen, bid);
         }
     }
 
-    private void ApplyReturnIncremental(int fd, ushort gen, ushort bid)
+    private void ApplyReturnIncremental(int slot, ushort gen, ushort bid)
     {
-        // The gen check also rejects stale returns from a reused fd's previous life.
-        TcpConnection? conn = ConnAt(fd, gen);
+        // The gen check also rejects stale returns from a reused slot's previous life.
+        TcpConnection? conn = ConnAt(slot, gen);
         if (conn is not { IncrementalMode: true })
         {
             return;
@@ -176,33 +177,33 @@ public sealed unsafe partial class Reactor
     {
         byte   kind = (byte)(cqe.user_data >> KindShift);
         ushort gen  = (ushort)(cqe.user_data >> GenShift);
-        int    fd   = (int)(uint)cqe.user_data;
+        int    low  = (int)(uint)cqe.user_data;
         bool   more = (cqe.flags & IORING_CQE_F_MORE) != 0;
 
         switch (kind)
         {
             case KindTcpRecv:
-                OnTcpRecvCompletionIncremental(fd, gen, cqe.res, cqe.flags);
+                OnTcpRecvCompletionIncremental(low, gen, cqe.res, cqe.flags);
                 return;
 
             case KindTcpSend:
-                OnSendCompletion(fd, gen, cqe.res, cqe.flags);
+                OnSendCompletion(low, gen, cqe.res, cqe.flags);
                 return;
 
             case KindClient:
-                OnClientCompletion(fd, cqe.res);
+                OnClientCompletion(low, cqe.res);
                 return;
 
             case KindTcpAccept:
-                OnTcpAcceptCompletion(fd, cqe.res, more);
+                OnTcpAcceptCompletion(low, cqe.res, more);
                 return;
 
             case KindUdpRecv:
-                OnUdpRecvCompletion(fd, cqe.res, cqe.flags);
+                OnUdpRecvCompletion(low, cqe.res, cqe.flags);
                 return;
 
             case KindUdpSend:
-                OnUdpSendCompletion(fd, cqe.res);
+                OnUdpSendCompletion(low, cqe.res);
                 return;
 
             case KindWake:

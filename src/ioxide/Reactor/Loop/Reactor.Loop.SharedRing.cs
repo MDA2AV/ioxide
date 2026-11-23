@@ -38,36 +38,36 @@ public sealed unsafe partial class Reactor
     {
         byte   kind = (byte)(cqe.user_data >> KindShift);
         ushort gen  = (ushort)(cqe.user_data >> GenShift);
-        int    fd   = (int)(uint)cqe.user_data;
+        int    low  = (int)(uint)cqe.user_data;
         bool   more = (cqe.flags & IORING_CQE_F_MORE) != 0;
 
         switch (kind)
         {
             // TCP
             case KindTcpAccept:
-                OnTcpAcceptCompletion(fd, cqe.res, more);
+                OnTcpAcceptCompletion(low, cqe.res, more);
                 return;
 
             case KindTcpRecv:
-                OnTcpRecvCompletionShared(fd, gen, cqe.res, cqe.flags);
+                OnTcpRecvCompletionShared(low, gen, cqe.res, cqe.flags);
                 return;
 
             case KindTcpSend:
-                OnSendCompletion(fd, gen, cqe.res, cqe.flags);
+                OnSendCompletion(low, gen, cqe.res, cqe.flags);
                 return;
 
             // UDP
             case KindUdpRecv:
-                OnUdpRecvCompletion(fd, cqe.res, cqe.flags);
+                OnUdpRecvCompletion(low, cqe.res, cqe.flags);
                 return;
 
             case KindUdpSend:
-                OnUdpSendCompletion(fd, cqe.res);
+                OnUdpSendCompletion(low, cqe.res);
                 return;
 
             // OTHER
             case KindClient:
-                OnClientCompletion(fd, cqe.res);
+                OnClientCompletion(low, cqe.res);
                 return;
 
             case KindWake:

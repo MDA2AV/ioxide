@@ -28,8 +28,13 @@ public sealed unsafe partial class Reactor
     /// <summary>Whether the kernel is holding completions the CQ had no room for. Reactor thread only.</summary>
     internal bool CqOverflowed => _ring.CqOverflowed;
 
-    // TcpConnection table indexed by fd (dense small ints - array beats Dictionary per CQE).
-    private TcpConnection?[] _connections = new TcpConnection?[4096];
+    // The connections this reactor holds, by slot: the number Track gives one at accept, which the tags
+    // of its operations carry and their completions bring back. Not by descriptor: those are numbered
+    // across the process, so a table by descriptor is as long as the highest one open anywhere, on every
+    // reactor, for the few that are its own. This one is as long as the most it has held at once.
+    private TcpConnection?[] _slots = new TcpConnection?[1024];
+    private int _slotsUsed;                            // handed out at least once; the table is empty past it
+    private readonly Stack<int> _freeSlots = new();    // the last one freed is the first one taken
 
     // The response-send strategy from config (ZeroCopySend), copied per-connection at accept into
     // TcpConnection.UseZc.
@@ -42,8 +47,9 @@ public sealed unsafe partial class Reactor
     private readonly uint _ringEntries;
     private readonly uint _recvBufferSize;
 
-    // user_data: [63:56] kind | [47:32] connection generation | [31:0] fd (or client-op slot).
-    // The generation makes straggler CQEs from a reused fd detectable as stale.
+    // user_data: [63:56] kind | [47:32] connection generation | [31:0] connection slot (recv, send),
+    // listening fd (accept) or client-op slot. The generation makes straggler CQEs from a reused
+    // slot detectable as stale.
     private const int  KindShift  = 56;
     private const int  GenShift   = 32;
     private const byte KindTcpAccept = 1;
@@ -56,8 +62,8 @@ public sealed unsafe partial class Reactor
     private const byte KindUdpSend   = 9;   // low 32 bits = send-slot index (Reactor.Udp.cs)
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private static ulong Tag(byte kind, ushort gen, int fd)
-        => ((ulong)kind << KindShift) | ((ulong)gen << GenShift) | (uint)fd;
+    private static ulong Tag(byte kind, ushort gen, int low)
+        => ((ulong)kind << KindShift) | ((ulong)gen << GenShift) | (uint)low;
 
     // Shared provided-buffer ring (one per reactor).
     private const ushort BgId = 1;
@@ -79,7 +85,7 @@ public sealed unsafe partial class Reactor
     private readonly Stack<TcpConnection> _pool;
 
     // Accepted and not yet recycled, in the table or not: a stop runs on until none is left.
-    private int _tcpLive;
+    private int TcpLive => _slotsUsed - _freeSlots.Count;
 
     // Every TcpConnection life on this reactor takes the next value, so two lives never share a generation (#416).
     private int _tcpGeneration;
@@ -169,29 +175,33 @@ public sealed unsafe partial class Reactor
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private TcpConnection? ConnAt(int fd, ushort gen)
+    private TcpConnection? ConnAt(int slot, ushort gen)
     {
-        TcpConnection?[] conns = _connections;
-        TcpConnection? conn = (uint)fd < (uint)conns.Length ? conns[fd] : null;
+        TcpConnection?[] slots = _slots;
+        TcpConnection? conn = (uint)slot < (uint)slots.Length ? slots[slot] : null;
         return conn != null && (ushort)conn.Generation == gen ? conn : null;
     }
 
     // Reactor thread: a connection is constructed at accept and cleared at recycle.
     internal int NextTcpGeneration() => ++_tcpGeneration;
 
-    private void Track(int fd, TcpConnection conn)
+    // A slot for the connection, which keeps it until it is recycled.
+    private void Track(TcpConnection conn)
     {
-        if (fd >= _connections.Length)
+        if (!_freeSlots.TryPop(out int slot))
         {
-            int newLength = _connections.Length;
-            while (newLength <= fd)
+            if (_slotsUsed == _slots.Length)
             {
-                newLength *= 2;
+                Array.Resize(ref _slots, _slotsUsed * 2);
             }
-            Array.Resize(ref _connections, newLength);
+            slot = _slotsUsed++;
         }
-        _connections[fd] = conn;
+        conn.Slot = slot;
+        _slots[slot] = conn;
     }
+
+    // Out of the table, so no completion finds it. It keeps its slot until Recycle frees it.
+    private void Untrack(TcpConnection conn) => _slots[conn.Slot] = null;
 
     // Writes addr, len and bid only: bytes 14-15 of entry 0 are the ring's tail.
     [MethodImpl(MethodImplOptions.AggressiveInlining)]

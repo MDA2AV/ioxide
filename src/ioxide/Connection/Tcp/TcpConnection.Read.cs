@@ -246,7 +246,7 @@ public sealed unsafe partial class TcpConnection : IValueTaskSource<RecvSnapshot
         {
             if (IncrementalMode)
             {
-                _reactor.EnqueueReturnQIncremental(ClientFd, memory.Gen, memory.BufferId);
+                _reactor.EnqueueReturnQIncremental(Slot, memory.Gen, memory.BufferId);
             }
             else
             {

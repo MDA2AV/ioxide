@@ -142,7 +142,7 @@ public sealed unsafe partial class Reactor
             CancelClientOps();
         }
 
-        return (_tcpLive == 0 && _opFreeTop == _opTargets.Length) || Native.MonotonicMs >= deadlineMs;
+        return (TcpLive == 0 && _opFreeTop == _opTargets.Length) || Native.MonotonicMs >= deadlineMs;
     }
 
     // The clients stop, then every socket closes, ending every read, write and wait on one; Teardown runs it for a
@@ -226,7 +226,7 @@ public sealed unsafe partial class Reactor
         }
 
         // What a connection still held has queued, and what its reader took, points into the shared slab.
-        if (_tcpLive == 0)
+        if (TcpLive == 0)
         {
             if (_bufRing != null)
             {

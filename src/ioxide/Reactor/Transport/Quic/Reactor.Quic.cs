@@ -10,8 +10,8 @@ namespace ioxide;
 /// <summary>
 /// QUIC transport: rides the UDP layer (Reactor.Udp.cs) on one dedicated port and demultiplexes
 /// datagrams to logical connections by Destination TcpConnection ID (RFC 8999 version-independent
-/// parse), since one UDP socket carries every connection - the fd-keyed TCP table cannot model
-/// this. Packet protection and the handshake live in the engine subclass of
+/// parse), since one UDP socket carries every connection, so an operation's tag cannot name the
+/// connection as TCP's do. Packet protection and the handshake live in the engine subclass of
 /// <see cref="QuicConnection"/>, produced by <see cref="QuicOptions.ConnectionFactory"/>; the
 /// engine registers the CIDs it mints via <see cref="QuicRegisterCid"/> as the handshake retires
 /// the client's initial DCID.

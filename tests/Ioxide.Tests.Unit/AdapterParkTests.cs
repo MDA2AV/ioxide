@@ -14,7 +14,7 @@ namespace Ioxide.Tests;
 /// <remarks>
 /// Each test races an arm made off the reactor against a close made on it, the shape a handler that
 /// hops threads produces. The "reactor" is a thread of the test's own on a reactor that never runs,
-/// which plays its part: it closes, and drains the queued flushes, whose fd -1 finds no table entry,
+/// which plays its part: it closes, and drains the queued flushes, whose slot -1 finds no table entry,
 /// as a closed connection's does. The window is a few instructions wide, so every test also asserts
 /// that closes landed inside it before trusting a clean count.
 /// </remarks>

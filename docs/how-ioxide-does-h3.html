@@ -266,9 +266,9 @@ var quic = new QuicOptions { Port = 8443, ConnectionFactory = engine.CreateFacto
     for a deep standing queue. Measure it on the deployment.</p>
 
     <h2>Why QUIC can't reuse the TCP plumbing</h2>
-    <p>The TCP side is built around one fact: <em>one connection = one fd</em>. The reactor's
-    connection table is keyed by fd, recv completions arrive per-fd, and the kernel does the
-    demultiplexing. QUIC inverts all of it:</p>
+    <p>The TCP side is built around one fact: <em>one connection = one fd</em>. The reactor gives
+    each connection a slot in its table when it accepts it, a completion brings that slot back, and
+    the kernel does the demultiplexing. QUIC inverts all of it:</p>
     <ul>
       <li><b>One UDP socket carries every connection.</b> There is nothing per-connection at the
       kernel level - the reactor must demultiplex datagrams itself, by the Destination Connection

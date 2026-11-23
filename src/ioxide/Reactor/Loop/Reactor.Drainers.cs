@@ -8,7 +8,7 @@ namespace ioxide;
 public sealed unsafe partial class Reactor
 {
     private readonly Mpsc<ushort> _returnQ = new(1 << 14);
-    private readonly Mpsc<ulong>  _flushQ  = new(1 << 12);   // (gen << 32) | fd
+    private readonly Mpsc<ulong>  _flushQ  = new(1 << 12);   // (gen << 32) | slot
 
     // Recycle must run on the reactor (buf_ring + pool are reactor-owned). TcpConnection is a
     // ref type, so this queue is a ConcurrentQueue rather than the unmanaged Mpsc<T>.
@@ -117,7 +117,7 @@ public sealed unsafe partial class Reactor
     {
         if (Environment.CurrentManagedThreadId == _reactorThreadId)
         {
-            Recycle(conn, conn.ClientFd);
+            Recycle(conn);
             return;
         }
         _recycleQ.Enqueue(conn);
@@ -128,14 +128,14 @@ public sealed unsafe partial class Reactor
     {
         while (_recycleQ.TryDequeue(out TcpConnection? conn))
         {
-            Recycle(conn, conn.ClientFd);
+            Recycle(conn);
         }
     }
 
-    private void Recycle(TcpConnection conn, int fd)
+    private void Recycle(TcpConnection conn)
     {
         conn.MarkClosed();
-        SubmitCancel(Tag(KindTcpRecv, (ushort)conn.Generation, fd));   // before Clear() bumps the generation
+        SubmitCancel(Tag(KindTcpRecv, (ushort)conn.Generation, conn.Slot));   // before Clear() bumps the generation
 
         // Before DrainRecv, which only sees what is still QUEUED: a reader or stream that pulled
         // buffers out holds the only record of them, and nothing obliges a handler to give them
@@ -155,7 +155,8 @@ public sealed unsafe partial class Reactor
         {
             conn.DrainRecv();   // return leftover buffers to the shared ring
         }
-        close(fd);
+        close(conn.ClientFd);
+        _freeSlots.Push(conn.Slot);   // past the cancel that names it: the next accept takes it
         conn.Clear();
 
         // Kept for the next accept, or its memory freed right here once the pool is full.
@@ -167,25 +168,24 @@ public sealed unsafe partial class Reactor
         {
             conn.Dispose();
         }
-        _tcpLive--;
     }
 
 #endregion
 
 #region Flush
 
-    internal void EnqueueFlush(int fd, int gen)
+    internal void EnqueueFlush(int slot, int gen)
     {
         if (Environment.CurrentManagedThreadId == _reactorThreadId)
         {
-            TcpConnection? conn = ConnAt(fd, (ushort)gen);
+            TcpConnection? conn = ConnAt(slot, (ushort)gen);
             if (conn != null)
             {
-                SubmitFlush(conn, fd, (ushort)gen);
+                SubmitFlush(conn, (ushort)gen);
             }
             return;
         }
-        ulong packed = ((ulong)(ushort)gen << 32) | (uint)fd;
+        ulong packed = ((ulong)(ushort)gen << 32) | (uint)slot;
         SpinWait sw = default;
         while (!_flushQ.TryEnqueue(packed))
         {
@@ -198,22 +198,22 @@ public sealed unsafe partial class Reactor
     {
         while (_flushQ.TryDequeue(out ulong packed))
         {
-            int    fd  = (int)(uint)packed;
-            ushort gen = (ushort)(packed >> 32);
-            // Gen check drops flushes for connections that closed (or whose fd was reused)
+            int    slot = (int)(uint)packed;
+            ushort gen  = (ushort)(packed >> 32);
+            // Gen check drops flushes for connections that closed (or whose slot was reused)
             // after queuing.
-            TcpConnection? conn = ConnAt(fd, gen);
+            TcpConnection? conn = ConnAt(slot, gen);
             if (conn == null)
             {
                 continue;
             }
-            SubmitFlush(conn, fd, gen);
+            SubmitFlush(conn, gen);
         }
     }
 
     // Submits the right send for a pending flush: a vectored SENDMSG for a segmented (multi-segment)
     // response, or the plain contiguous SEND for everything else (incl. the fast path and Grow mode).
-    private void SubmitFlush(TcpConnection conn, int fd, ushort gen)
+    private void SubmitFlush(TcpConnection conn, ushort gen)
     {
         if (!conn.TryClaimFlush())
         {
@@ -222,11 +222,11 @@ public sealed unsafe partial class Reactor
 
         if (conn.FlushVectored)
         {
-            SubmitSendMsg(conn, fd, gen);
+            SubmitSendMsg(conn, gen);
         }
         else
         {
-            SubmitSend(conn, fd, gen, conn.WriteBuffer, (uint)conn.WriteInFlight, conn.SendOpFlags);
+            SubmitSend(conn, gen, conn.WriteBuffer, (uint)conn.WriteInFlight, conn.SendOpFlags);
         }
     }
 

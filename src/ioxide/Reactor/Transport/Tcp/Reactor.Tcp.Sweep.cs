@@ -27,12 +27,12 @@ public sealed unsafe partial class Reactor
     /// </summary>
     internal long NowMs = Native.MonotonicMs;
 
-    // Connections whose write shutdown waits for a flush (TcpConnection.ShutdownWrite), (gen << 32) | fd.
+    // Connections whose write shutdown waits for a flush (TcpConnection.ShutdownWrite), (gen << 32) | slot.
     // Added by any thread; nearly always empty, as a handler that awaits its last flush never defers one.
     private readonly ConcurrentQueue<ulong> _deferredWriteShutdowns = new();
 
-    internal void DeferWriteShutdown(int fd, int gen)
-        => _deferredWriteShutdowns.Enqueue(((ulong)(ushort)gen << 32) | (uint)fd);
+    internal void DeferWriteShutdown(int slot, int gen)
+        => _deferredWriteShutdowns.Enqueue(((ulong)(ushort)gen << 32) | (uint)slot);
 
     // One look at each per tick: one whose flush is still in flight waits for the next. A connection that
     // is gone was torn down by the reactor, which leaves nothing to shut down.
@@ -54,15 +54,12 @@ public sealed unsafe partial class Reactor
     /// and can touch a connection directly.
     /// </summary>
     /// <remarks>
-    /// The table is indexed by fd, so it spans every descriptor in the process rather than this
-    /// reactor's connections alone: a million connections over 64 reactors is a million slots per
-    /// reactor, every reactor walking its own four times a second, and on the same tick, since they
-    /// start together. That walk held a reactor off its ring long enough to show in the tail of every
-    /// request scheduled behind it. So it is made only when something on a connection needs it: one
-    /// of the two clocks, or a recv parked on -ENOBUFS waiting for the buffers of the shared ring that
-    /// connections their handler let go still hold. With a ring per connection only those parked are
-    /// looked at, as no other connection's buffers can serve them. A write shutdown deferred behind a
-    /// flush is not a reason either: those are in a queue of their own, looked at on every tick.
+    /// The pass is over this reactor's own connections, as many slots as it has held at once, and made
+    /// only when something on one needs it: one of the two clocks, or a recv parked on -ENOBUFS waiting
+    /// for the buffers of the shared ring that connections their handler let go still hold. With a ring
+    /// per connection only those parked are looked at, as no other connection's buffers can serve them.
+    /// A write shutdown deferred behind a flush is not a reason either: those are in a queue of their
+    /// own, looked at on every tick.
     /// </remarks>
     private void TcpSweep()
     {
@@ -88,11 +85,9 @@ public sealed unsafe partial class Reactor
         }
 
         long now = Native.MonotonicMs;
-        TcpConnection?[] conns = _connections;
 
-        for (int fd = 0; fd < conns.Length; fd++)
+        foreach (TcpConnection? conn in _slots.AsSpan(0, _slotsUsed))
         {
-            TcpConnection? conn = conns[fd];
             if (conn is null)
             {
                 continue;
@@ -149,11 +144,10 @@ public sealed unsafe partial class Reactor
         for (int i = _recvStarved.Count - 1; i >= 0; i--)
         {
             ulong parked = _recvStarved[i];
-            int fd = (int)(uint)parked;
-            if (ConnAt(fd, (ushort)(parked >> 32)) is { SweepClosed: true } conn)
+            if (ConnAt((int)(uint)parked, (ushort)(parked >> 32)) is { SweepClosed: true } conn)
             {
                 _recvStarved.RemoveAt(i);
-                CloseFromRecv(conn, fd);
+                CloseFromRecv(conn);
             }
         }
     }

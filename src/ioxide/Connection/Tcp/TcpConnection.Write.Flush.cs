@@ -207,10 +207,10 @@ public sealed unsafe partial class TcpConnection : IValueTaskSource, IFlushListe
         }
 
         // The generation lets the reactor drop a flush whose connection closed (or
-        // whose fd was reused) before the queue drained.
+        // whose slot was reused) before the queue drained.
         gen = Volatile.Read(ref _generation);
 
-        _reactor.EnqueueFlush(ClientFd, gen);
+        _reactor.EnqueueFlush(Slot, gen);
 
         // Race recovery: if close raced in after the entry guard, self-complete so we
         // don't hang on a send the reactor will never make.

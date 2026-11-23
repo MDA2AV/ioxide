@@ -117,22 +117,24 @@ public IoUringSqe* GetSqe()
 
     <h3>user_data: the routing key</h3>
     <p>Every SQE carries a 64-bit <code>user_data</code> that comes back on its CQE, packed as
-    <code>[kind:8 | generation:16 | fd:32]</code> (or, for client ops, the low 32 bits are a slot
-    index). The <em>generation</em> is the crux of lifetime safety: a pooled <code>Connection</code>
-    bumps its generation every time it is recycled, so a straggler CQE from a closed-and-reused fd
-    carries a stale generation and is detected and dropped instead of corrupting the fd's new tenant.
+    <code>[kind:8 | generation:16 | slot:32]</code>. The slot is the connection's index in the
+    reactor's table, taken at accept and given back at recycle (for accept the low 32 bits are the
+    listening fd, for client ops the op's slot). The <em>generation</em> is the crux of lifetime
+    safety: a pooled <code>Connection</code> bumps its generation every time it is recycled, so a
+    straggler CQE from a closed connection carries a stale generation and is detected and dropped
+    instead of corrupting the slot's new tenant.
     Kinds: accept, recv, send, wake, client, cancel, timer.</p>
 <p class="src"><b>Reactor.cs</b> · packing the routing key into user_data, and unpacking it on the CQE</p>
 <pre><code class="language-csharp">private const int KindShift = 56;
 private const int GenShift  = 32;
 
-private static ulong Tag(byte kind, ushort gen, int fd)
-    =&gt; ((ulong)kind &lt;&lt; KindShift) | ((ulong)gen &lt;&lt; GenShift) | (uint)fd;
+private static ulong Tag(byte kind, ushort gen, int low)
+    =&gt; ((ulong)kind &lt;&lt; KindShift) | ((ulong)gen &lt;&lt; GenShift) | (uint)low;
 
 // ...and on dispatch the CQE's user_data unpacks straight back out:
 byte   kind = (byte)(cqe.user_data &gt;&gt; KindShift);
 ushort gen  = (ushort)(cqe.user_data &gt;&gt; GenShift);
-int    fd   = (int)(uint)cqe.user_data;</code></pre>
+int    low  = (int)(uint)cqe.user_data;   // recv and send: the connection's slot</code></pre>
 
     <h3>Startup - <code>Run()</code></h3>
     <p>Runs on the reactor's own thread, in order: record the managed thread id (every fast-path
@@ -193,7 +195,7 @@ int    fd   = (int)(uint)cqe.user_data;</code></pre>
       MSG_WAITALL) resubmits the remainder; a full ack runs <code>CompleteFlush</code>, resuming the
       handler inline. Error → cancel recv + tear down.</li>
       <li><b>accept</b> - pop a pooled connection (or build one), set <code>TCP_NODELAY</code>,
-      register it, init its refcount to 2, arm its multishot recv stamped with its generation, and
+      give it a slot, init its refcount to 2, arm its multishot recv stamped with its generation, and
       start the handler via <code>RunHandlerAsync</code>. Incremental mode also registers the
       per-connection buffer ring here.</li>
       <li><b>client</b> - free the op slot <em>before</em> invoking the completion, so the inline
@@ -261,7 +263,7 @@ private void OnTimerTick()
     <p>Four queues carry work from other threads to the reactor, each woken by writing the eventfd
     (a multishot <code>POLL_ADD</code> turns that into a CQE): a bounded lock-free
     <code>Mpsc&lt;ushort&gt;</code> for buffer returns, an <code>Mpsc&lt;ulong&gt;</code> for flushes
-    (packing <code>(generation &lt;&lt; 32) | fd</code>), and <code>ConcurrentQueue</code>s for
+    (packing <code>(generation &lt;&lt; 32) | slot</code>), and <code>ConcurrentQueue</code>s for
     connection recycles and client-op submissions (ref types). Every public entry point first checks
     <code>CurrentManagedThreadId == reactorThreadId</code> and takes a direct, queue-free fast path
     when already on the reactor.</p>
@@ -286,12 +288,13 @@ private void OnTimerTick()
     <p><code>Recycle</code> always runs on the reactor: <code>MarkClosed</code> wakes any awaiters,
     an <code>ASYNC_CANCEL</code> is submitted for the connection's multishot recv tagged with the
     <em>pre-bump</em> generation (so it matches the armed SQE), leftover buffers return (shared) or
-    the per-connection ring unregisters (incremental), the fd closes, and <code>Clear()</code> bumps
+    the per-connection ring unregisters (incremental), the fd closes, the slot goes back to the next
+    accept, and <code>Clear()</code> bumps
     the generation - invalidating every stale token and queued reference at once - before the
     connection is pushed back to the pool (or freed if the pool is at <code>PoolMax</code>).</p>
 <p class="src"><b>Reactor.cs / Connection.cs</b> · cancel by the pre-bump generation, then bump it to void every stale token</p>
 <pre><code class="language-csharp">// Reactor.Recycle - cancel the armed recv BEFORE the generation moves, so it matches the SQE:
-SubmitCancel(Tag(KindRecv, (ushort)conn.Generation, fd));
+SubmitCancel(Tag(KindRecv, (ushort)conn.Generation, conn.Slot));
 // ...
 conn.Clear();
 

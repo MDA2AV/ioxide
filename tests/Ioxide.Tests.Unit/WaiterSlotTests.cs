@@ -431,7 +431,7 @@ internal static unsafe class WaiterSlotTests
 
     internal static Reactor NeverRunning() => new(0, new ServerConfig { ReactorCount = 1, Tcp = null, Udp = null });
 
-    // fd -1, so a flush queued to the reactor finds no table entry when it is drained.
+    // Never accepted, so its slot is -1 and a flush queued to the reactor finds no table entry when it is drained.
     private static TcpConnection Connection(Reactor reactor) => new(reactor, -1, 64, 8);
 
     private sealed class CountingRecvListener : IRecvListener

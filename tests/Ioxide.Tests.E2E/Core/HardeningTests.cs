@@ -1,5 +1,6 @@
 using System.Net;
 using System.Net.Sockets;
+using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Text;
 using ioxide;
@@ -248,19 +249,19 @@ internal static class HardeningTests
             Assert.True(closed.Length == 0, $"the server's teardown closed {string.Join(", ", closed)}");
         });
 
-        runner.Test("core: a recycled connection's stale recv completion does not close the next connection on its number (#416)", () =>
+        runner.Test("core: a recycled connection's stale recv completion does not close the next connection in its slot (#416)", () =>
         {
             // PoolMax 0: every connection is a new object, so both lives start from the same generation.
-            (string got, int a, int b) = NextConnectionOnTheSameNumber(poolMax: 0);
-            Assert.True(b == a, $"precondition: B was accepted on {b}, not on A's {a}");
-            Assert.True(got == "BBBB", $"B, accepted on the number A gave back, was closed before it was served: '{got}'");
+            (string got, int a, int b) = NextConnectionInTheSameSlot(poolMax: 0);
+            Assert.True(b == a, $"precondition: B was given slot {b}, not A's {a}");
+            Assert.True(got == "BBBB", $"B, given the slot A gave back, was closed before it was served: '{got}'");
         });
 
         runner.Test("core: control: the same stale completion misses a connection taken from the pool", () =>
         {
             // B reuses A's object, whose generation its recycle moved.
-            (string got, int a, int b) = NextConnectionOnTheSameNumber(poolMax: 64);
-            Assert.True(b == a, $"precondition: B was accepted on {b}, not on A's {a}");
+            (string got, int a, int b) = NextConnectionInTheSameSlot(poolMax: 64);
+            Assert.True(b == a, $"precondition: B was given slot {b}, not A's {a}");
             Assert.True(got == "BBBB", $"B was closed before it was served: '{got}'");
         });
 
@@ -427,15 +428,15 @@ internal static class HardeningTests
 
     /// <summary>
     /// Connection A is recycled with its multishot recv still armed: its send fails after its own FIN, which
-    /// wakes nothing on the read side, so the recv's cancel is only queued when its number is closed. The
-    /// reactor is held until B has connected, so the next enter accepts B onto that number ahead of A's
-    /// -ECANCELED. Returns what B got back for its "BBBB", and the numbers A and B were accepted on.
+    /// wakes nothing on the read side, so the recv's cancel is only queued when its slot is freed. The
+    /// reactor is held until B has connected, so the next enter accepts B into that slot ahead of A's
+    /// -ECANCELED. Returns what B got back for its "BBBB", and the slots A and B were given.
     /// </summary>
-    private static (string Got, int A, int B) NextConnectionOnTheSameNumber(int poolMax)
+    private static (string Got, int A, int B) NextConnectionInTheSameSlot(int poolMax)
     {
         using var aStalled = new ManualResetEventSlim();
         using var bConnected = new ManualResetEventSlim();
-        int[] numbers = [-1, -1];
+        int[] slots = [-1, -1];
 
         (int port, _, _) = TestServer.StartConfigured(async (_, conn) =>
         {
@@ -444,7 +445,7 @@ internal static class HardeningTests
                 bool isB = aStalled.IsSet;   // the harness's probe and A come first
                 if (isB)
                 {
-                    Volatile.Write(ref numbers[1], conn.ClientFd);
+                    Volatile.Write(ref slots[1], SlotOf(conn));
                 }
 
                 RecvSnapshot first = await conn.ReadAsync();
@@ -460,7 +461,7 @@ internal static class HardeningTests
 
                 if (!isB && head.Count >= 4 && head[0] == (byte)'A')
                 {
-                    Volatile.Write(ref numbers[0], conn.ClientFd);
+                    Volatile.Write(ref slots[0], SlotOf(conn));
                     conn.ShutdownWrite();
                     conn.Write(new byte[16]);
                     await conn.FlushAsync();   // EPIPE: the reactor tears A down, its recv still armed
@@ -491,23 +492,6 @@ internal static class HardeningTests
         a.GetStream().Write("AAAA"u8);
         Assert.True(aStalled.Wait(5_000), "A's failed flush never returned");
 
-        // Every free number below A's taken, so the one A gives back is the lowest free when B is accepted.
-        int aNumber = Volatile.Read(ref numbers[0]);
-        var filler = new List<int>();
-        while (true)
-        {
-            int fd = ioxide.Native.open("/dev/null", 0, 0);
-            if (fd < 0 || fd > aNumber)
-            {
-                if (fd >= 0)
-                {
-                    ioxide.Native.close(fd);
-                }
-                break;
-            }
-            filler.Add(fd);
-        }
-
         try
         {
             using var b = new TcpClient();
@@ -536,17 +520,16 @@ internal static class HardeningTests
             {
                 end = $"<{e.SocketErrorCode}>";
             }
-            return (Encoding.ASCII.GetString(got, 0, n) + end, Volatile.Read(ref numbers[0]), Volatile.Read(ref numbers[1]));
+            return (Encoding.ASCII.GetString(got, 0, n) + end, Volatile.Read(ref slots[0]), Volatile.Read(ref slots[1]));
         }
         finally
         {
             bConnected.Set();
-            foreach (int fd in filler)
-            {
-                ioxide.Native.close(fd);
-            }
         }
     }
+
+    [UnsafeAccessor(UnsafeAccessorKind.Field, Name = "Slot")]
+    private static extern ref int SlotOf(TcpConnection connection);
 
     /// <summary>
     /// Serve one connection with a handler that lets go (and then throws, or not), wait for the server

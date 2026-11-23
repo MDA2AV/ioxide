@@ -349,16 +349,16 @@ internal static class TcpSweepTests
         });
     }
 
-    // A connection that goes with its shutdown still deferred leaves its entry in the queue, and its descriptor number to
-    // the next one accepted. The tick drops the entry, and leaves that one alone: here an open connection that gets an
-    // entry of an earlier life.
+    // A connection that goes with its shutdown still deferred leaves its entry in the queue, and its slot to the next one
+    // accepted. The tick drops the entry, and leaves that one alone: here an open connection that gets an entry of an
+    // earlier life of its slot.
     private static void RegisterDeferredConnectionGone(Runner runner)
     {
-        runner.Test("tcp/exit: with no clock set, a let-go whose connection is gone is dropped, and its descriptor's next connection left alone", () =>
+        runner.Test("tcp/exit: with no clock set, a let-go whose connection is gone is dropped, and its slot's next connection left alone", () =>
         {
             byte[] body = Pattern(StallingBody);
             var letGo = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-            var open = new TaskCompletionSource<(int Fd, int Generation)>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var open = new TaskCompletionSource<(int Slot, int Generation)>(TaskCreationOptions.RunContinuationsAsynchronously);
 
             (int port, Reactor reactor, Thread _) = TestServer.StartConfigured(async (_, conn) =>
             {
@@ -377,7 +377,7 @@ internal static class TcpSweepTests
                 {
                     if (first != 0)
                     {
-                        open.TrySetResult((conn.ClientFd, GenerationOf(conn)));
+                        open.TrySetResult((SlotOf(conn), GenerationOf(conn)));
                     }
                     while (first != 0)
                     {
@@ -400,8 +400,8 @@ internal static class TcpSweepTests
             using TcpClient client = Connect(port, "P", 2_000);
             NetworkStream stream = client.GetStream();
             Assert.Equal(4, ReadOnce(stream, 0, new byte[4]));
-            (int fd, int generation) = open.Task.Result;
-            DeferredOf(reactor).Enqueue(((ulong)(ushort)(generation - 1) << 32) | (uint)fd);
+            (int slot, int generation) = open.Task.Result;
+            DeferredOf(reactor).Enqueue(((ulong)(ushort)(generation - 1) << 32) | (uint)slot);
 
             WaitFor(() => DeferredOf(reactor).IsEmpty, 2_000, "an entry whose connection is gone was never dropped");
             for (int i = 0; i < 2; i++)
@@ -642,8 +642,8 @@ internal static class TcpSweepTests
         }, skip: !TestServer.KernelAtLeast(6, 12));
     }
 
-    [UnsafeAccessor(UnsafeAccessorKind.Field, Name = "_tcpLive")]
-    private static extern ref int LiveOf(Reactor reactor);
+    [UnsafeAccessor(UnsafeAccessorKind.Method, Name = "get_TcpLive")]
+    private static extern int LiveOf(Reactor reactor);
 
     [UnsafeAccessor(UnsafeAccessorKind.Field, Name = "_recvStarved")]
     private static extern ref List<ulong> StarvedOf(Reactor reactor);
@@ -665,6 +665,9 @@ internal static class TcpSweepTests
 
     [UnsafeAccessor(UnsafeAccessorKind.Field, Name = "_generation")]
     private static extern ref int GenerationOf(TcpConnection connection);
+
+    [UnsafeAccessor(UnsafeAccessorKind.Field, Name = "Slot")]
+    private static extern ref int SlotOf(TcpConnection connection);
 
     private static ServerConfig Config(TcpOptions tcp) => new()
     {
