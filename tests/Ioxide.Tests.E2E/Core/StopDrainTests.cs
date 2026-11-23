@@ -790,19 +790,21 @@ internal static class StopDrainTests
 
     // A connect completes into a listener's backlog without anyone accepting, so it succeeds exactly while the
     // listening socket is open; one that landed there as the listener closed is reset instead.
+    // One whose SYN the closing listener drops waits a second for TCP to send it again, as long as a stop runs on, so a
+    // connect with no answer in 100 ms is given up, and the next one is refused.
     private static bool Refuses(int port)
     {
         using var probe = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp);
         try
         {
-            probe.Connect(IPAddress.Loopback, port);
+            probe.ConnectAsync(IPAddress.Loopback, port).Wait(100);
             return false;
         }
-        catch (SocketException e) when (e.SocketErrorCode == SocketError.ConnectionReset)
+        catch (AggregateException e) when (e.InnerException is SocketException { SocketErrorCode: SocketError.ConnectionReset })
         {
             return false;
         }
-        catch (SocketException e) when (e.SocketErrorCode == SocketError.ConnectionRefused)
+        catch (AggregateException e) when (e.InnerException is SocketException { SocketErrorCode: SocketError.ConnectionRefused })
         {
             return true;
         }
