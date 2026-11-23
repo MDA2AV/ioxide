@@ -47,9 +47,9 @@ public sealed unsafe partial class TcpConnection : IValueTaskSource, IFlushListe
 
     /// <summary>
     /// Whether a flush is outstanding - which is what tells the reactor's sweep that this
-    /// connection is sending rather than waiting on its peer, so the send clock governs it and the
-    /// read one does not. Read rather than <see cref="FlushArmedMs"/> being non-zero, so the stamp
-    /// never has to double as a flag.
+    /// connection is sending rather than waiting on its peer, so the read clock does not govern it,
+    /// and the send one does once it has armed (<see cref="FlushArmed"/>). Read rather than
+    /// <see cref="FlushArmedMs"/> being non-zero, so the stamp never has to double as a flag.
     /// </summary>
     internal bool FlushOutstanding => Volatile.Read(ref _flushInProgress) != 0;
 

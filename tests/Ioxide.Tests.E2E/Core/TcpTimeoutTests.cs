@@ -543,11 +543,12 @@ internal static class TcpTimeoutTests
                 while (got < buffer.Length)
                 {
                     int n = stream.Read(buffer, got, buffer.Length - got);
-                    Assert.True(n > 0, $"closed before response {i + 1}, on a flush that had not started");
+                    Assert.True(n > 0, faulted.Task.IsCompleted
+                        ? faulted.Task.Result
+                        : $"closed before response {i + 1}, on a flush that had not started");
                     got += n;
                 }
             }
-            Assert.True(!faulted.Task.IsCompleted, faulted.Task.IsCompleted ? faulted.Task.Result : "");
         });
 
         runner.Test("tcp/send: 0 leaves a stalled flush parked", () =>

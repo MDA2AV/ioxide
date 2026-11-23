@@ -15,7 +15,8 @@ internal interface IFlushListener
     /// The connection is about to arm this listener's flush: the in-progress guard has passed and
     /// something is staged. As <see cref="IRecvListener.OnParking"/>: the listener readies its value
     /// task here, so a flush refused for overlapping one in flight, or one that sends nothing, leaves
-    /// an earlier flush's source alone.
+    /// an earlier flush's source alone. Must not throw: the guard would stay taken with nothing armed,
+    /// and neither clock governs that.
     /// </summary>
     void OnParking();
 
