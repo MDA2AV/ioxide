@@ -1,7 +1,4 @@
-using System.Collections.Concurrent;
-using System.Diagnostics;
 using System.Net.Sockets;
-using System.Reflection;
 using System.Runtime.InteropServices;
 using System.Text;
 using ioxide;
@@ -10,20 +7,12 @@ using ioxide.utils;
 namespace Ioxide.Tests;
 
 /// <summary>
-/// A write shutdown deferred behind a flush (#653): made from that flush's completion, or from the drain of one asked
-/// for off the reactor, never from a walk of the table. The client sees it as the FIN its server's kernel sends. Every
-/// server here runs with both clocks off, so the sweep never walks and cannot be what made one whose FIN arrives.
+/// A write shutdown deferred behind a flush (#653): made by the tick, from a queue of its own rather than a walk of the
+/// table. The client sees it as the FIN its server's kernel sends. Every server here runs with both clocks off, so the
+/// sweep never walks.
 /// </summary>
 internal static class WriteShutdownTests
 {
-    // Read through reflection only to prove which branch a test took; nothing here asserts on it otherwise.
-    private static readonly FieldInfo WriteShutdownField =
-        typeof(TcpConnection).GetField("_writeShutdown", BindingFlags.NonPublic | BindingFlags.Instance)
-        ?? throw new InvalidOperationException("TcpConnection._writeShutdown is gone: update the branch guard");
-
-    // 0 not made, 1 made or suppressed, 2 deferred behind a flush.
-    private static int WriteShutdownState(TcpConnection conn) => (int)WriteShutdownField.GetValue(conn)!;
-
     // Far past what the server's send buffer, bounded per connection by StallSends, and the client's default receive
     // buffer can absorb between them, so a flush of it cannot complete before the client reads.
     private const int StallingBody = 2 * 1024 * 1024;
@@ -54,19 +43,17 @@ internal static class WriteShutdownTests
 
     public static void Register(Runner runner)
     {
-        RegisterDrainedAfterCompletion(runner);
         RegisterSendShapes(runner);
         RegisterManyOffThread(runner);
         RegisterOffThreadShutdownWrite(runner);
-        RegisterStopWithOneQueued(runner);
+        RegisterStopWithOneDeferred(runner);
         RegisterLetGoInsideCompletion(runner);
         RegisterAcceptPausedWithNoClocks(runner);
         RegisterShutdownWriteOnReactor(runner);
-        RegisterDeferredBehindAnEmptyFlush(runner);
     }
 
-    // ShutdownWrite on the reactor thread with the flush still the kernel's: decided inline and deferred, for the
-    // flush's completion to make. The handler keeps the connection, so no let-go can be what shut it down.
+    // ShutdownWrite on the reactor thread with the flush still the kernel's. The handler keeps the connection, so no
+    // let-go can be what shut it down.
     private static void RegisterShutdownWriteOnReactor(Runner runner)
     {
         runner.Test("tcp/half-close: with no clock set, ShutdownWrite behind a flush on the reactor shuts the write side down after the last byte", () =>
@@ -112,114 +99,6 @@ internal static class WriteShutdownTests
             byte[] got = ReadToFin(stream, body.Length);
             Assert.Equal(body.Length, got.Length);
             Assert.True(got.AsSpan().SequenceEqual(body), "every byte arrived before the FIN, but not intact");
-        });
-    }
-
-    // A flush can end without a send completion of its own - nothing staged, or an arm released by MarkClosed - and a
-    // write shutdown decided while one is passing through FlushAsync is deferred behind a flush that has no completion
-    // to make it: only the tick's retry (RetryDeferredWriteShutdowns) can. A reactor pass is held until it is queued,
-    // so the flush ahead of it completes before that drain, and the thread that asked then runs empty flushes across
-    // it. Without the retry this lost about one in six; the first one lost ends the test.
-    private static void RegisterDeferredBehindAnEmptyFlush(Runner runner)
-    {
-        runner.Test("tcp/half-close: with no clock set, a ShutdownWrite made while a flush ends without a send still goes through", () =>
-        {
-            const int Attempts = 100;
-            const int BodyLength = 1024;
-            using var work = new BlockingCollection<Action>();
-            var asker = new Thread(() =>
-            {
-                foreach (Action job in work.GetConsumingEnumerable())
-                {
-                    job();
-                }
-            }) { IsBackground = true, Name = "write-shutter" };
-            asker.Start();
-            using var jobDone = new SemaphoreSlim(0);
-
-            int port = Start(Config(NoClocks), async (reactor, conn) =>
-            {
-                if (!await IsThisTestsConnection(conn))
-                {
-                    conn.DecRef();
-                    return;
-                }
-
-                try
-                {
-                    conn.Write(new byte[BodyLength]);
-                    ValueTask flush = conn.FlushAsync();
-
-                    var holding = new ManualResetEventSlim();
-                    var asked = new ManualResetEventSlim();
-                    reactor.ScheduleOnReactor(_ =>
-                    {
-                        holding.Set();
-                        asked.Wait(500);
-                    }, null);
-
-                    work.Add(() =>
-                    {
-                        try
-                        {
-                            holding.Wait(1_000);
-                            conn.ShutdownWrite();   // the flush still outstanding, so it is queued
-                            asked.Set();
-
-                            var waited = Stopwatch.StartNew();
-                            while (!flush.IsCompleted && waited.ElapsedMilliseconds < 1_000)
-                            {
-                            }
-
-                            long until = Stopwatch.GetTimestamp() + Stopwatch.Frequency / 100;   // 10 ms
-                            while (Stopwatch.GetTimestamp() < until)
-                            {
-                                _ = conn.FlushAsync();   // nothing staged
-                            }
-                        }
-                        finally
-                        {
-                            jobDone.Release();
-                        }
-                    });
-
-                    await conn.ReadAsync();   // until the client closes
-                }
-                finally
-                {
-                    conn.DecRef();
-                }
-            });
-
-            try
-            {
-                for (int i = 0; i < Attempts; i++)
-                {
-                    using var client = new TcpClient();
-                    client.Connect("127.0.0.1", port);
-                    client.ReceiveTimeout = 2_000;   // eight ticks
-                    NetworkStream stream = client.GetStream();
-                    stream.Write("hi"u8);
-
-                    byte[] got;
-                    try
-                    {
-                        got = ReadToFin(stream, BodyLength);
-                    }
-                    catch (Exception e)
-                    {
-                        throw new Exception($"connection {i + 1} of {Attempts}: {e.Message}");
-                    }
-
-                    // The asking thread is done with this connection before the next one starts.
-                    Assert.True(jobDone.Wait(5_000), "the asking thread never finished");
-                    Assert.Equal(BodyLength, got.Length);
-                }
-            }
-            finally
-            {
-                work.CompleteAdding();
-            }
         });
     }
 
@@ -338,10 +217,8 @@ internal static class WriteShutdownTests
         }
     }
 
-    // FinishSend runs CompleteFlush first, and that resumes the flush's awaiter inline. A handler that writes its last
-    // part there, flushes it without waiting and lets go has its write shutdown deferred behind that second flush -
-    // before FinishSend of the first one looks for one. It has to wait for the second flush (RunDeferredWriteShutdown's
-    // !FlushOutstanding), not be made with the first.
+    // A handler resumed inline, inside its first flush's completion, that writes its last part there, flushes it without
+    // waiting and lets go: the write shutdown waits for that second flush.
     private static void RegisterLetGoInsideCompletion(Runner runner)
     {
         runner.Test("tcp/exit: with no clock set, a handler that lets go behind a second flush, from inside the first one's completion, gets both out before the FIN", () =>
@@ -386,61 +263,8 @@ internal static class WriteShutdownTests
         });
     }
 
-    // ShutdownWriteOrDefer's first branch: one queued off the reactor while the flush was in flight, drained only after
-    // that flush's completion was dispatched. FinishSend found nothing deferred, so the drain has to make it itself.
-    private static void RegisterDrainedAfterCompletion(Runner runner)
-    {
-        runner.Test("tcp/exit: with no clock set, a let-go queued behind a flush that completes before the queue drains still shuts the write side down", () =>
-        {
-            var seen = new TaskCompletionSource<(bool Outstanding, int StateAtCompletion)>(
-                TaskCreationOptions.RunContinuationsAsynchronously);
-
-            int port = Start(Config(NoClocks), async (reactor, conn) =>
-            {
-                if (!await IsThisTestsConnection(conn))
-                {
-                    conn.DecRef();
-                    return;
-                }
-
-                // Posted from the reactor thread, so it runs in the next pass's post drain: after that pass has
-                // drained its write-shutdown queue, and before the wait that submits what this prepares.
-                reactor.ScheduleOnReactor(_ =>
-                {
-                    conn.Write("bye"u8);
-                    ValueTask flush = conn.FlushAsync();   // prepared now; this pass's wait submits it and it completes at once
-                    bool outstanding = !flush.IsCompleted;
-
-                    // Runs inline in CompleteFlush, before FinishSend looks for a deferred one: 0 there means it was not drained yet.
-                    flush.GetAwaiter().UnsafeOnCompleted(() => seen.TrySetResult((outstanding, WriteShutdownState(conn))));
-
-                    // Off the reactor with the flush in flight, so it is queued - and this pass's drain of the
-                    // queue is over, so it waits for the next pass, by which time the flush has completed.
-                    var letGo = new Thread(conn.DecRef) { IsBackground = true };
-                    letGo.Start();
-                    letGo.Join();
-                }, null);
-            });
-
-            using var client = new TcpClient();
-            client.Connect("127.0.0.1", port);
-            client.ReceiveTimeout = 3_000;
-            NetworkStream stream = client.GetStream();
-            stream.Write("hi"u8);
-
-            Assert.Equal("bye", ReadExactly(stream, 3));
-            Assert.Equal(0, ReadAfterLastByte(stream, 3));
-
-            Assert.True(seen.Task.Wait(1_000), "the flush never completed");
-            (bool outstanding, int state) = seen.Task.Result;
-            Assert.True(outstanding, "the flush was over before the handler let go: nothing was deferred behind it");
-            Assert.True(state == 0,
-                $"it was drained before the flush completed (_writeShutdown {state} at the completion), so this took the other branch");
-        });
-    }
-
-    // Every way a flush ends reaches FinishSend: one SEND, several partial SENDs, a vectored SENDMSG, a SEND_ZC whose
-    // notif comes after its data, and the incremental loop's own dispatcher.
+    // Every shape of send holds its flush in flight until the last byte is the kernel's: one SEND, several partial SENDs,
+    // a vectored SENDMSG, a SEND_ZC whose notif comes after its data, and the incremental loop's own dispatcher.
     private static void RegisterSendShapes(Runner runner)
     {
         (string Name, ServerConfig Config, bool Skip)[] shapes =
@@ -485,6 +309,8 @@ internal static class WriteShutdownTests
                 // Not a byte is read before the handler has let go, so its flush cannot have finished by then.
                 Assert.True(letGo.Task.Wait(5_000), "the handler never let go");
                 Assert.True(letGo.Task.Result, "the flush was already over when the handler let go, so this proved nothing");
+
+                Thread.Sleep(600);   // a couple of ticks that find the flush still in flight, and leave it alone
 
                 byte[] got = ReadToFin(stream, body.Length);
                 Assert.Equal(body.Length, got.Length);
@@ -602,7 +428,7 @@ internal static class WriteShutdownTests
                     ValueTask flush = conn.FlushAsync();
                     bool outstanding = !flush.IsCompleted;
 
-                    // Off the reactor, which this blocks meanwhile, so it is queued with the flush in flight.
+                    // Off the reactor, which this blocks meanwhile, so it is deferred with the flush in flight.
                     var shutter = new Thread(conn.ShutdownWrite) { IsBackground = true };
                     shutter.Start();
                     shutter.Join();
@@ -658,11 +484,11 @@ internal static class WriteShutdownTests
         });
     }
 
-    // The stop's first pass closes every connection while one asked for off the reactor is still in the queue: the drain
-    // after it finds the connection torn down (its write shutdown suppressed, or its slot gone) and must leave it alone.
-    private static void RegisterStopWithOneQueued(Runner runner)
+    // The stop's first pass closes every connection while one is still in the queue: a tick after it finds the connection
+    // torn down (its write shutdown suppressed, or its slot gone) and must leave it alone.
+    private static void RegisterStopWithOneDeferred(Runner runner)
     {
-        runner.Test("stop: a reactor stopped with a let-go still queued behind a flush stops, and the peer is let go", () =>
+        runner.Test("stop: a reactor stopped with a let-go still deferred behind a flush stops, and the peer is let go", () =>
         {
             byte[] body = Pattern(StallingBody);
             var queued = new TaskCompletionSource<int>(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -675,7 +501,7 @@ internal static class WriteShutdownTests
                     return;
                 }
 
-                // In the post drain: this pass has drained its write-shutdown queue already, and ends in the stop.
+                // In the post drain, so the stop comes right behind the let-go.
                 reactor.ScheduleOnReactor(_ =>
                 {
                     StallSends(conn);
@@ -752,7 +578,7 @@ internal static class WriteShutdownTests
         var buffer = new byte[64 * 1024];
         while (true)
         {
-            int n = ReadAfterLastByte(stream, (int)got.Length, buffer);
+            int n = ReadOnce(stream, (int)got.Length, buffer);
             if (n == 0)
             {
                 return got.ToArray();
@@ -766,9 +592,8 @@ internal static class WriteShutdownTests
     }
 
     // One read, telling a lost FIN (the receive timeout) from a reset or anything else.
-    private static int ReadAfterLastByte(NetworkStream stream, int readSoFar, byte[]? buffer = null)
+    private static int ReadOnce(NetworkStream stream, int readSoFar, byte[] buffer)
     {
-        buffer ??= new byte[16];
         try
         {
             return stream.Read(buffer, 0, buffer.Length);
@@ -804,21 +629,5 @@ internal static class WriteShutdownTests
                 return false;   // TestServer's listen probe
             }
         }
-    }
-
-    private static string ReadExactly(NetworkStream stream, int count)
-    {
-        var buffer = new byte[count];
-        int got = 0;
-        while (got < count)
-        {
-            int n = stream.Read(buffer, got, count - got);
-            if (n == 0)
-            {
-                throw new IOException($"EOF after {got} of {count} bytes");
-            }
-            got += n;
-        }
-        return Encoding.ASCII.GetString(buffer);
     }
 }

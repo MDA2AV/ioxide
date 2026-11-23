@@ -49,7 +49,7 @@ public sealed unsafe partial class TcpConnection
 
     private int _readTimeoutDisabled;
     private long _writeShutdownMs;
-    private int _writeShutdown;   // 0, 1 made (or suppressed), 2 deferred behind a flush - its completion makes it, or the next tick
+    private int _writeShutdown;   // 0, 1 made (or suppressed), 2 deferred behind a flush - the tick makes it
 
     /// <summary>
     /// Set once the sweep has shut this connection down, so the next tick skips it instead of
@@ -168,7 +168,7 @@ public sealed unsafe partial class TcpConnection
 
     // shutdown(SHUT_WR), once: tells the kernel this side is done sending. The FIN is the kernel's, behind
     // the bytes it already took; it takes no more, so a flush still in flight would be cut short.
-    internal void ShutdownWriteNow()
+    private void ShutdownWriteNow()
     {
         if (Interlocked.Exchange(ref _writeShutdown, 1) != 1)
         {
@@ -179,66 +179,41 @@ public sealed unsafe partial class TcpConnection
 
     internal bool WriteShutdownDone => Volatile.Read(ref _writeShutdown) == 1;   // or suppressed
 
-    internal bool WriteShutdownDeferred => Volatile.Read(ref _writeShutdown) == 2;
-
     /// <summary>
     /// Half-close, <c>shutdown(SHUT_WR)</c>: the peer gets a FIN once what has been flushed is out, and
     /// the connection stays - its read side open, its descriptor still released by <see cref="DecRef"/>.
     /// For a protocol layer that is done sending (HTTP's <c>Connection: close</c>). Nothing may be
-    /// written after it. A flush still in flight defers it until that flush is done; a connection the
-    /// reactor already tore down gets none. Any thread (#211).
+    /// written after it. A flush still in flight defers it to the tick after that flush is done; a
+    /// connection the reactor already tore down gets none. Any thread (#211).
     /// </summary>
     public void ShutdownWrite()
     {
-        if (WriteShutdownDone)
-        {
-            return;   // nothing to ask the reactor for
-        }
-
         if (!FlushOutstanding)
         {
             ShutdownWriteNow();
-            return;
         }
-
-        // Whether to defer is decided on the reactor, where the flush completes, so one thread orders the
-        // two. Marked from here, it could land just after the completion had looked for it, and never be made.
-        _reactor.EnqueueWriteShutdown(this, ClientFd, Generation);
+        else if (Interlocked.CompareExchange(ref _writeShutdown, 2, 0) == 0)   // not over one made, suppressed or already deferred
+        {
+            _reactor.DeferWriteShutdown(ClientFd, Generation);
+        }
     }
 
     /// <summary>
-    /// Reactor thread: <see cref="ShutdownWrite"/> called with a flush in flight. Made now when that
-    /// flush is already over - one that came through the queue can arrive after its completion - and
-    /// otherwise deferred behind it, for <see cref="RunDeferredWriteShutdown"/>. True when this call
-    /// deferred it, so the reactor keeps it for its tick to retry.
+    /// Reactor thread, from the tick: makes the write shutdown deferred behind a flush, once that flush
+    /// is over. False while it is still in flight.
     /// </summary>
-    /// <remarks>
-    /// The retry is for a flush that ends without a send of its own - nothing staged, or an arm released
-    /// by <see cref="MarkClosed"/> - which has no completion to make it. A flush armed later never needs
-    /// waiting for, as nothing may be written after ShutdownWrite or a handler's release.
-    /// </remarks>
-    internal bool ShutdownWriteOrDefer()
+    internal bool RunDeferredWriteShutdown()
     {
-        if (!FlushOutstanding)
+        if (Volatile.Read(ref _writeShutdown) == 2)
         {
-            ShutdownWriteNow();
-            return false;
-        }
-
-        return Interlocked.CompareExchange(ref _writeShutdown, 2, 0) == 0;   // not over one made, suppressed or already deferred
-    }
-
-    /// <summary>
-    /// Reactor thread, from the completion that ends a flush and from the tick's retry: makes the write
-    /// shutdown deferred behind it. With a flush still in flight, that one's completion makes it, or a
-    /// later tick.
-    /// </summary>
-    internal void RunDeferredWriteShutdown()
-    {
-        if (WriteShutdownDeferred && !FlushOutstanding)
-        {
+            if (FlushOutstanding)
+            {
+                return false;
+            }
             ShutdownWriteNow();
         }
+
+        return true;
     }
 
     /// <summary>

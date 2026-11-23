@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using static ioxide.Native;
 
 namespace ioxide;
@@ -26,6 +27,27 @@ public sealed unsafe partial class Reactor
     /// </summary>
     internal long NowMs = Native.MonotonicMs;
 
+    // Connections whose write shutdown waits for a flush (TcpConnection.ShutdownWrite), (gen << 32) | fd.
+    // Added by any thread; nearly always empty, as a handler that awaits its last flush never defers one.
+    private readonly ConcurrentQueue<ulong> _deferredWriteShutdowns = new();
+
+    internal void DeferWriteShutdown(int fd, int gen)
+        => _deferredWriteShutdowns.Enqueue(((ulong)(ushort)gen << 32) | (uint)fd);
+
+    // One look at each per tick: one whose flush is still in flight waits for the next. A connection that
+    // is gone was torn down by the reactor, which leaves nothing to shut down.
+    private void RunDeferredWriteShutdowns()
+    {
+        for (int left = _deferredWriteShutdowns.Count; left > 0 && _deferredWriteShutdowns.TryDequeue(out ulong packed); left--)
+        {
+            TcpConnection? conn = ConnAt((int)(uint)packed, (ushort)(packed >> 32));
+            if (conn != null && !conn.RunDeferredWriteShutdown())
+            {
+                _deferredWriteShutdowns.Enqueue(packed);
+            }
+        }
+    }
+
     /// <summary>
     /// One pass over the connection table. Runs on the reactor thread from the ticker, so it owns
     /// the table outright and can touch a connection directly.
@@ -37,9 +59,8 @@ public sealed unsafe partial class Reactor
     /// start together. That walk held a reactor off its ring long enough to show in the tail of every
     /// request scheduled behind it. So it is made only when something on a connection needs it: one
     /// of the two clocks, or a recv parked on -ENOBUFS waiting for the buffers that connections their
-    /// handler let go still hold. A write shutdown deferred behind a flush is not a reason - the flush's
-    /// own completion makes it (Reactor.FinishSend), and the few that outlive their flush are on a list
-    /// of their own, retried every tick (RetryDeferredWriteShutdowns).
+    /// handler let go still hold. A write shutdown deferred behind a flush is not a reason: those are in a
+    /// queue of their own, looked at on every tick.
     /// </remarks>
     private void TcpSweep()
     {
@@ -49,7 +70,7 @@ public sealed unsafe partial class Reactor
         }
         _acceptPaused.Clear();
 
-        RetryDeferredWriteShutdowns();
+        RunDeferredWriteShutdowns();
 
         bool starved = _recvStarved.Count > 0;
         if (!starved && _readTimeoutMs <= 0 && _sendTimeoutMs <= 0)

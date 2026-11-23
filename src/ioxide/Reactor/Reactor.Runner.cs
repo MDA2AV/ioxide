@@ -66,8 +66,8 @@ public sealed unsafe partial class Reactor
         ArmWakePoll();
 
         // After OnStart, so a reactor that serves no TCP registers nothing. Whenever TCP is on, clocks
-        // or not: the sweep re-arms accepts paused on a lack of descriptors and retries write shutdowns
-        // deferred behind a flush, and walks the table only when a clock is set or a recv is starved (TcpSweep).
+        // or not: the sweep re-arms accepts paused on a lack of descriptors and makes the write shutdowns
+        // deferred behind a flush, and walks the table only when a clock is set or a recv is starved.
         if (_tcpEnabled)
         {
             AddTicker(TcpSweep);
