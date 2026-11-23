@@ -9,7 +9,7 @@ public sealed unsafe partial class Reactor
 {
     private readonly Mpsc<ushort> _returnQ = new(1 << 14);
     private readonly Mpsc<ulong>  _flushQ  = new(1 << 12);   // (gen << 32) | fd
-    private readonly Mpsc<ulong>  _finQ    = new(1 << 12);   // (gen << 32) | fd: FINs asked for behind a flush
+    private readonly Mpsc<ulong>  _writeShutdownQ = new(1 << 12);   // (gen << 32) | fd: ShutdownWrite off the reactor, behind a flush
 
     // Recycle must run on the reactor (buf_ring + pool are reactor-owned). TcpConnection is a
     // ref type, so this queue is a ConcurrentQueue rather than the unmanaged Mpsc<T>.
@@ -212,20 +212,20 @@ public sealed unsafe partial class Reactor
         }
     }
 
-    // A FIN asked for with a flush in flight (TcpConnection.SendFinOrDefer), decided where the flush
-    // completes. The caller still holds its ref, so the fd and generation are this life's.
-    internal void EnqueueFinBehindFlush(TcpConnection conn, int fd, int gen)
+    // TcpConnection.ShutdownWrite with a flush in flight, decided where the flush completes. The caller
+    // still holds its ref, so the fd and generation are this life's.
+    internal void EnqueueWriteShutdown(TcpConnection conn, int fd, int gen)
     {
         if (Environment.CurrentManagedThreadId == _reactorThreadId)
         {
-            AskFin(conn, fd, (ushort)gen);
+            ShutdownWriteOrDefer(conn, fd, (ushort)gen);
             return;
         }
         ulong packed = ((ulong)(ushort)gen << 32) | (uint)fd;
         SpinWait sw = default;
-        while (!_finQ.TryEnqueue(packed))
+        while (!_writeShutdownQ.TryEnqueue(packed))
         {
-            // Nothing drains the queue past the stop, which has suppressed every FIN anyway.
+            // Nothing drains the queue past the stop, which has suppressed every write shutdown anyway.
             if (_postsClosed)
             {
                 return;
@@ -235,51 +235,51 @@ public sealed unsafe partial class Reactor
         Wake();
     }
 
-    // A connection gone by now was torn down by the reactor, which sends no FIN; the gen check also
-    // drops an ask whose fd was reused before the queue drained.
-    private void DrainFinQ()
+    // A connection gone by now was torn down by the reactor, which leaves nothing to shut down; the gen
+    // check also drops an entry whose fd was reused before the queue drained.
+    private void DrainWriteShutdownQ()
     {
-        while (_finQ.TryDequeue(out ulong packed))
+        while (_writeShutdownQ.TryDequeue(out ulong packed))
         {
             int    fd  = (int)(uint)packed;
             ushort gen = (ushort)(packed >> 32);
             if (ConnAt(fd, gen) is { } conn)
             {
-                AskFin(conn, fd, gen);
+                ShutdownWriteOrDefer(conn, fd, gen);
             }
         }
     }
 
-    // FINs left asked for behind a flush, packed (gen << 32) | fd. The flush's completion sends almost
+    // Write shutdowns deferred behind a flush, packed (gen << 32) | fd. The flush's completion makes almost
     // every one (FinishSend); the tick retries the rest, which met a flush that ended without a send of
     // its own, so no completion is coming for them.
-    private readonly List<ulong> _finAsked = [];
+    private readonly List<ulong> _deferredWriteShutdowns = [];
 
-    private void AskFin(TcpConnection conn, int fd, ushort gen)
+    private void ShutdownWriteOrDefer(TcpConnection conn, int fd, ushort gen)
     {
-        if (conn.AskFinBehindFlush())
+        if (conn.ShutdownWriteOrDefer())
         {
-            _finAsked.Add(((ulong)gen << 32) | (uint)fd);
+            _deferredWriteShutdowns.Add(((ulong)gen << 32) | (uint)fd);
         }
     }
 
-    // From the ticker: what has gone, been sent or been suppressed drops off the list.
-    private void RetryFinAsks()
+    // From the ticker: what has gone, been made or been suppressed drops off the list.
+    private void RetryDeferredWriteShutdowns()
     {
-        for (int i = _finAsked.Count - 1; i >= 0; i--)
+        for (int i = _deferredWriteShutdowns.Count - 1; i >= 0; i--)
         {
-            ulong packed = _finAsked[i];
+            ulong packed = _deferredWriteShutdowns[i];
             TcpConnection? conn = ConnAt((int)(uint)packed, (ushort)(packed >> 32));
             if (conn != null)
             {
-                conn.SendFinBehindFlush();
-                if (conn.FinWanted)
+                conn.RunDeferredWriteShutdown();
+                if (conn.WriteShutdownDeferred)
                 {
                     continue;   // its flush is still in flight
                 }
             }
-            _finAsked[i] = _finAsked[^1];
-            _finAsked.RemoveAt(_finAsked.Count - 1);
+            _deferredWriteShutdowns[i] = _deferredWriteShutdowns[^1];
+            _deferredWriteShutdowns.RemoveAt(_deferredWriteShutdowns.Count - 1);
         }
     }
 

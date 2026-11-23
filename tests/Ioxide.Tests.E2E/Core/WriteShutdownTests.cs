@@ -10,19 +10,19 @@ using ioxide.utils;
 namespace Ioxide.Tests;
 
 /// <summary>
-/// The FIN asked for behind a flush (#653): sent from that flush's completion, or from the drain of an ask made off the
-/// reactor, never from a walk of the table. Every server here runs with both clocks off, so the sweep never walks and
-/// cannot be what sent a FIN that arrives.
+/// A write shutdown deferred behind a flush (#653): made from that flush's completion, or from the drain of one asked
+/// for off the reactor, never from a walk of the table. The client sees it as the FIN its server's kernel sends. Every
+/// server here runs with both clocks off, so the sweep never walks and cannot be what made one whose FIN arrives.
 /// </summary>
-internal static class FinBehindFlushTests
+internal static class WriteShutdownTests
 {
     // Read through reflection only to prove which branch a test took; nothing here asserts on it otherwise.
-    private static readonly FieldInfo FinSentField =
-        typeof(TcpConnection).GetField("_finSent", BindingFlags.NonPublic | BindingFlags.Instance)
-        ?? throw new InvalidOperationException("TcpConnection._finSent is gone: update the branch guard");
+    private static readonly FieldInfo WriteShutdownField =
+        typeof(TcpConnection).GetField("_writeShutdown", BindingFlags.NonPublic | BindingFlags.Instance)
+        ?? throw new InvalidOperationException("TcpConnection._writeShutdown is gone: update the branch guard");
 
-    // 0 nothing asked, 1 sent or suppressed, 2 asked for behind a flush.
-    private static int FinState(TcpConnection conn) => (int)FinSentField.GetValue(conn)!;
+    // 0 not made, 1 made or suppressed, 2 deferred behind a flush.
+    private static int WriteShutdownState(TcpConnection conn) => (int)WriteShutdownField.GetValue(conn)!;
 
     // Far past what the server's send buffer, bounded per connection by StallSends, and the client's default receive
     // buffer can absorb between them, so a flush of it cannot complete before the client reads.
@@ -54,22 +54,22 @@ internal static class FinBehindFlushTests
 
     public static void Register(Runner runner)
     {
-        RegisterAskAfterCompletion(runner);
+        RegisterDrainedAfterCompletion(runner);
         RegisterSendShapes(runner);
         RegisterManyOffThread(runner);
         RegisterOffThreadShutdownWrite(runner);
-        RegisterStopWithAskQueued(runner);
+        RegisterStopWithOneQueued(runner);
         RegisterLetGoInsideCompletion(runner);
         RegisterAcceptPausedWithNoClocks(runner);
         RegisterShutdownWriteOnReactor(runner);
-        RegisterAskStrandedByAnEmptyFlush(runner);
+        RegisterDeferredBehindAnEmptyFlush(runner);
     }
 
-    // ShutdownWrite on the reactor thread with the flush still the kernel's: the ask is decided inline and left
-    // standing, for the flush's completion to send. The handler keeps the connection, so no let-go can be the FIN.
+    // ShutdownWrite on the reactor thread with the flush still the kernel's: decided inline and deferred, for the
+    // flush's completion to make. The handler keeps the connection, so no let-go can be what shut it down.
     private static void RegisterShutdownWriteOnReactor(Runner runner)
     {
-        runner.Test("tcp/half-close: with no clock set, ShutdownWrite behind a flush on the reactor sends its FIN after the last byte", () =>
+        runner.Test("tcp/half-close: with no clock set, ShutdownWrite behind a flush on the reactor shuts the write side down after the last byte", () =>
         {
             byte[] body = Pattern(StallingBody);
             var shut = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -115,14 +115,14 @@ internal static class FinBehindFlushTests
         });
     }
 
-    // A flush can end without a send completion of its own - nothing staged, or an arm released by MarkClosed - and
-    // an ask decided while one is passing through FlushAsync is left standing behind a flush that has no completion
-    // to send it: only the tick's retry of standing asks (RetryFinAsks) can. A reactor pass is held until the ask is
-    // queued, so the flush ahead of it completes before that drain, and the asking thread then runs empty flushes
-    // across it. Without the retry this lost about one FIN in six; the first one lost ends the test.
-    private static void RegisterAskStrandedByAnEmptyFlush(Runner runner)
+    // A flush can end without a send completion of its own - nothing staged, or an arm released by MarkClosed - and a
+    // write shutdown decided while one is passing through FlushAsync is deferred behind a flush that has no completion
+    // to make it: only the tick's retry (RetryDeferredWriteShutdowns) can. A reactor pass is held until it is queued,
+    // so the flush ahead of it completes before that drain, and the thread that asked then runs empty flushes across
+    // it. Without the retry this lost about one in six; the first one lost ends the test.
+    private static void RegisterDeferredBehindAnEmptyFlush(Runner runner)
     {
-        runner.Test("tcp/half-close: with no clock set, a FIN asked for while a flush ends without a send still goes out", () =>
+        runner.Test("tcp/half-close: with no clock set, a ShutdownWrite made while a flush ends without a send still goes through", () =>
         {
             const int Attempts = 100;
             const int BodyLength = 1024;
@@ -133,7 +133,7 @@ internal static class FinBehindFlushTests
                 {
                     job();
                 }
-            }) { IsBackground = true, Name = "fin-asker" };
+            }) { IsBackground = true, Name = "write-shutter" };
             asker.Start();
             using var jobDone = new SemaphoreSlim(0);
 
@@ -163,7 +163,7 @@ internal static class FinBehindFlushTests
                         try
                         {
                             holding.Wait(1_000);
-                            conn.ShutdownWrite();   // the flush still outstanding: the ask is queued
+                            conn.ShutdownWrite();   // the flush still outstanding, so it is queued
                             asked.Set();
 
                             var waited = Stopwatch.StartNew();
@@ -339,9 +339,9 @@ internal static class FinBehindFlushTests
     }
 
     // FinishSend runs CompleteFlush first, and that resumes the flush's awaiter inline. A handler that writes its last
-    // part there, flushes it without waiting and lets go asks for the FIN behind that second flush - before FinishSend
-    // of the first one looks for an ask. The FIN has to wait for the second flush (SendFinBehindFlush's
-    // !FlushOutstanding), not go out with the first.
+    // part there, flushes it without waiting and lets go has its write shutdown deferred behind that second flush -
+    // before FinishSend of the first one looks for one. It has to wait for the second flush (RunDeferredWriteShutdown's
+    // !FlushOutstanding), not be made with the first.
     private static void RegisterLetGoInsideCompletion(Runner runner)
     {
         runner.Test("tcp/exit: with no clock set, a handler that lets go behind a second flush, from inside the first one's completion, gets both out before the FIN", () =>
@@ -386,13 +386,13 @@ internal static class FinBehindFlushTests
         });
     }
 
-    // AskFinBehindFlush's first branch: an ask queued off the reactor while the flush was in flight, drained only after
-    // that flush's completion was dispatched. FinishSend found nothing asked, so the drain has to send the FIN itself.
-    private static void RegisterAskAfterCompletion(Runner runner)
+    // ShutdownWriteOrDefer's first branch: one queued off the reactor while the flush was in flight, drained only after
+    // that flush's completion was dispatched. FinishSend found nothing deferred, so the drain has to make it itself.
+    private static void RegisterDrainedAfterCompletion(Runner runner)
     {
-        runner.Test("tcp/exit: with no clock set, a let-go queued behind a flush that completes before the queue drains still sends the FIN", () =>
+        runner.Test("tcp/exit: with no clock set, a let-go queued behind a flush that completes before the queue drains still shuts the write side down", () =>
         {
-            var seen = new TaskCompletionSource<(bool Outstanding, int FinStateAtCompletion)>(
+            var seen = new TaskCompletionSource<(bool Outstanding, int StateAtCompletion)>(
                 TaskCreationOptions.RunContinuationsAsynchronously);
 
             int port = Start(Config(NoClocks), async (reactor, conn) =>
@@ -404,17 +404,17 @@ internal static class FinBehindFlushTests
                 }
 
                 // Posted from the reactor thread, so it runs in the next pass's post drain: after that pass has
-                // drained its FIN queue, and before the wait that submits what this prepares.
+                // drained its write-shutdown queue, and before the wait that submits what this prepares.
                 reactor.ScheduleOnReactor(_ =>
                 {
                     conn.Write("bye"u8);
                     ValueTask flush = conn.FlushAsync();   // prepared now; this pass's wait submits it and it completes at once
                     bool outstanding = !flush.IsCompleted;
 
-                    // Runs inline in CompleteFlush, before FinishSend looks for an ask: 0 there means none was drained yet.
-                    flush.GetAwaiter().UnsafeOnCompleted(() => seen.TrySetResult((outstanding, FinState(conn))));
+                    // Runs inline in CompleteFlush, before FinishSend looks for a deferred one: 0 there means it was not drained yet.
+                    flush.GetAwaiter().UnsafeOnCompleted(() => seen.TrySetResult((outstanding, WriteShutdownState(conn))));
 
-                    // Off the reactor with the flush in flight, so the ask is queued - and this pass's drain of the
+                    // Off the reactor with the flush in flight, so it is queued - and this pass's drain of the
                     // queue is over, so it waits for the next pass, by which time the flush has completed.
                     var letGo = new Thread(conn.DecRef) { IsBackground = true };
                     letGo.Start();
@@ -433,9 +433,9 @@ internal static class FinBehindFlushTests
 
             Assert.True(seen.Task.Wait(1_000), "the flush never completed");
             (bool outstanding, int state) = seen.Task.Result;
-            Assert.True(outstanding, "the flush was over before the handler let go: nothing was asked behind it");
+            Assert.True(outstanding, "the flush was over before the handler let go: nothing was deferred behind it");
             Assert.True(state == 0,
-                $"the ask was drained before the flush completed (_finSent {state} at the completion), so this took the other branch");
+                $"it was drained before the flush completed (_writeShutdown {state} at the completion), so this took the other branch");
         });
     }
 
@@ -455,7 +455,7 @@ internal static class FinBehindFlushTests
 
         foreach ((string name, ServerConfig config, bool skip) in shapes)
         {
-            runner.Test($"tcp/exit ({name}): with no clock set, a handler that lets go behind a flush sends its FIN after the last byte", () =>
+            runner.Test($"tcp/exit ({name}): with no clock set, a handler that lets go behind a flush shuts the write side down after the last byte", () =>
             {
                 byte[] body = Pattern(StallingBody);
                 var letGo = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -493,10 +493,10 @@ internal static class FinBehindFlushTests
         }
     }
 
-    // The queue under load: many asks from the thread pool at once, each behind a flush that cannot complete yet.
+    // The queue under load: many let-gos from the thread pool at once, each behind a flush that cannot complete yet.
     private static void RegisterManyOffThread(Runner runner)
     {
-        runner.Test("tcp/exit: with no clock set, sixteen handlers letting go behind their flushes from the thread pool all send their FIN", () =>
+        runner.Test("tcp/exit: with no clock set, sixteen handlers letting go behind their flushes from the thread pool all shut their write side down", () =>
         {
             const int Clients = 16;
             byte[] body = Pattern(StallingBody);
@@ -582,7 +582,7 @@ internal static class FinBehindFlushTests
     // ShutdownWrite from another thread goes through the same queue as an off-reactor DecRef.
     private static void RegisterOffThreadShutdownWrite(Runner runner)
     {
-        runner.Test("tcp/half-close: with no clock set, ShutdownWrite from another thread behind a flush sends its FIN after the last byte, and the read side stays open", () =>
+        runner.Test("tcp/half-close: with no clock set, ShutdownWrite from another thread behind a flush shuts the write side down after the last byte, and the read side stays open", () =>
         {
             byte[] body = Pattern(StallingBody);
             var shut = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -602,7 +602,7 @@ internal static class FinBehindFlushTests
                     ValueTask flush = conn.FlushAsync();
                     bool outstanding = !flush.IsCompleted;
 
-                    // Off the reactor, which this blocks meanwhile, so the ask is queued with the flush in flight.
+                    // Off the reactor, which this blocks meanwhile, so it is queued with the flush in flight.
                     var shutter = new Thread(conn.ShutdownWrite) { IsBackground = true };
                     shutter.Start();
                     shutter.Join();
@@ -658,9 +658,9 @@ internal static class FinBehindFlushTests
         });
     }
 
-    // The stop's first pass closes every connection while an ask made off the reactor is still in the queue: the drain
-    // after it finds the connection torn down (its FIN suppressed, or its slot gone) and must leave it alone.
-    private static void RegisterStopWithAskQueued(Runner runner)
+    // The stop's first pass closes every connection while one asked for off the reactor is still in the queue: the drain
+    // after it finds the connection torn down (its write shutdown suppressed, or its slot gone) and must leave it alone.
+    private static void RegisterStopWithOneQueued(Runner runner)
     {
         runner.Test("stop: a reactor stopped with a let-go still queued behind a flush stops, and the peer is let go", () =>
         {
@@ -675,7 +675,7 @@ internal static class FinBehindFlushTests
                     return;
                 }
 
-                // In the post drain: this pass has drained its FIN queue already, and ends in the stop.
+                // In the post drain: this pass has drained its write-shutdown queue already, and ends in the stop.
                 reactor.ScheduleOnReactor(_ =>
                 {
                     StallSends(conn);

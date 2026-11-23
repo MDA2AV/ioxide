@@ -37,9 +37,9 @@ public sealed unsafe partial class Reactor
     /// start together. That walk held a reactor off its ring long enough to show in the tail of every
     /// request scheduled behind it. So it is made only when something on a connection needs it: one
     /// of the two clocks, or a recv parked on -ENOBUFS waiting for the buffers that connections their
-    /// handler let go still hold. The FIN asked for behind a flush is not a reason - the flush's own
-    /// completion sends it (Reactor.FinishSend), and the few asks that outlive their flush are on a
-    /// list of their own, retried every tick (RetryFinAsks).
+    /// handler let go still hold. A write shutdown deferred behind a flush is not a reason - the flush's
+    /// own completion makes it (Reactor.FinishSend), and the few that outlive their flush are on a list
+    /// of their own, retried every tick (RetryDeferredWriteShutdowns).
     /// </remarks>
     private void TcpSweep()
     {
@@ -49,7 +49,7 @@ public sealed unsafe partial class Reactor
         }
         _acceptPaused.Clear();
 
-        RetryFinAsks();
+        RetryDeferredWriteShutdowns();
 
         bool starved = _recvStarved.Count > 0;
         if (!starved && _readTimeoutMs <= 0 && _sendTimeoutMs <= 0)
@@ -139,7 +139,7 @@ public sealed unsafe partial class Reactor
     {
         conn.SweepClosed = true;   // one shutdown per connection, not one per tick until it lands
 
-        conn.SuppressFin();   // this shutdown is the FIN
+        conn.SuppressWriteShutdown();   // this shutdown ends both sides
         shutdown(conn.ClientFd, SHUT_RDWR);
         conn.MarkClosed();
     }

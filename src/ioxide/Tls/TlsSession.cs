@@ -25,7 +25,7 @@ public sealed unsafe class TlsSession : IDisposable
 
     private GCHandle _handle;   // roots this session so the keylog callback can reach it via SSL ex_data
     private readonly int _fd;   // the connection's fd - the teardown close_notify goes out on it
-    private readonly TcpConnection _conn;   // whether it can: no send in flight, no FIN yet
+    private readonly TcpConnection _conn;   // whether it can: no send in flight, write side not shut down
 
     /// <summary>The captured TLS 1.3 server traffic secret (set by the keylog callback during the handshake).</summary>
     internal byte[]? ServerSecret;
@@ -595,9 +595,9 @@ public sealed unsafe class TlsSession : IDisposable
         // Clean server-side teardown: send close_notify so the peer can tell end-of-stream from a
         // truncation, whichever backend owns the write side - also when the peer closed first, which
         // RFC 8446 6.1 asks of both sides. Skip where a raw send cannot go out cleanly: into a send
-        // the ring still has, past the FIN - which a reactor teardown marks too - or once the
+        // the ring still has, past the write shutdown - which a reactor teardown marks too - or once the
         // connection was recycled, when the fd may be someone else's.
-        if (_conn.Generation == _generation && !_conn.FlushOutstanding && !_conn.FinSent)
+        if (_conn.Generation == _generation && !_conn.FlushOutstanding && !_conn.WriteShutdownDone)
         {
             if (KernelTx)
             {

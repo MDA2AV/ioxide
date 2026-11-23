@@ -35,7 +35,7 @@ public sealed unsafe partial class Reactor
             // teardown runs from FinishSend once the kernel has let go of the slab.
             SubmitCancel(Tag(KindTcpRecv, gen, fd));   // the multishot recv is still armed
             conn.CloseAfterSend = true;
-            conn.SuppressFin();
+            conn.SuppressWriteShutdown();
             conn.MarkClosed();
             conn.WriteInFlight = conn.WriteHead;
             res = 0;
@@ -72,7 +72,8 @@ public sealed unsafe partial class Reactor
     }
 
     // The kernel is done with the slab: complete the flush, then any teardown that waited for it, or
-    // else the FIN that did - asked for behind this flush, by a handler that let go or by ShutdownWrite.
+    // else the write shutdown that did - deferred behind this flush, by a handler that let go or by
+    // ShutdownWrite.
     private void FinishSend(TcpConnection conn, int fd)
     {
         int generation = conn.Generation;
@@ -86,11 +87,11 @@ public sealed unsafe partial class Reactor
         }
 
         // CompleteFlush resumed the flush's caller inline. The reactor's ref keeps this life from being
-        // recycled under that, so the generation check is only a guard. The sweep used to send this FIN,
-        // up to a tick (250 ms) after the flush.
-        if (conn.FinWanted && conn.Generation == generation)
+        // recycled under that, so the generation check is only a guard. The sweep used to make this
+        // shutdown, up to a tick (250 ms) after the flush.
+        if (conn.WriteShutdownDeferred && conn.Generation == generation)
         {
-            conn.SendFinBehindFlush();
+            conn.RunDeferredWriteShutdown();
         }
     }
 

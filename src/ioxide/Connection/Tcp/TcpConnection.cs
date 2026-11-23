@@ -48,8 +48,8 @@ public sealed unsafe partial class TcpConnection
     internal long FlushSeenMs;
 
     private int _readTimeoutDisabled;
-    private long _finSentMs;
-    private int _finSent;   // 0, 1 sent (or suppressed), 2 asked for behind a flush - its completion sends it, or the next tick
+    private long _writeShutdownMs;
+    private int _writeShutdown;   // 0, 1 made (or suppressed), 2 deferred behind a flush - its completion makes it, or the next tick
 
     /// <summary>
     /// Set once the sweep has shut this connection down, so the next tick skips it instead of
@@ -140,11 +140,10 @@ public sealed unsafe partial class TcpConnection
             return;
         }
 
-        // Before the decrement, while our ref keeps the fd from being recycled. A FIN now would cut
-        // a flush in flight short, so that one is left to the flush's completion.
+        // Before the decrement, while our ref keeps the fd from being recycled.
         if (Volatile.Read(ref _refs) == 2)
         {
-            SendFinOrDefer();
+            ShutdownWrite();
         }
 
         ReleaseRef();
@@ -152,9 +151,9 @@ public sealed unsafe partial class TcpConnection
 
     internal void ReleaseReactorRef() => ReleaseRef();
 
-    // The reactor tore the connection down, so no FIN. Called before MarkClosed: the handler it
-    // wakes lets go inline, while the reactor's ref is still held.
-    internal void SuppressFin() => Volatile.Write(ref _finSent, 1);
+    // The reactor tore the connection down, so the handler's release shuts nothing down. Called before
+    // MarkClosed: the handler it wakes lets go inline, while the reactor's ref is still held.
+    internal void SuppressWriteShutdown() => Volatile.Write(ref _writeShutdown, 1);
 
     private void ReleaseRef()
     {
@@ -167,88 +166,80 @@ public sealed unsafe partial class TcpConnection
     // Only meaningful while the connection is in the reactor's table, i.e. the reactor's ref is held.
     internal bool HandlerReleased => Volatile.Read(ref _refs) == 1;
 
-    internal void SendFin()
+    // shutdown(SHUT_WR), once: tells the kernel this side is done sending. The FIN is the kernel's, behind
+    // the bytes it already took; it takes no more, so a flush still in flight would be cut short.
+    internal void ShutdownWriteNow()
     {
-        if (Interlocked.Exchange(ref _finSent, 1) != 1)
+        if (Interlocked.Exchange(ref _writeShutdown, 1) != 1)
         {
-            Volatile.Write(ref _finSentMs, _reactor.NowMs);   // the peer's time to close starts now
+            Volatile.Write(ref _writeShutdownMs, _reactor.NowMs);   // the peer's time to close starts now
             Native.shutdown(ClientFd, Native.SHUT_WR);
         }
     }
 
-    internal bool FinSent => Volatile.Read(ref _finSent) == 1;
+    internal bool WriteShutdownDone => Volatile.Read(ref _writeShutdown) == 1;   // or suppressed
 
-    internal bool FinWanted => Volatile.Read(ref _finSent) == 2;
+    internal bool WriteShutdownDeferred => Volatile.Read(ref _writeShutdown) == 2;
 
     /// <summary>
-    /// The FIN now, or - with a flush in flight, which a FIN would cut short - asked for behind that
-    /// flush, for its final completion to send. Any thread.
+    /// Half-close, <c>shutdown(SHUT_WR)</c>: the peer gets a FIN once what has been flushed is out, and
+    /// the connection stays - its read side open, its descriptor still released by <see cref="DecRef"/>.
+    /// For a protocol layer that is done sending (HTTP's <c>Connection: close</c>). Nothing may be
+    /// written after it. A flush still in flight defers it until that flush is done; a connection the
+    /// reactor already tore down gets none. Any thread (#211).
     /// </summary>
-    /// <remarks>
-    /// The ask is decided on the reactor (<see cref="AskFinBehindFlush"/>): inline when this is the
-    /// reactor thread, through its queue when it is not. The flush completes on the reactor too, so
-    /// the ask and the completion are ordered by one thread instead of raced across two - a caller
-    /// here could otherwise see the flush in flight, the reactor complete it and look for an ask
-    /// before this one landed, and the FIN wait for nothing. Nothing may be written once the FIN is
-    /// asked for (<see cref="ShutdownWrite"/>, or a handler that let go), so no flush armed after the
-    /// ask can need waiting for. A flush that ends without a send of its own - nothing staged, or an
-    /// arm released by <see cref="MarkClosed"/> - has no completion to send it, so the reactor also
-    /// keeps every ask it left standing and retries those on each tick.
-    /// </remarks>
-    private void SendFinOrDefer()
+    public void ShutdownWrite()
     {
-        if (FinSent)
+        if (WriteShutdownDone)
         {
-            return;   // sent, or suppressed by a teardown: nothing to ask the reactor for
+            return;   // nothing to ask the reactor for
         }
 
         if (!FlushOutstanding)
         {
-            SendFin();
+            ShutdownWriteNow();
             return;
         }
 
-        _reactor.EnqueueFinBehindFlush(this, ClientFd, Generation);
+        // Whether to defer is decided on the reactor, where the flush completes, so one thread orders the
+        // two. Marked from here, it could land just after the completion had looked for it, and never be made.
+        _reactor.EnqueueWriteShutdown(this, ClientFd, Generation);
     }
 
     /// <summary>
-    /// Reactor thread: the FIN asked for behind a flush. Sent now when that flush is already over -
-    /// an ask that came through the queue can arrive after its completion - and otherwise left asked
-    /// for, for <see cref="SendFinBehindFlush"/>. True when this call left it asked for, so the
-    /// reactor keeps it for its tick to retry.
+    /// Reactor thread: <see cref="ShutdownWrite"/> called with a flush in flight. Made now when that
+    /// flush is already over - one that came through the queue can arrive after its completion - and
+    /// otherwise deferred behind it, for <see cref="RunDeferredWriteShutdown"/>. True when this call
+    /// deferred it, so the reactor keeps it for its tick to retry.
     /// </summary>
-    internal bool AskFinBehindFlush()
+    /// <remarks>
+    /// The retry is for a flush that ends without a send of its own - nothing staged, or an arm released
+    /// by <see cref="MarkClosed"/> - which has no completion to make it. A flush armed later never needs
+    /// waiting for, as nothing may be written after ShutdownWrite or a handler's release.
+    /// </remarks>
+    internal bool ShutdownWriteOrDefer()
     {
         if (!FlushOutstanding)
         {
-            SendFin();
+            ShutdownWriteNow();
             return false;
         }
 
-        return Interlocked.CompareExchange(ref _finSent, 2, 0) == 0;   // not over a FIN sent, suppressed or already asked
+        return Interlocked.CompareExchange(ref _writeShutdown, 2, 0) == 0;   // not over one made, suppressed or already deferred
     }
 
     /// <summary>
-    /// Reactor thread, from the completion that ends a flush and from the tick's retry of standing
-    /// asks: the FIN asked for behind it. A flush still in flight keeps it for its own completion,
-    /// or for a later tick.
+    /// Reactor thread, from the completion that ends a flush and from the tick's retry: makes the write
+    /// shutdown deferred behind it. With a flush still in flight, that one's completion makes it, or a
+    /// later tick.
     /// </summary>
-    internal void SendFinBehindFlush()
+    internal void RunDeferredWriteShutdown()
     {
-        if (FinWanted && !FlushOutstanding)
+        if (WriteShutdownDeferred && !FlushOutstanding)
         {
-            SendFin();
+            ShutdownWriteNow();
         }
     }
-
-    /// <summary>
-    /// Half-close: the peer gets a FIN once what has been flushed is out, and the connection stays -
-    /// its read side open, its descriptor still released by <see cref="DecRef"/>. For a protocol layer
-    /// that is done sending (HTTP's <c>Connection: close</c>). Nothing may be written after it.
-    /// A flush still in flight keeps the FIN until it is done; a connection the reactor already tore
-    /// down gets none. Any thread: with a flush in flight the ask is decided on the reactor (#211).
-    /// </summary>
-    public void ShutdownWrite() => SendFinOrDefer();
 
     /// <summary>
     /// Take this connection off the read timeout for the rest of its life - for an adapter whose
@@ -258,13 +249,13 @@ public sealed unsafe partial class TcpConnection
     public void DisableReadTimeout() => Volatile.Write(ref _readTimeoutDisabled, 1);
 
     // The peer owes the next move: a read is parked on a connection still on the read timeout, or
-    // the handler let go and its FIN is out. The server's own sends restart the clock; the sweep
-    // skips it during a flush.
+    // the handler let go and the write side is shut down. The server's own sends restart the clock; the
+    // sweep skips it during a flush.
     internal bool WaitingOnPeer(out long sinceMs)
     {
         if (HandlerReleased)
         {
-            sinceMs = Volatile.Read(ref _finSentMs);   // 0 until the FIN is out
+            sinceMs = Volatile.Read(ref _writeShutdownMs);   // 0 until it is made
             return sinceMs != 0;
         }
 
@@ -312,8 +303,8 @@ public sealed unsafe partial class TcpConnection
         Volatile.Write(ref ReadParkedMs, 0);
         FlushSeenMs = 0;
         Volatile.Write(ref _readTimeoutDisabled, 0);
-        Volatile.Write(ref _finSentMs, 0);
-        Volatile.Write(ref _finSent, 0);
+        Volatile.Write(ref _writeShutdownMs, 0);
+        Volatile.Write(ref _writeShutdown, 0);
         SweepClosed = false;
         CloseAfterSend = false;
 

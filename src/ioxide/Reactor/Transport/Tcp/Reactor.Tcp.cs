@@ -298,7 +298,7 @@ public sealed unsafe partial class Reactor
     // and the table slot, so the slab cannot be recycled under it; FinishSend lets go (#221).
     private void CloseFromRecv(TcpConnection conn, int fd)
     {
-        conn.SuppressFin();
+        conn.SuppressWriteShutdown();
 
         if (conn.FlushSubmitted)
         {
