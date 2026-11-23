@@ -85,8 +85,9 @@ public sealed unsafe partial class Reactor
             return;
         }
 
-        // CompleteFlush resumed the flush's caller inline, so this is still the same life only if the
-        // generation says so. The sweep used to send this FIN, up to a tick (250 ms) after the flush.
+        // CompleteFlush resumed the flush's caller inline. The reactor's ref keeps this life from being
+        // recycled under that, so the generation check is only a guard. The sweep used to send this FIN,
+        // up to a tick (250 ms) after the flush.
         if (conn.FinWanted && conn.Generation == generation)
         {
             conn.SendFinBehindFlush();

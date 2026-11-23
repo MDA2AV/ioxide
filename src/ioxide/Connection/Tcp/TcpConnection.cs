@@ -49,7 +49,7 @@ public sealed unsafe partial class TcpConnection
 
     private int _readTimeoutDisabled;
     private long _finSentMs;
-    private int _finSent;   // 0, 1 sent (or suppressed), 2 asked for behind a flush - its completion sends it
+    private int _finSent;   // 0, 1 sent (or suppressed), 2 asked for behind a flush - its completion sends it, or the next tick
 
     /// <summary>
     /// Set once the sweep has shut this connection down, so the next tick skips it instead of
@@ -191,10 +191,17 @@ public sealed unsafe partial class TcpConnection
     /// here could otherwise see the flush in flight, the reactor complete it and look for an ask
     /// before this one landed, and the FIN wait for nothing. Nothing may be written once the FIN is
     /// asked for (<see cref="ShutdownWrite"/>, or a handler that let go), so no flush armed after the
-    /// ask can need waiting for.
+    /// ask can need waiting for. A flush that ends without a send of its own - nothing staged, or an
+    /// arm released by <see cref="MarkClosed"/> - has no completion to send it, so the reactor also
+    /// keeps every ask it left standing and retries those on each tick.
     /// </remarks>
     private void SendFinOrDefer()
     {
+        if (FinSent)
+        {
+            return;   // sent, or suppressed by a teardown: nothing to ask the reactor for
+        }
+
         if (!FlushOutstanding)
         {
             SendFin();
@@ -207,23 +214,24 @@ public sealed unsafe partial class TcpConnection
     /// <summary>
     /// Reactor thread: the FIN asked for behind a flush. Sent now when that flush is already over -
     /// an ask that came through the queue can arrive after its completion - and otherwise left asked
-    /// for, for <see cref="SendFinBehindFlush"/>.
+    /// for, for <see cref="SendFinBehindFlush"/>. True when this call left it asked for, so the
+    /// reactor keeps it for its tick to retry.
     /// </summary>
-    internal void AskFinBehindFlush()
+    internal bool AskFinBehindFlush()
     {
         if (!FlushOutstanding)
         {
             SendFin();
-            return;
+            return false;
         }
 
-        Interlocked.CompareExchange(ref _finSent, 2, 0);   // not over a FIN already sent or suppressed
+        return Interlocked.CompareExchange(ref _finSent, 2, 0) == 0;   // not over a FIN sent, suppressed or already asked
     }
 
     /// <summary>
-    /// Reactor thread, from the completion that ends a flush, and from the sweep as a backstop: the
-    /// FIN asked for behind it. A flush armed before the ask and still in flight keeps it for its own
-    /// completion, which comes later on this thread.
+    /// Reactor thread, from the completion that ends a flush and from the tick's retry of standing
+    /// asks: the FIN asked for behind it. A flush still in flight keeps it for its own completion,
+    /// or for a later tick.
     /// </summary>
     internal void SendFinBehindFlush()
     {
@@ -238,7 +246,7 @@ public sealed unsafe partial class TcpConnection
     /// its read side open, its descriptor still released by <see cref="DecRef"/>. For a protocol layer
     /// that is done sending (HTTP's <c>Connection: close</c>). Nothing may be written after it.
     /// A flush still in flight keeps the FIN until it is done; a connection the reactor already tore
-    /// down gets none. Reactor thread only (#211).
+    /// down gets none. Any thread: with a flush in flight the ask is decided on the reactor (#211).
     /// </summary>
     public void ShutdownWrite() => SendFinOrDefer();
 

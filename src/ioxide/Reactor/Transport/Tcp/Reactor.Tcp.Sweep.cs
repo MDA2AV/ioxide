@@ -38,7 +38,8 @@ public sealed unsafe partial class Reactor
     /// request scheduled behind it. So it is made only when something on a connection needs it: one
     /// of the two clocks, or a recv parked on -ENOBUFS waiting for the buffers that connections their
     /// handler let go still hold. The FIN asked for behind a flush is not a reason - the flush's own
-    /// completion sends it (Reactor.FinishSend).
+    /// completion sends it (Reactor.FinishSend), and the few asks that outlive their flush are on a
+    /// list of their own, retried every tick (RetryFinAsks).
     /// </remarks>
     private void TcpSweep()
     {
@@ -47,6 +48,8 @@ public sealed unsafe partial class Reactor
             SubmitAcceptMultishot(listenFd);
         }
         _acceptPaused.Clear();
+
+        RetryFinAsks();
 
         bool starved = _recvStarved.Count > 0;
         if (!starved && _readTimeoutMs <= 0 && _sendTimeoutMs <= 0)
@@ -87,10 +90,6 @@ public sealed unsafe partial class Reactor
                 }
                 continue;
             }
-
-            // A FIN asked for behind a flush goes out from that flush's completion; this only backs it
-            // up while the walk is made anyway.
-            conn.SendFinBehindFlush();
 
             if (_readTimeoutMs > 0 && conn.WaitingOnPeer(out long sinceMs) && now - sinceMs > _readTimeoutMs)
             {

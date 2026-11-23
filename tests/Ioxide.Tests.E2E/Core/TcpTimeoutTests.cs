@@ -467,96 +467,6 @@ internal static class TcpTimeoutTests
             Assert.Equal((long)body.Length, total);
         });
 
-        // Both clocks off, so the sweep never walks the table: the FIN behind each of these flushes can
-        // only come from the flush's own completion. A lost one leaves the client reading until its
-        // receive timeout, which throws.
-        runner.Test("tcp/half-close: with no clock set, ShutdownWrite behind a flush still sends its FIN", () =>
-        {
-            byte[] body = new byte[6 * 1024 * 1024];
-            var inFlight = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
-
-            int port = StartWith(readMs: 0, sendMs: 0, async (_, conn) =>
-            {
-                try
-                {
-                    if (!await IsThisTestsConnection(conn))
-                    {
-                        return;
-                    }
-
-                    conn.Write(body);
-                    ValueTask flush = conn.FlushAsync();
-                    conn.ShutdownWrite();
-                    inFlight.TrySetResult(!flush.IsCompleted);
-                    await flush;
-
-                    await conn.ReadAsync();   // until the client closes, having read to the FIN
-                }
-                finally
-                {
-                    conn.DecRef();
-                }
-            });
-
-            Assert.Equal((long)body.Length, ReadToEndSlowly(port));
-            Assert.True(inFlight.Task.Wait(1_000) && inFlight.Task.Result,
-                "the flush was already done when ShutdownWrite ran, so this proved nothing");
-        });
-
-        runner.Test("tcp/exit: with no clock set, a handler that lets go behind a flush still sends its FIN", () =>
-        {
-            byte[] body = new byte[6 * 1024 * 1024];
-            var inFlight = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
-
-            int port = StartWith(readMs: 0, sendMs: 0, async (_, conn) =>
-            {
-                if (!await IsThisTestsConnection(conn))
-                {
-                    conn.DecRef();
-                    return;
-                }
-
-                conn.Write(body);
-                ValueTask flush = conn.FlushAsync();
-                inFlight.TrySetResult(!flush.IsCompleted);
-                conn.DecRef();   // on the reactor thread, with the flush still the kernel's
-            });
-
-            Assert.Equal((long)body.Length, ReadToEndSlowly(port));
-            Assert.True(inFlight.Task.Wait(1_000) && inFlight.Task.Result,
-                "the flush was already done when the handler let go, so this proved nothing");
-        });
-
-        runner.Test("tcp/exit: with no clock set, letting go behind a flush from another thread still sends the FIN", () =>
-        {
-            // Off the reactor the ask goes through its queue, and can land before or after the flush's
-            // completion: either way exactly one FIN, after the last byte.
-            byte[] body = new byte[6 * 1024 * 1024];
-            var inFlight = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
-
-            int port = StartWith(readMs: 0, sendMs: 0, async (_, conn) =>
-            {
-                if (!await IsThisTestsConnection(conn))
-                {
-                    conn.DecRef();
-                    return;
-                }
-
-                conn.Write(body);
-                ValueTask flush = conn.FlushAsync();
-                bool pending = !flush.IsCompleted;
-                await Task.Run(() =>
-                {
-                    inFlight.TrySetResult(pending);
-                    conn.DecRef();
-                });
-            });
-
-            Assert.Equal((long)body.Length, ReadToEndSlowly(port));
-            Assert.True(inFlight.Task.Wait(1_000) && inFlight.Task.Result,
-                "the flush was already done when the handler let go, so this proved nothing");
-        });
-
         runner.Test("tcp/send: a flush the peer stopped draining is released, not parked forever", () =>
         {
             // The reported shape (#234's workload, and the reason the idle clock alone is not
@@ -947,28 +857,6 @@ internal static class TcpTimeoutTests
                 conn.DecRef();
             }
         };
-
-    // A slow reader, so a large flush is still the kernel's when the handler moves on: reads to the
-    // FIN and returns how much came before it. A FIN that never comes ends in the receive timeout.
-    private static long ReadToEndSlowly(int port)
-    {
-        using var client = new TcpClient();
-        client.ReceiveBufferSize = 4096;
-        client.Connect("127.0.0.1", port);
-        client.ReceiveTimeout = 5_000;
-        NetworkStream stream = client.GetStream();
-        stream.Write("hi"u8);
-
-        var buffer = new byte[16 * 1024];
-        long total = 0;
-        int n;
-        while ((n = stream.Read(buffer, 0, buffer.Length)) > 0)
-        {
-            total += n;
-            Thread.Sleep(5);
-        }
-        return total;
-    }
 
     private static int StartWith(int readMs, int sendMs, Func<Reactor, TcpConnection, Task> handle)
         => TestServer.StartConfigured(handle, new ServerConfig

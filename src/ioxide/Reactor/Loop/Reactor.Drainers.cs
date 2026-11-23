@@ -218,13 +218,18 @@ public sealed unsafe partial class Reactor
     {
         if (Environment.CurrentManagedThreadId == _reactorThreadId)
         {
-            conn.AskFinBehindFlush();
+            AskFin(conn, fd, (ushort)gen);
             return;
         }
         ulong packed = ((ulong)(ushort)gen << 32) | (uint)fd;
         SpinWait sw = default;
         while (!_finQ.TryEnqueue(packed))
         {
+            // Nothing drains the queue past the stop, which has suppressed every FIN anyway.
+            if (_postsClosed)
+            {
+                return;
+            }
             sw.SpinOnce();
         }
         Wake();
@@ -236,7 +241,45 @@ public sealed unsafe partial class Reactor
     {
         while (_finQ.TryDequeue(out ulong packed))
         {
-            ConnAt((int)(uint)packed, (ushort)(packed >> 32))?.AskFinBehindFlush();
+            int    fd  = (int)(uint)packed;
+            ushort gen = (ushort)(packed >> 32);
+            if (ConnAt(fd, gen) is { } conn)
+            {
+                AskFin(conn, fd, gen);
+            }
+        }
+    }
+
+    // FINs left asked for behind a flush, packed (gen << 32) | fd. The flush's completion sends almost
+    // every one (FinishSend); the tick retries the rest, which met a flush that ended without a send of
+    // its own, so no completion is coming for them.
+    private readonly List<ulong> _finAsked = [];
+
+    private void AskFin(TcpConnection conn, int fd, ushort gen)
+    {
+        if (conn.AskFinBehindFlush())
+        {
+            _finAsked.Add(((ulong)gen << 32) | (uint)fd);
+        }
+    }
+
+    // From the ticker: what has gone, been sent or been suppressed drops off the list.
+    private void RetryFinAsks()
+    {
+        for (int i = _finAsked.Count - 1; i >= 0; i--)
+        {
+            ulong packed = _finAsked[i];
+            TcpConnection? conn = ConnAt((int)(uint)packed, (ushort)(packed >> 32));
+            if (conn != null)
+            {
+                conn.SendFinBehindFlush();
+                if (conn.FinWanted)
+                {
+                    continue;   // its flush is still in flight
+                }
+            }
+            _finAsked[i] = _finAsked[^1];
+            _finAsked.RemoveAt(_finAsked.Count - 1);
         }
     }
 
