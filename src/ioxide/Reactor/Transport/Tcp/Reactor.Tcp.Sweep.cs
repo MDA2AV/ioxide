@@ -102,11 +102,12 @@ public sealed unsafe partial class Reactor
             }
 
             // Sending, so not waiting on the peer: only the send clock applies, and the read clock
-            // restarts once the flush is done.
+            // restarts once the flush is done. A flush call off the reactor can be caught here before it
+            // has armed, with the last flush's time still on the clock: it is not judged by that.
             if (conn.FlushOutstanding)
             {
                 conn.FlushSeenMs = now;
-                if (_sendTimeoutMs > 0 && now - Volatile.Read(ref conn.FlushArmedMs) > _sendTimeoutMs)
+                if (_sendTimeoutMs > 0 && conn.FlushArmed && now - Volatile.Read(ref conn.FlushArmedMs) > _sendTimeoutMs)
                 {
                     TcpSweepClose(conn);
                 }

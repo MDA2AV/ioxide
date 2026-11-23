@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using System.Net;
 using System.Net.Sockets;
+using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Text;
 using ioxide;
@@ -489,6 +490,67 @@ internal static class TcpTimeoutTests
             Assert.Equal("", report.Task.Result);
         });
 
+        // A flush is in progress from the moment it is called, and on the send clock only once it arms. Off the reactor a
+        // tick can come in between, when the clock still has the last flush's time, or none. The flag held by hand is
+        // that moment, over several ticks.
+        runner.Test("tcp/send: a flush a tick catches before it arms is not timed out by the last one's time", () =>
+        {
+            const int SendMs = 500;
+            var faulted = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
+
+            int port = StartWith(readMs: 0, sendMs: SendMs, async (_, conn) =>
+            {
+                try
+                {
+                    if (!await IsThisTestsConnection(conn))
+                    {
+                        return;
+                    }
+
+                    // With no flush before it, then with one before it that is older than the timeout.
+                    for (int i = 0; i < 2; i++)
+                    {
+                        Volatile.Write(ref FlushInProgressOf(conn), 1);
+                        await Task.Delay(2 * SendMs);
+                        Volatile.Write(ref FlushInProgressOf(conn), 0);
+
+                        conn.Write("sent"u8);
+                        await conn.FlushAsync();
+                    }
+
+                    await conn.ReadAsync();   // until the client closes
+                }
+                catch (Exception e)
+                {
+                    faulted.TrySetResult($"{e.GetType().Name}: {e.Message}");
+                }
+                finally
+                {
+                    conn.DecRef();
+                }
+            });
+
+            using var client = new TcpClient();
+            client.Connect("127.0.0.1", port);
+            client.ReceiveTimeout = SweepGraceMs;
+            NetworkStream stream = client.GetStream();
+            stream.Write("hi"u8);
+
+            for (int i = 0; i < 2; i++)
+            {
+                var buffer = new byte[4];
+                int got = 0;
+                while (got < buffer.Length)
+                {
+                    int n = stream.Read(buffer, got, buffer.Length - got);
+                    Assert.True(n > 0, faulted.Task.IsCompleted
+                        ? faulted.Task.Result
+                        : $"closed before response {i + 1}, on a flush that had not started");
+                    got += n;
+                }
+            }
+        });
+
         runner.Test("tcp/send: 0 leaves a stalled flush parked", () =>
         {
             // The control, and the proof that the test above measures the sweep rather than some
@@ -857,6 +919,9 @@ internal static class TcpTimeoutTests
                 conn.DecRef();
             }
         };
+
+    [UnsafeAccessor(UnsafeAccessorKind.Field, Name = "_flushInProgress")]
+    private static extern ref int FlushInProgressOf(TcpConnection connection);
 
     private static int StartWith(int readMs, int sendMs, Func<Reactor, TcpConnection, Task> handle)
         => TestServer.StartConfigured(handle, new ServerConfig

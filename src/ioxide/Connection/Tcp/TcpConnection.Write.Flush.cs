@@ -29,20 +29,27 @@ public sealed unsafe partial class TcpConnection : IValueTaskSource, IFlushListe
     internal bool FlushSubmitted => Volatile.Read(ref _flushArmed) == 2;
 
     /// <summary>
+    /// Whether a flush has been handed over, so that <see cref="FlushArmedMs"/> is its own and the send
+    /// clock applies. <see cref="FlushOutstanding"/> comes sooner, while the stamp is still the last
+    /// flush's, or 0.
+    /// </summary>
+    internal bool FlushArmed => Volatile.Read(ref _flushArmed) != 0;
+
+    /// <summary>
     /// The reactor's cached clock at the moment a flush was handed over. The sweep reads it against
-    /// <see cref="TcpOptions.SendTimeoutMs"/> while the flush is outstanding, and afterwards as the
-    /// last time the server sent, which restarts the read clock.
+    /// <see cref="TcpOptions.SendTimeoutMs"/> while the flush is armed, and afterwards as the last time
+    /// the server sent, which restarts the read clock.
     ///
-    /// Written on every arm and never cleared, because clearing it would put a store on
+    /// Written before every arm and never cleared, because clearing it would put a store on
     /// CompleteFlush, which is the hottest path in the server.
     /// </summary>
     internal long FlushArmedMs;
 
     /// <summary>
     /// Whether a flush is outstanding - which is what tells the reactor's sweep that this
-    /// connection is sending rather than waiting on its peer, so the send clock governs it and the
-    /// read one does not. Read rather than <see cref="FlushArmedMs"/> being non-zero, so the stamp
-    /// never has to double as a flag.
+    /// connection is sending rather than waiting on its peer, so the read clock does not govern it,
+    /// and the send one does once it has armed (<see cref="FlushArmed"/>). Read rather than
+    /// <see cref="FlushArmedMs"/> being non-zero, so the stamp never has to double as a flag.
     /// </summary>
     internal bool FlushOutstanding => Volatile.Read(ref _flushInProgress) != 0;
 
@@ -184,13 +191,13 @@ public sealed unsafe partial class TcpConnection : IValueTaskSource, IFlushListe
         // something to send, and the slot the disarming path reads is set next; the arm publishes both.
         listener.OnParking();
         _flushListener = listener;
+        Volatile.Write(ref FlushArmedMs, _reactor.NowMs);   // the send clock; before the arm, so the sweep sees both
         if (Interlocked.CompareExchange(ref _flushArmed, 1, 0) != 0)
         {
             throw new InvalidOperationException("FlushAsync already armed.");
         }
 
         WriteInFlight = target;
-        Volatile.Write(ref FlushArmedMs, _reactor.NowMs);
 
         // A segmented response that spilled past the primary slab is gathered into one SENDMSG.
         _flushVectored = _inOverflow;
