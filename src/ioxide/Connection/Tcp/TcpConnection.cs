@@ -140,7 +140,7 @@ public sealed unsafe partial class TcpConnection
             return;
         }
 
-        // Before the decrement, while our ref keeps the fd from being recycled.
+        // Before the decrement, while our ref keeps this life and its fd from being recycled, on any thread.
         if (Volatile.Read(ref _refs) == 2)
         {
             ShutdownWrite();
@@ -184,7 +184,7 @@ public sealed unsafe partial class TcpConnection
     /// the connection stays - its read side open, its descriptor still released by <see cref="DecRef"/>.
     /// For a protocol layer that is done sending (HTTP's <c>Connection: close</c>). Nothing may be
     /// written after it. A flush still in flight defers it to the tick after that flush is done; a
-    /// connection the reactor already tore down gets none. Any thread (#211).
+    /// connection the reactor already tore down gets none. Reactor thread only (#211).
     /// </summary>
     public void ShutdownWrite()
     {

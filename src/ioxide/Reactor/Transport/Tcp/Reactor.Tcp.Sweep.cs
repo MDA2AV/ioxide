@@ -49,8 +49,9 @@ public sealed unsafe partial class Reactor
     }
 
     /// <summary>
-    /// One pass over the connection table. Runs on the reactor thread from the ticker, so it owns
-    /// the table outright and can touch a connection directly.
+    /// What TCP needs from every tick, and a pass over the connection table when something on a
+    /// connection needs one. Runs on the reactor thread from the ticker, so it owns the table outright
+    /// and can touch a connection directly.
     /// </summary>
     /// <remarks>
     /// The table is indexed by fd, so it spans every descriptor in the process rather than this
