@@ -59,9 +59,10 @@ public sealed unsafe partial class Reactor
     /// reactor, every reactor walking its own four times a second, and on the same tick, since they
     /// start together. That walk held a reactor off its ring long enough to show in the tail of every
     /// request scheduled behind it. So it is made only when something on a connection needs it: one
-    /// of the two clocks, or a recv parked on -ENOBUFS waiting for the buffers that connections their
-    /// handler let go still hold. A write shutdown deferred behind a flush is not a reason: those are in a
-    /// queue of their own, looked at on every tick.
+    /// of the two clocks, or a recv parked on -ENOBUFS waiting for the buffers of the shared ring that
+    /// connections their handler let go still hold. With a ring per connection only those parked are
+    /// looked at, as no other connection's buffers can serve them. A write shutdown deferred behind a
+    /// flush is not a reason either: those are in a queue of their own, looked at on every tick.
     /// </remarks>
     private void TcpSweep()
     {
@@ -74,8 +75,15 @@ public sealed unsafe partial class Reactor
         RunDeferredWriteShutdowns();
 
         bool starved = _recvStarved.Count > 0;
+        if (starved && _incremental)
+        {
+            ReturnStarvedBuffers();
+            starved = false;   // nothing another connection holds can serve them
+        }
+
         if (!starved && _readTimeoutMs <= 0 && _sendTimeoutMs <= 0)
         {
+            CloseCondemnedStarved();
             return;
         }
 
@@ -120,7 +128,24 @@ public sealed unsafe partial class Reactor
             }
         }
 
-        // A condemned connection whose recv is parked has no completion coming for its shutdown to end.
+        CloseCondemnedStarved();
+    }
+
+    // Incremental mode: a recv parked on a ring its handler filled and then let go of, which nobody will empty.
+    private void ReturnStarvedBuffers()
+    {
+        foreach (ulong parked in _recvStarved)
+        {
+            if (ConnAt((int)(uint)parked, (ushort)(parked >> 32)) is { HandlerReleased: true } conn)
+            {
+                ReturnReleasedBuffers(conn);
+            }
+        }
+    }
+
+    // A condemned connection whose recv is parked has no completion coming for its shutdown to end.
+    private void CloseCondemnedStarved()
+    {
         for (int i = _recvStarved.Count - 1; i >= 0; i--)
         {
             ulong parked = _recvStarved[i];

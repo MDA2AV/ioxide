@@ -12,8 +12,9 @@ namespace Ioxide.Tests;
 
 /// <summary>
 /// What the tick does for TCP without walking the connection table (#653): it makes the write shutdowns deferred behind
-/// a flush, from a queue of their own, and re-arms paused accepts. A client sees a write shutdown as the FIN its server's
-/// kernel sends. Both clocks are off wherever a test is not about one, so the table is never walked.
+/// a flush, from a queue of their own, re-arms paused accepts, and gives back what a let-go connection holds of a ring of
+/// its own. A client sees a write shutdown as the FIN its server's kernel sends. Both clocks are off wherever a test is
+/// not about one, so the table is walked only for a recv starved of the shared ring's buffers.
 /// </summary>
 internal static class TcpSweepTests
 {
@@ -69,6 +70,8 @@ internal static class TcpSweepTests
         RegisterReadClockAfterDeferred(runner);
         RegisterSendClockAlone(runner);
         RegisterAcceptPaused(runner);
+        RegisterWalkForBuffers(runner);
+        RegisterStopWhileWaiting(runner);
     }
 
     // Every shape of send holds its flush in flight until the last byte is the kernel's: one SEND, several partial SENDs,
@@ -530,6 +533,126 @@ internal static class TcpSweepTests
             Assert.Equal(4, ReadOnce(client.GetStream(), 0, new byte[4]));
         });
     }
+
+    // From the shared ring, what any connection its handler let go holds can end a recv's wait for a buffer, so the table
+    // is walked for them. With a ring per connection only its own can, so it is not: the mark the walk leaves on a
+    // connection with a flush in progress, held here by hand, never appears.
+    private static void RegisterWalkForBuffers(Runner runner)
+    {
+        (string Ring, ServerConfig Config, bool Walks, bool Skip)[] modes =
+        [
+            ("of the shared ring", Config(NoClocks) with { RecvSlots = 4 }, true, false),
+            ("of its own ring", Config(NoClocks) with { Incremental = new IncrementalOptions { MaxConnections = 8, RecvSlots = 2, RecvBufferSize = 1024 } },
+                false, !TestServer.KernelAtLeast(6, 12)),
+        ];
+
+        foreach ((string ring, ServerConfig config, bool walks, bool skip) in modes)
+        {
+            runner.Test($"tcp: with no clock set, a recv waiting for a buffer {ring} {(walks ? "brings" : "does not bring")} the walk", () =>
+            {
+                var marked = new TaskCompletionSource<TcpConnection>(TaskCreationOptions.RunContinuationsAsynchronously);
+                var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+
+                (int port, Reactor reactor, Thread _) = TestServer.StartConfigured(async (_, conn) =>
+                {
+                    try
+                    {
+                        byte first = await FirstByte(conn);
+                        if (first == (byte)'M')
+                        {
+                            Volatile.Write(ref FlushInProgressOf(conn), 1);
+                            marked.TrySetResult(conn);
+                            await release.Task;
+                            Volatile.Write(ref FlushInProgressOf(conn), 0);
+                        }
+                        else if (first != 0)
+                        {
+                            await release.Task;   // an upload this handler is too busy to read
+                        }
+                    }
+                    finally
+                    {
+                        conn.DecRef();
+                    }
+                }, config);
+
+                using TcpClient mark = Connect(port, "M");
+                Assert.True(marked.Task.Wait(5_000), "the marked connection was never accepted");
+                using TcpClient upload = Connect(port, "U");
+                try
+                {
+                    upload.GetStream().Write(new byte[32 * 1024]);
+                    WaitFor(() => StarvedOf(reactor).Count > 0, 5_000, "the upload never ran out of buffers");
+                    Thread.Sleep(600);   // two ticks
+                    Assert.Equal(1, StarvedOf(reactor).Count);
+                    Assert.Equal(walks, Volatile.Read(ref FlushSeenOf(marked.Task.Result)) != 0);
+                }
+                finally
+                {
+                    release.TrySetResult();
+                }
+            }, skip: skip);
+        }
+    }
+
+    // A stop ends every connection, but a recv that waits for a buffer has no completion coming to say so. Here nothing
+    // gives one back either, as with a handler that faulted with every item in hand: only the tick's pass over the recvs
+    // waiting lets go of the connection, with a walk or without one.
+    private static void RegisterStopWhileWaiting(Runner runner)
+    {
+        runner.Test("stop: with no clock set, a connection whose recv waits for a buffer its handler never gave back is let go of", () =>
+        {
+            const int Slots = 2, BufferSize = 1024;
+            var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            ServerConfig config = Config(NoClocks) with { Incremental = new IncrementalOptions { MaxConnections = 8, RecvSlots = Slots, RecvBufferSize = BufferSize } };
+
+            (int port, Reactor reactor, Thread thread) = TestServer.StartConfigured(async (_, conn) =>
+            {
+                try
+                {
+                    int taken = 0;
+                    while (taken < Slots * BufferSize)
+                    {
+                        RecvSnapshot snapshot = await conn.ReadAsync();
+                        while (conn.TryGetItem(snapshot, out SpscRecvRing.Item item))
+                        {
+                            taken += item.Len;
+                        }
+                        if (snapshot.IsClosed)
+                        {
+                            return;
+                        }
+                    }
+                    await release.Task;
+                }
+                finally
+                {
+                    conn.DecRef();
+                }
+            }, config);
+
+            using TcpClient upload = Connect(port, "U");
+            upload.GetStream().Write(new byte[32 * 1024]);
+            WaitFor(() => StarvedOf(reactor).Count > 0, 5_000, "the upload never ran out of buffers");
+
+            reactor.Stop();
+            release.TrySetResult();
+            Assert.True(thread.Join(10_000), "the reactor never stopped");
+            Assert.Equal(0, LiveOf(reactor));
+        }, skip: !TestServer.KernelAtLeast(6, 12));
+    }
+
+    [UnsafeAccessor(UnsafeAccessorKind.Field, Name = "_tcpLive")]
+    private static extern ref int LiveOf(Reactor reactor);
+
+    [UnsafeAccessor(UnsafeAccessorKind.Field, Name = "_recvStarved")]
+    private static extern ref List<ulong> StarvedOf(Reactor reactor);
+
+    [UnsafeAccessor(UnsafeAccessorKind.Field, Name = "_flushInProgress")]
+    private static extern ref int FlushInProgressOf(TcpConnection connection);
+
+    [UnsafeAccessor(UnsafeAccessorKind.Field, Name = "FlushSeenMs")]
+    private static extern ref long FlushSeenOf(TcpConnection connection);
 
     [UnsafeAccessor(UnsafeAccessorKind.Field, Name = "_acceptPaused")]
     private static extern ref List<int> PausedOf(Reactor reactor);
