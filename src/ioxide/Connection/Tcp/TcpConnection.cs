@@ -48,8 +48,8 @@ public sealed unsafe partial class TcpConnection
     internal long FlushSeenMs;
 
     private int _readTimeoutDisabled;
-    private long _finSentMs;
-    private int _finSent;   // 0, 1 sent (or suppressed), 2 asked for behind a flush - the sweep sends it
+    private long _writeShutdownMs;
+    private int _writeShutdown;   // 0, 1 made (or suppressed), 2 deferred behind a flush - the tick makes it
 
     /// <summary>
     /// Set once the sweep has shut this connection down, so the next tick skips it instead of
@@ -140,11 +140,10 @@ public sealed unsafe partial class TcpConnection
             return;
         }
 
-        // Before the decrement, while our ref keeps the fd from being recycled. A FIN now would cut
-        // a flush in flight short, so the sweep sends that one once it completes.
-        if (Volatile.Read(ref _refs) == 2 && !FlushOutstanding)
+        // Before the decrement, while our ref keeps this life and its fd from being recycled, on any thread.
+        if (Volatile.Read(ref _refs) == 2)
         {
-            SendFin();
+            ShutdownWrite();
         }
 
         ReleaseRef();
@@ -152,9 +151,9 @@ public sealed unsafe partial class TcpConnection
 
     internal void ReleaseReactorRef() => ReleaseRef();
 
-    // The reactor tore the connection down, so no FIN. Called before MarkClosed: the handler it
-    // wakes lets go inline, while the reactor's ref is still held.
-    internal void SuppressFin() => Volatile.Write(ref _finSent, 1);
+    // The reactor tore the connection down, so the handler's release shuts nothing down. Called before
+    // MarkClosed: the handler it wakes lets go inline, while the reactor's ref is still held.
+    internal void SuppressWriteShutdown() => Volatile.Write(ref _writeShutdown, 1);
 
     private void ReleaseRef()
     {
@@ -167,36 +166,54 @@ public sealed unsafe partial class TcpConnection
     // Only meaningful while the connection is in the reactor's table, i.e. the reactor's ref is held.
     internal bool HandlerReleased => Volatile.Read(ref _refs) == 1;
 
-    internal void SendFin()
+    // shutdown(SHUT_WR), once: tells the kernel this side is done sending. The FIN is the kernel's, behind
+    // the bytes it already took; it takes no more, so a flush still in flight would be cut short.
+    private void ShutdownWriteNow()
     {
-        if (Interlocked.Exchange(ref _finSent, 1) != 1)
+        if (Interlocked.Exchange(ref _writeShutdown, 1) != 1)
         {
-            Volatile.Write(ref _finSentMs, _reactor.NowMs);   // the peer's time to close starts now
+            Volatile.Write(ref _writeShutdownMs, _reactor.NowMs);   // the peer's time to close starts now
             Native.shutdown(ClientFd, Native.SHUT_WR);
         }
     }
 
-    internal bool FinSent => Volatile.Read(ref _finSent) == 1;
-
-    internal bool FinWanted => Volatile.Read(ref _finSent) == 2;
+    internal bool WriteShutdownDone => Volatile.Read(ref _writeShutdown) == 1;   // or suppressed
 
     /// <summary>
-    /// Half-close: the peer gets a FIN once what has been flushed is out, and the connection stays -
-    /// its read side open, its descriptor still released by <see cref="DecRef"/>. For a protocol layer
-    /// that is done sending (HTTP's <c>Connection: close</c>). Nothing may be written after it.
-    /// A flush still in flight keeps the FIN until it is done; a connection the reactor already tore
-    /// down gets none. Reactor thread only (#211).
+    /// Half-close, <c>shutdown(SHUT_WR)</c>: the peer gets a FIN once what has been flushed is out, and
+    /// the connection stays - its read side open, its descriptor still released by <see cref="DecRef"/>.
+    /// For a protocol layer that is done sending (HTTP's <c>Connection: close</c>). Nothing may be
+    /// written after it. A flush still in flight defers it to the tick after that flush is done; a
+    /// connection the reactor already tore down gets none. Reactor thread only (#211).
     /// </summary>
     public void ShutdownWrite()
     {
         if (!FlushOutstanding)
         {
-            SendFin();
+            ShutdownWriteNow();
         }
-        else
+        else if (Interlocked.CompareExchange(ref _writeShutdown, 2, 0) == 0)   // not over one made, suppressed or already deferred
         {
-            Interlocked.CompareExchange(ref _finSent, 2, 0);
+            _reactor.DeferWriteShutdown(ClientFd, Generation);
         }
+    }
+
+    /// <summary>
+    /// Reactor thread, from the tick: makes the write shutdown deferred behind a flush, once that flush
+    /// is over. False while it is still in flight.
+    /// </summary>
+    internal bool RunDeferredWriteShutdown()
+    {
+        if (Volatile.Read(ref _writeShutdown) == 2)
+        {
+            if (FlushOutstanding)
+            {
+                return false;
+            }
+            ShutdownWriteNow();
+        }
+
+        return true;
     }
 
     /// <summary>
@@ -207,13 +224,13 @@ public sealed unsafe partial class TcpConnection
     public void DisableReadTimeout() => Volatile.Write(ref _readTimeoutDisabled, 1);
 
     // The peer owes the next move: a read is parked on a connection still on the read timeout, or
-    // the handler let go and its FIN is out. The server's own sends restart the clock; the sweep
-    // skips it during a flush.
+    // the handler let go and the write side is shut down. The server's own sends restart the clock; the
+    // sweep skips it during a flush.
     internal bool WaitingOnPeer(out long sinceMs)
     {
         if (HandlerReleased)
         {
-            sinceMs = Volatile.Read(ref _finSentMs);   // 0 until the FIN is out
+            sinceMs = Volatile.Read(ref _writeShutdownMs);   // 0 until it is made
             return sinceMs != 0;
         }
 
@@ -261,8 +278,8 @@ public sealed unsafe partial class TcpConnection
         Volatile.Write(ref ReadParkedMs, 0);
         FlushSeenMs = 0;
         Volatile.Write(ref _readTimeoutDisabled, 0);
-        Volatile.Write(ref _finSentMs, 0);
-        Volatile.Write(ref _finSent, 0);
+        Volatile.Write(ref _writeShutdownMs, 0);
+        Volatile.Write(ref _writeShutdown, 0);
         SweepClosed = false;
         CloseAfterSend = false;
 

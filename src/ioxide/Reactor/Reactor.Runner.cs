@@ -65,9 +65,9 @@ public sealed unsafe partial class Reactor
         ArmTcpAccepts();
         ArmWakePoll();
 
-        // After OnStart, so a reactor that serves no TCP registers nothing and the sweep costs it
-        // not even a table walk. Whenever TCP is on, clocks or not: the sweep sends the deferred FIN
-        // (TcpConnection.DecRef).
+        // After OnStart, so a reactor that serves no TCP registers nothing. Whenever TCP is on, clocks
+        // or not: the sweep re-arms accepts paused on a lack of descriptors and makes the write shutdowns
+        // deferred behind a flush, and walks the table only when a clock is set or a recv is starved.
         if (_tcpEnabled)
         {
             AddTicker(TcpSweep);

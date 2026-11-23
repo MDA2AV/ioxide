@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using static ioxide.Native;
 
 namespace ioxide;
@@ -26,10 +27,42 @@ public sealed unsafe partial class Reactor
     /// </summary>
     internal long NowMs = Native.MonotonicMs;
 
+    // Connections whose write shutdown waits for a flush (TcpConnection.ShutdownWrite), (gen << 32) | fd.
+    // Added by any thread; nearly always empty, as a handler that awaits its last flush never defers one.
+    private readonly ConcurrentQueue<ulong> _deferredWriteShutdowns = new();
+
+    internal void DeferWriteShutdown(int fd, int gen)
+        => _deferredWriteShutdowns.Enqueue(((ulong)(ushort)gen << 32) | (uint)fd);
+
+    // One look at each per tick: one whose flush is still in flight waits for the next. A connection that
+    // is gone was torn down by the reactor, which leaves nothing to shut down.
+    private void RunDeferredWriteShutdowns()
+    {
+        for (int left = _deferredWriteShutdowns.Count; left > 0 && _deferredWriteShutdowns.TryDequeue(out ulong packed); left--)
+        {
+            TcpConnection? conn = ConnAt((int)(uint)packed, (ushort)(packed >> 32));
+            if (conn != null && !conn.RunDeferredWriteShutdown())
+            {
+                _deferredWriteShutdowns.Enqueue(packed);
+            }
+        }
+    }
+
     /// <summary>
-    /// One pass over the connection table. Runs on the reactor thread from the ticker, so it owns
-    /// the table outright and can touch a connection directly.
+    /// What TCP needs from every tick, and a pass over the connection table when something on a
+    /// connection needs one. Runs on the reactor thread from the ticker, so it owns the table outright
+    /// and can touch a connection directly.
     /// </summary>
+    /// <remarks>
+    /// The table is indexed by fd, so it spans every descriptor in the process rather than this
+    /// reactor's connections alone: a million connections over 64 reactors is a million slots per
+    /// reactor, every reactor walking its own four times a second, and on the same tick, since they
+    /// start together. That walk held a reactor off its ring long enough to show in the tail of every
+    /// request scheduled behind it. So it is made only when something on a connection needs it: one
+    /// of the two clocks, or a recv parked on -ENOBUFS waiting for the buffers that connections their
+    /// handler let go still hold. A write shutdown deferred behind a flush is not a reason: those are in a
+    /// queue of their own, looked at on every tick.
+    /// </remarks>
     private void TcpSweep()
     {
         foreach (int listenFd in _acceptPaused)
@@ -38,9 +71,16 @@ public sealed unsafe partial class Reactor
         }
         _acceptPaused.Clear();
 
+        RunDeferredWriteShutdowns();
+
+        bool starved = _recvStarved.Count > 0;
+        if (!starved && _readTimeoutMs <= 0 && _sendTimeoutMs <= 0)
+        {
+            return;
+        }
+
         long now = Native.MonotonicMs;
         TcpConnection?[] conns = _connections;
-        bool starved = _recvStarved.Count > 0;
 
         for (int fd = 0; fd < conns.Length; fd++)
         {
@@ -71,12 +111,6 @@ public sealed unsafe partial class Reactor
                     TcpSweepClose(conn);
                 }
                 continue;
-            }
-
-            // A FIN left behind a flush - by a handler that let go, or by ShutdownWrite - goes now.
-            if ((conn.HandlerReleased || conn.FinWanted) && !conn.FinSent)
-            {
-                conn.SendFin();
             }
 
             if (_readTimeoutMs > 0 && conn.WaitingOnPeer(out long sinceMs) && now - sinceMs > _readTimeoutMs)
@@ -127,7 +161,7 @@ public sealed unsafe partial class Reactor
     {
         conn.SweepClosed = true;   // one shutdown per connection, not one per tick until it lands
 
-        conn.SuppressFin();   // this shutdown is the FIN
+        conn.SuppressWriteShutdown();   // this shutdown ends both sides
         shutdown(conn.ClientFd, SHUT_RDWR);
         conn.MarkClosed();
     }

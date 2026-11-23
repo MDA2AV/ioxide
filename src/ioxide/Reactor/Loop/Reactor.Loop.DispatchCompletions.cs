@@ -35,7 +35,7 @@ public sealed unsafe partial class Reactor
             // teardown runs from FinishSend once the kernel has let go of the slab.
             SubmitCancel(Tag(KindTcpRecv, gen, fd));   // the multishot recv is still armed
             conn.CloseAfterSend = true;
-            conn.SuppressFin();
+            conn.SuppressWriteShutdown();
             conn.MarkClosed();
             conn.WriteInFlight = conn.WriteHead;
             res = 0;

@@ -25,6 +25,7 @@ internal static class Program
         LetGoHandlerStyleTests.Register(runner);
         KestrelLetGoTests.Register(runner);
         SendInFlightRecycleTests.Register(runner);
+        TcpSweepTests.Register(runner);
         PipeReaderContractTests.Register(runner);
         WriteContractTests.Register(runner);
         StreamContractTests.Register(runner);
