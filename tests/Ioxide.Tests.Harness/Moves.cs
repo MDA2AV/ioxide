@@ -118,7 +118,8 @@ public static class Moves
 
     /// <summary>
     /// Holds a reactor inside a callback until disposed: what is posted to it stays posted, a connection given to it
-    /// stays in transit.
+    /// stays in transit. For 30 s at most, so a test that fails before it lets go doesn't hold the reactor, and with it
+    /// the suite, for good.
     /// </summary>
     public static Held Hold(Reactor reactor)
     {
@@ -126,7 +127,7 @@ public static class Moves
         reactor.ScheduleOnReactor(_ =>
         {
             held.Holding.Set();
-            held.Released.Wait();
+            held.Released.Wait(30_000);
         }, null);
         Assert.True(held.Holding.Wait(5_000), $"reactor {reactor.ShardIndex} never got to being held");
         return held;

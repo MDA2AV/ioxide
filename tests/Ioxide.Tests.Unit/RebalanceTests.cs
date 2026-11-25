@@ -15,8 +15,26 @@ internal static class RebalanceTests
     {
         runner.Test("rebalance: a busy reactor next to an idle one weighs its connections for a tick, gives for one, and settles for one", () =>
         {
-            Reactor[] fleet = Fleet(100, 0);
+            using Rig rig = new(100, 0);
+            TcpConnection[] conns = rig.Connections(8);
             foreach (int expected in new[] { Weighing, Giving, Settling, Giving, Settling, Giving })
+            {
+                foreach (TcpConnection conn in conns.Where(conn => conn.MoveState == TcpConnection.MoveNone))
+                {
+                    rig.Weigh(conn, 100);
+                }
+                rig.Tick();
+                Assert.Equal(expected, BalanceOf(rig.Reactor));
+                Assert.True(ReferenceEquals(GiverOf(rig.Other), expected is Giving or Settling ? rig.Reactor : null),
+                    $"the taker is taken from by {GiverOf(rig.Other)?.ShardIndex.ToString() ?? "nobody"} while {expected}");
+            }
+        });
+
+        // One connection is all its load, say: the taker is for the others meanwhile.
+        runner.Test("rebalance: a busy reactor that has given nothing lets its taker be until it has weighed anew", () =>
+        {
+            Reactor[] fleet = Fleet(100, 0);
+            foreach (int expected in new[] { Weighing, Giving, Settling, Off, Weighing, Giving })
             {
                 Tick(fleet[0], weight: 1_000);
                 Assert.Equal(expected, BalanceOf(fleet[0]));
@@ -41,6 +59,16 @@ internal static class RebalanceTests
                 Assert.Equal(Off, BalanceOf(fleet[0]));
                 Assert.True(GiverOf(fleet[1]) is null && TakerOf(fleet[0]) is null, "the taker was never let go of");
             }
+        });
+
+        runner.Test("rebalance: a reactor quiet for a tick between two busy ones is given nothing, and one quiet for two is", () =>
+        {
+            Reactor[] fleet = Fleet(100, 0);
+            LoadOf(fleet[1]) = 10;
+            PeakOf(fleet[1]) = 90;   // busy the tick before
+            Assert.True(Chosen(fleet[0]) is null, "one that was busy a tick ago was chosen");
+            PeakOf(fleet[1]) = 10;
+            Assert.True(ReferenceEquals(Chosen(fleet[0]), fleet[1]), "one quiet for two ticks was not chosen");
         });
 
         runner.Test("rebalance: from 75 percent on, to one 30 points below, and to nobody else", () =>
@@ -158,13 +186,14 @@ internal static class RebalanceTests
             rig.Tick();
             Assert.Equal(500L, BudgetOf(rig.Reactor));   // half of 1,000
 
-            // A first completion that takes next to nothing says nothing of what its connection weighs.
+            // A first completion that takes next to nothing says nothing of what its connection weighs. Half the load is to
+            // go, so one in two of those that come by goes.
             foreach (TcpConnection conn in conns)
             {
                 rig.Weigh(conn, 1);
             }
             Assert.Equal(4, conns.Count(conn => conn.MoveState == TcpConnection.MoveCancelling));
-            Assert.True(conns.Take(4).All(conn => ReferenceEquals(conn.MoveTo, rig.Other)), "not the first that came by, or not to the taker");
+            Assert.True(conns.Where((_, i) => i % 2 == 0).All(conn => ReferenceEquals(conn.MoveTo, rig.Other)), "not one in two that came by, or not to the taker");
             Assert.Equal(0L, BudgetOf(rig.Reactor));
 
             // The rest stay, however often they come by.
@@ -207,16 +236,16 @@ internal static class RebalanceTests
             }
         });
 
-        runner.Test("rebalance: a connection nobody has weighed stays, and so does one last weighed long ago", () =>
+        runner.Test("rebalance: a connection nobody has weighed lately is taken for what its completion took", () =>
         {
             using Rig rig = new(100, 0);
             TcpConnection[] conns = rig.Connections(3);
             rig.Tick();
             rig.Weigh(conns[0], 100);
             rig.Weigh(conns[1], 100);
-            rig.Tick();   // gives
-            rig.Weigh(conns[2], 10);
-            Assert.Equal(TcpConnection.MoveNone, conns[2].MoveState);
+            rig.Tick();   // gives: 100 of it, and one in two
+            rig.Weigh(conns[2], 150);
+            Assert.Equal(TcpConnection.MoveNone, conns[2].MoveState);   // weighs too much
             rig.Weigh(conns[0], 10);
             Assert.Equal(TcpConnection.MoveCancelling, conns[0].MoveState);
 
@@ -231,8 +260,67 @@ internal static class RebalanceTests
                 rig.Weigh(conns[2], 1_000);
             }
             Assert.True(BudgetOf(rig.Reactor) > 200, "there was no room for it anyway");
-            rig.Weigh(conns[1], 10);   // once, a dozen ticks ago
-            Assert.Equal(TcpConnection.MoveNone, conns[1].MoveState);
+            long budget = BudgetOf(rig.Reactor);
+            rig.Weigh(conns[1], 10);   // last weighed a dozen ticks ago
+            Assert.Equal(TcpConnection.MoveCancelling, conns[1].MoveState);
+            Assert.Equal(budget - 10, BudgetOf(rig.Reactor));
+        });
+
+        runner.Test("rebalance: a reactor reads the share of each tick its thread was on a CPU, the last tick's alone", () =>
+        {
+            Reactor reactor = Fleet(0, 0)[0];
+            long until = Native.ThreadCpuNs + 50_000_000;
+            while (Native.ThreadCpuNs < until)
+            {
+                Thread.SpinWait(100);   // on a CPU for 50 ms, however long that takes on a busy machine
+            }
+            ReadLoad(reactor);
+            int spun = LoadOf(reactor);
+            Thread.Sleep(100);
+            ReadLoad(reactor);
+            int slept = LoadOf(reactor);
+            Assert.True(spun > 0 && slept < 10, $"{spun}% for a tick spent spinning, and {slept}% for one spent asleep after it");
+            Assert.Equal(spun, PeakOf(reactor));   // the higher of the last two
+        });
+
+        runner.Test("rebalance: a reactor kept from its completions, as by a handler that blocks, reads busy though its thread is off a CPU", () =>
+        {
+            Reactor reactor = Fleet(0, 0)[0];
+            Thread.Sleep(100);
+            WorkedOf(reactor) = System.Diagnostics.Stopwatch.Frequency / 10;   // 100 ms, all of it outside the ring's wait
+            ReadLoad(reactor);
+            Assert.True(LoadOf(reactor) >= 40, $"{LoadOf(reactor)}%");
+        });
+
+        runner.Test("rebalance: nothing goes to a taker whose reading has gone stale since", () =>
+        {
+            using Rig rig = new(100, 0);
+            TcpConnection[] conns = rig.Connections(4);
+            rig.Tick();
+            foreach (TcpConnection conn in conns)
+            {
+                rig.Weigh(conn, 100);
+            }
+            rig.Tick();
+            Assert.Equal(Giving, BalanceOf(rig.Reactor));
+            LoadAtOf(rig.Other) = Native.MonotonicMs - 1_000;   // stuck since
+            foreach (TcpConnection conn in conns)
+            {
+                rig.Weigh(conn, 1);
+            }
+            Assert.True(conns.All(conn => conn.MoveState == TcpConnection.MoveNone), "one went to a reactor stuck in something");
+        });
+
+        runner.Test("rebalance: what a connection weighs is what its completions took in one tick", () =>
+        {
+            using Rig rig = new(100, 0);
+            TcpConnection conn = rig.Connections(1)[0];
+            for (int tick = 0; tick < 3; tick++)
+            {
+                rig.Tick();
+                rig.Weigh(conn, 100);
+            }
+            Assert.Equal(100L, conn.LastWeight);
         });
 
         runner.Test("rebalance: a connection is weighed afresh on the reactor it came to", () =>
@@ -320,7 +408,7 @@ internal static class RebalanceTests
         return fleet;
     }
 
-    private static void Load(Reactor reactor, int percent) => LoadOf(reactor) = percent;
+    private static void Load(Reactor reactor, int percent) => LoadOf(reactor) = PeakOf(reactor) = percent;
 
     private static void Tick(Reactor reactor, long weight)
     {
@@ -381,6 +469,12 @@ internal static class RebalanceTests
     [UnsafeAccessor(UnsafeAccessorKind.Method, Name = "DecideBalance")]
     private static extern void DecideBalance(Reactor reactor);
 
+    [UnsafeAccessor(UnsafeAccessorKind.Method, Name = "ReadLoad")]
+    private static extern void ReadLoad(Reactor reactor);
+
+    [UnsafeAccessor(UnsafeAccessorKind.Field, Name = "_worked")]
+    private static extern ref long WorkedOf(Reactor reactor);
+
     [UnsafeAccessor(UnsafeAccessorKind.Method, Name = "LeastLoaded")]
     private static extern Reactor? LeastLoaded(Reactor reactor);
 
@@ -395,6 +489,9 @@ internal static class RebalanceTests
 
     [UnsafeAccessor(UnsafeAccessorKind.Field, Name = "_loadPercent")]
     private static extern ref int LoadOf(Reactor reactor);
+
+    [UnsafeAccessor(UnsafeAccessorKind.Field, Name = "_loadPeak")]
+    private static extern ref int PeakOf(Reactor reactor);
 
     [UnsafeAccessor(UnsafeAccessorKind.Field, Name = "_loadAtMs")]
     private static extern ref long LoadAtOf(Reactor reactor);

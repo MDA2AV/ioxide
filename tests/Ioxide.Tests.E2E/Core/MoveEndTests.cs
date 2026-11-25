@@ -1,5 +1,6 @@
 using System.Net.Sockets;
 using System.Runtime.CompilerServices;
+using System.Runtime.InteropServices;
 using System.Text;
 using ioxide;
 using ioxide.utils;
@@ -32,7 +33,113 @@ internal static class MoveEndTests
         RegisterClocks(runner);
         RegisterShutdown(runner);
         RegisterNoRoom(runner);
+        RegisterBatch(runner);
     }
+
+    // A connection that ends in the batch of completions that ends its recv.
+    private static void RegisterBatch(Runner runner)
+    {
+        // Its recv's cancel and its send's failure come back in one batch. A recv armed at the first would only be submitted
+        // after the second has closed the descriptor, whose number may be another socket's by then.
+        runner.Test("move end: a connection that ends as its recv is cancelled leaves no recv for whatever takes its descriptor's number", () =>
+        {
+            const int Rounds = 8, Big = 8 * 1024 * 1024;
+            int reused = 0;
+            for (int round = 0; round < Rounds; round++)
+            {
+                var flushing = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+                var opened = new TaskCompletionSource<(int Was, int Fd, int Peer)>(TaskCreationOptions.RunContinuationsAsynchronously);
+                using (var fleet = new MoveFleet(2, async conn =>
+                {
+                    try
+                    {
+                        if (await MoveFleet.ReadText(conn) != "go")
+                        {
+                            return;
+                        }
+                        ValueTask<RecvSnapshot> read = conn.ReadAsync();
+                        conn.Write(new byte[Big]);
+                        ValueTask flush = conn.FlushAsync();
+                        flushing.SetResult();
+                        await flush;   // which fails
+                        int was = conn.ClientFd;
+
+                        // The next pass, before the reactor submits: a socket opened then takes the number this one leaves.
+                        Reactor.Current!.ScheduleOnReactor(_ => opened.SetResult(OpenSocketPair(was)), null);
+                        await read;
+                    }
+                    finally
+                    {
+                        conn.DecRef();
+                    }
+                }, MoveFleet.Shared(new TcpOptions { WriteSlabSize = 4096, PoolMax = 64, SendWaitAll = false })))
+                {
+                    (Socket client, TcpConnection conn) = fleet.Connect();
+                    client.Send("go"u8);
+                    Assert.True(flushing.Task.Wait(5_000), "the handler never flushed");
+
+                    // A move given up has its recv armed again, behind the send that stalls.
+                    Assert.True(Moves.Begin(conn, fleet.B, patient: true), "the move was refused");
+                    Moves.WaitFor(conn, Moves.Waiting);
+                    Moves.GiveUp(conn);
+                    Moves.WaitFor(conn, Moves.None);
+                    Thread.Sleep(20);
+
+                    Moves.OnItsReactor(conn, reactor =>
+                    {
+                        Assert.True(Moves.StartMove(reactor, conn, fleet.B), "the move was refused");
+                        TcpSweepClose(reactor, conn);   // as a send timeout does
+                    });
+                    Assert.True(opened.Task.Wait(5_000), "the connection never ended");
+                    (int was, int fd, int peer) = opened.Task.Result;
+                    Thread.Sleep(50);
+                    try
+                    {
+                        if (fd == was)
+                        {
+                            reused++;
+                            Assert.Equal(6L, Peek(fd));
+                        }
+                    }
+                    finally
+                    {
+                        Native.close(fd);
+                        Native.close(peer);
+                    }
+                }
+                TestServer.StopAll();
+            }
+            Assert.True(reused > 0, "the number was never taken again, so this proves nothing");
+        });
+    }
+
+    // A pair of sockets, one end of which takes the lowest number free (which was ought to be), with 6 bytes in it.
+    private static unsafe (int Was, int Fd, int Peer) OpenSocketPair(int was)
+    {
+        int* pair = stackalloc int[2];
+        Assert.Equal(0, socketpair(1 /* AF_UNIX */, 1 /* SOCK_STREAM */, 0, pair));
+        (int fd, int peer) = pair[0] == was ? (pair[0], pair[1]) : (pair[1], pair[0]);
+        fixed (byte* bytes = "secret"u8)
+        {
+            Native.write(peer, bytes, 6);
+        }
+        return (was, fd, peer);
+    }
+
+    private static unsafe long Peek(int fd)
+    {
+        byte* buffer = stackalloc byte[64];
+        return recv(fd, buffer, 64, 0x42 /* MSG_PEEK | MSG_DONTWAIT */);
+    }
+
+    [DllImport("libc")]
+    private static extern unsafe int socketpair(int domain, int type, int protocol, int* pair);
+
+    [DllImport("libc")]
+    private static extern unsafe long recv(int fd, void* buffer, nuint length, int flags);
+
+    [UnsafeAccessor(UnsafeAccessorKind.Method, Name = "TcpSweepClose")]
+    private static extern void TcpSweepClose(Reactor reactor, TcpConnection conn);
 
     // Incremental mode: a connection's ring is registered in its new reactor's io_uring, which can be refused.
     private static void RegisterNoRoom(Runner runner)
@@ -128,7 +235,166 @@ internal static class MoveEndTests
             Assert.Equal(4, Moves.RoomOn(fleet.B));
         }, skip);
 
+        runner.Test("move end: what a move had reserved is free again as soon as its connection's send fails, though its handler holds on to that", () =>
+        {
+            const int Big = 8 * 1024 * 1024;
+            var flushing = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var failed = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            using var fleet = new MoveFleet(2, async conn =>
+            {
+                try
+                {
+                    if (await MoveFleet.ReadText(conn) != "go")
+                    {
+                        return;
+                    }
+                    conn.Write(new byte[Big]);
+                    ValueTask flush = conn.FlushAsync();
+                    flushing.SetResult();
+                    await flush;
+                    failed.SetResult();
+                    await release.Task;
+                }
+                finally
+                {
+                    conn.DecRef();
+                }
+            }, MoveFleet.Incremental(room: 4));
+            (Socket client, TcpConnection conn) = fleet.Connect();
+            MoveFleet.AwaitLive(fleet.B, 0);
+            client.Send("go"u8);
+            Assert.True(flushing.Task.Wait(5_000), "the handler never flushed");
+            Assert.True(Moves.Begin(conn, fleet.B, patient: true), "the move was refused");
+            Moves.WaitFor(conn, Moves.Waiting);
+            Assert.Equal(3, Moves.RoomOn(fleet.B));
+            try
+            {
+                client.LingerState = new LingerOption(true, 0);
+                client.Close();   // a reset, which fails the send
+                Assert.True(failed.Task.Wait(5_000), "the flush never ended");
+                Assert.True(SpinWait.SpinUntil(() => Moves.RoomOn(fleet.B) == 4, 2_000), $"{Moves.RoomOn(fleet.B)} of 4 are free while the handler holds on");
+            }
+            finally
+            {
+                release.SetResult();
+            }
+            MoveFleet.AwaitLive(fleet.A, 0);
+        }, skip);
+
         bool cannotRunOut = skip || !LockedMemory.CanRunOut;
+
+        foreach (bool roomAtHome in new[] { true, false })
+        {
+            string how = roomAtHome ? "is told where it comes back to" : "is told as it is closed";
+            runner.Test($"move end: whoever waits for the flush of a connection that its new reactor can't register {how}", () =>
+            {
+                const int Big = 8 * 1024 * 1024;
+                var flushing = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+                var flushed = new TaskCompletionSource<int>(TaskCreationOptions.RunContinuationsAsynchronously);
+                var ended = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+                using var fleet = new MoveFleet(2, async conn =>
+                {
+                    try
+                    {
+                        if (await MoveFleet.ReadText(conn) != "go")
+                        {
+                            return;
+                        }
+                        Task<string> read = MoveFleet.ReadText(conn);
+                        conn.Write(new byte[Big]);
+                        ValueTask flush = conn.FlushAsync();
+                        flushing.SetResult();
+                        await flush;
+                        flushed.SetResult(Reactor.Current!.ShardIndex);
+                        if (await read == "more")
+                        {
+                            conn.Write(Encoding.ASCII.GetBytes($"{Reactor.Current!.ShardIndex}more"));
+                            await conn.FlushAsync();
+                            await MoveFleet.ReadText(conn);
+                        }
+                        ended.SetResult();
+                    }
+                    finally
+                    {
+                        conn.DecRef();
+                    }
+                }, MoveFleet.Incremental(room: 4));
+                (Socket client, TcpConnection conn) = fleet.Connect();
+                MoveFleet.AwaitLive(fleet.B, 0);
+                client.Send("go"u8);
+                Assert.True(flushing.Task.Wait(5_000), "the handler never flushed");
+                Assert.True(Moves.Begin(conn, fleet.B, patient: true), "the move was refused");
+                Moves.WaitFor(conn, Moves.Waiting);
+                Moves.Held b = Moves.Hold(fleet.B);
+                Receive(client, Big);   // the send completes, and the connection goes with it
+                Moves.WaitFor(conn, Moves.Given);
+                if (roomAtHome)
+                {
+                    Moves.Held a = Moves.Hold(fleet.A);
+                    using (LockedMemory.None())
+                    {
+                        b.Dispose();
+                        Moves.On(fleet.B, static () => { });
+                    }
+                    a.Dispose();
+                    Assert.True(flushed.Task.Wait(5_000), "whoever waits for the flush was never told");
+                    Assert.Equal(0, flushed.Task.Result);
+                    client.Send("more"u8);
+                    Assert.Equal("0more", MoveFleet.Receive(client, 5));
+                    client.Dispose();
+                }
+                else
+                {
+                    using (LockedMemory.None())
+                    {
+                        b.Dispose();
+                        Assert.Equal(0, client.Receive(new byte[16]));
+                    }
+                    Assert.True(flushed.Task.Wait(5_000), "whoever waits for the flush was never told");
+                }
+                Assert.True(ended.Task.Wait(5_000), "the handler never ended");
+                MoveFleet.AwaitLive(fleet.A, 0);
+                MoveFleet.AwaitLive(fleet.B, 0);
+                foreach (Reactor reactor in fleet.Reactors)
+                {
+                    Assert.Equal(4, Moves.RoomOn(reactor));
+                    Assert.Equal(0, ArrivingAt(reactor));
+                    Assert.Equal(0, GivenAwayBy(reactor));
+                }
+            }, cannotRunOut);
+        }
+
+        runner.Test("move end: a connection its new reactor can't register, whose home has stopped, is closed, and nothing of it is left", () =>
+        {
+            using var fleet = new MoveFleet(2, MoveFleet.Tell, MoveFleet.Incremental(room: 4));
+            (Socket client, TcpConnection conn) = fleet.Connect();
+            Assert.Equal("0hello", MoveFleet.Exchange(client, "hello"));
+            MoveFleet.AwaitLive(fleet.B, 0);
+            Moves.Held b = Moves.Hold(fleet.B);
+            try
+            {
+                Assert.True(Moves.Begin(conn, fleet.B), "the move was refused");
+                Moves.WaitFor(conn, Moves.Given);
+                fleet.A.Stop();
+            }
+            finally
+            {
+                using (LockedMemory.None())
+                {
+                    b.Dispose();
+                    Assert.Equal(0, client.Receive(new byte[16]));
+                }
+            }
+            Assert.True(fleet.Threads[0].Join(5_000), "the stop never ended");
+            MoveFleet.AwaitLive(fleet.B, 0);
+            foreach (Reactor reactor in fleet.Reactors)
+            {
+                Assert.Equal(4, Moves.RoomOn(reactor));
+                Assert.Equal(0, ArrivingAt(reactor));
+                Assert.Equal(0, GivenAwayBy(reactor));
+            }
+        }, cannotRunOut);
 
         runner.Test("move end: a connection whose ring its new reactor can't register goes home, and is served there", () =>
         {
@@ -393,6 +659,25 @@ internal static class MoveEndTests
             Assert.Equal("0hello", MoveFleet.Exchange(second, "hello"));
         }, skip);
 
+        runner.Test($"move end: a handler that lets go of a connection that moved, holding buffers, gives them back where it is ({mode})", () =>
+        {
+            using var fleet = new MoveFleet(2, async conn =>
+            {
+                var pipe = new TcpConnectionDualPipe(conn);
+                await pipe.Input.ReadAsync();   // and keeps what it got
+                conn.DecRef();
+            }, config() with { RecvSlots = 4, RecvBufferSize = 256 });
+            for (int i = 0; i < 20; i++)   // five times as many as the buffers there are
+            {
+                (Socket client, TcpConnection conn) = fleet.Connect();
+                Moves.To(conn, fleet.B);
+                client.Send("x"u8);
+                Assert.Equal(0, client.Receive(new byte[4]));
+                client.Dispose();
+                MoveFleet.AwaitLive(fleet.B, 0);
+            }
+        }, skip);
+
         runner.Test($"move end: a pin ends with the connection's life ({mode})", () =>
         {
             using var fleet = new MoveFleet(2, MoveFleet.Tell, config());
@@ -569,6 +854,27 @@ internal static class MoveEndTests
 
     [UnsafeAccessor(UnsafeAccessorKind.Method, Name = "CloseFromRecv")]
     private static extern void CloseFromRecv(Reactor reactor, TcpConnection conn);
+
+    [UnsafeAccessor(UnsafeAccessorKind.Field, Name = "_arriving")]
+    private static extern ref int ArrivingField(Reactor reactor);
+
+    private static int ArrivingAt(Reactor reactor) => Volatile.Read(ref ArrivingField(reactor));
+
+    [UnsafeAccessor(UnsafeAccessorKind.Field, Name = "_givenAway")]
+    private static extern ref int GivenAwayField(Reactor reactor);
+
+    private static int GivenAwayBy(Reactor reactor) => Volatile.Read(ref GivenAwayField(reactor));
+
+    private static void Receive(Socket client, int length)
+    {
+        var buffer = new byte[64 * 1024];
+        for (int got = 0; got < length;)
+        {
+            int n = client.Receive(buffer, 0, Math.Min(buffer.Length, length - got), SocketFlags.None);
+            Assert.True(n > 0, $"closed after {got} of {length} bytes");
+            got += n;
+        }
+    }
 
     private static readonly System.Collections.Concurrent.ConcurrentQueue<TcpConnection> Accepted = new();
 

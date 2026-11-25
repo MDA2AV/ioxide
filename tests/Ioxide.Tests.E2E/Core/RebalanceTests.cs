@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.Net.Sockets;
+using System.Runtime.CompilerServices;
 using System.Text;
 using ioxide;
 
@@ -27,8 +28,8 @@ internal static class RebalanceTests
                 (Socket Client, TcpConnection Conn)[] all = Enumerable.Range(0, 8).Select(_ => fleet.Connect()).ToArray();
                 using var load = new Load(all.Select(pair => pair.Client));
 
-                Assert.True(SpinWait.SpinUntil(() => Moves.LiveOn(fleet.B) >= 2, 20_000),
-                    $"reactor A has {Moves.LiveOn(fleet.A)} of 8 connections and B {Moves.LiveOn(fleet.B)} after 20 s");
+                AwaitGiven(fleet.A, () => Moves.LiveOn(fleet.B) >= 2,
+                    () => $"reactor A has {Moves.LiveOn(fleet.A)} of 8 connections and B {Moves.LiveOn(fleet.B)} after 20 s");
                 load.AssertRuns();
                 Assert.True(SpinWait.SpinUntil(() => load.ServedBy(1) > 100 && load.ServedBy(0) > 100, 20_000),
                     $"{load.ServedBy(0)} messages were answered by A and {load.ServedBy(1)} by B");
@@ -63,7 +64,7 @@ internal static class RebalanceTests
             (Socket Client, TcpConnection Conn)[] silent = Enumerable.Range(0, 30).Select(_ => fleet.Connect()).ToArray();
             (Socket Client, TcpConnection Conn)[] busy = Enumerable.Range(0, 8).Select(_ => fleet.Connect()).ToArray();
             using var load = new Load(busy.Select(pair => pair.Client));
-            Assert.True(SpinWait.SpinUntil(() => fleet.B.ConnectionsTaken >= 2, 20_000), "nothing was given");
+            AwaitGiven(fleet.A, () => fleet.B.ConnectionsTaken >= 2, () => "nothing was given");
             Thread.Sleep(LongEnoughMs);
             load.AssertRuns();
             Assert.True(silent.All(pair => ReferenceEquals(pair.Conn.Reactor, fleet.A)), "a connection that never said anything was given away");
@@ -78,7 +79,7 @@ internal static class RebalanceTests
                 conn.Pinned = true;
             }
             using var load = new Load(all.Select(pair => pair.Client));
-            Assert.True(SpinWait.SpinUntil(() => fleet.B.ConnectionsTaken >= 2, 20_000), "nothing was given");
+            AwaitGiven(fleet.A, () => fleet.B.ConnectionsTaken >= 2, () => "nothing was given");
             Thread.Sleep(LongEnoughMs);
             load.AssertRuns();
             Assert.True(all.Take(4).All(pair => ReferenceEquals(pair.Conn.Reactor, fleet.A)), "a pinned connection was given away");
@@ -91,10 +92,21 @@ internal static class RebalanceTests
             using Moves.Held stuck = Moves.Hold(fleet.B);
             Thread.Sleep(1_000);   // long enough for its last reading to be an old one
             using var load = new Load(all.Select(pair => pair.Client));
-            Assert.True(SpinWait.SpinUntil(() => fleet.Reactors[2].ConnectionsTaken >= 2, 20_000), "nothing was given to the idle one");
+            AwaitGiven(fleet.A, () => fleet.Reactors[2].ConnectionsTaken >= 2, () => "nothing was given to the idle one");
             Thread.Sleep(LongEnoughMs);
             Assert.True(all.All(pair => !ReferenceEquals(pair.Conn.Reactor, fleet.B) && Moves.StateOf(pair.Conn) != Moves.Given), "the stuck one was given a connection");
             load.AssertRuns();
+        });
+
+        runner.Test("rebalance: a reactor kept from its completions by a handler that blocks is given nothing, though its thread is off a CPU", () =>
+        {
+            using var fleet = new MoveFleet(2, conn => conn.Reactor.ShardIndex == 1 ? Block(conn) : Work(conn), On());
+            (Socket Client, TcpConnection Conn)[] all = Enumerable.Range(0, 8).Select(_ => fleet.Connect()).ToArray();
+            (Socket blocked, TcpConnection _) = fleet.Connect(fleet.B);
+            using var load = new Load(all.Select(pair => pair.Client).Append(blocked));
+            Thread.Sleep(2 * LongEnoughMs);
+            load.AssertRuns();
+            Assert.Equal(0L, fleet.B.ConnectionsTaken);
         });
 
         runner.Test("rebalance: once the load is even nothing moves any more", () =>
@@ -114,7 +126,7 @@ internal static class RebalanceTests
             (Socket Client, TcpConnection Conn)[] all = Enumerable.Range(0, 8).Select(_ => fleet.Connect()).ToArray();
             using (var load = new Load(all.Select(pair => pair.Client)))
             {
-                Assert.True(SpinWait.SpinUntil(() => fleet.B.ConnectionsTaken >= 1, 20_000), "nothing was given");
+                AwaitGiven(fleet.A, () => fleet.B.ConnectionsTaken >= 1, () => "nothing was given");
                 foreach (Reactor reactor in fleet.Reactors)
                 {
                     reactor.Stop();
@@ -130,6 +142,29 @@ internal static class RebalanceTests
         });
     }
 
+    // Waits for what the balance is to bring about. A reactor that never reads 75% of a CPU, its share on a machine busy with
+    // other things, has nothing to balance by: the test is skipped rather than failed.
+    private static void AwaitGiven(Reactor giver, Func<bool> done, Func<string> what)
+    {
+        int busiest = 0;
+        if (SpinWait.SpinUntil(() =>
+        {
+            busiest = Math.Max(busiest, Volatile.Read(ref LoadOf(giver)));
+            return done();
+        }, 20_000))
+        {
+            return;
+        }
+        if (busiest < 75)
+        {
+            throw new SkipException($"reactor {giver.ShardIndex} read {busiest}% of a CPU at most, short of the 75% from which it gives");
+        }
+        Assert.True(false, what());
+    }
+
+    [UnsafeAccessor(UnsafeAccessorKind.Field, Name = "_loadPercent")]
+    private static extern ref int LoadOf(Reactor reactor);
+
     private static ServerConfig On(ServerConfig? config = null)
     {
         config ??= MoveFleet.Shared();
@@ -137,6 +172,29 @@ internal static class RebalanceTests
     }
 
     private static Task Work(TcpConnection conn) => Work(conn, WorkUs);
+
+    // Answers each line as Work does, after keeping its reactor's thread asleep for 100 ms.
+    private static async Task Block(TcpConnection conn)
+    {
+        string pending = "";
+        try
+        {
+            for (string got; (got = await MoveFleet.ReadText(conn)).Length > 0;)
+            {
+                pending += got;
+                for (int end; (end = pending.IndexOf('\n') + 1) > 0; pending = pending[end..])
+                {
+                    Thread.Sleep(100);
+                    conn.Write(Encoding.ASCII.GetBytes($"{Reactor.Current!.ShardIndex}{pending[..end]}"));
+                }
+                await conn.FlushAsync();
+            }
+        }
+        finally
+        {
+            conn.DecRef();
+        }
+    }
 
     // Answers each line with the digit of the reactor it runs on and the line itself, after keeping that reactor busy for a while.
     private static async Task Work(TcpConnection conn, int forUs)

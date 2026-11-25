@@ -161,6 +161,87 @@ internal static class MoveStopTests
                 }
             }, skip);
         }
+        RegisterGiverFault(runner);
+
+        runner.Test("move stop: a reactor that stops waits for a connection it gave away to be taken, and others find it there", () =>
+        {
+            using var fleet = new MoveFleet(2, MoveFleet.Tell);
+            (Socket client, TcpConnection conn) = fleet.Connect();
+            Assert.Equal("0hello", MoveFleet.Exchange(client, "hello"));
+            using (Moves.Hold(fleet.B))
+            {
+                Assert.True(Moves.Begin(conn, fleet.B), "the move was refused");
+                Moves.WaitFor(conn, Moves.Given);
+                fleet.A.Stop();
+                Assert.True(!fleet.Threads[0].Join(300), "the stop was over with a connection of its own on its way to another reactor");
+                Assert.True(!PostsClosedOn(fleet.A), "what other threads have for the connection would go nowhere");
+            }
+            Assert.True(fleet.Threads[0].Join(EndsWithinMs), "the stop never ended");
+            Assert.Equal("1hello", MoveFleet.Exchange(client, "hello"));
+        });
+
+        runner.Test("move stop: a reactor that stops while a send of a connection moving to it is in flight is given nothing, and the flush is told where it was", () =>
+        {
+            const int Big = 8 * 1024 * 1024;
+            var flushing = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var flushed = new TaskCompletionSource<int>(TaskCreationOptions.RunContinuationsAsynchronously);
+            using var fleet = new MoveFleet(2, async conn =>
+            {
+                try
+                {
+                    if (await MoveFleet.ReadText(conn) != "go")
+                    {
+                        return;
+                    }
+                    Task<string> read = MoveFleet.ReadText(conn);
+                    conn.Write(new byte[Big]);
+                    ValueTask flush = conn.FlushAsync();
+                    flushing.SetResult();
+                    await flush;
+                    flushed.SetResult(Reactor.Current!.ShardIndex);
+                    for (string got = await read; got.Length > 0; got = await MoveFleet.ReadText(conn))
+                    {
+                        conn.Write(Encoding.ASCII.GetBytes($"{Reactor.Current!.ShardIndex}{got}"));
+                        await conn.FlushAsync();
+                    }
+                }
+                finally
+                {
+                    conn.DecRef();
+                }
+            });
+            (Socket client, TcpConnection conn) = fleet.Connect();
+            client.Send("go"u8);
+            Assert.True(flushing.Task.Wait(5_000), "the handler never flushed");
+            Assert.True(Moves.Begin(conn, fleet.B, patient: true), "the move was refused");
+            Moves.WaitFor(conn, Moves.Waiting);
+            fleet.B.Stop();
+            Assert.True(fleet.Threads[1].Join(EndsWithinMs), "the stop never ended");
+
+            var buffer = new byte[64 * 1024];
+            for (int got = 0; got < Big;)
+            {
+                got += client.Receive(buffer);
+            }
+            Assert.True(flushed.Task.Wait(EndsWithinMs), "whoever waits for the flush was never told");
+            Assert.Equal(0, flushed.Task.Result);
+            Moves.WaitFor(conn, Moves.None);
+            Assert.Equal("0next", MoveFleet.Exchange(client, "next"));
+        });
+
+        runner.Test("move stop: a reactor that stops while it gives lets go of the one it gives to, and leaves the fleet", () =>
+        {
+            using var fleet = new MoveFleet(2, MoveFleet.Tell, MoveFleet.Shared(new TcpOptions { WriteSlabSize = 4096, PoolMax = 64, Rebalance = true }));
+            Moves.On(fleet.A, () =>
+            {
+                TakerOf(fleet.A) = fleet.B;
+                GiverOf(fleet.B) = fleet.A;
+            });
+            fleet.A.Stop();
+            Assert.True(fleet.Threads[0].Join(EndsWithinMs), "the stop never ended");
+            Assert.True(GiverOf(fleet.B) is null, "the reactor that stopped still gives to the other, which nobody else can now");
+            Assert.True(!FleetOf(fleet.B).Contains(fleet.A), "the reactor that stopped is still in the fleet");
+        });
 
         // Its giver has been told that the reactor isn't stopping, and is about to post it.
         runner.Test("move stop: a stop waits for a connection that is on its way and not posted yet", () =>
@@ -283,6 +364,57 @@ internal static class MoveStopTests
         });
     }
 
+    private static void RegisterGiverFault(Runner runner)
+    {
+        foreach (int stage in new[] { Moves.Cancelling, Moves.Waiting })
+        {
+            string when = stage == Moves.Cancelling ? "its recv is being cancelled" : "it waits for its connection to be idle";
+            runner.Test($"move stop: what a move had reserved on the other reactor is free again once its giver ends by a fault while {when}", () =>
+            {
+                var atWork = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+                var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+                using var faulted = new ManualResetEventSlim();
+                using var goOn = new ManualResetEventSlim(true);
+                using var fleet = new MoveFleet(2, async conn =>
+                {
+                    try
+                    {
+                        for (string got; (got = await MoveFleet.ReadText(conn)).Length > 0;)
+                        {
+                            atWork.TrySetResult();
+                            await release.Task.ConfigureAwait(false);
+                        }
+                    }
+                    finally
+                    {
+                        conn.DecRef();
+                    }
+                }, MoveFleet.Incremental(room: 4));
+                (Socket client, TcpConnection conn) = fleet.Connect();
+                MoveFleet.AwaitLive(fleet.B, 0);
+                client.Send("work"u8);
+                Assert.True(atWork.Task.Wait(5_000), "the handler never got to work");
+                try
+                {
+                    Assert.True(Moves.Begin(conn, fleet.B, patient: true), "the move was refused");
+                    if (stage == Moves.Waiting)
+                    {
+                        Moves.WaitFor(conn, Moves.Waiting);
+                    }
+                    Assert.Equal(3, Moves.RoomOn(fleet.B));
+                    Fault(fleet.A, faulted, goOn);
+                    Assert.True(faulted.Wait(5_000), "the reactor never faulted");
+                }
+                finally
+                {
+                    release.SetResult();
+                }
+                Assert.True(fleet.Threads[0].Join(EndsWithinMs), "the reactor outlived its fault");
+                Assert.Equal(4, Moves.RoomOn(fleet.B));
+            }, !TestServer.KernelAtLeast(6, 12));
+        }
+    }
+
     // Faults the reactor's loop in its next pass, and holds it there, before its teardown, until goOn.
     private static void Fault(Reactor reactor, ManualResetEventSlim faulted, ManualResetEventSlim goOn)
     {
@@ -373,6 +505,18 @@ internal static class MoveStopTests
     private static extern ref bool StopRequestedOf(Reactor reactor);
 
     private static int ArrivingAt(Reactor reactor) => Volatile.Read(ref ArrivingField(reactor));
+
+    [UnsafeAccessor(UnsafeAccessorKind.Method, Name = "get_PostsClosed")]
+    private static extern bool PostsClosedOn(Reactor reactor);
+
+    [UnsafeAccessor(UnsafeAccessorKind.Field, Name = "_giver")]
+    private static extern ref Reactor? GiverOf(Reactor reactor);
+
+    [UnsafeAccessor(UnsafeAccessorKind.Field, Name = "_taker")]
+    private static extern ref Reactor? TakerOf(Reactor reactor);
+
+    [UnsafeAccessor(UnsafeAccessorKind.Field, Name = "_fleet")]
+    private static extern ref Reactor?[] FleetOf(Reactor reactor);
 
     [UnsafeAccessor(UnsafeAccessorKind.Field, Name = "_leaving")]
     private static extern ref List<ulong> LeavingOf(Reactor reactor);

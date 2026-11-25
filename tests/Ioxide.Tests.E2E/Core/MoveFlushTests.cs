@@ -20,6 +20,9 @@ internal static class MoveFlushTests
     // How long a flush may take that takes none.
     private const int FlushedWithinMs = 2_000;
 
+    // What the pending ones fail with, for that and nothing else.
+    private const string NeverCompleted = "never completed";
+
     public static void Register(Runner runner)
     {
         foreach ((string mode, Func<ServerConfig> config, bool skip) in MoveFleet.Modes())
@@ -48,10 +51,10 @@ internal static class MoveFlushTests
                 using (InTransit(conn, fleet.B))
                 {
                     said = Task.Run(() => Say(conn, "push"));
-                    Thread.Sleep(50);   // it has been asked for by now
+                    AwaitAskedFor(conn);
                 }
                 AssertSent(client, said);
-            }, Lost);
+            }, Lost, failsWith: NeverCompleted);
         }
 
         runner.Pending("move flush: one from a timer of the old reactor, while its connection is between two, is sent", () =>
@@ -64,7 +67,7 @@ internal static class MoveFlushTests
                 Moves.On(fleet.A, () => said = Say(conn, "push"));   // on the thread it has just left
             }
             AssertSent(client, said);
-        }, Lost);
+        }, Lost, failsWith: NeverCompleted);
 
         runner.Pending("move flush: one through a pipe, from another thread while its connection is between two reactors, is sent", () =>
         {
@@ -88,10 +91,10 @@ internal static class MoveFlushTests
             using (InTransit(conn, fleet.B))
             {
                 said = Task.Run(async () => await pipe!.Output.WriteAsync("push"u8.ToArray()));
-                Thread.Sleep(50);
+                AwaitAskedFor(conn);
             }
             AssertSent(client, said);
-        }, Lost);
+        }, Lost, failsWith: NeverCompleted);
 
         runner.Pending("move flush: one through a stream, from another thread while its connection is between two reactors, is sent", () =>
         {
@@ -115,10 +118,10 @@ internal static class MoveFlushTests
             using (InTransit(conn, fleet.B))
             {
                 said = Task.Run(async () => await stream!.WriteAsync("push"u8.ToArray()));
-                Thread.Sleep(50);
+                AwaitAskedFor(conn);
             }
             AssertSent(client, said);
-        }, Lost);
+        }, Lost, failsWith: NeverCompleted);
 
         runner.Pending("move flush: after one from another thread while its connection is between two reactors, it can be flushed again", () =>
         {
@@ -128,14 +131,14 @@ internal static class MoveFlushTests
             using (InTransit(conn, fleet.B))
             {
                 first = Task.Run(() => Say(conn, "first"));
-                Thread.Sleep(50);
+                AwaitAskedFor(conn);
             }
             Moves.WaitFor(conn, Moves.None);
             Thread.Sleep(50);
             Task second = Task.Run(() => Say(conn, "push"));   // refused: the one before never ends
             Assert.True(Task.WaitAll([first, second], FlushedWithinMs), "a flush never completed");
             Assert.Equal("firstpush", MoveFleet.Receive(client, 9));
-        }, Lost);
+        }, Lost, failsWith: NeverCompleted);
 
         runner.Test("move flush: control: whoever waits for one from another thread, while its connection is between two reactors, is told once the connection ends", () =>
         {
@@ -145,7 +148,7 @@ internal static class MoveFlushTests
             using (InTransit(conn, fleet.B))
             {
                 said = Task.Run(() => Say(conn, "push"));
-                Thread.Sleep(50);
+                AwaitAskedFor(conn);
             }
             Moves.WaitFor(conn, Moves.None);
             client.Dispose();
@@ -205,6 +208,10 @@ internal static class MoveFlushTests
         Moves.WaitFor(conn, Moves.Given);
         return held;
     }
+
+    // Until the flush another thread asks for is under way.
+    private static void AwaitAskedFor(TcpConnection conn)
+        => Assert.True(SpinWait.SpinUntil(() => Moves.FlushOutstandingOf(conn), 5_000), "the flush was never asked for");
 
     private static void AssertSent(Socket client, Task said)
     {

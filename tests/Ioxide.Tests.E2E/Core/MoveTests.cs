@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.IO.Pipelines;
 using System.IO.Pipes;
 using System.Net.Sockets;
@@ -210,6 +211,114 @@ internal static class MoveTests
             Assert.Equal("1later", MoveFleet.Exchange(client, "later"));
         }, skip);
 
+        runner.Test($"move: one whose handler is at work for a few milliseconds goes when the handler next waits, unhelped ({mode})", () =>
+        {
+            using var atWork = new SemaphoreSlim(0);
+            using var fleet = new MoveFleet(2, async conn =>
+            {
+                try
+                {
+                    for (string got; (got = await MoveFleet.ReadText(conn)).Length > 0;)
+                    {
+                        atWork.Release();
+                        await Task.Delay(5).ConfigureAwait(false);
+                        await MoveFleet.Home(conn);
+                        conn.Write(Encoding.ASCII.GetBytes($"{Reactor.Current!.ShardIndex}{got}"));
+                        await conn.FlushAsync();
+                    }
+                }
+                finally
+                {
+                    conn.DecRef();
+                }
+            }, config());
+            (Socket client, TcpConnection conn) = fleet.Connect();
+            for (int i = 0; i < 100 && fleet.A.ConnectionsGiven == 0; i++)
+            {
+                client.Send("work"u8);
+                Assert.True(atWork.Wait(5_000), "the handler never got to work");
+                Moves.Begin(conn, fleet.B);
+                Assert.Equal("work", MoveFleet.Receive(client, 5)[1..]);
+                Moves.WaitFor(conn, Moves.None);
+            }
+            Assert.Equal(1L, fleet.A.ConnectionsGiven);   // not one of a hundred moves, each begun with its handler at work, was given up
+            Assert.Equal("1next", MoveFleet.Exchange(client, "next"));
+        }, skip);
+
+        runner.Test($"move: one whose handler is at work for longer than the 100 ms a waiting read has goes too, unhelped ({mode})", () =>
+        {
+            var atWork = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            using var fleet = new MoveFleet(2, async conn =>
+            {
+                try
+                {
+                    for (string got; (got = await MoveFleet.ReadText(conn)).Length > 0;)
+                    {
+                        atWork.TrySetResult();
+                        await Task.Delay(300).ConfigureAwait(false);
+                        await MoveFleet.Home(conn);
+                        conn.Write(Encoding.ASCII.GetBytes($"{Reactor.Current!.ShardIndex}{got}"));
+                        await conn.FlushAsync();
+                    }
+                }
+                finally
+                {
+                    conn.DecRef();
+                }
+            }, config());
+            (Socket client, TcpConnection conn) = fleet.Connect();
+            client.Send("work"u8);
+            Assert.True(atWork.Task.Wait(5_000), "the handler never got to work");
+            Assert.True(Moves.Begin(conn, fleet.B), "the move was refused");
+            Assert.Equal("0work", MoveFleet.Receive(client, 5));
+            Moves.WaitFor(conn, Moves.None);
+            Assert.Equal(1L, fleet.A.ConnectionsGiven);
+            Assert.Equal("1next", MoveFleet.Exchange(client, "next"));
+        }, skip);
+
+        runner.Test($"move: one whose send doesn't go stays, 100 ms after its handler waits in a read beside it ({mode})", () =>
+        {
+            const int Big = 8 * 1024 * 1024;
+            var flushing = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            using var fleet = new MoveFleet(2, async conn =>
+            {
+                try
+                {
+                    if (await MoveFleet.ReadText(conn) != "go")
+                    {
+                        return;
+                    }
+                    Task<string> read = MoveFleet.ReadText(conn);
+                    conn.Write(new byte[Big]);
+                    ValueTask flush = conn.FlushAsync();
+                    flushing.SetResult();
+                    await flush;
+                    for (string got = await read; got.Length > 0; got = await MoveFleet.ReadText(conn))
+                    {
+                        conn.Write(Encoding.ASCII.GetBytes($"{Reactor.Current!.ShardIndex}{got}"));
+                        await conn.FlushAsync();
+                    }
+                }
+                finally
+                {
+                    conn.DecRef();
+                }
+            }, config());
+            (Socket client, TcpConnection conn) = fleet.Connect();
+            client.Send("go"u8);
+            Assert.True(flushing.Task.Wait(5_000), "the handler never flushed");
+            Assert.True(Moves.Begin(conn, fleet.B), "the move was refused");
+            Moves.WaitFor(conn, Moves.None, timeoutMs: 1_500);   // well short of the 2 s a handler at work has
+            Assert.Equal(0L, fleet.A.ConnectionsGiven);
+
+            var buffer = new byte[64 * 1024];
+            for (int got = 0; got < Big;)
+            {
+                got += client.Receive(buffer);
+            }
+            Assert.Equal("0next", MoveFleet.Exchange(client, "next"));
+        }, skip);
+
         runner.Test($"move: without help, one whose handler stays at work stays too, and is served ({mode})", () =>
         {
             var atWork = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -334,6 +443,125 @@ internal static class MoveTests
             Moves.To(conn, fleet.B);   // whole messages only: it holds nothing now
             Assert.Equal("1abcdefghij", MoveFleet.Exchange(client, "abcdefghij"));
         });
+
+        foreach ((string mode, Func<ServerConfig> config, bool skip) in MoveFleet.Modes())
+        {
+            runner.Test($"move: a connection that holds one stays, though a buffer of its last life is handed back meanwhile ({mode})", () =>
+            {
+                (TcpConnection Conn, SpscRecvRing.Item Item)? kept = null;
+                using var fleet = new MoveFleet(2, async conn =>
+                {
+                    if (kept is not null)
+                    {
+                        await TellTens(conn);
+                        return;
+                    }
+                    if (conn.TryGetItem(await conn.ReadAsync(), out SpscRecvRing.Item item))
+                    {
+                        kept = (conn, item);   // somebody else's to hand back, who takes their time
+                    }
+                    conn.DecRef();
+                }, config());
+                (Socket client, _) = fleet.Connect();
+                client.Send("kept"u8);
+                Assert.True(SpinWait.SpinUntil(() => kept is not null, 5_000), "nothing was received");
+                client.Dispose();
+                MoveFleet.AwaitLive(fleet.A, 0);
+
+                (client, TcpConnection conn) = fleet.Connect();
+                Assert.True(ReferenceEquals(conn, kept!.Value.Conn), "this is another connection's object");
+                kept.Value.Conn.ReturnBuffer(kept.Value.Item);
+                client.Send("01234"u8);
+                Assert.True(SpinWait.SpinUntil(() => Moves.ReadParkedOf(conn) && Queued(conn) == 0 && TakenOf(QueueOf(conn)) > 0, 5_000), "the handler never got to wait for the rest");
+                Assert.True(Moves.Begin(conn, fleet.B, patient: true), "the move was refused");
+                Moves.WaitFor(conn, Moves.None);
+                client.Send("56789"u8);
+                Assert.Equal("00123456789", MoveFleet.Receive(client, 11));
+                Assert.Equal(0L, fleet.A.ConnectionsGiven);
+
+                Moves.To(conn, fleet.B);
+                Assert.Equal("1abcdefghij", MoveFleet.Exchange(client, "abcdefghij"));
+            }, skip);
+        }
+
+        foreach (bool memories in new[] { false, true })
+        {
+            runner.Test($"move: a buffer handed back after its connection's life goes to the reactor it is of, though the next life is on another ({(memories ? "memories" : "items")})", () =>
+            {
+                const int Buffers = 4;
+                (TcpConnection Conn, SpscRecvRing.Item Item)? kept = null;
+                var gate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+                using var fleet = new MoveFleet(2, async conn =>
+                {
+                    try
+                    {
+                        while (true)
+                        {
+                            RecvSnapshot snapshot = await conn.ReadAsync();
+                            while (conn.TryGetItem(snapshot, out SpscRecvRing.Item item))
+                            {
+                                if (kept is null)
+                                {
+                                    kept = (conn, item);
+                                    return;
+                                }
+                                await gate.Task;   // holding it
+                                conn.Write(item.AsSpan());
+                                conn.ReturnBuffer(in item);
+                                await conn.FlushAsync();
+                            }
+                            if (snapshot.IsClosed)
+                            {
+                                return;
+                            }
+                        }
+                    }
+                    finally
+                    {
+                        conn.DecRef();
+                    }
+                }, MoveFleet.Shared(new TcpOptions { PoolMax = 64, Rebalance = true }) with { RecvSlots = Buffers, RecvBufferSize = 64 });
+                (Socket client, _) = fleet.Connect();
+                client.Send("kept"u8);
+                Assert.True(SpinWait.SpinUntil(() => kept is not null, 5_000), "nothing was received");
+                client.Dispose();
+                MoveFleet.AwaitLive(fleet.A, 0);
+                (_, TcpConnection next) = fleet.Connect();
+                Assert.True(ReferenceEquals(next, kept!.Value.Conn), "this is another connection's object");
+                Moves.To(next, fleet.B);
+
+                SpscRecvRing.Item late = kept.Value.Item;
+                var returning = new Thread(() =>
+                {
+                    if (memories)
+                    {
+                        next.ReturnBuffers([late.AsMemoryManager()]);
+                    }
+                    else
+                    {
+                        next.ReturnBuffer(in late);
+                    }
+                });
+                returning.Start();
+                returning.Join();
+
+                // As many as there are buffers, on either reactor, hold one each: neither has one too few, or one twice.
+                var clients = new List<(Socket Client, string Message)>();
+                for (int i = 0; i < 2 * Buffers; i++)
+                {
+                    (Socket holder, TcpConnection conn) = fleet.Connect(fleet.Reactors[i % 2]);
+                    string message = $"message {i} of its own";
+                    holder.Send(Encoding.ASCII.GetBytes(message));
+                    Assert.True(SpinWait.SpinUntil(() => TakenOf(QueueOf(conn)) == 1, 5_000), $"reactor {i % 2} has no buffer for client {i}");
+                    clients.Add((holder, message));
+                }
+                gate.SetResult();
+                foreach ((Socket holder, string message) in clients)
+                {
+                    Assert.Equal(message, MoveFleet.Receive(holder, message.Length));
+                }
+            });
+        }
 
         runner.Test("move: buffers handed back from another thread count as handed back", () =>
         {
@@ -628,6 +856,65 @@ internal static class MoveTests
 
     private static void RegisterThreads(Runner runner)
     {
+        // Nothing of the connection's comes to its reactor while its move waits, not even its handler waiting in a read again,
+        // when it does so on another thread.
+        runner.Test("move: a handler that waits in a read again on another thread, while its move waits for that, gets what comes next at once", () =>
+        {
+            var atWork = new SemaphoreSlim(0);
+            var gate = new SemaphoreSlim(0);
+            var parked = new SemaphoreSlim(0);
+            var arrived = new SemaphoreSlim(0);
+            long arrivedAt = 0;
+            using var fleet = new MoveFleet(2, async conn =>
+            {
+                try
+                {
+                    for (string got; (got = await MoveFleet.ReadText(conn)).Length > 0;)
+                    {
+                        if (got != "work")
+                        {
+                            arrivedAt = Stopwatch.GetTimestamp();
+                            arrived.Release();
+                            continue;
+                        }
+                        atWork.Release();
+                        await gate.WaitAsync().ConfigureAwait(false);
+                        await Task.CompletedTask.ConfigureAwait(ConfigureAwaitOptions.ForceYielding);
+                        Task<string> next = MoveFleet.ReadText(conn);   // on the thread pool
+                        parked.Release();
+                        if ((got = await next).Length == 0)
+                        {
+                            return;
+                        }
+                        arrivedAt = Stopwatch.GetTimestamp();
+                        arrived.Release();
+                    }
+                }
+                finally
+                {
+                    conn.DecRef();
+                }
+            });
+            (Socket client, TcpConnection conn) = fleet.Connect();
+            var took = new List<double>();
+            for (int round = 0; round < 8; round++)
+            {
+                Thread.Sleep(31 * round);   // anywhere in a tick of the reactor's
+                client.Send("work"u8);
+                Assert.True(atWork.Wait(5_000), "the handler never got to work");
+                Assert.True(Moves.Begin(conn, fleet.Reactors[(round + 1) % 2], patient: true), "the move was refused");
+                Moves.WaitFor(conn, Moves.Waiting);
+                gate.Release();
+                Assert.True(parked.Wait(5_000), "the handler never got to read again");
+                long sent = Stopwatch.GetTimestamp();
+                client.Send("next"u8);
+                Assert.True(arrived.Wait(5_000), "what came next never reached the handler");
+                took.Add(Stopwatch.GetElapsedTime(sent, Volatile.Read(ref arrivedAt)).TotalMilliseconds);
+                Moves.WaitFor(conn, Moves.None);
+            }
+            Assert.True(took.Max() < 50, $"what came next took {string.Join(", ", took.Select(ms => $"{ms:F1}"))} ms");
+        });
+
         runner.Test("move: a switch to the connection's reactor lands where the connection is by then", () =>
         {
             using var fleet = new MoveFleet(2, MoveFleet.Tell);

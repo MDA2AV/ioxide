@@ -76,15 +76,25 @@ internal static class ConnectionMoveTests
             Assert.True(conn.HoldsNothing, "memories given back from another thread are held");
         });
 
-        runner.Test("move: holding is counted afresh in the connection's next life", () =>
+        runner.Test("move: holding is counted afresh in the connection's next life, whatever is given back of the last one", () =>
         {
             TcpConnection conn = Connection();
             Deliver(conn, 0);
-            Assert.True(conn.TryGetItem(Snapshot(conn), out SpscRecvRing.Item item), "nothing was delivered");
-            conn.Clear();   // with it never given back
+            Deliver(conn, 1);
+            RecvSnapshot snapshot = Snapshot(conn);
+            Assert.True(conn.TryGetItem(snapshot, out SpscRecvRing.Item first), "nothing was delivered");
+            Assert.True(conn.TryGetItem(snapshot, out SpscRecvRing.Item second), "one was delivered");
+            conn.Clear();   // with neither given back
             Assert.True(conn.HoldsNothing, "a new life holds what the last one did");
-            conn.ReturnBuffer(in item);   // too late
-            Assert.True(!conn.HoldsNothing, "a return of the life before made up for one to come");
+
+            conn.ReturnBuffer(in first);   // too late, both
+            conn.ReturnBuffers([second.AsMemoryManager()]);
+            Assert.True(conn.HoldsNothing, "what is given back of the life before counts in this one");
+            Deliver(conn, 3);
+            Assert.True(conn.TryGetItem(Snapshot(conn), out SpscRecvRing.Item held), "nothing was delivered");
+            Assert.True(!conn.HoldsNothing, "what was given back of the life before made up for what this one holds");
+            conn.ReturnBuffer(in held);
+            Assert.True(conn.HoldsNothing, "everything was given back and something is held");
         });
 
         runner.Test("move: every life has a number of its own, whichever reactors it was on, and tags one per place", () =>
@@ -220,7 +230,7 @@ internal static class ConnectionMoveTests
     private static Reactor NeverRunning(int id) => new(id, new ServerConfig { ReactorCount = 2, Tcp = new TcpOptions(), Udp = null });
 
     private static unsafe void Deliver(TcpConnection conn, ushort bid)
-        => Assert.True(RecvOf(conn).TryEnqueue(new SpscRecvRing.Item { Ptr = null, Bid = bid, Len = 0, HasBuffer = true }), "the queue is full");
+        => Assert.True(RecvOf(conn).TryEnqueue(new SpscRecvRing.Item { Ptr = null, Bid = bid, Len = 0, HasBuffer = true, Gen = (ushort)conn.Generation }), "the queue is full");
 
     private static RecvSnapshot Snapshot(TcpConnection conn)
     {

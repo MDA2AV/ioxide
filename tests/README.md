@@ -110,13 +110,16 @@ not `TestExpiredCert`. The name is what a failure prints, so it should say what 
 
 | Type | For |
 | --- | --- |
-| `Runner` | `Test`, `Pending`, `skip:`, a 120 s per-test watchdog, and the summary. A reactor that dies unobserved fails the run at the end |
+| `Runner` | `Test`, `Pending` (with `failsWith:`, the failure it is there for), `skip:`, `SkipException` for a test that finds at run time it can prove nothing there, a 120 s per-test watchdog, and the summary. A reactor that dies unobserved fails the run at the end |
 | `TestServer` | Starts a real reactor on a unique port. Returns only once `OnStart` has finished, and rethrows what it threw |
 | `Client` | Socket-level HTTP and TLS: `GetTls`, `GetTlsClientCert`, `TryGetTls`, raw and fragmented senders |
 | `TestCert` | Certificate fixtures, cross-process locked and written atomically |
 | `H3TestClient` | A native ngtcp2 + nghttp3 driver. `Alpn` and `ServerName` are settable, for the negative cases |
 | `Handlers` | Generic connection handlers, so a test does not hand-roll one to answer 200 |
 | `Externals` | Docker sidecars, `curl`, `curl-h3`. Each reports absence rather than failing |
+| `MoveFleet` | A few reactors on one port, with clients whose server-side connection is at hand, for connections that change reactors |
+| `Moves` | Moves connections on request, holds a reactor, shuffles connections all the time, and reads a move's state |
+| `LockedMemory` | Runs a body with no locked memory left (`RLIMIT_MEMLOCK` 0), where the process can run out of it |
 
 Module-specific handlers live with their suite - `PgHandlers` in the Pg project, not here - so the
 harness never references a module it does not need.

@@ -1,12 +1,14 @@
 using System.Buffers;
 using System.IO.Pipelines;
 using System.Net;
+using System.Net.Security;
 using System.Runtime.CompilerServices;
 using System.Text;
 using ioxide;
 using ioxide.http2;
 using ioxide.nghttp2;
 using ioxide.timer;
+using ioxide.tls;
 
 namespace Ioxide.Tests;
 
@@ -20,9 +22,10 @@ internal static class MoveHttp2Tests
 
     public static void Register(Runner runner)
     {
-        foreach (Stack stack in new Stack[] { new Managed(false), new Managed(true), new Native(false), new Native(true) })
+        foreach (Over over in Enum.GetValues<Over>())
         {
-            Register(runner, stack);
+            Register(runner, new Managed(over));
+            Register(runner, new Native(over));
         }
     }
 
@@ -30,15 +33,15 @@ internal static class MoveHttp2Tests
     {
         runner.Test($"move h2 ({stack.Name}): requests are served on whichever reactor the connection is on", () =>
         {
-            using var fleet = new MoveFleet(2, conn => Serve(conn, stack.Answer(_ => new ValueTask<string>($"{Reactor.Current!.ShardIndex}"))));
-            using HttpClient client = H2Client();
-            string first = Get(client, fleet.Port, "/");
+            using var fleet = Fleet(2, stack, _ => stack.Answer(_ => new ValueTask<string>($"{Reactor.Current!.ShardIndex}")));
+            using HttpClient client = H2Client(stack, fleet.Port);
+            string first = Get(client, "/");
             TcpConnection conn = fleet.TakeAccepted();
             Assert.Equal($"{conn.Reactor.ShardIndex}", first);
             for (int i = 0; i < 10; i++)
             {
                 Moves.To(conn, fleet.Reactors[i % 2]);
-                Assert.Equal($"{i % 2}", Get(client, fleet.Port, "/"));
+                Assert.Equal($"{i % 2}", Get(client, "/"));
             }
         });
 
@@ -46,7 +49,7 @@ internal static class MoveHttp2Tests
         {
             var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
             int waiting = 0;
-            using var fleet = new MoveFleet(2, conn => Serve(conn, stack.Answer(async path =>
+            using var fleet = Fleet(2, stack, _ => stack.Answer(async path =>
             {
                 string from = $"{Reactor.Current!.ShardIndex}";
                 if (path == "/wait")
@@ -55,28 +58,28 @@ internal static class MoveHttp2Tests
                     await release.Task.ConfigureAwait(false);   // and goes on on the thread pool
                 }
                 return from;
-            })));
-            using HttpClient client = H2Client();
-            Get(client, fleet.Port, "/");
+            }));
+            using HttpClient client = H2Client(stack, fleet.Port);
+            Get(client, "/");
             TcpConnection conn = fleet.TakeAccepted();
             Moves.To(conn, fleet.A);
 
-            Task<string>[] waits = Enumerable.Range(0, 5).Select(_ => client.GetStringAsync(Url(fleet.Port, "/wait"))).ToArray();
+            Task<string>[] waits = Enumerable.Range(0, 5).Select(_ => client.GetStringAsync("/wait")).ToArray();
             Assert.True(SpinWait.SpinUntil(() => Volatile.Read(ref waiting) == waits.Length, 5_000), "the handlers never got to wait");
             Moves.To(conn, fleet.B);
-            Assert.Equal("1", Get(client, fleet.Port, "/"));
+            Assert.Equal("1", Get(client, "/"));
             Assert.True(waits.All(wait => !wait.IsCompleted), "a request was answered before its handler was done");
 
             release.SetResult();
             Assert.True(Task.WaitAll(waits, 10_000), "a request in progress over the move was never answered");
             Assert.True(waits.All(wait => wait.Result == "0"), $"answers of handlers begun before the move: {string.Join(" ", waits.Select(w => w.Result))}");
-            Assert.Equal("1", Get(client, fleet.Port, "/"));
+            Assert.Equal("1", Get(client, "/"));
         });
 
         runner.Test($"move h2 ({stack.Name}): a handler that goes on on the reactor its connection has left is answered for from the new one", () =>
         {
             using var started = new CountdownEvent(4);
-            using var fleet = new MoveFleet(2, conn => Serve(conn, stack.Answer(async path =>
+            using var fleet = Fleet(2, stack, _ => stack.Answer(async path =>
             {
                 Reactor reactor = Reactor.Current!;
                 if (path == "/wait")
@@ -86,12 +89,12 @@ internal static class MoveHttp2Tests
                     Assert.True(ReferenceEquals(Reactor.Current, reactor), "a timer resumed on another reactor than its own");
                 }
                 return $"{reactor.ShardIndex}";
-            })));
-            using HttpClient client = H2Client();
-            Get(client, fleet.Port, "/");
+            }));
+            using HttpClient client = H2Client(stack, fleet.Port);
+            Get(client, "/");
             TcpConnection conn = fleet.TakeAccepted();
             Moves.To(conn, fleet.A);
-            Task<string>[] waits = Enumerable.Range(0, 4).Select(_ => client.GetStringAsync(Url(fleet.Port, "/wait"))).ToArray();
+            Task<string>[] waits = Enumerable.Range(0, 4).Select(_ => client.GetStringAsync("/wait")).ToArray();
             Assert.True(started.Wait(5_000), "the handlers never got to wait");
             Moves.To(conn, fleet.B);
             Assert.True(Task.WaitAll(waits, 10_000), "a request in progress over the move was never answered");
@@ -104,14 +107,14 @@ internal static class MoveHttp2Tests
 
             runner.Test($"move h2 ({stack.Name}): an upload echoed while the connection is moved all the time comes back whole ({where})", () =>
             {
-                using var fleet = new MoveFleet(3, conn => Serve(conn, stack.Echo(pool)));
-                using HttpClient client = H2Client();
+                using var fleet = Fleet(3, stack, _ => stack.Echo(pool));
+                using HttpClient client = H2Client(stack, fleet.Port);
                 using var shuffle = new Moves.Shuffle(fleet.Reactors);
                 byte[] upload = Pattern(UploadLength);
                 for (int i = 0; i < 3 || (shuffle.Made < 20 && i < 100); i++)
                 {
                     using var content = new DuplexContent(upload);
-                    using HttpResponseMessage response = Finish(client.PostAsync(Url(fleet.Port, "/"), content), "the echo's headers");
+                    using HttpResponseMessage response = Finish(client.PostAsync("/", content), "the echo's headers");
                     byte[] back = Finish(response.Content.ReadAsByteArrayAsync(), "the echo");
                     Assert.True(back.AsSpan().SequenceEqual(upload), $"{back.Length} of {upload.Length} bytes came back, different from {FirstDifference(upload, back)} on");
                 }
@@ -122,7 +125,7 @@ internal static class MoveHttp2Tests
         runner.Test($"move h2 ({stack.Name}): many requests at once over a connection moved all the time are each answered with their own", () =>
         {
             int onWrong = 0;
-            using var fleet = new MoveFleet(4, conn => Serve(conn, stack.Answer(async path =>
+            using var fleet = Fleet(4, stack, conn => stack.Answer(async path =>
             {
                 switch (path.Length % 3)
                 {
@@ -140,8 +143,8 @@ internal static class MoveHttp2Tests
                         break;
                 }
                 return string.Concat(Enumerable.Repeat(path, 40));
-            })));
-            using HttpClient client = H2Client();
+            }));
+            using HttpClient client = H2Client(stack, fleet.Port);
             using var shuffle = new Moves.Shuffle(fleet.Reactors);
 
             Task[] callers = Enumerable.Range(0, 16).Select(i => Task.Run(async () =>
@@ -149,7 +152,7 @@ internal static class MoveHttp2Tests
                 for (int n = 0; n < 60; n++)
                 {
                     string path = $"/{i}/{new string('x', n % 7)}{n}";
-                    Assert.Equal(string.Concat(Enumerable.Repeat(path, 40)), await client.GetStringAsync(Url(fleet.Port, path)));
+                    Assert.Equal(string.Concat(Enumerable.Repeat(path, 40)), await client.GetStringAsync(path));
                 }
             })).ToArray();
             Assert.True(Task.WaitAll(callers, 60_000), "a request was never answered");
@@ -160,9 +163,9 @@ internal static class MoveHttp2Tests
         runner.Test($"move h2 ({stack.Name}): a response that goes on and on goes on over moves", () =>
         {
             var stop = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-            using var fleet = new MoveFleet(2, conn => Serve(conn, stack.Endless(stop.Task)));
-            using HttpClient client = H2Client();
-            using HttpResponseMessage response = Finish(client.GetAsync(Url(fleet.Port, "/"), HttpCompletionOption.ResponseHeadersRead), "the headers");
+            using var fleet = Fleet(2, stack, _ => stack.Endless(stop.Task));
+            using HttpClient client = H2Client(stack, fleet.Port);
+            using HttpResponseMessage response = Finish(client.GetAsync("/", HttpCompletionOption.ResponseHeadersRead), "the headers");
             TcpConnection conn = fleet.TakeAccepted();
             using Stream body = Finish(response.Content.ReadAsStreamAsync(), "the body");
             var buffer = new byte[4096];
@@ -192,26 +195,47 @@ internal static class MoveHttp2Tests
 
         runner.Test($"move h2 ({stack.Name}): a connection that moved and ends is let go of by its new reactor", () =>
         {
-            using var fleet = new MoveFleet(2, conn => Serve(conn, stack.Answer(_ => new ValueTask<string>("x"))));
+            using var fleet = Fleet(2, stack, _ => stack.Answer(_ => new ValueTask<string>("x")));
             TcpConnection conn;
-            using (HttpClient client = H2Client())
+            using (HttpClient client = H2Client(stack, fleet.Port))
             {
-                Get(client, fleet.Port, "/");
+                Get(client, "/");
                 conn = fleet.TakeAccepted();
                 Moves.To(conn, fleet.A);
                 Moves.To(conn, fleet.B);
-                Assert.Equal("x", Get(client, fleet.Port, "/"));
+                Assert.Equal("x", Get(client, "/"));
             }
             MoveFleet.AwaitLive(fleet.A, 0);
             MoveFleet.AwaitLive(fleet.B, 0);
         });
     }
 
-    private static async Task Serve(TcpConnection conn, Func<TcpConnection, Task> serve)
+    private static MoveFleet Fleet(int reactors, Stack stack, Func<TcpConnection, Serving> serving)
+    {
+        var services = new TlsService[reactors];
+        return new MoveFleet(reactors, conn => Serve(conn, stack.Over, services, serving(conn)), null,
+            stack.Over == Over.Tls ? (i, reactor) => services[i] = TlsService.Start(reactor, TlsOptions()) : null);
+    }
+
+    private static async Task Serve(TcpConnection conn, Over over, TlsService[] services, Serving serve)
     {
         try
         {
-            await serve(conn);
+            switch (over)
+            {
+                case Over.Connection:
+                    await serve(conn, null);
+                    break;
+                case Over.Pipe:
+                    await serve(conn, new TcpConnectionDualPipe(conn));
+                    break;
+                case Over.Tls:
+                    await using (var pipe = new TlsConnectionDualPipe(conn, await services[Reactor.Current!.ShardIndex].AcceptAsync(conn)))
+                    {
+                        await serve(conn, pipe);
+                    }
+                    break;
+            }
         }
         finally
         {
@@ -219,15 +243,31 @@ internal static class MoveHttp2Tests
         }
     }
 
-    /// <summary>An HTTP/2 stack, given the connection itself or a pipe over it.</summary>
-    private abstract class Stack(string name, bool pipe)
+    private static TlsOptions TlsOptions()
     {
-        public string Name { get; } = pipe ? name + ", over a pipe" : name;
-        protected readonly bool Pipe = pipe;
+        (string certificate, string key) = TestCert.Ensure();
+        return new TlsOptions { CertificatePath = certificate, KeyPath = key, Alpn = ["h2"] };
+    }
 
-        public abstract Func<TcpConnection, Task> Answer(Func<string, ValueTask<string>> answer);
-        public abstract Func<TcpConnection, Task> Echo(bool pool);
-        public abstract Func<TcpConnection, Task> Endless(Task stop);
+    /// <summary>What a stack is given: the connection, or one of the two pipes over it.</summary>
+    private enum Over { Connection, Pipe, Tls }
+
+    private delegate Task Serving(TcpConnection conn, IDuplexPipe? pipe);
+
+    private abstract class Stack(string name, Over over)
+    {
+        public string Name { get; } = over switch
+        {
+            Over.Pipe => name + ", over a pipe",
+            Over.Tls => name + ", over TLS",
+            _ => name,
+        };
+
+        public Over Over { get; } = over;
+
+        public abstract Serving Answer(Func<string, ValueTask<string>> answer);
+        public abstract Serving Echo(bool pool);
+        public abstract Serving Endless(Task stop);
 
         protected static ConfiguredTaskAwaitable LeaveReactor(bool pool)
             => Task.CompletedTask.ConfigureAwait(pool ? ConfigureAwaitOptions.ForceYielding : ConfigureAwaitOptions.None);
@@ -273,54 +313,53 @@ internal static class MoveHttp2Tests
         }
     }
 
-    private sealed class Managed(bool pipe) : Stack("http2", pipe)
+    private sealed class Managed(Over over) : Stack("http2", over)
     {
-        private Http2Connection Over(TcpConnection conn) => Pipe ? new Http2Connection(new TcpConnectionDualPipe(conn)) : new Http2Connection(conn);
+        private static Http2Connection On(TcpConnection conn, IDuplexPipe? pipe) => pipe is null ? new Http2Connection(conn) : new Http2Connection(pipe);
 
-        public override Func<TcpConnection, Task> Answer(Func<string, ValueTask<string>> answer)
-            => conn => Over(conn).RunAsync(async request => Http2Response.Text(await answer(Encoding.ASCII.GetString(request.Path.Span))));
+        public override Serving Answer(Func<string, ValueTask<string>> answer)
+            => (conn, pipe) => On(conn, pipe).RunAsync(async request => Http2Response.Text(await answer(Encoding.ASCII.GetString(request.Path.Span))));
 
-        public override Func<TcpConnection, Task> Echo(bool pool)
-            => conn => Over(conn).RunAsync((_, body, writer) =>
+        public override Serving Echo(bool pool)
+            => (conn, pipe) => On(conn, pipe).RunAsync((_, body, writer) =>
                 EchoBody(pool, body.ReadAsync, () => writer.WriteHeaders(new Http2Response { Status = 200 }), writer, writer.FlushAsync));
 
-        public override Func<TcpConnection, Task> Endless(Task stop)
-            => conn => Over(conn).RunAsync((_, writer) =>
+        public override Serving Endless(Task stop)
+            => (conn, pipe) => On(conn, pipe).RunAsync((_, writer) =>
             {
                 writer.WriteHeaders(new Http2Response { Status = 200 });
                 return WriteOnAndOn(stop, writer, writer.FlushAsync);
             });
     }
 
-    private sealed class Native(bool pipe) : Stack("nghttp2", pipe)
+    private sealed class Native(Over over) : Stack("nghttp2", over)
     {
-        private Nghttp2Connection Over(TcpConnection conn) => Pipe ? new Nghttp2Connection(new TcpConnectionDualPipe(conn)) : new Nghttp2Connection(conn);
+        private static Nghttp2Connection On(TcpConnection conn, IDuplexPipe? pipe) => pipe is null ? new Nghttp2Connection(conn) : new Nghttp2Connection(pipe);
 
-        public override Func<TcpConnection, Task> Answer(Func<string, ValueTask<string>> answer)
-            => conn => Over(conn).RunAsync(async request => Nghttp2Response.Text(await answer(Encoding.ASCII.GetString(request.Path.Span))));
+        public override Serving Answer(Func<string, ValueTask<string>> answer)
+            => (conn, pipe) => On(conn, pipe).RunAsync(async request => Nghttp2Response.Text(await answer(Encoding.ASCII.GetString(request.Path.Span))));
 
-        public override Func<TcpConnection, Task> Echo(bool pool)
-            => conn => Over(conn).RunAsync((_, body, writer) =>
+        public override Serving Echo(bool pool)
+            => (conn, pipe) => On(conn, pipe).RunAsync((_, body, writer) =>
                 EchoBody(pool, body.ReadAsync, () => writer.WriteHeaders(new Nghttp2Response { Status = 200 }), writer, writer.FlushAsync));
 
-        public override Func<TcpConnection, Task> Endless(Task stop)
-            => conn => Over(conn).RunAsync((_, writer) =>
+        public override Serving Endless(Task stop)
+            => (conn, pipe) => On(conn, pipe).RunAsync((_, writer) =>
             {
                 writer.WriteHeaders(new Nghttp2Response { Status = 200 });
                 return WriteOnAndOn(stop, writer, writer.FlushAsync);
             });
     }
 
-    private static HttpClient H2Client() => new(new SocketsHttpHandler())
+    private static HttpClient H2Client(Stack stack, int port) => new(new SocketsHttpHandler { SslOptions = { RemoteCertificateValidationCallback = (_, _, _, _) => true } })
     {
+        BaseAddress = new Uri($"{(stack.Over == Over.Tls ? "https" : "http")}://127.0.0.1:{port}"),
         DefaultRequestVersion = HttpVersion.Version20,
         DefaultVersionPolicy = HttpVersionPolicy.RequestVersionExact,
         Timeout = TimeSpan.FromSeconds(60),
     };
 
-    private static string Url(int port, string path) => $"http://127.0.0.1:{port}{path}";
-
-    private static string Get(HttpClient client, int port, string path) => Finish(client.GetStringAsync(Url(port, path)), path);
+    private static string Get(HttpClient client, string path) => Finish(client.GetStringAsync(path), path);
 
     private static T Finish<T>(Task<T> task, string what)
     {
