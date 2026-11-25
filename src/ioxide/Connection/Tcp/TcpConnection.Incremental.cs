@@ -23,15 +23,32 @@ public sealed unsafe partial class TcpConnection
     internal int Generation => Volatile.Read(ref _generation);
 
     /// <summary>Hand a consumed recv buffer back, routed by mode.</summary>
-    public void ReturnBuffer(in SpscRecvRing.Item item)
+    public void ReturnBuffer(in SpscRecvRing.Item item) => HandBack(item.Gen, item.Bid, item.Ptr);
+
+    private void HandBack(ushort gen, ushort bid, byte* ptr)
     {
+        // Read before the generation: while it is still that of the buffer's life, so are these.
+        Reactor reactor = Volatile.Read(ref _reactor);
+        int slot = Volatile.Read(ref Slot);
+        int tagGen = Volatile.Read(ref TagGen);
+
+        if (gen != (ushort)Volatile.Read(ref _generation))
+        {
+            // Late, in another life, which can be on another reactor. A ring of its own went with the life it was of.
+            if (!IncrementalMode)
+            {
+                reactor.ReturnLate(ptr, bid);
+            }
+            return;
+        }
+
         if (IncrementalMode)
         {
-            _reactor.EnqueueReturnQIncremental(Slot, item.Gen, item.Bid);
+            reactor.EnqueueReturnQIncremental(slot, (ushort)tagGen, bid);
         }
         else
         {
-            _reactor.EnqueueReturnQ(item.Bid);
+            reactor.EnqueueReturnQ(bid);
         }
         CountReturned();
     }

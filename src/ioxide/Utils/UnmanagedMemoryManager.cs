@@ -7,10 +7,11 @@ public sealed unsafe class UnmanagedMemoryManager : MemoryManager<byte>
     private byte* _ptr;
     private int _length;
 
+    internal byte* Pointer => _ptr;
+
     public ushort BufferId { get; private set; }
 
-    // TcpConnection generation at enqueue time; lets returns route safely in
-    // incremental mode after pool reuse.
+    // TcpConnection generation at enqueue time; lets returns route safely after pool reuse.
     public ushort Gen { get; private set; }
 
     public UnmanagedMemoryManager(byte* ptr, int length)

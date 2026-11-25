@@ -94,6 +94,28 @@ public sealed unsafe partial class Reactor
         Wake();
     }
 
+    // Handed back after its connection's life, whose next one can be on another reactor (TcpOptions.Rebalance): a buffer
+    // is the one's whose memory it is. Nobody's, once that one has ended.
+    internal void ReturnLate(byte* buffer, ushort bid)
+    {
+        if (OwnsBuffer(buffer))
+        {
+            EnqueueReturnQ(bid);
+            return;
+        }
+        foreach (Reactor? reactor in _fleet)
+        {
+            if (reactor is not null && reactor.OwnsBuffer(buffer))
+            {
+                reactor.EnqueueReturnQ(bid);
+                return;
+            }
+        }
+    }
+
+    private bool OwnsBuffer(byte* buffer)
+        => buffer >= _bufSlab && buffer < _bufSlab + (_bufferRingEntries * (nuint)_recvBufferSize);
+
     private void DrainReturnQ()
     {
         bool any = false;

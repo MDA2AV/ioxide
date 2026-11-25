@@ -161,9 +161,11 @@
     <h2 id="rebalance">Connections that change reactors</h2>
     <p>The kernel spreads connections over the listeners as they connect, so the busy ones can end up
     on a few reactors while the others' cores stay unused. With <code>Tcp.Rebalance</code> (off by
-    default) a reactor that spent three quarters or more of the last tick on a CPU, next to one that
-    spent 30 points less, weighs its connections for a tick, by the time their recv completions take,
-    and then gives that one connections worth half the difference.</p>
+    default) a reactor that was busy three quarters or more of the last tick (on a CPU, or kept from
+    waiting for completions), next to one 30 points less busy in both of its last two ticks, weighs its
+    connections for a tick, by the time their recv completions take, and then gives that one
+    connections worth half the difference, and no more than that share of them. One that could give
+    none lets the other be until it has weighed again.</p>
     <p>A socket belongs to the process, so any ring can receive and send on it. What ties a connection
     to its reactor is the recv armed in its ring, what was received into its buffers, a send in
     flight, and its slot. A move undoes those on the one and redoes them on the other, with nothing
@@ -172,19 +174,23 @@
       <li>The recv is cancelled. What the peer sends from then on stays in the socket.</li>
       <li>The handler goes on where it is, through what had arrived.</li>
       <li>Once it waits in a read, every buffer is handed back and nothing is being sent, the
-      connection leaves the table and is posted to the other reactor. Not idle within 100 ms, it stays
-      and its recv is armed again.</li>
+      connection leaves the table and is posted to the other reactor. A handler at work is waited
+      for, 2 s at most; once it waits in a read, the connection has 100 ms to be idle. Not idle by
+      then, it stays and its recv is armed again.</li>
       <li>The other one gives it a slot, registers its buffer ring (incremental mode, under a group id kept
       for it since the start) and arms a recv on the same descriptor. The handler resumes there, with that
       recv's completion.</li>
     </ol>
-    <p>So a handler may find itself on another reactor after a read, and only after a read: take what
-    belongs to a reactor from <code>Reactor.Current</code> then, or set <code>conn.Pinned</code> while
-    it can't follow. What runs elsewhere and has to get to the connection's reactor asks
-    <code>conn.Reactor</code> again once it got there. ioxide's HTTP/2 stacks and TLS pipes do; a TLS
-    handshake and Kestrel's connections stay put. A flush another thread asks for while the connection
-    is between two reactors can get lost, so a connection that others flush while a read of it waits
-    has to be pinned.</p>
+    <p>So a handler may find itself on another reactor after a read, or after a flush that a read waits
+    beside, and an HTTP/2 request handler after any wait on its request or response: take what belongs
+    to a reactor from <code>Reactor.Current</code> then, or set <code>conn.Pinned</code> while it can't
+    follow. What runs elsewhere and has to get to the connection's reactor asks <code>conn.Reactor</code>
+    again once it got there. ioxide's HTTP/2 stacks (given the connection or one of ioxide's pipes) and
+    its TLS pipes do; a TLS handshake and Kestrel's connections stay put. A flush asked for off the
+    connection's reactor while it is between two reactors can get lost, so a connection that something
+    other than its handler flushes while a read of it waits - another thread, a timer of the reactor it
+    was accepted on - has to be pinned, or flushed from <code>conn.Reactor</code>. So does one that an
+    HTTP/2 stack serves over a pipe of another kind, such as an <code>SslStream</code>'s.</p>
 
     <h2>Wiring and services</h2>
     <p>Three seams connect an application: <code>TcpHandle</code> (the per-connection loop, with

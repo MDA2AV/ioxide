@@ -14,10 +14,13 @@ public sealed unsafe partial class TcpConnection
     private Reactor _home;
 
     /// <summary>
-    /// The reactor this connection is on, or on its way to. It changes only under <see cref="TcpOptions.Rebalance"/>,
-    /// while a read waits, so after every read it can be another one than before.
+    /// The reactor this connection is on. It changes only under <see cref="TcpOptions.Rebalance"/>, while a read waits, so
+    /// after every read it can be another one than before.
     /// </summary>
     /// <remarks>
+    /// While it is on its way to another reactor it is that one to the thread of the reactor it left, and the one it left
+    /// to every other thread, as that one passes on what it is sent.
+    ///
     /// On that reactor's own thread it doesn't change until the code running there returns or waits. Anywhere else it can
     /// change at any moment: what must run on the connection's reactor asks again once it got there, as in
     /// <c>while (!connection.Reactor.OnReactorThread) await new ReactorSwitch(connection.Reactor);</c>
@@ -39,6 +42,10 @@ public sealed unsafe partial class TcpConnection
     /// a transaction on one of its database connections, say. Set by the code that reads from the connection, before the
     /// read. Reset with the connection's life. Only <see cref="TcpOptions.Rebalance"/> ever moves one.
     /// </summary>
+    /// <remarks>
+    /// Pins don't nest: code that pins a connection for a while sets back what it found, as
+    /// <see cref="ioxide.tls.TlsService.AcceptAsync"/> does, and doesn't unpin one that somebody else pinned.
+    /// </remarks>
     public bool Pinned { get; set; }
 
     // Where it is in a move, on its reactor's thread. With none, its recv is armed as ever.

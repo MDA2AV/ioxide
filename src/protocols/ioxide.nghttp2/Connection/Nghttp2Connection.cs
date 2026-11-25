@@ -29,6 +29,10 @@ namespace ioxide.nghttp2;
 /// <c>TcpConnectionDualPipe</c> for h2c, or a <c>TlsConnectionDualPipe</c> for h2 over TLS, or a
 /// pipe over anything else - the protocol code is identical in every case, and the transport is
 /// chosen where the connection is accepted.
+///
+/// Given the connection or one of those two pipes, it follows the connection to whichever reactor that
+/// is on (<c>TcpOptions.Rebalance</c>). Over a pipe of another kind it stays on the reactor it began
+/// on, and its connection has to be pinned (<c>TcpConnection.Pinned</c>).
 /// </summary>
 /// <remarks>
 /// Reactor thread only. nghttp2's callbacks fire INSIDE <c>ih2_read</c>, so they may only deposit

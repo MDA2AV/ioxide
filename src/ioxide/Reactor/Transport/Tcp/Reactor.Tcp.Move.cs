@@ -25,14 +25,21 @@ namespace ioxide;
 /// </remarks>
 public sealed unsafe partial class Reactor
 {
-    /// <summary>How long a connection without a recv waits to become idle before it stays after all.</summary>
+    /// <summary>How long a connection without a recv, whose handler waits in a read, waits to become idle before it stays after all.</summary>
     private const int MoveGiveUpMs = 100;
+
+    /// <summary>How long it waits for a handler at work to wait in a read at all.</summary>
+    private const int MoveAtMostMs = 2_000;
 
     // Their recv is over and they are not idle yet: looked at on every pass. (tag generation << 32) | slot.
     private readonly List<ulong> _leaving = [];
 
     // On their way here: posted, or about to be, and not taken. A stop waits for them.
     private int _arriving;
+
+    // Given away and not taken yet: until then other threads send what they have for one this reactor's way, so a stop
+    // waits for them too.
+    private int _givenAway;
 
     private long _connectionsGiven;
     private long _connectionsTaken;
@@ -82,11 +89,13 @@ public sealed unsafe partial class Reactor
     // As the queues name one: what is over or has left is not found by it.
     private static ulong NameOf(TcpConnection conn) => ((ulong)(ushort)conn.TagGen << 32) | (uint)conn.Slot;
 
-    // Its recv is over, by the cancel or by itself: nothing more arrives here.
+    // Its recv is over, by the cancel or by itself: nothing more arrives here. Idle, it goes. Whether it stays is for the
+    // next pass to say, past the rest of this batch: a recv armed now would be submitted after whatever the batch does with
+    // the connection, such as closing its descriptor, whose number may be another socket's by then.
     private void RecvOver(TcpConnection conn)
     {
         conn.MoveState = TcpConnection.MoveWaiting;
-        if (!SettleMove(conn))
+        if (!conn.Idle || !HandOver(conn, flushDone: false))
         {
             _leaving.Add(NameOf(conn));
         }
@@ -118,9 +127,11 @@ public sealed unsafe partial class Reactor
             return true;
         }
 
-        // Over, held back, or waiting for the rest of something it holds a part of in this reactor's buffers.
+        // Over, held back, or waiting for the rest of something it holds a part of in this reactor's buffers. A handler at
+        // work is waited for, for a while; once it waits in a read, what keeps the connection from being idle has 100 ms.
         if (conn.IsClosed || conn.HandlerReleased || conn.Pinned || (conn.ReadParked && !conn.HoldsNothing)
-            || NowMs - conn.MoveSinceMs >= MoveGiveUpMs)
+            || NowMs - conn.MoveSinceMs >= MoveAtMostMs
+            || (conn.ReadParked && NowMs - Math.Max(Volatile.Read(ref conn.ReadParkedMs), conn.MoveSinceMs) >= MoveGiveUpMs))
         {
             StayHere(conn);
             return true;
@@ -165,6 +176,7 @@ public sealed unsafe partial class Reactor
         }
         Volatile.Write(ref _connectionsGiven, _connectionsGiven + 1);
 
+        Interlocked.Increment(ref _givenAway);
         conn.LeaveFor(target);
         target.ScheduleOnReactor(Arrive, new Arrival(target, conn, flushDone, this));   // the last this thread touches of it
         return true;
@@ -202,6 +214,7 @@ public sealed unsafe partial class Reactor
         Track(conn);
         conn.ArriveOn(this);
         Interlocked.Decrement(ref _arriving);   // in the table now, which a stop waits for too
+        Interlocked.Decrement(ref (arrival.From ?? this)._givenAway);   // and others send it here
         Volatile.Write(ref _connectionsTaken, _connectionsTaken + 1);
 
         // Past the new tag being there for all to see: a shutdown deferred since was queued under it.
@@ -244,6 +257,7 @@ public sealed unsafe partial class Reactor
         conn.IncrementalMode = false;   // it has no ring to tear down
         Track(conn);
         conn.ArriveOn(this);
+        Interlocked.Decrement(ref (arrival.From ?? this)._givenAway);
         if (arrival.FlushDone)
         {
             conn.CompleteFlush();
@@ -264,5 +278,6 @@ public sealed unsafe partial class Reactor
         }
         conn.MarkClosed();
         ResetPeer(conn.ClientFd);
+        Interlocked.Decrement(ref (arrival.From ?? arrival.Target)._givenAway);
     }
 }

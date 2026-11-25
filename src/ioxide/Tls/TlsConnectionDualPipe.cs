@@ -26,7 +26,11 @@ namespace ioxide.tls;
 /// off to kTLS RX, and keeps the userspace reader. <see cref="TlsSession"/> then reports the
 /// OUTCOME, which is what this reads.
 /// </summary>
-/// <remarks>Usable from any thread: reads, flushes and disposal from another run on the connection's reactor.</remarks>
+/// <remarks>
+/// Usable from any thread: reads and disposal from another run on the connection's reactor, and so do flushes where
+/// BoringSSL encrypts. Under kTLS transmit the writer is the connection's own, a flush of which, asked for off the
+/// connection's reactor while it moves (<see cref="TcpOptions.Rebalance"/>), can get lost.
+/// </remarks>
 public sealed class TlsConnectionDualPipe : IDuplexPipe, IAsyncDisposable
 {
     private readonly TcpConnection _conn;

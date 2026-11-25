@@ -143,7 +143,8 @@ public sealed unsafe partial class Reactor
             CancelClientOps();
         }
 
-        return (TcpLive == 0 && Volatile.Read(ref _arriving) == 0 && _opFreeTop == _opTargets.Length) || Native.MonotonicMs >= deadlineMs;
+        return (TcpLive == 0 && Volatile.Read(ref _arriving) == 0 && Volatile.Read(ref _givenAway) == 0 && _opFreeTop == _opTargets.Length)
+            || Native.MonotonicMs >= deadlineMs;
     }
 
     // The clients stop, then every socket closes, ending every read, write and wait on one; Teardown runs it for a

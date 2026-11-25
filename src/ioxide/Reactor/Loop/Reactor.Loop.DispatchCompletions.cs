@@ -84,6 +84,7 @@ public sealed unsafe partial class Reactor
 
         if (conn.CloseAfterSend)
         {
+            EndMove(conn);
             Untrack(conn);
             conn.ReleaseReactorRef();
         }

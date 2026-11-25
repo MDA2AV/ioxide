@@ -25,6 +25,10 @@ namespace ioxide.http2;
 /// It speaks to an <see cref="IDuplexPipe"/> and knows nothing about TLS: hand it a
 /// <c>TcpConnectionDualPipe</c> for h2c or a <c>TlsConnectionDualPipe</c> for h2 over TLS, and the
 /// protocol code is identical either way.
+///
+/// Given the connection or one of those two pipes, it follows the connection to whichever reactor that
+/// is on (<c>TcpOptions.Rebalance</c>). Over a pipe of another kind it stays on the reactor it began
+/// on, and its connection has to be pinned (<c>TcpConnection.Pinned</c>).
 /// </summary>
 /// <remarks>Reactor thread only.</remarks>
 public sealed partial class Http2Connection : IDisposable

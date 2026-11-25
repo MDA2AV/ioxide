@@ -1,3 +1,5 @@
+using System.Diagnostics;
+
 namespace ioxide;
 
 public sealed unsafe partial class Reactor
@@ -57,7 +59,24 @@ public sealed unsafe partial class Reactor
         // Not NowMs: that was read before this pass's work, and the wait would oversleep by all of it.
         long now = Native.MonotonicMs;
 
+        // A connection whose move waits for it to be idle has no recv to wake the loop, and its handler can get to wait in
+        // a read on another thread: looked at again in a millisecond.
+        if (_leaving.Count > 0)
+        {
+            wakeAt = Math.Min(wakeAt, now);
+        }
+        bool weighing = _fleet.Length > 0;
+        if (weighing)
+        {
+            _worked += Stopwatch.GetTimestamp() - _passFrom;   // this pass, past the last wait
+        }
+
         // +1: the ms clock can read just short of the deadline when the kernel's timer wakes us.
-        return _ring.SubmitAndWait(1, Math.Max(0, wakeAt - now) + 1);
+        int rc = _ring.SubmitAndWait(1, Math.Max(0, wakeAt - now) + 1);
+        if (weighing)
+        {
+            _passFrom = Stopwatch.GetTimestamp();
+        }
+        return rc;
     }
 }

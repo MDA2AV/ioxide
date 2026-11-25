@@ -6,9 +6,11 @@ namespace ioxide;
 /// <summary>
 /// Which connections move, and where (<see cref="TcpOptions.Rebalance"/>). The kernel spreads connections over the
 /// reactors as they connect, knowing nothing of what each will ask for, so some reactors can end up with all the busy ones.
-/// On its tick a reactor compares what its thread spent on a CPU with what the others' did. A busy one with a much less
-/// busy one beside it weighs its connections for a tick, by the time their recv completions take, and then gives away
-/// enough of them to halve the difference, each as it next completes a recv. One with nothing to do is never looked at.
+/// On its tick a reactor compares how busy it was with how busy the others were: the share of the tick its thread spent
+/// on a CPU, or kept from waiting for completions if that is more. A busy one with a much less busy one beside it, less
+/// busy in both of its last two ticks, weighs its connections for a tick, by the time their recv completions take, and
+/// then gives away enough of them to halve the difference, each as it next completes a recv. One with nothing to do is
+/// never looked at.
 /// </summary>
 public sealed unsafe partial class Reactor
 {
@@ -19,7 +21,7 @@ public sealed unsafe partial class Reactor
     private const int GapPercent = 30;
 
     /// <summary>A reactor whose last reading is older is stuck in something, whatever the reading says.</summary>
-    private const int LoadStaleMs = 3 * TickMs;
+    private const int LoadStaleMs = 2 * TickMs;
 
     /// <summary>For how many ticks a connection's weight is taken for what it still is.</summary>
     private const int WeightTicks = 8;
@@ -38,15 +40,25 @@ public sealed unsafe partial class Reactor
     private static readonly ConditionalWeakTable<ServerConfig, Reactor?[]> Fleets = new();
     private Reactor?[] _fleet = [];
 
-    // This reactor's last reading, which the others go by.
+    // This reactor's last reading, and the higher of it and the one before: as a taker it goes by that, so one that was
+    // quiet for a moment, between two bursts, is given nothing.
     private int _loadPercent;
+    private int _loadPeak;
     private long _loadAtMs;
     private long _loadCpuNs;
     private long _loadTimestamp;
 
+    // Of this tick, outside the ring's wait, in Stopwatch ticks: a handler that blocks, or a CPU shared with others, keeps
+    // a reactor from its completions without its thread being on a CPU. The ms clock is too coarse for a pass.
+    private long _worked;
+    private long _passFrom;
+
     private Reactor? _taker;     // given to, while Giving and Settling
     private Reactor? _giver;     // the one giving to this reactor, if any: one at a time, or two would fill the same gap
     private long _budget;        // what may still be given to _taker
+    private double _share;       // of the connections that fit it, the one in so many that goes
+    private double _credit;      // towards the next of them
+    private bool _gave;          // since _taker was claimed
     private long _weight;        // of the recv completions of this tick
     private long _weighTick;
 
@@ -59,7 +71,7 @@ public sealed unsafe partial class Reactor
         }
 
         _loadCpuNs = Native.ThreadCpuNs;
-        _loadTimestamp = Stopwatch.GetTimestamp();
+        _loadTimestamp = _passFrom = Stopwatch.GetTimestamp();
         Volatile.Write(ref _loadAtMs, Native.MonotonicMs);
 
         _fleet = Fleets.GetValue(_config, static config => new Reactor?[config.ReactorCount]);
@@ -67,10 +79,18 @@ public sealed unsafe partial class Reactor
         AddTicker(BalanceTick);
     }
 
-    // For good: the config can outlive its reactors, and have others after them.
+    // For good: the config can outlive its reactors, and have others after them. Moves under way end here, and what they
+    // had reserved on other reactors goes back.
     private void LeaveFleet()
     {
         ReleaseTaker();
+        foreach (TcpConnection? conn in _slots.AsSpan(0, _slotsUsed))
+        {
+            if (conn is not null)
+            {
+                EndMove(conn);
+            }
+        }
         if (_fleet.Length > 0)
         {
             Interlocked.CompareExchange(ref _fleet[_id], null, this);
@@ -94,7 +114,16 @@ public sealed unsafe partial class Reactor
             _balance = Balance.Settling;
             return;
         }
+
+        // Nothing of it could go (one connection is all its load, or pinned ones are): the taker is for the others, until
+        // this one has weighed anew.
+        bool futile = _balance == Balance.Settling && !_gave;
         ReleaseTaker();
+        if (futile)
+        {
+            _balance = Balance.Off;
+            return;
+        }
 
         Reactor? taker = _loadPercent >= BusyPercent && !_stopRequested ? LeastLoaded() : null;
         if (taker is null)
@@ -110,7 +139,11 @@ public sealed unsafe partial class Reactor
         }
 
         _taker = taker;
-        _budget = weight * (_loadPercent - taker._loadPercent) / (2 * _loadPercent);
+        int gap = _loadPercent - Volatile.Read(ref taker._loadPeak);
+        _budget = weight * gap / (2 * _loadPercent);
+        _share = gap / (2.0 * _loadPercent);
+        _credit = 0.5;
+        _gave = false;
         _balance = Balance.Giving;
     }
 
@@ -120,22 +153,27 @@ public sealed unsafe partial class Reactor
         long timestamp = Stopwatch.GetTimestamp();
         double wall = Stopwatch.GetElapsedTime(_loadTimestamp, timestamp).TotalNanoseconds;
 
-        Volatile.Write(ref _loadPercent, (int)(100 * (cpu - _loadCpuNs) / Math.Max(1, wall)));
+        double busy = Math.Max(cpu - _loadCpuNs, _worked * (1e9 / Stopwatch.Frequency));
+        int reading = (int)Math.Min(100, 100 * busy / Math.Max(1, wall));
+        Volatile.Write(ref _loadPeak, Math.Max(reading, _loadPercent));
+        Volatile.Write(ref _loadPercent, reading);
         Volatile.Write(ref _loadAtMs, NowMs);
         _loadCpuNs = cpu;
         _loadTimestamp = timestamp;
+        _worked = 0;
     }
 
     private Reactor? LeastLoaded()
     {
         Reactor? least = null;
+        long now = Native.MonotonicMs;   // not the pass's: a busy reactor's passes are long
         foreach (Reactor? reactor in _fleet)
         {
             if (reactor is not null && !reactor._stopRequested
                 && Volatile.Read(ref reactor._giver) is null
-                && NowMs - Volatile.Read(ref reactor._loadAtMs) <= LoadStaleMs
-                && Volatile.Read(ref reactor._loadPercent) + GapPercent <= _loadPercent   // so never this one
-                && (least is null || reactor._loadPercent < least._loadPercent))
+                && now - Volatile.Read(ref reactor._loadAtMs) <= LoadStaleMs
+                && Volatile.Read(ref reactor._loadPeak) + GapPercent <= _loadPercent   // so never this one
+                && (least is null || reactor._loadPeak < least._loadPeak))
             {
                 least = reactor;
             }
@@ -155,7 +193,8 @@ public sealed unsafe partial class Reactor
     // After one of its recv completions, its handler's part included, unless the balance is off.
     private void Weigh(TcpConnection conn, long took)
     {
-        if (conn.WeighedTick != _weighTick)
+        bool first = conn.WeighedTick != _weighTick;
+        if (first)
         {
             conn.LastWeight = conn.WeighedTick >= _weighTick - WeightTicks ? conn.Weight : 0;
             conn.WeighedTick = _weighTick;
@@ -164,12 +203,25 @@ public sealed unsafe partial class Reactor
         conn.Weight += took;
         _weight += took;
 
-        // By what it weighed over a whole tick, this one's being a part. A tenth over the budget is near enough: an idle
-        // reactor reads a little over 0, and of two that weigh the same neither would go to it.
-        if (_balance == Balance.Giving && conn.LastWeight > 0 && conn.LastWeight <= _budget + (_budget / 10)
-            && StartMove(conn, _taker!))
+        if (_balance == Balance.Giving && first)
         {
-            _budget -= conn.LastWeight;
+            Give(conn, conn.LastWeight > 0 ? conn.LastWeight : took);
+        }
+    }
+
+    // Once a tick, as it first comes by: by what it weighed over the last whole tick, or what this completion took if it
+    // weighed nothing lately. A tenth over the budget is near enough: an idle reactor reads a little over 0, and of two that
+    // weigh the same neither would go to it. Of all that come by, no more go than the share of the load that is to go, so
+    // ones whose work after an await weighs nothing don't all go at once.
+    private void Give(TcpConnection conn, long weighs)
+    {
+        _credit += _share;
+        if (_credit >= 1 && weighs <= _budget + (_budget / 10) && NowMs - Volatile.Read(ref _taker!._loadAtMs) <= LoadStaleMs
+            && StartMove(conn, _taker))
+        {
+            _credit -= 1;
+            _budget -= weighs;
+            _gave = true;
         }
     }
 }

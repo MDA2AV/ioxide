@@ -244,15 +244,7 @@ public sealed unsafe partial class TcpConnection : IValueTaskSource<RecvSnapshot
     {
         foreach (UnmanagedMemoryManager memory in memories)
         {
-            if (IncrementalMode)
-            {
-                _reactor.EnqueueReturnQIncremental(Slot, memory.Gen, memory.BufferId);
-            }
-            else
-            {
-                _reactor.EnqueueReturnQ(memory.BufferId);
-            }
-            CountReturned();
+            HandBack(memory.Gen, memory.BufferId, memory.Pointer);
         }
     }
 
@@ -266,7 +258,7 @@ public sealed unsafe partial class TcpConnection : IValueTaskSource<RecvSnapshot
     // rather than taking an entry of its own, so a peer sending small segments to a handler that is not
     // reading fills the connection's ring, not its queue. Reactor thread.
     internal bool TryExtendRecv(int res, ushort bid, byte* ptr)
-        => _recv.TryExtendLast(ptr, res, bid, (ushort)TagGen);
+        => _recv.TryExtendLast(ptr, res, bid, (ushort)Volatile.Read(ref _generation));
 
     // Returns false on recv-queue overflow; the reactor then tears the connection down.
     public bool Complete(int res, ushort bid, bool hasBuffer, byte* ptr)
@@ -277,7 +269,7 @@ public sealed unsafe partial class TcpConnection : IValueTaskSource<RecvSnapshot
                      Bid = bid,
                      Len = res,
                      HasBuffer = hasBuffer,
-                     Gen = (ushort)TagGen
+                     Gen = (ushort)Volatile.Read(ref _generation)
                  }))
         {
             Console.Error.WriteLine("[conn] recv queue overflow; closing connection.");

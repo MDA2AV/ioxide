@@ -64,6 +64,10 @@ var result = await pool.QueryAsync("SELECT 42");
 
 // result.Value: "42" · result.Rows: 1 · result.CommandTag: "SELECT 1"</code></pre>
 
+    <p>With <code>TcpOptions.Rebalance</code> the handler's connection can change reactors at a read,
+    so the pool is taken from <code>Reactor.Current</code> after it, not once for the connection's life
+    (<a href="architecture.html#rebalance">connections that change reactors</a>).</p>
+
     <p>One <code>PgConnection</code> is one ordered conversation, and commands <em>pipeline</em>
     onto it - many in flight at once, answered in order. <code>QueryAsync</code> picks the next
     connection round-robin; the pool is parallelism, not exclusive checkout, and there is no

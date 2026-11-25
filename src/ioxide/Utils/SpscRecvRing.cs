@@ -12,7 +12,7 @@ public sealed unsafe class SpscRecvRing
         public ushort Bid;
         public int Len;
         public bool HasBuffer;
-        public ushort Gen;   // the generation of the connection's tags when enqueued (incremental return guard)
+        public ushort Gen;   // connection generation when enqueued (guards a late return)
 
         public ReadOnlySpan<byte> AsSpan() => new(Ptr, Len);
 
