@@ -1,6 +1,7 @@
 using System.Buffers;
 using System.IO.Pipelines;
 using System.Runtime.InteropServices;
+using ioxide.tls;
 
 namespace ioxide.nghttp2;
 
@@ -60,11 +61,17 @@ public sealed partial class Nghttp2Connection : IDisposable
     // and the session returns no WINDOW_UPDATE of its own.
     private bool _streamBodies;
 
-    // The reactor this connection is served on; null when it runs without one, as over a test pipe.
+    // The TCP connection underneath, which can change reactors while a read waits (TcpOptions.Rebalance). Null over any
+    // other pipe, which stays on the reactor the serving began on - or runs without one, as over a test pipe.
+    private readonly TcpConnection? _tcp;
     private Reactor? _reactor;
 
-    internal Reactor? Reactor => _reactor;
-    internal bool OffReactor => _reactor is { OnReactorThread: false };
+    /// <summary>The reactor this connection is served on.</summary>
+    internal Reactor? Reactor => _tcp is { } tcp ? tcp.Reactor : _reactor;
+
+    // Back on the reactor, from wherever: while (OffReactor) await new ReactorSwitch(Reactor). The connection can have moved
+    // on by the time a switch lands, and the next one follows it.
+    internal bool OffReactor => Reactor is { OnReactorThread: false };
 
     // Requests still being assembled, keyed by stream. A request only leaves here when its stream
     // ends, which is when it becomes dispatchable.
@@ -105,6 +112,12 @@ public sealed partial class Nghttp2Connection : IDisposable
     public Nghttp2Connection(IDuplexPipe pipe, Nghttp2Options? options = null)
     {
         _pipe = pipe;
+        _tcp = pipe switch
+        {
+            TcpConnectionDualPipe tcp => tcp.Connection,
+            TlsConnectionDualPipe tls => tls.Connection,
+            _ => null,
+        };
         _options = options ?? new Nghttp2Options();
     }
 

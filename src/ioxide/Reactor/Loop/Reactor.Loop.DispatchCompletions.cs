@@ -74,6 +74,12 @@ public sealed unsafe partial class Reactor
     // The kernel is done with the slab: complete the flush, then any teardown that waited for it.
     private void FinishSend(TcpConnection conn)
     {
+        // Before whoever waits for this flush is told, as it may well send on: the connection's next reactor tells it.
+        if (conn.MoveState == TcpConnection.MoveWaiting && conn.IdleButForTheSend && HandOver(conn, flushDone: true))
+        {
+            return;
+        }
+
         conn.CompleteFlush();
 
         if (conn.CloseAfterSend)

@@ -133,4 +133,38 @@ public sealed record TcpOptions
     /// as when the flush deadline cuts a connection.
     /// </remarks>
     public int SendTimeoutMs { get; init; } = 60_000;
+
+    /// <summary>
+    /// Let a busy reactor give connections to one that is not, among those sharing the <see cref="ServerConfig"/>. Off by
+    /// default.
+    ///
+    /// The kernel spreads connections over the reactors as they connect, before any of them has asked for anything. When
+    /// the busy ones happen to be on a few reactors, the others' cores stay unused: with two of four reactors' connections
+    /// silent, a server does half of what it could. With this on, a reactor that spent three quarters or more of the last
+    /// tick (~250 ms) on a CPU, next to one that spent 30 points less, gives it connections worth half the difference. It
+    /// takes two or three ticks to see to it. A connection that alone keeps a reactor busy stays: it can't be split.
+    /// </summary>
+    /// <remarks>
+    /// A connection moves as TCP has it, whatever protocol is on it, and the peer notices nothing: while a read of its
+    /// handler's waits, everything received has been handed back and nothing is being sent. So what a handler may no longer
+    /// do is take it for granted that it resumes on the same reactor after a read, or after a flush that a read waits
+    /// beside (and an HTTP/2 request handler, whose connection reads beside it, after any wait on its request or response):
+    /// <list type="bullet">
+    /// <item>What belongs to a reactor (a pool, a cache, the <c>Reactor</c> the handler was called with, which is the one
+    /// the connection was accepted on) is taken from <see cref="Reactor.Current"/> or
+    /// <see cref="TcpConnection.Reactor"/> afterwards, not kept across it.</item>
+    /// <item>A handler that has to keep it, through a transaction over several reads say, sets
+    /// <see cref="TcpConnection.Pinned"/> meanwhile.</item>
+    /// <item>A connection that other threads flush while a read of it waits, as a broadcast to its websocket does, has to
+    /// be pinned: a flush asked for off the reactor while the connection is between two of them can get lost, and then
+    /// never completes. One that its own handler flushes, between its reads, on whichever thread, is safe, and so are
+    /// ioxide's HTTP/2 stacks, and its TLS pipes where BoringSSL encrypts, which take theirs to the connection's reactor
+    /// first.</item>
+    /// </list>
+    /// A TLS handshake, and a connection served by Kestrel, stay where they are.
+    ///
+    /// Incremental mode has one thing more: a connection only moves to a reactor with a group id left
+    /// (<see cref="IncrementalOptions.MaxConnections"/>).
+    /// </remarks>
+    public bool Rebalance { get; init; } = false;
 }

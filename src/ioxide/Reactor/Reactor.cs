@@ -47,7 +47,7 @@ public sealed unsafe partial class Reactor
     private readonly uint _ringEntries;
     private readonly uint _recvBufferSize;
 
-    // user_data: [63:56] kind | [47:32] connection generation | [31:0] connection slot (recv, send),
+    // user_data: [63:56] kind | [47:32] the connection's tag generation | [31:0] connection slot (recv, send),
     // listening fd (accept) or client-op slot. The generation makes straggler CQEs from a reused
     // slot detectable as stale.
     private const int  KindShift  = 56;
@@ -87,7 +87,8 @@ public sealed unsafe partial class Reactor
     // Accepted and not yet recycled, in the table or not: a stop runs on until none is left.
     private int TcpLive => _slotsUsed - _freeSlots.Count;
 
-    // Every TcpConnection life on this reactor takes the next value, so two lives never share a generation (#416).
+    // Every connection that comes to this reactor takes the next value for its tags, accepted or given to it, so two in
+    // one slot never share a generation (#416).
     private int _tcpGeneration;
 
     // Incremental-mode sizing (see Reactor.Incremental.cs).
@@ -179,13 +180,10 @@ public sealed unsafe partial class Reactor
     {
         TcpConnection?[] slots = _slots;
         TcpConnection? conn = (uint)slot < (uint)slots.Length ? slots[slot] : null;
-        return conn != null && (ushort)conn.Generation == gen ? conn : null;
+        return conn != null && (ushort)conn.TagGen == gen ? conn : null;
     }
 
-    // Reactor thread: a connection is constructed at accept and cleared at recycle.
-    internal int NextTcpGeneration() => ++_tcpGeneration;
-
-    // A slot for the connection, which keeps it until it is recycled.
+    // A slot for the connection, which keeps it until it is recycled or given away, and the generation of its tags.
     private void Track(TcpConnection conn)
     {
         if (!_freeSlots.TryPop(out int slot))
@@ -197,10 +195,11 @@ public sealed unsafe partial class Reactor
             slot = _slotsUsed++;
         }
         conn.Slot = slot;
+        conn.TagGen = ++_tcpGeneration;
         _slots[slot] = conn;
     }
 
-    // Out of the table, so no completion finds it. It keeps its slot until Recycle frees it.
+    // Out of the table, so no completion finds it. It keeps its slot until Recycle frees it, or HandOver.
     private void Untrack(TcpConnection conn) => _slots[conn.Slot] = null;
 
     // Writes addr, len and bid only: bytes 14-15 of entry 0 are the ring's tail.

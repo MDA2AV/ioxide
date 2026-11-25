@@ -136,9 +136,14 @@ public sealed class TlsEncryptingPipeWriter : PipeWriter, IValueTaskSource<Flush
     {
         try
         {
-            if (_conn.Reactor.PostsClosed)
+            Reactor reactor = _conn.Reactor;
+            if (reactor.PostsClosed)
             {
                 _core.SetResult(Stopped());
+            }
+            else if (!reactor.OnReactorThread)
+            {
+                reactor.ScheduleContinuation(_flushOnReactor);   // the connection moved meanwhile: after it
             }
             else if (_completed)
             {

@@ -226,7 +226,10 @@ public sealed class Http2ResponseWriter : IBufferWriter<byte>
 
         try
         {
-            await new ReactorSwitch(_connection.Reactor);
+            while (_connection.OffReactor)
+            {
+                await new ReactorSwitch(_connection.Reactor);
+            }
         }
         catch (ObjectDisposedException)
         {
@@ -300,7 +303,10 @@ public sealed class Http2ResponseWriter : IBufferWriter<byte>
             throw new InvalidOperationException("Write the response headers before flushing a body chunk.");
         }
 
-        await new ReactorSwitch(_connection.Reactor);
+        while (_connection.OffReactor)
+        {
+            await new ReactorSwitch(_connection.Reactor);
+        }
 
         SendUnsentHeaders();
         return await Send(endStream);

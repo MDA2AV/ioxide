@@ -146,7 +146,10 @@ public sealed class Nghttp2ResponseWriter : IBufferWriter<byte>, IValueTaskSourc
     /// </returns>
     public async ValueTask<FlushResult> FlushAsync()
     {
-        await new ReactorSwitch(_connection.Reactor);
+        while (_connection.OffReactor)
+        {
+            await new ReactorSwitch(_connection.Reactor);
+        }
 
         if (!_headersSent)
         {

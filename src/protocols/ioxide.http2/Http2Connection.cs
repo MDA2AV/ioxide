@@ -1,5 +1,6 @@
 using System.Buffers;
 using System.IO.Pipelines;
+using ioxide.tls;
 
 namespace ioxide.http2;
 
@@ -116,11 +117,17 @@ public sealed partial class Http2Connection : IDisposable
     // What a stream consumes before it is credited: a quarter of its window, but at most the 65,535 a peer counts until it applies our SETTINGS, so any window it counts holds a step.
     private readonly int _creditStep;
 
-    // The reactor this connection is served on; null when it runs without one, as over a test pipe.
+    // The TCP connection underneath, which can change reactors while a read waits (TcpOptions.Rebalance). Null over any
+    // other pipe, which stays on the reactor the serving began on - or runs without one, as over a test pipe.
+    private readonly TcpConnection? _tcp;
     private Reactor? _reactor;
 
-    internal Reactor? Reactor => _reactor;
-    internal bool OffReactor => _reactor is { OnReactorThread: false };
+    /// <summary>The reactor this connection is served on.</summary>
+    internal Reactor? Reactor => _tcp is { } tcp ? tcp.Reactor : _reactor;
+
+    // Back on the reactor, from wherever: while (OffReactor) await new ReactorSwitch(Reactor). The connection can have moved
+    // on by the time a switch lands, and the next one follows it.
+    internal bool OffReactor => Reactor is { OnReactorThread: false };
 
     /// <summary>
     /// Serve over an already-chosen transport. The pipe is the caller's to dispose.
@@ -128,6 +135,12 @@ public sealed partial class Http2Connection : IDisposable
     public Http2Connection(IDuplexPipe pipe, Http2Options? options = null)
     {
         _pipe = pipe;
+        _tcp = pipe switch
+        {
+            TcpConnectionDualPipe tcp => tcp.Connection,
+            TlsConnectionDualPipe tls => tls.Connection,
+            _ => null,
+        };
         _options = options ?? new Http2Options();
         _decoder = new HpackDecoder();
         _initialStreamWindow = Math.Max(_options.InitialWindowSize, DefaultWindow);
@@ -230,8 +243,11 @@ public sealed partial class Http2Connection : IDisposable
             while (!IsBroken)
             {
                 ReadResult read = await _pipe.Input.ReadAsync();
-                _reactor ??= Reactor.Current;        // a RunAsync begun off the reactor learns it here
-                await new ReactorSwitch(_reactor);   // a pipe may complete its read elsewhere: a default Pipe on the thread pool
+                _reactor ??= Reactor.Current;   // a RunAsync begun off the reactor learns it here
+                while (OffReactor)              // a pipe may complete its read elsewhere: a default Pipe on the thread pool
+                {
+                    await new ReactorSwitch(Reactor);
+                }
 
                 bool received = Accumulate(read.Buffer);
                 _pipe.Input.AdvanceTo(read.Buffer.End);
@@ -284,7 +300,10 @@ public sealed partial class Http2Connection : IDisposable
     {
         try
         {
-            await new ReactorSwitch(_reactor);
+            while (OffReactor)
+            {
+                await new ReactorSwitch(Reactor);
+            }
         }
         catch (ObjectDisposedException)
         {
@@ -399,12 +418,18 @@ public sealed partial class Http2Connection : IDisposable
         try
         {
             Http2Response response = await inFlight;
-            await new ReactorSwitch(_reactor);   // back on the reactor, wherever the handler finished
+            while (OffReactor)   // back on the reactor, wherever the handler finished
+            {
+                await new ReactorSwitch(Reactor);
+            }
             WriteResponse(pending.StreamId, response);
         }
         catch (Exception exception)
         {
-            await new ReactorSwitch(_reactor);
+            while (OffReactor)
+            {
+                await new ReactorSwitch(Reactor);
+            }
             // Nobody can observe this task, so an escaping exception would vanish silently and the
             // peer would wait on a stream that is never coming.
             AnswerFault(request, pending.StreamId, exception);

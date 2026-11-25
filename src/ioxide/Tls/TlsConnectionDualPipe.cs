@@ -82,6 +82,9 @@ public sealed class TlsConnectionDualPipe : IDuplexPipe, IAsyncDisposable
     /// <summary>Response bytes. Plaintext under kTLS TX; encrypted here otherwise.</summary>
     public PipeWriter Output => _writer;
 
+    /// <summary>The connection this is a pipe over.</summary>
+    public TcpConnection Connection => _conn;
+
     /// <summary>
     /// Whether the connection is still in the life this pipe was made for. Connections are pooled: once this is
     /// false, the connection has ended and may already be serving another client.
@@ -93,7 +96,10 @@ public sealed class TlsConnectionDualPipe : IDuplexPipe, IAsyncDisposable
         // The session and the reader are the reactor's: freeing them under its SSL_write is a use after free.
         try
         {
-            await new ReactorSwitch(_conn.Reactor);
+            while (!_conn.Reactor.OnReactorThread)   // again, if the connection moved meanwhile
+            {
+                await new ReactorSwitch(_conn.Reactor);
+            }
         }
         catch (ObjectDisposedException)
         {

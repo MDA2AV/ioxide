@@ -74,8 +74,8 @@ public sealed unsafe partial class Reactor
     internal void ScheduleContinuation(Action continuation) => ScheduleOnReactor(ReactorSwitch.Resume, continuation);
 
     // A switch waiting on a stopped reactor resumes on the thread pool, where its GetResult throws, instead of
-    // waiting forever, as does a continuation posted like one (ScheduleContinuation). Every other post is dropped:
-    // it would never have run.
+    // waiting forever, as does a continuation posted like one (ScheduleContinuation). A connection given to it is
+    // closed. Every other post is dropped: it would never have run.
     [MethodImpl(MethodImplOptions.NoInlining)]
     private void DrainStoppedPosts()
     {
@@ -87,6 +87,10 @@ public sealed unsafe partial class Reactor
             if (item.Callback == ReactorSwitch.Resume)
             {
                 ThreadPool.UnsafeQueueUserWorkItem(static continuation => continuation(), (Action)item.State!, preferLocal: false);
+            }
+            else if (item.Callback == Arrive)
+            {
+                AbandonArrival((Arrival)item.State!);
             }
         }
     }

@@ -9,9 +9,13 @@ public sealed class TcpConnectionDualPipe : IDuplexPipe
     public PipeReader Input => _input;
     public PipeWriter Output { get; }
 
+    /// <summary>The connection this is a pipe over.</summary>
+    public TcpConnection Connection { get; }
+
     public TcpConnectionDualPipe(TcpConnection connection)
     {
         ArgumentNullException.ThrowIfNull(connection);
+        Connection = connection;
         _input = new TcpConnectionPipeReader(connection);
         Output = new TcpConnectionPipeWriter(connection);
     }

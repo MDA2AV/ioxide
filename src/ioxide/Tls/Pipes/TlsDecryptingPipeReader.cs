@@ -91,7 +91,10 @@ public sealed class TlsDecryptingPipeReader : PipeReader, IAsyncDisposable, IRec
     [MethodImpl(MethodImplOptions.NoInlining)]
     private async ValueTask<ReadResult> FillOnReactor(ValueTask<ReadResult> read)
     {
-        await new ReactorSwitch(_conn.Reactor);
+        while (!_conn.Reactor.OnReactorThread)   // again, if the connection moved meanwhile
+        {
+            await new ReactorSwitch(_conn.Reactor);
+        }
 
         if (!read.IsCompleted)
         {
@@ -148,7 +151,10 @@ public sealed class TlsDecryptingPipeReader : PipeReader, IAsyncDisposable, IRec
     {
         try
         {
-            await new ReactorSwitch(_conn.Reactor);
+            while (!_conn.Reactor.OnReactorThread)   // again, if the connection moved meanwhile
+            {
+                await new ReactorSwitch(_conn.Reactor);
+            }
         }
         catch (ObjectDisposedException)
         {

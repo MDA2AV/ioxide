@@ -16,6 +16,7 @@ public sealed unsafe partial class Reactor
             DrainRemoteOps();
             DrainPostQ();
             RearmStarvedRecvs();
+            if (_leaving.Count > 0) RunLeaving();
             QuicFireDueTimers();
 
             // After the drains, so a stop whose last connection one of them let go of ends without a wait.

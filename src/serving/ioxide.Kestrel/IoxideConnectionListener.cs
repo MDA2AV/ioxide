@@ -133,6 +133,9 @@ internal sealed class IoxideConnectionListener : IConnectionListener
         Reactor reactor = scheduler.Reactor;
         var id = Interlocked.Increment(ref _connectionCounter);
 
+        // Its pipes are scheduled on this reactor, and what the endpoints take from HttpContext.GetReactor() is this one's.
+        conn.Pinned = true;
+
         // TLS handshake (TLS endpoints only) runs here on the reactor thread, before Kestrel sees the
         // connection; the returned session decrypts inbound records - Kestrel gets plaintext.
         TlsSession? session = null;

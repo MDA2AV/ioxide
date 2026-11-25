@@ -1322,6 +1322,10 @@ public sealed class TlsService
         BoringSsl.SSL_set_ex_data(ssl, SslSessionIndex, GCHandle.ToIntPtr(handle));
         session.AttachHandle(handle);
 
+        // The service, and the sweep below, are this reactor's: the connection stays until the handshake is over.
+        bool pinned = conn.Pinned;
+        conn.Pinned = true;
+
         // Under the sweep from here until the handshake settles, either way.
         PendingHandshake? pending = null;
         if (_options.HandshakeTimeoutMs > 0)
@@ -1489,6 +1493,7 @@ public sealed class TlsService
             {
                 pending.Conn = null;
             }
+            conn.Pinned = pinned;
         }
     }
 

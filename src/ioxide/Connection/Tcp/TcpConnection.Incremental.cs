@@ -33,6 +33,7 @@ public sealed unsafe partial class TcpConnection
         {
             _reactor.EnqueueReturnQ(item.Bid);
         }
+        CountReturned();
     }
 
     private void DisposeIncremental()

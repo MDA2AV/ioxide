@@ -118,9 +118,10 @@ public IoUringSqe* GetSqe()
     <h3>user_data: the routing key</h3>
     <p>Every SQE carries a 64-bit <code>user_data</code> that comes back on its CQE, packed as
     <code>[kind:8 | generation:16 | slot:32]</code>. The slot is the connection's index in the
-    reactor's table, taken at accept and given back at recycle (for accept the low 32 bits are the
+    reactor's table, taken when it comes to the reactor, accepted or given by another, and given back at
+    recycle or when it is given away (for accept the low 32 bits are the
     listening fd, for client ops the op's slot). The <em>generation</em> is the crux of lifetime
-    safety: a pooled <code>Connection</code> bumps its generation every time it is recycled, so a
+    safety: with the slot the reactor hands out its next number (<code>TagGen</code>), so a
     straggler CQE from a closed connection carries a stale generation and is detected and dropped
     instead of corrupting the slot's new tenant.
     Kinds: accept, recv, send, wake, client, cancel, timer.</p>
@@ -285,23 +286,23 @@ private void OnTimerTick()
 }</code></pre>
 
     <h3>Recycling</h3>
-    <p><code>Recycle</code> always runs on the reactor: <code>MarkClosed</code> wakes any awaiters,
-    an <code>ASYNC_CANCEL</code> is submitted for the connection's multishot recv tagged with the
-    <em>pre-bump</em> generation (so it matches the armed SQE), leftover buffers return (shared) or
-    the per-connection ring unregisters (incremental), the fd closes, the slot goes back to the next
-    accept, and <code>Clear()</code> bumps
-    the generation - invalidating every stale token and queued reference at once - before the
+    <p><code>Recycle</code> always runs on the connection's reactor: <code>MarkClosed</code> wakes any awaiters,
+    an <code>ASYNC_CANCEL</code> is submitted for the connection's multishot recv by the tag it was armed
+    under, leftover buffers return (shared) or
+    the per-connection ring unregisters (incremental), the fd closes, the slot goes back for the next
+    connection to come, and <code>Clear()</code> bumps
+    the connection's own generation - invalidating every stale token and adapter at once - before the
     connection is pushed back to the pool (or freed if the pool is at <code>PoolMax</code>).</p>
-<p class="src"><b>Reactor.cs / Connection.cs</b> · cancel by the pre-bump generation, then bump it to void every stale token</p>
-<pre><code class="language-csharp">// Reactor.Recycle - cancel the armed recv BEFORE the generation moves, so it matches the SQE:
-SubmitCancel(Tag(KindRecv, (ushort)conn.Generation, conn.Slot));
+<p class="src"><b>Reactor.cs / Connection.cs</b> · cancel by the tag, then bump the generation to void every stale token</p>
+<pre><code class="language-csharp">// Reactor.Recycle - cancel the armed recv before its slot goes to another connection:
+SubmitCancel(Tag(KindRecv, (ushort)conn.TagGen, conn.Slot));
 // ...
 conn.Clear();
 
 // Connection.Clear:
 internal void Clear()
 {
-    // Bump first: stale IVTS tokens now resolve to Closed(), stale CQEs fail the gen check.
+    // Bump first: stale IVTS tokens now resolve to Closed().
     Interlocked.Increment(ref _generation);
 
     Volatile.Write(ref _readWaiter, null);
@@ -346,6 +347,10 @@ internal void Clear()
       the fixed write slab; <code>FlushAsync</code> arms the flush IVTS and asks the reactor to submit
       the send. <code>CompleteFlush</code> (from the send CQE) resets the slab and resumes the
       handler. A <code>_flushInProgress</code> guard rejects writes mid-flush.</li>
+      <li><b>Which reactor</b> - <code>Reactor</code> is the one it is on, or on its way to
+      (<a href="architecture.html#rebalance">connections that change reactors</a>);
+      <code>Pinned</code> keeps it there. The life's generation and everything above go along with it; the
+      slot and the tags' generation are its reactor's.</li>
       <li><b>SendOpFlags</b> - per-connection send flags, defaulting to <code>MSG_WAITALL</code>;
       <code>ioxide.tls</code> clears it after the kTLS handoff (kTLS rejects MSG_WAITALL).</li>
     </ul>
@@ -482,7 +487,8 @@ memory directly; <code>Stream</code> cannot.</p>
     rings are per-reactor machinery, not socket config. Under <code>Tcp</code> (a
     <code>TcpOptions</code>): <code>Port</code> + <code>ExtraPorts</code>,
     <code>ListenBacklog</code>, <code>WriteSlabSize</code>, <code>PoolMax</code>,
-    <code>RecvQueueEntries</code>, <code>WriteOverflow</code>, <code>ZeroCopySend</code>. Under
+    <code>RecvQueueEntries</code>, <code>WriteOverflow</code>, <code>ZeroCopySend</code>,
+    <code>Rebalance</code>. Under
     <code>Udp</code> (a <code>UdpOptions</code>): <code>Ports</code>, <code>RecvSlots</code>,
     <code>Gro</code>. And <code>Quic</code> holds the optional <code>QuicOptions</code>. <code>RecvSnapshot</code> is the
     readonly struct a read returns (tail + closed flag). <code>IoxideRuntime</code> is the version /

@@ -135,7 +135,8 @@ public sealed unsafe partial class Reactor
     private void Recycle(TcpConnection conn)
     {
         conn.MarkClosed();
-        SubmitCancel(Tag(KindTcpRecv, (ushort)conn.Generation, conn.Slot));   // before Clear() bumps the generation
+        SubmitCancel(Tag(KindTcpRecv, (ushort)conn.TagGen, conn.Slot));   // before its slot goes to another
+        EndMove(conn);   // closed on its way out: what it had reserved goes back
 
         // Before DrainRecv, which only sees what is still QUEUED: a reader or stream that pulled
         // buffers out holds the only record of them, and nothing obliges a handler to give them

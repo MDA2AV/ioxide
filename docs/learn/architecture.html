@@ -41,7 +41,8 @@
     <h1>Architecture</h1>
     <p class="lead">One reactor per thread, typically one per core. Each owns an io_uring, a
     SO_REUSEPORT listener, a connection table, buffer rings, and a connection pool - and is the
-    sole writer of all of them. Nothing is shared between reactors. This page is the system view;
+    sole writer of all of them. Nothing is shared between reactors; a connection can
+    <a href="#rebalance">move from one to another</a>, if the server asks for that. This page is the system view;
     the <a href="dev-core.html">core internals</a> page goes inside the classes, type by type.</p>
 
     <h2>The loop</h2>
@@ -112,11 +113,11 @@
     <h2>Completion routing: tags and generations</h2>
     <p>Every SQE carries its routing in <code>user_data</code>:</p>
 <pre><code class="language-plaintext">[63:56] kind     accept · recv · send · wake · client · cancel · timer
-[47:32] gen      the connection's generation at submit time
+[47:32] gen      the number the reactor gave the connection with its slot
 [31:0]  slot     the connection's (accept: the listener's fd; client: the op's slot)</code></pre>
     <p>Dispatch is an array index (<code>slots[slot]</code>) plus a generation check. A connection
-    takes a slot when it is accepted and gives it back when it is recycled, for the next one
-    accepted, so the table is only as long as the most connections the reactor has held at once. An
+    takes a slot when it comes to the reactor and gives it back when it is recycled or given away, for the next one
+    to come, so the table is only as long as the most connections the reactor has held at once. An
     fd would not do for an index: fds are numbered across the process, so every reactor's table
     would be as long as the highest one open anywhere. The generation is what makes slot reuse safe:
     a straggler CQE from the old life would otherwise reach the new tenant. Stale generation → the
@@ -157,6 +158,34 @@
     memory is freed). Pooled connections keep their slab and buffer-ring allocations across
     lives.</p>
 
+    <h2 id="rebalance">Connections that change reactors</h2>
+    <p>The kernel spreads connections over the listeners as they connect, so the busy ones can end up
+    on a few reactors while the others' cores stay unused. With <code>Tcp.Rebalance</code> (off by
+    default) a reactor that spent three quarters or more of the last tick on a CPU, next to one that
+    spent 30 points less, weighs its connections for a tick, by the time their recv completions take,
+    and then gives that one connections worth half the difference.</p>
+    <p>A socket belongs to the process, so any ring can receive and send on it. What ties a connection
+    to its reactor is the recv armed in its ring, what was received into its buffers, a send in
+    flight, and its slot. A move undoes those on the one and redoes them on the other, with nothing
+    but TCP to go by:</p>
+    <ol>
+      <li>The recv is cancelled. What the peer sends from then on stays in the socket.</li>
+      <li>The handler goes on where it is, through what had arrived.</li>
+      <li>Once it waits in a read, every buffer is handed back and nothing is being sent, the
+      connection leaves the table and is posted to the other reactor. Not idle within 100 ms, it stays
+      and its recv is armed again.</li>
+      <li>The other one gives it a slot, registers its buffer ring (incremental mode, under a group id kept
+      for it since the start) and arms a recv on the same descriptor. The handler resumes there, with that
+      recv's completion.</li>
+    </ol>
+    <p>So a handler may find itself on another reactor after a read, and only after a read: take what
+    belongs to a reactor from <code>Reactor.Current</code> then, or set <code>conn.Pinned</code> while
+    it can't follow. What runs elsewhere and has to get to the connection's reactor asks
+    <code>conn.Reactor</code> again once it got there. ioxide's HTTP/2 stacks and TLS pipes do; a TLS
+    handshake and Kestrel's connections stay put. A flush another thread asks for while the connection
+    is between two reactors can get lost, so a connection that others flush while a read of it waits
+    has to be pinned.</p>
+
     <h2>Wiring and services</h2>
     <p>Three seams connect an application: <code>TcpHandle</code> (the per-connection loop, with
     <code>QuicHandle</code> its QUIC twin), <code>OnStart</code> (runs on the reactor thread before
@@ -185,6 +214,7 @@
       <tr><td><code>Tcp.WriteSlabSize</code></td><td>16 KB</td><td>per-connection write buffer</td></tr>
       <tr><td><code>Tcp.PoolMax</code></td><td>1024</td><td>pooled connection objects per reactor (bounds native memory)</td></tr>
       <tr><td><code>Tcp.RecvQueueEntries</code></td><td>64</td><td>per-connection slice queue depth; each queued slice holds a recv buffer; overflow closes the connection and readers see an error</td></tr>
+      <tr><td><code>Tcp.Rebalance</code></td><td>false</td><td>a busy reactor gives <a href="#rebalance">connections to one that is not</a></td></tr>
       <tr><td><code>Udp.Ports</code></td><td>[]</td><td>raw UDP sockets; datagrams reach <code>Reactor.OnDatagram</code></td></tr>
       <tr><td><code>Udp.Address</code></td><td>null</td><td>the address the UDP ports bind; null = every interface</td></tr>
       <tr><td><code>Udp.RecvSlots</code></td><td>16</td><td>shared UDP provided-buffer ring depth (in-flight datagrams)</td></tr>

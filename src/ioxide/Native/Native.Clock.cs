@@ -12,6 +12,7 @@ namespace ioxide;
 /// to the code it calls as nowMs.
 /// </summary>
 public static unsafe partial class Native {
+    private const int CLOCK_THREAD_CPUTIME_ID = 3;
     private const int CLOCK_MONOTONIC_COARSE = 6;
     private const int RTLD_LAZY   = 1;
     private const int RTLD_NOLOAD = 4;   // the same on glibc and musl
@@ -41,6 +42,19 @@ public static unsafe partial class Native {
     }
 
     internal static bool MonotonicMsFromVdso => CoarseClock != null;
+
+    /// <summary>What the calling thread has spent on a CPU so far, in nanoseconds. A system call.</summary>
+    internal static long ThreadCpuNs
+    {
+        get
+        {
+            __kernel_timespec ts = default;
+            clock_gettime(CLOCK_THREAD_CPUTIME_ID, &ts);
+            return ts.tv_sec * 1_000_000_000 + ts.tv_nsec;
+        }
+    }
+
+    [DllImport("libc")] private static extern int clock_gettime(int clock, __kernel_timespec* ts);
 
     private static delegate* unmanaged[SuppressGCTransition]<int, __kernel_timespec*, int> FindCoarseClock()
     {
