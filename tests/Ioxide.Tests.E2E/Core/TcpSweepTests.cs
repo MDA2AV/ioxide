@@ -358,7 +358,7 @@ internal static class TcpSweepTests
         {
             byte[] body = Pattern(StallingBody);
             var letGo = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-            var open = new TaskCompletionSource<(int Slot, int Generation)>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var open = new TaskCompletionSource<(int Slot, int TagGen)>(TaskCreationOptions.RunContinuationsAsynchronously);
 
             (int port, Reactor reactor, Thread _) = TestServer.StartConfigured(async (_, conn) =>
             {
@@ -377,7 +377,7 @@ internal static class TcpSweepTests
                 {
                     if (first != 0)
                     {
-                        open.TrySetResult((SlotOf(conn), GenerationOf(conn)));
+                        open.TrySetResult((SlotOf(conn), TagGenOf(conn)));
                     }
                     while (first != 0)
                     {
@@ -400,8 +400,8 @@ internal static class TcpSweepTests
             using TcpClient client = Connect(port, "P", 2_000);
             NetworkStream stream = client.GetStream();
             Assert.Equal(4, ReadOnce(stream, 0, new byte[4]));
-            (int slot, int generation) = open.Task.Result;
-            DeferredOf(reactor).Enqueue(((ulong)(ushort)(generation - 1) << 32) | (uint)slot);
+            (int slot, int tagGen) = open.Task.Result;
+            DeferredOf(reactor).Enqueue(((ulong)(ushort)(tagGen - 1) << 32) | (uint)slot);
 
             WaitFor(() => DeferredOf(reactor).IsEmpty, 2_000, "an entry whose connection is gone was never dropped");
             for (int i = 0; i < 2; i++)
@@ -663,8 +663,8 @@ internal static class TcpSweepTests
     [UnsafeAccessor(UnsafeAccessorKind.Field, Name = "_deferredWriteShutdowns")]
     private static extern ref ConcurrentQueue<ulong> DeferredOf(Reactor reactor);
 
-    [UnsafeAccessor(UnsafeAccessorKind.Field, Name = "_generation")]
-    private static extern ref int GenerationOf(TcpConnection connection);
+    [UnsafeAccessor(UnsafeAccessorKind.Field, Name = "TagGen")]
+    private static extern ref int TagGenOf(TcpConnection connection);
 
     [UnsafeAccessor(UnsafeAccessorKind.Field, Name = "Slot")]
     private static extern ref int SlotOf(TcpConnection connection);

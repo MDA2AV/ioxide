@@ -24,9 +24,16 @@ internal static class Program
         LetGoBufferTests.Register(runner);
         LetGoHandlerStyleTests.Register(runner);
         KestrelLetGoTests.Register(runner);
+        KestrelMoveTests.Register(runner);
         SendInFlightRecycleTests.Register(runner);
         TcpSweepTests.Register(runner);
         SlotTests.Register(runner);
+        MoveTests.Register(runner);
+        MoveEndTests.Register(runner);
+        MoveStopTests.Register(runner);
+        MoveStreamTests.Register(runner);
+        MoveFlushTests.Register(runner);
+        RebalanceTests.Register(runner);
         PipeReaderContractTests.Register(runner);
         WriteContractTests.Register(runner);
         StreamContractTests.Register(runner);
@@ -74,6 +81,7 @@ internal static class Program
         H3CriticalStreamTests.Register(runner);
         H3AlpnTests.Register(runner);
         Http2BodyTests.Register(runner);
+        MoveHttp2Tests.Register(runner);
         Http2StreamedFaultTests.Register(runner);
         Http2BufferedFaultTests.Register(runner);
         Nghttp2ManyHeadersTests.Register(runner);

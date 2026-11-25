@@ -26,6 +26,7 @@ internal static class Program
         QuicChaosTests.Register(runner);
         H3ChaosTests.Register(runner);
         LetGoChaosTests.Register(runner);
+        MoveChaosTests.Register(runner);
 
         return runner.Summary();
     }

@@ -51,6 +51,7 @@ internal static class Program
         ReactorStopTests.Register(runner);
         DualStackTlsTests.Register(runner, ktls);
         TlsLetGoBufferTests.Register(runner, ktls);
+        TlsMoveTests.Register(runner, ktls);
 
         return runner.Summary();
     }

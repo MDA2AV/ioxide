@@ -338,25 +338,16 @@ internal static class HardeningTests
             // Served before the limit drops: the control, and a connection that must outlive the refusal.
             using TcpClient held = ConnectServing(port, TimeSpan.FromSeconds(10));
 
-            Assert.Equal(0, getrlimit(RlimitMemlock, out RLimit original));
             using var refused = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp)
             {
                 ReceiveTimeout = 5_000,
             };
             bool shed;
-            try
+            using (LockedMemory.None())   // held's ring is already charged
             {
-                // The soft limit only, so it can be put back. held's ring is already charged.
-                var none = new RLimit { Cur = 0, Max = original.Max };
-                Assert.Equal(0, setrlimit(RlimitMemlock, in none));
-
                 refused.Connect(IPAddress.Loopback, port);
                 refused.Send(Encoding.ASCII.GetBytes("GET / HTTP/1.1\r\nHost: t\r\n\r\n"));
                 shed = Shed(refused);   // returns once the reactor has dealt with the accept
-            }
-            finally
-            {
-                setrlimit(RlimitMemlock, in original);
             }
 
             Assert.True(shed, "the connection accepted under a zero memlock limit was served, so its ring was never refused and nothing was tested");
@@ -364,7 +355,7 @@ internal static class HardeningTests
             // The unfixed reactor died in that accept and closed held on its way down.
             GetOk(held);
             using TcpClient fresh = ConnectServing(port, TimeSpan.FromSeconds(10));
-        }, skip: !TestServer.KernelAtLeast(6, 12) || HoldsIpcLock() || RegistersRingAtZeroMemlock());
+        }, skip: !TestServer.KernelAtLeast(6, 12) || !LockedMemory.CanRunOut);
     }
 
     /// <summary>
@@ -721,67 +712,6 @@ internal static class HardeningTests
         int n = stream.Read(reply, 0, 4);
         Assert.True(n == 4 && Encoding.ASCII.GetString(reply) == "done",
             "connection died during buffer-group exhaustion (expected it to stall and resume)");
-    }
-
-    private const int RlimitMemlock = 8;
-
-    [StructLayout(LayoutKind.Sequential)]
-    private struct RLimit
-    {
-        public ulong Cur;
-        public ulong Max;
-    }
-
-    [DllImport("libc", SetLastError = true)]
-    private static extern int getrlimit(int resource, out RLimit limit);
-
-    [DllImport("libc", SetLastError = true)]
-    private static extern int setrlimit(int resource, in RLimit limit);
-
-    // io_uring charges nothing to RLIMIT_MEMLOCK for a process with CAP_IPC_LOCK, so it cannot run out.
-    private static bool HoldsIpcLock()
-    {
-        string? caps = File.ReadLines("/proc/self/status").FirstOrDefault(l => l.StartsWith("CapEff:", StringComparison.Ordinal));
-        return caps is not null && (Convert.ToUInt64(caps["CapEff:".Length..].Trim(), 16) & (1UL << 14)) != 0;
-    }
-
-    // A kernel that registers the ring at a zero limit leaves nothing to refuse (GitHub's ubuntu-26.04 on
-    // 7.0.0-1020-azure). Asked as the incremental accept asks: a 4-entry ring on its own page.
-    private static unsafe bool RegistersRingAtZeroMemlock()
-    {
-        if (getrlimit(RlimitMemlock, out RLimit original) != 0)
-        {
-            return false;   // the test asks again, and fails on it
-        }
-
-        int page = Environment.SystemPageSize;
-        using Ring ring = Ring.Create(8);
-        byte* memory = (byte*)NativeMemory.AlignedAlloc((nuint)page, (nuint)page);
-        NativeMemory.Clear(memory, (nuint)page);
-        int ret = -1;
-        try
-        {
-            var none = new RLimit { Cur = 0, Max = original.Max };
-            if (setrlimit(RlimitMemlock, in none) == 0)
-            {
-                var reg = new Native.io_uring_buf_reg
-                {
-                    ring_addr = (ulong)memory, ring_entries = 4, bgid = 1, flags = Native.IOU_PBUF_RING_INC,
-                };
-                ret = Native.io_uring_register(ring.Fd, Native.IORING_REGISTER_PBUF_RING, &reg, 1);
-            }
-        }
-        finally
-        {
-            setrlimit(RlimitMemlock, in original);
-            if (ret == 0)
-            {
-                var reg = new Native.io_uring_buf_reg { bgid = 1 };
-                Native.io_uring_register(ring.Fd, Native.IORING_UNREGISTER_PBUF_RING, &reg, 1);
-            }
-            NativeMemory.AlignedFree(memory);
-        }
-        return ret == 0;
     }
 
     // Closed without an answer: EOF, or a reset when the request was still unread at the close.

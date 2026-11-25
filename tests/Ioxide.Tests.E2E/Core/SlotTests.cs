@@ -373,9 +373,9 @@ internal static class SlotTests
         long newest = long.MinValue;
         for (int i = 0; i < UsedOf(reactor); i++)
         {
-            if (slots[i] is { } conn && GenerationOf(conn) > newest)
+            if (slots[i] is { } conn && TagGenOf(conn) > newest)
             {
-                newest = GenerationOf(conn);
+                newest = TagGenOf(conn);
                 last = (conn.ClientFd, i);
             }
         }
@@ -452,6 +452,6 @@ internal static class SlotTests
     [UnsafeAccessor(UnsafeAccessorKind.Field, Name = "Slot")]
     private static extern ref int SlotOf(TcpConnection connection);
 
-    [UnsafeAccessor(UnsafeAccessorKind.Field, Name = "_generation")]
-    private static extern ref int GenerationOf(TcpConnection connection);
+    [UnsafeAccessor(UnsafeAccessorKind.Field, Name = "TagGen")]
+    private static extern ref int TagGenOf(TcpConnection connection);
 }

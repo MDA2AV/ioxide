@@ -1,0 +1,269 @@
+using System.Runtime.CompilerServices;
+using ioxide;
+using ioxide.utils;
+
+namespace Ioxide.Tests;
+
+/// <summary>
+/// What a connection that can change reactors keeps of itself: whether it is idle, whose it is, seen from whichever thread
+/// asks, and which of its numbers are its life's and which its reactor's.
+/// </summary>
+internal static class ConnectionMoveTests
+{
+    public static void Register(Runner runner)
+    {
+        runner.Test("move: a connection is idle with a read waiting, and nothing held, sent or read beside it", () =>
+        {
+            TcpConnection conn = Connection();
+            Assert.True(!conn.ReadParked && !conn.Idle, "a connection nobody reads is idle");
+
+            ValueTask<RecvSnapshot> read = conn.ReadAsync();
+            Assert.True(conn.ReadParked && conn.Idle, "one whose read waits is not");
+
+            InProgressOf(conn) = 1;
+            Assert.True(conn.IdleButForTheSend && !conn.Idle, "one with a flush in progress is idle");
+            InProgressOf(conn) = 0;
+
+            conn.Pinned = true;
+            Assert.True(!conn.Idle && !conn.IdleButForTheSend, "a pinned one is idle");
+            conn.Pinned = false;
+
+            RefsOf(conn) = 1;
+            Assert.True(!conn.Idle && !conn.IdleButForTheSend, "one its handler has let go of is idle");
+            RefsOf(conn) = 2;
+            Assert.True(conn.Idle, "what made it busy was not all of it");
+
+            conn.MarkClosed();
+            Assert.True(read.IsCompleted && !conn.Idle && !conn.IdleButForTheSend, "one that is closed is idle");
+        });
+
+        runner.Test("move: what was received and not taken, or taken and not given back, is held", () =>
+        {
+            TcpConnection conn = Connection();
+            Assert.True(conn.HoldsNothing, "a new connection holds something");
+
+            for (ushort i = 0; i < 3; i++)
+            {
+                Deliver(conn, i);
+            }
+            Assert.True(!conn.HoldsNothing, "what is queued is not held");
+
+            var taken = new List<SpscRecvRing.Item>();
+            RecvSnapshot snapshot = Snapshot(conn);
+            while (conn.TryGetItem(snapshot, out SpscRecvRing.Item item))
+            {
+                taken.Add(item);
+            }
+            Assert.Equal(3, taken.Count);
+            foreach (SpscRecvRing.Item item in taken)
+            {
+                Assert.True(!conn.HoldsNothing, "what was taken is not held");
+                conn.ReturnBuffer(in item);
+            }
+            Assert.True(conn.HoldsNothing, "everything was given back and something is held");
+
+            // The same through the memories, and from another thread.
+            for (ushort i = 0; i < 4; i++)
+            {
+                Deliver(conn, i);
+            }
+            UnmanagedMemoryManager[] memories = conn.GetSnapshotMemories(Snapshot(conn));
+            Assert.Equal(4, memories.Length);
+            Assert.True(!conn.HoldsNothing, "what was taken as memories is not held");
+            var giving = new Thread(() => conn.ReturnBuffers(memories));
+            giving.Start();
+            giving.Join();
+            Assert.True(conn.HoldsNothing, "memories given back from another thread are held");
+        });
+
+        runner.Test("move: holding is counted afresh in the connection's next life", () =>
+        {
+            TcpConnection conn = Connection();
+            Deliver(conn, 0);
+            Assert.True(conn.TryGetItem(Snapshot(conn), out SpscRecvRing.Item item), "nothing was delivered");
+            conn.Clear();   // with it never given back
+            Assert.True(conn.HoldsNothing, "a new life holds what the last one did");
+            conn.ReturnBuffer(in item);   // too late
+            Assert.True(!conn.HoldsNothing, "a return of the life before made up for one to come");
+        });
+
+        runner.Test("move: every life has a number of its own, whichever reactors it was on, and tags one per place", () =>
+        {
+            Reactor a = NeverRunning(0), b = NeverRunning(1);
+            var conn = new TcpConnection(a, -1, 64, 8);
+            var lives = new HashSet<int>();
+            for (int life = 0; life < 50; life++)
+            {
+                Reactor reactor = life % 2 == 0 ? a : b;
+                Track(reactor, conn);
+                int tag = conn.TagGen;
+                Assert.True(lives.Add(conn.Generation), $"life {life} has the number of an earlier one");
+                Untrack(reactor, conn);
+                FreeSlotsOf(reactor).Push(conn.Slot);
+
+                // Away, within the life: its tags change, its life doesn't.
+                Reactor other = life % 2 == 0 ? b : a;
+                int generation = conn.Generation;
+                conn.LeaveFor(other);
+                Track(other, conn);
+                conn.ArriveOn(other);
+                Assert.Equal(generation, conn.Generation);
+                Assert.True(ConnAt(other, conn.Slot, (ushort)conn.TagGen) == conn, "it is not found by its tag where it arrived");
+                Untrack(other, conn);
+                FreeSlotsOf(other).Push(conn.Slot);
+                conn.Clear();
+            }
+        });
+
+        runner.Test("move: two connections in one slot never share a tag, accepted there or given there", () =>
+        {
+            Reactor a = NeverRunning(0), b = NeverRunning(1);
+            var seen = new HashSet<int>();
+            for (int i = 0; i < 200; i++)
+            {
+                var conn = new TcpConnection(i % 3 == 0 ? a : b, -1, 64, 8);
+                if (i % 3 == 0)
+                {
+                    Track(a, conn);
+                    Untrack(a, conn);
+                    FreeSlotsOf(a).Push(conn.Slot);
+                    conn.LeaveFor(b);
+                    Assert.Equal(-1, conn.Slot);
+                }
+                Track(b, conn);
+                conn.ArriveOn(b);
+                Assert.Equal(0, conn.Slot);
+                Assert.True(seen.Add(conn.TagGen), $"tag generation {conn.TagGen} came twice");
+                Untrack(b, conn);
+                FreeSlotsOf(b).Push(conn.Slot);
+                conn.Dispose();
+            }
+        });
+
+        runner.Test("move: whose a connection is: its reactor's, and on that reactor's thread, once given away, the taker's", () =>
+        {
+            Reactor a = NeverRunning(0), b = NeverRunning(1);
+            var conn = new TcpConnection(a, -1, 64, 8);
+            Assert.True(ReferenceEquals(conn.Reactor, a), "a new connection is another reactor's");
+
+            conn.LeaveFor(b);
+            Assert.True(ReferenceEquals(conn.Reactor, a), "to another thread it has arrived before it did");   // which passes on what it is sent
+            ThreadOf(a) = Environment.CurrentManagedThreadId;
+            Assert.True(ReferenceEquals(conn.Reactor, b), "to the thread that gave it away it is still its own");
+            ThreadOf(a) = 0;
+            ThreadOf(b) = Environment.CurrentManagedThreadId;
+            Assert.True(ReferenceEquals(conn.Reactor, a), "to the taker's thread it is the taker's before it was taken");
+
+            Track(b, conn);
+            conn.ArriveOn(b);
+            Assert.True(ReferenceEquals(conn.Reactor, b), "to the taker's thread it is not the taker's");
+            ThreadOf(b) = 0;
+            ThreadOf(a) = Environment.CurrentManagedThreadId;
+            Assert.True(ReferenceEquals(conn.Reactor, b), "to the thread it left it is not the taker's");
+            ThreadOf(a) = 0;
+            Assert.True(ReferenceEquals(conn.Reactor, b), "to another thread it has not arrived");
+        });
+
+        runner.Test("move: nothing of a move is left to the connection's next life", () =>
+        {
+            Reactor a = NeverRunning(0);
+            var conn = new TcpConnection(a, -1, 64, 8) { Pinned = true, MoveState = TcpConnection.MoveWaiting, MoveTo = a, LastWeight = 5, WeighedTick = 7 };
+            conn.Clear();
+            Assert.True(!conn.Pinned && conn.MoveState == TcpConnection.MoveNone && conn.MoveTo is null && conn.LastWeight == 0 && conn.WeighedTick == long.MinValue,
+                "a new life begins with what the last one ended with");
+        });
+
+        runner.Test("move: a group id is promised once, and a promise kept or taken back", () =>
+        {
+            var config = new ServerConfig { ReactorCount = 1, Udp = null, Tcp = new TcpOptions(), Incremental = new IncrementalOptions { MaxConnections = 3, RecvSlots = 2, RecvBufferSize = 64 } };
+            var reactor = new Reactor(0, config);
+            InitIncremental(reactor);
+            Assert.Equal(3, RoomOf(reactor));
+            Assert.True(TryReserveGid(reactor) && TryReserveGid(reactor) && TryReserveGid(reactor), "fewer than there are were promised");
+            Assert.True(!TryReserveGid(reactor), "more than there are were promised");
+            UnreserveGid(reactor);
+            Assert.Equal(1, RoomOf(reactor));
+            Assert.True(TryReserveGid(reactor) && !TryReserveGid(reactor), "one was taken back, and not one was to be had");
+
+            // As many threads as there are ids, and more: each is promised once.
+            for (int i = 0; i < 3; i++)
+            {
+                UnreserveGid(reactor);
+            }
+            for (int round = 0; round < 200; round++)
+            {
+                int promised = 0;
+                Parallel.For(0, 8, _ =>
+                {
+                    if (TryReserveGid(reactor))
+                    {
+                        Interlocked.Increment(ref promised);
+                    }
+                });
+                Assert.True(promised <= 3, $"{promised} of 3 were promised");
+                for (int i = 0; i < promised; i++)
+                {
+                    UnreserveGid(reactor);
+                }
+                Assert.Equal(3, RoomOf(reactor));
+            }
+        });
+    }
+
+    private static TcpConnection Connection()
+    {
+        var conn = new TcpConnection(NeverRunning(0), -1, 64, 8);
+        conn.InitRefs();
+        return conn;
+    }
+
+    private static Reactor NeverRunning(int id) => new(id, new ServerConfig { ReactorCount = 2, Tcp = new TcpOptions(), Udp = null });
+
+    private static unsafe void Deliver(TcpConnection conn, ushort bid)
+        => Assert.True(RecvOf(conn).TryEnqueue(new SpscRecvRing.Item { Ptr = null, Bid = bid, Len = 0, HasBuffer = true }), "the queue is full");
+
+    private static RecvSnapshot Snapshot(TcpConnection conn)
+    {
+        ValueTask<RecvSnapshot> read = conn.ReadAsync();
+        Assert.True(read.IsCompleted, "the read waits");
+        return read.Result;
+    }
+
+    [UnsafeAccessor(UnsafeAccessorKind.Field, Name = "_recv")]
+    private static extern ref SpscRecvRing RecvOf(TcpConnection conn);
+
+    [UnsafeAccessor(UnsafeAccessorKind.Field, Name = "_flushInProgress")]
+    private static extern ref int InProgressOf(TcpConnection conn);
+
+    [UnsafeAccessor(UnsafeAccessorKind.Field, Name = "_refs")]
+    private static extern ref int RefsOf(TcpConnection conn);
+
+    [UnsafeAccessor(UnsafeAccessorKind.Field, Name = "_reactorThreadId")]
+    private static extern ref int ThreadOf(Reactor reactor);
+
+    [UnsafeAccessor(UnsafeAccessorKind.Method, Name = "Track")]
+    private static extern void Track(Reactor reactor, TcpConnection conn);
+
+    [UnsafeAccessor(UnsafeAccessorKind.Method, Name = "Untrack")]
+    private static extern void Untrack(Reactor reactor, TcpConnection conn);
+
+    [UnsafeAccessor(UnsafeAccessorKind.Field, Name = "_freeSlots")]
+    private static extern ref Stack<int> FreeSlotsOf(Reactor reactor);
+
+    [UnsafeAccessor(UnsafeAccessorKind.Method, Name = "ConnAt")]
+    private static extern TcpConnection? ConnAt(Reactor reactor, int slot, ushort gen);
+
+    [UnsafeAccessor(UnsafeAccessorKind.Method, Name = "InitIncremental")]
+    private static extern void InitIncremental(Reactor reactor);
+
+    [UnsafeAccessor(UnsafeAccessorKind.Method, Name = "TryReserveGid")]
+    private static extern bool TryReserveGid(Reactor reactor);
+
+    [UnsafeAccessor(UnsafeAccessorKind.Method, Name = "UnreserveGid")]
+    private static extern void UnreserveGid(Reactor reactor);
+
+    [UnsafeAccessor(UnsafeAccessorKind.Field, Name = "_freeGidCount")]
+    private static extern ref int FreeGidCountOf(Reactor reactor);
+
+    private static int RoomOf(Reactor reactor) => Volatile.Read(ref FreeGidCountOf(reactor));
+}
