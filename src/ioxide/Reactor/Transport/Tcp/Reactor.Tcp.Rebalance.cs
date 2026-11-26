@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using static ioxide.Native;
 using System.Runtime.CompilerServices;
 
 namespace ioxide;
@@ -190,7 +191,35 @@ public sealed unsafe partial class Reactor
         }
     }
 
-    // After one of its recv completions, its handler's part included, unless the balance is off.
+    // A completion in a round: dispatched as any other, and a receive timed, its handler's part included, and charged to its
+    // connection. Outside a round the loop calls the dispatchers directly, which weigh nothing.
+    private void DispatchWeighed(in IoUringCqe cqe)
+    {
+        if ((byte)(cqe.user_data >> KindShift) != KindTcpRecv)
+        {
+            Dispatch(in cqe);
+            return;
+        }
+        long started = Stopwatch.GetTimestamp();
+        Dispatch(in cqe);
+        if (cqe.res > 0 && ConnAt((int)(uint)cqe.user_data, (ushort)(cqe.user_data >> GenShift)) is { } conn)
+        {
+            Weigh(conn, Stopwatch.GetTimestamp() - started);
+        }
+    }
+
+    private void Dispatch(in IoUringCqe cqe)
+    {
+        if (_incremental)
+        {
+            DispatchIncremental(in cqe);
+        }
+        else
+        {
+            DispatchSharedRing(in cqe);
+        }
+    }
+
     private void Weigh(TcpConnection conn, long took)
     {
         bool first = conn.WeighedTick != _weighTick;

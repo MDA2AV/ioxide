@@ -44,9 +44,17 @@ public sealed unsafe partial class Reactor
 
             NowMs = Native.MonotonicMs;   // one read per batch; see Reactor.Tcp.Sweep.cs
 
-            // Picked once a batch, not per CQE, so no completion pays for the mode test.
+            // Picked once a batch, not per CQE, so no completion pays for the mode test, nor for whether this reactor is in a
+            // round of TcpOptions.Rebalance, which only a tick changes.
             uint ready = _ring.CqReady();
-            if (_incremental)
+            if (_balance != Balance.Off)
+            {
+                for (uint i = 0; i < ready; i++)
+                {
+                    DispatchWeighed(in _ring.CqeAt(i));
+                }
+            }
+            else if (_incremental)
             {
                 for (uint i = 0; i < ready; i++)
                 {

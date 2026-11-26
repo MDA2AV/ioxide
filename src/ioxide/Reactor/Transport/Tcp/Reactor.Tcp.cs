@@ -1,5 +1,4 @@
-﻿using System.Diagnostics;
-using System.Net;
+﻿using System.Net;
 using System.Net.Sockets;
 using System.Runtime.CompilerServices;
 using static ioxide.Native;
@@ -108,14 +107,15 @@ public sealed unsafe partial class Reactor
             return;
         }
 
-        if (res == -ECANCELED && conn is { MoveState: TcpConnection.MoveCancelling })
-        {
-            RecvOver(conn);
-            return;
-        }
-
         if (res <= 0)
         {
+            // The recv a move cancelled, which is the move's to go on with.
+            if (res == -ECANCELED && conn is { MoveState: TcpConnection.MoveCancelling })
+            {
+                RecvOver(conn);
+                return;
+            }
+
             // Peer EOF or recv error - reactor owns teardown.
             if (hasBuf)
             {
@@ -140,15 +140,10 @@ public sealed unsafe partial class Reactor
 
 
         byte* ptr = hasBuf ? _bufSlab + (nuint)bid * (nuint)_recvBufferSize : null;
-        long started = _balance == Balance.Off ? 0 : Stopwatch.GetTimestamp();
         if (!conn.Complete(res, bid, hasBuf, ptr))
         {
             CloseFromRecvOverflow(conn, gen);
             return;
-        }
-        if (started != 0)
-        {
-            Weigh(conn, Stopwatch.GetTimestamp() - started);
         }
 
         if ((flags & IORING_CQE_F_MORE) == 0)
@@ -200,14 +195,15 @@ public sealed unsafe partial class Reactor
             return;
         }
 
-        if (res == -ECANCELED && conn is { MoveState: TcpConnection.MoveCancelling })
-        {
-            RecvOver(conn);
-            return;
-        }
-
         if (res <= 0)
         {
+            // The recv a move cancelled, which is the move's to go on with.
+            if (res == -ECANCELED && conn is { MoveState: TcpConnection.MoveCancelling })
+            {
+                RecvOver(conn);
+                return;
+            }
+
             // Peer EOF / recv error - the per-conn ring is freed in Recycle.
             if (conn != null)
             {
@@ -236,15 +232,10 @@ public sealed unsafe partial class Reactor
         if (!conn.TryExtendRecv(res, bid, ptr))
         {
             conn.RefCount![bid]++;
-            long started = _balance == Balance.Off ? 0 : Stopwatch.GetTimestamp();
             if (!conn.Complete(res, bid, hasBuffer: true, ptr))
             {
                 CloseFromRecvOverflow(conn, gen);
                 return;
-            }
-            if (started != 0)
-            {
-                Weigh(conn, Stopwatch.GetTimestamp() - started);
             }
         }
 
