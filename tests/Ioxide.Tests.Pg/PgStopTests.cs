@@ -122,7 +122,7 @@ internal static class PgStopTests
         return $"accepted {accepted()}, closed {closed()}, connections {pool.ConnectionCount}";
     }
 
-    private static PgOptions Options(int port) => new()
+    internal static PgOptions Options(int port) => new()
     {
         Port = (ushort)port,
         User = "fake",
@@ -131,7 +131,7 @@ internal static class PgStopTests
         CommandTimeoutMs = 0,   // a startup never answered waits until the stop
     };
 
-    private static void AnswerStartup(Socket socket)
+    internal static void AnswerStartup(Socket socket)
     {
         int length = BinaryPrimitives.ReadInt32BigEndian(FakeServer.Receive(socket, 4));
         FakeServer.Receive(socket, length - 4);   // protocol version and parameters
