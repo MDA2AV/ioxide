@@ -92,13 +92,13 @@ for (int i = 0; i < threads.Length; i++)
     var reactor = new Reactor(i, config);
 
     // OnStart runs ON the reactor thread, so every connection the pool opens belongs to THIS
-    // reactor's ring. Start registers the pool as a reactor service; the handler fetches it back
-    // with GetService. One pool per reactor, no sharing, no lock.
+    // reactor's ring. Start registers the pool as a reactor service; the handler takes it with
+    // PgPool.Current, this thread's reactor's pool. One pool per reactor, no sharing, no lock.
     reactor.OnStart = r => PgPool.Start(r, pgOptions);
 
     reactor.TcpHandle = async (r, conn) =>
     {
-        PgPool pg = r.GetService<PgPool>();
+        PgPool pg = PgPool.Current;
 
         try
         {

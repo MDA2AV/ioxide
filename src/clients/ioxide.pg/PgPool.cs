@@ -4,7 +4,7 @@ namespace ioxide.pg;
 /// N Postgres connections on one reactor's ring, with pipelining. Commands round-robin across the
 /// connections and each connection multiplexes many in flight, so the connections stay busy under
 /// load instead of one round trip at a time. Broken connections are evicted and replaced. One pool
-/// per reactor - create from <c>Reactor.OnStart</c>.
+/// per reactor - create from <c>Reactor.OnStart</c>, and take it in a handler with <see cref="Current"/>.
 /// </summary>
 /// <remarks>
 /// Safe to call from any thread. The pool belongs to its reactor and takes no lock: a query made on
@@ -34,7 +34,24 @@ public sealed class PgPool : IDisposable
         _options = options;
     }
 
-    /// <summary>Open <see cref="PgOptions.PoolSize"/> connections and register the pool as a service.</summary>
+    // The pool started on this thread's reactor, the last one if it started several; null on any other thread.
+    [ThreadStatic]
+    private static PgPool? t_current;
+
+    /// <summary>
+    /// The pool started on the reactor the calling thread runs: one thread-static read, where
+    /// <c>Reactor.Current.GetService&lt;PgPool&gt;()</c> also looks it up among the reactor's services. Taken where it
+    /// is used, it is always that reactor's pool.
+    /// </summary>
+    /// <exception cref="InvalidOperationException">On a thread that runs no reactor, or whose reactor started no pool or
+    /// disposed it.</exception>
+    public static PgPool Current => t_current ?? throw new InvalidOperationException(
+        "No PgPool on this thread: Current is the pool its reactor started (PgPool.Start, from OnStart), and only on that reactor's thread.");
+
+    /// <summary>
+    /// Open <see cref="PgOptions.PoolSize"/> connections and register the pool as a service; on the reactor's thread it
+    /// is <see cref="Current"/> from then on.
+    /// </summary>
     public static PgPool Start(Reactor reactor, PgOptions options)
     {
         var pool = new PgPool(reactor, options);
@@ -45,6 +62,21 @@ public sealed class PgPool : IDisposable
         reactor.AddService(pool);
         reactor.AddTicker(pool.Sweep);   // per-command timeout sweep + background replenishment
         reactor.AddStopper(pool.Dispose);
+        if (reactor.OnReactorThread)
+        {
+            t_current = pool;
+        }
+        else
+        {
+            reactor.ScheduleOnReactor(static state =>
+            {
+                var pool = (PgPool)state!;
+                if (!pool._disposed)
+                {
+                    t_current = pool;
+                }
+            }, pool);
+        }
         return pool;
     }
 
@@ -245,6 +277,10 @@ public sealed class PgPool : IDisposable
         }
 
         _disposed = true;
+        if (t_current == this)
+        {
+            t_current = null;
+        }
         foreach (PgConnection connection in _connections)
         {
             connection.Dispose();

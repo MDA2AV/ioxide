@@ -58,9 +58,9 @@
 // At startup, on the reactor thread.
 reactor.OnStart = r =&gt; PgPool.Start(r, options);
 
-// In the handler: rent → query → return, in one call.
-var pool   = reactor.GetService&lt;PgPool&gt;();
-var result = await pool.QueryAsync("SELECT 42");
+// In the handler: rent → query → return, in one call. Current is the pool of the reactor
+// this thread runs, one thread-static read (reactor.GetService&lt;PgPool&gt;() finds it too).
+var result = await PgPool.Current.QueryAsync("SELECT 42");
 
 // result.Value: "42" · result.Rows: 1 · result.CommandTag: "SELECT 1"</code></pre>
 
