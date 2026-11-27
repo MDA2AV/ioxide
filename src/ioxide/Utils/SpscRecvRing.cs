@@ -12,7 +12,7 @@ public sealed unsafe class SpscRecvRing
         public ushort Bid;
         public int Len;
         public bool HasBuffer;
-        public ushort Gen;   // connection generation when enqueued (guards a late return)
+        public ushort Gen;   // the connection's stamp when enqueued (TcpConnection.Stamp), which tells a late return
 
         public ReadOnlySpan<byte> AsSpan() => new(Ptr, Len);
 

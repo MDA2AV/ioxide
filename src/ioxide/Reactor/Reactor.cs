@@ -183,7 +183,8 @@ public sealed unsafe partial class Reactor
         return conn != null && (ushort)conn.TagGen == gen ? conn : null;
     }
 
-    // A slot for the connection, which keeps it until it is recycled or given away, and the generation of its tags.
+    // A slot for the connection, which keeps it until it is recycled or given away, the generation of its tags, and whether
+    // it can move.
     private void Track(TcpConnection conn)
     {
         if (!_freeSlots.TryPop(out int slot))
@@ -196,6 +197,8 @@ public sealed unsafe partial class Reactor
         }
         conn.Slot = slot;
         conn.TagGen = ++_tcpGeneration;
+        conn.Movable = _fleet.Length > 0;
+        conn.Stamp = (ushort)(conn.Movable ? conn.Generation : conn.TagGen);
         _slots[slot] = conn;
     }
 

@@ -348,6 +348,15 @@ internal static class MoveTests
             Assert.True(SpinWait.SpinUntil(() => Moves.IsOn(conn, fleet.B), 5_000), Moves.Describe(conn));
             Assert.Equal("1hello", MoveFleet.Exchange(client, "hello"));
         }, skip);
+
+        runner.Test($"move: without Rebalance a connection stays on its reactor: a move is refused ({mode})", () =>
+        {
+            using var fleet = new MoveFleet(2, MoveFleet.Tell, config(), moves: false);
+            (Socket client, TcpConnection conn) = fleet.Connect();
+            Moves.OnItsReactor(conn, reactor => Assert.True(!Moves.StartMove(reactor, conn, fleet.B), "a move began without Rebalance"));
+            Assert.Equal("0hello", MoveFleet.Exchange(client, "hello"));
+            Assert.True(Moves.IsOn(conn, fleet.A), Moves.Describe(conn));
+        }, skip);
     }
 
     private static void RegisterHolds(Runner runner)
@@ -484,9 +493,12 @@ internal static class MoveTests
             }, skip);
         }
 
-        foreach (bool memories in new[] { false, true })
+        foreach ((bool memories, bool rebalance) in new[] { (false, true), (true, true), (false, false), (true, false) })
         {
-            runner.Test($"move: a buffer handed back after its connection's life goes to the reactor it is of, though the next life is on another ({(memories ? "memories" : "items")})", () =>
+            string where = rebalance
+                ? "goes to the reactor it is of, though the next life is on another"
+                : "goes back to its reactor's ring without Rebalance, as before connections moved";
+            runner.Test($"move: a buffer handed back after its connection's life {where} ({(memories ? "memories" : "items")})", () =>
             {
                 const int Buffers = 4;
                 (TcpConnection Conn, SpscRecvRing.Item Item)? kept = null;
@@ -520,7 +532,7 @@ internal static class MoveTests
                     {
                         conn.DecRef();
                     }
-                }, MoveFleet.Shared(new TcpOptions { PoolMax = 64, Rebalance = true }) with { RecvSlots = Buffers, RecvBufferSize = 64 });
+                }, MoveFleet.Shared(new TcpOptions { PoolMax = 64, Rebalance = true }) with { RecvSlots = Buffers, RecvBufferSize = 64 }, moves: rebalance);
                 (Socket client, _) = fleet.Connect();
                 client.Send("kept"u8);
                 Assert.True(SpinWait.SpinUntil(() => kept is not null, 5_000), "nothing was received");
@@ -528,7 +540,10 @@ internal static class MoveTests
                 MoveFleet.AwaitLive(fleet.A, 0);
                 (_, TcpConnection next) = fleet.Connect();
                 Assert.True(ReferenceEquals(next, kept!.Value.Conn), "this is another connection's object");
-                Moves.To(next, fleet.B);
+                if (rebalance)
+                {
+                    Moves.To(next, fleet.B);
+                }
 
                 SpscRecvRing.Item late = kept.Value.Item;
                 var returning = new Thread(() =>
@@ -561,6 +576,91 @@ internal static class MoveTests
                     Assert.Equal(message, MoveFleet.Receive(holder, message.Length));
                 }
             });
+        }
+
+        foreach ((string mode, ServerConfig config, bool skip, bool memories) in new[]
+        {
+            ("shared ring", MoveFleet.Shared() with { RecvSlots = 4, RecvBufferSize = 64 }, false, false),
+            ("ring per connection", MoveFleet.Incremental(slots: 2, size: 256), !TestServer.KernelAtLeast(6, 12), false),
+            ("ring per connection", MoveFleet.Incremental(slots: 2, size: 256), !TestServer.KernelAtLeast(6, 12), true),
+        })
+        {
+            runner.Test($"move: without Rebalance, a buffer handed back after its connection's life leaves the next life's alone ({mode}, {(memories ? "memories" : "items")})", () =>
+            {
+                (TcpConnection Conn, SpscRecvRing.Item Item)? kept = null;
+                SpscRecvRing.Item? held = null;
+                using var fleet = new MoveFleet(2, async conn =>
+                {
+                    try
+                    {
+                        bool first = kept is null;
+                        while (true)
+                        {
+                            RecvSnapshot snapshot = await conn.ReadAsync();
+                            while (conn.TryGetItem(snapshot, out SpscRecvRing.Item item))
+                            {
+                                if (first)
+                                {
+                                    kept = (conn, item);   // the test hands it back, once this life is over
+                                    return;
+                                }
+                                if (held is null)
+                                {
+                                    held = item;   // this life holds it to its end
+                                    continue;
+                                }
+                                conn.Write(item.AsSpan());
+                                conn.ReturnBuffer(in item);
+                            }
+                            await conn.FlushAsync();
+                            if (snapshot.IsClosed)
+                            {
+                                return;
+                            }
+                        }
+                    }
+                    finally
+                    {
+                        conn.DecRef();
+                    }
+                }, config, moves: false);
+                (Socket client, _) = fleet.Connect();
+                client.Send("kept"u8);
+                Assert.True(SpinWait.SpinUntil(() => kept is not null, 5_000), "nothing was received");
+                client.Dispose();
+                MoveFleet.AwaitLive(fleet.A, 0);
+
+                (client, TcpConnection next) = fleet.Connect();
+                Assert.True(ReferenceEquals(next, kept!.Value.Conn), "this is another connection's object");
+                string mine = new('h', 40);
+                client.Send(Encoding.ASCII.GetBytes(mine));
+                Assert.True(SpinWait.SpinUntil(() => held is not null, 5_000), "nothing was received");
+
+                SpscRecvRing.Item late = kept.Value.Item;
+                var returning = new Thread(() =>
+                {
+                    if (memories)
+                    {
+                        next.ReturnBuffers([late.AsMemoryManager()]);
+                    }
+                    else
+                    {
+                        next.ReturnBuffer(in late);
+                    }
+                });
+                returning.Start();
+                returning.Join();
+
+                // Through every buffer the next life has, over and over, while it holds the first.
+                for (int i = 0; i < 16; i++)
+                {
+                    string message = $"{i:D2}" + new string((char)('a' + i), 58);
+                    client.Send(Encoding.ASCII.GetBytes(message));
+                    Assert.Equal(message, MoveFleet.Receive(client, message.Length));
+                }
+                Assert.Equal(mine, Encoding.ASCII.GetString(held!.Value.AsSpan()));
+                next.ReturnBuffer(held.Value);
+            }, skip);
         }
 
         runner.Test("move: buffers handed back from another thread count as handed back", () =>

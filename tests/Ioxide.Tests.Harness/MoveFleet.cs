@@ -19,8 +19,12 @@ public sealed class MoveFleet : IDisposable
     /// <summary>What a handler failed with, if one did.</summary>
     public readonly ConcurrentQueue<Exception> Faults = new();
 
-    public MoveFleet(int reactors, Func<TcpConnection, Task> handle, ServerConfig? config = null, Action<int, Reactor>? onStart = null)
+    /// <param name="moves">False for a server as it is by default, without <see cref="TcpOptions.Rebalance"/>, whose connections can't move.</param>
+    public MoveFleet(int reactors, Func<TcpConnection, Task> handle, ServerConfig? config = null, Action<int, Reactor>? onStart = null,
+        bool moves = true)
     {
+        config ??= Shared();
+        config = config with { Tcp = moves ? Movable(config.Tcp!) : config.Tcp! with { Rebalance = false } };
         (Port, Reactors, Threads) = TestServer.StartFleet(reactors, async (_, conn) =>
         {
             _accepted.Add(conn);
@@ -33,7 +37,7 @@ public sealed class MoveFleet : IDisposable
                 Faults.Enqueue(e);
                 throw;
             }
-        }, config ?? Shared(), onStart);
+        }, config, onStart);
     }
 
     public Reactor A => Reactors[0];
@@ -44,15 +48,21 @@ public sealed class MoveFleet : IDisposable
         RecvBufferSize = 4096,
         RecvSlots = 256,
         Udp = null,
-        Tcp = tcp ?? new TcpOptions { WriteSlabSize = 4096, PoolMax = 64 },
+        Tcp = Movable(tcp ?? new TcpOptions { WriteSlabSize = 4096, PoolMax = 64 }),
     };
 
     public static ServerConfig Incremental(int room = 64, int slots = 8, int size = 1024, TcpOptions? tcp = null) => new()
     {
         Udp = null,
         Incremental = new IncrementalOptions { MaxConnections = room, RecvSlots = slots, RecvBufferSize = size },
-        Tcp = tcp ?? new TcpOptions { WriteSlabSize = 4096, PoolMax = 64 },
+        Tcp = Movable(tcp ?? new TcpOptions { WriteSlabSize = 4096, PoolMax = 64 }),
     };
+
+    /// <summary>
+    /// Connections that can move, which only <see cref="TcpOptions.Rebalance"/> makes them: a test that doesn't ask for its
+    /// looks gets them as good as never (every 24 days by the clock), and moves the connections itself.
+    /// </summary>
+    public static TcpOptions Movable(TcpOptions tcp) => tcp.Rebalance ? tcp : tcp with { Rebalance = true, RebalanceIntervalMs = int.MaxValue };
 
     /// <summary>Both recv modes, by name; incremental needs Linux 6.12.</summary>
     public static IEnumerable<(string Mode, Func<ServerConfig> Config, bool Skip)> Modes()

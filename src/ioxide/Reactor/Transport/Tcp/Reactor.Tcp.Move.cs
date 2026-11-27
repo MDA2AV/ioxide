@@ -56,12 +56,12 @@ public sealed unsafe partial class Reactor
     private sealed record Arrival(Reactor Target, TcpConnection Conn, bool FlushDone, Reactor? From);
 
     /// <summary>
-    /// Begins moving a connection, whose recv is armed, to another reactor. False when it stays: it is pinned, over or
-    /// moving already, or the other reactor is stopping or has no room for it.
+    /// Begins moving a connection, whose recv is armed, to another reactor. False when it stays: it is no fleet's, pinned,
+    /// over or moving already, or the other reactor is stopping or has no room for it.
     /// </summary>
     internal bool StartMove(TcpConnection conn, Reactor target)
     {
-        if (target == this || conn.MoveState != TcpConnection.MoveNone || conn.Pinned || conn.IsClosed || conn.HandlerReleased
+        if (target == this || !conn.Movable || conn.MoveState != TcpConnection.MoveNone || conn.Pinned || conn.IsClosed || conn.HandlerReleased
             || _stopRequested || target._stopRequested)
         {
             return false;

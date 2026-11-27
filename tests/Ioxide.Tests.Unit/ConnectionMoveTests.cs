@@ -125,6 +125,109 @@ internal static class ConnectionMoveTests
             }
         });
 
+        runner.Test("move: a connection outside a fleet hands back as before connections moved: its receives carry its tag, and nothing is counted", () =>
+        {
+            Reactor a = NeverRunning(0);
+            var conn = new TcpConnection(a, -1, 64, 8);
+            conn.Clear();   // its second life: its number is not its tag's
+            conn.InitRefs();
+            Track(a, conn);
+            Assert.True(conn.TagGen != conn.Generation, "its tag is its life's number");
+            Assert.True(!conn.Movable, "a connection without Rebalance can move");
+            Receive(conn, 7);
+            Assert.True(conn.TryGetItem(Snapshot(conn), out SpscRecvRing.Item item), "nothing was received");
+            Assert.Equal((ushort)conn.TagGen, item.Gen);
+            conn.ReturnBuffer(in item);
+            conn.ReturnBuffers([item.AsMemoryManager()]);
+            Assert.Equal(0L, ReturnedOf(conn));
+        });
+
+        runner.Test("move: a fleet's connection carries its life in its receives, wherever it goes, and counts what it hands back", () =>
+        {
+            var config = new ServerConfig { ReactorCount = 2, Udp = null, Tcp = new TcpOptions { Rebalance = true } };
+            Reactor a = new(0, config), b = new(1, config);
+            JoinFleet(a);
+            JoinFleet(b);
+            var conn = new TcpConnection(a, -1, 64, 8);
+            conn.Clear();   // its second life: its number is not its tag's
+            conn.InitRefs();
+            Track(a, conn);
+            Assert.True(conn.TagGen != conn.Generation, "its tag is its life's number");
+            Assert.True(conn.Movable, "a fleet's connection can't move");
+            Receive(conn, 3);
+            Assert.True(conn.TryGetItem(Snapshot(conn), out SpscRecvRing.Item item), "nothing was received");
+            Assert.Equal((ushort)conn.Generation, item.Gen);
+            conn.ReturnBuffer(in item);
+            Assert.Equal(1L, ReturnedOf(conn));
+
+            Untrack(a, conn);
+            conn.LeaveFor(b);
+            Track(b, conn);
+            conn.ArriveOn(b);
+            Assert.True(conn.TagGen != conn.Generation, "its tag is its life's number");
+            Assert.True(conn.Movable && conn.Stamp == (ushort)conn.Generation, "where it arrived it carries something other than its life");
+        });
+
+        runner.Test("move: a slice that continues the last one received grows it, with Rebalance and without", () =>
+        {
+            var config = new ServerConfig { ReactorCount = 2, Udp = null, Tcp = new TcpOptions { Rebalance = true } };
+            Reactor fleetMember = new(0, config);
+            JoinFleet(fleetMember);
+            foreach (Reactor reactor in new[] { NeverRunning(0), fleetMember })
+            {
+                var conn = new TcpConnection(reactor, -1, 64, 8);
+                conn.Clear();   // its second life: its number is not its tag's
+                conn.InitRefs();
+                Track(reactor, conn);
+                Assert.True(conn.TagGen != conn.Generation, "its tag is its life's number");
+                GrowsTheLast(conn);
+            }
+        });
+
+        runner.Test("move: without Rebalance a buffer goes back to its reactor under the tag it came with, as before connections moved", () =>
+        {
+            foreach (bool incremental in new[] { false, true })
+            {
+                var config = new ServerConfig
+                {
+                    ReactorCount = 1, Udp = null, Tcp = new TcpOptions(),
+                    Incremental = incremental ? new IncrementalOptions { MaxConnections = 3, RecvSlots = 2, RecvBufferSize = 64 } : null,
+                };
+                var reactor = new Reactor(0, config);
+                if (incremental)
+                {
+                    InitIncremental(reactor);
+                }
+                var conn = new TcpConnection(reactor, -1, 64, 8);
+                conn.Clear();   // its second life: its number is not its tag's
+                conn.InitRefs();
+                Track(reactor, conn);
+                conn.IncrementalMode = incremental;   // as its ring's setup leaves it
+                Assert.True(conn.TagGen != conn.Generation, "its tag is its life's number");
+                Receive(conn, 1);
+                Receive(conn, 2);
+                RecvSnapshot snapshot = Snapshot(conn);
+                Assert.True(conn.TryGetItem(snapshot, out SpscRecvRing.Item first), "nothing was received");
+                Assert.True(conn.TryGetItem(snapshot, out SpscRecvRing.Item second), "one was received");
+                conn.ReturnBuffer(in first);
+                conn.ReturnBuffers([second.AsMemoryManager()]);
+                foreach (ushort bid in new ushort[] { 1, 2 })
+                {
+                    if (incremental)
+                    {
+                        Assert.True(ReturnQIncOf(reactor)!.TryDequeue(out ulong packed), $"buffer {bid} was not handed back (ring per connection)");
+                        UnpackReturn(null, packed, out int slot, out ushort gen, out ushort got);
+                        Assert.True(slot == conn.Slot && gen == (ushort)conn.TagGen && got == bid,
+                            $"buffer {bid} came back as {got}, of slot {slot} under tag {gen}, not {conn.Slot} and {conn.TagGen}");
+                    }
+                    else
+                    {
+                        Assert.True(ReturnQOf(reactor).TryDequeue(out ushort got) && got == bid, $"buffer {bid} was not handed back (shared ring)");
+                    }
+                }
+            }
+        });
+
         runner.Test("move: two connections in one slot never share a tag, accepted there or given there", () =>
         {
             Reactor a = NeverRunning(0), b = NeverRunning(1);
@@ -220,12 +323,33 @@ internal static class ConnectionMoveTests
         });
     }
 
+    // One that can move, as a fleet's are (TcpOptions.Rebalance), whose receives carry its life.
     private static TcpConnection Connection()
     {
-        var conn = new TcpConnection(NeverRunning(0), -1, 64, 8);
+        var conn = new TcpConnection(NeverRunning(0), -1, 64, 8) { Movable = true };
         conn.InitRefs();
         return conn;
     }
+
+    private static unsafe void GrowsTheLast(TcpConnection conn)
+    {
+        byte* buffer = (byte*)System.Runtime.InteropServices.NativeMemory.Alloc(64);
+        try
+        {
+            Assert.True(conn.Complete(4, 5, hasBuffer: true, ptr: buffer), "the queue is full");
+            Assert.True(conn.TryExtendRecv(3, 5, buffer + 4), $"a slice continuing the last item did not grow it (movable: {conn.Movable})");
+            Assert.True(conn.TryGetItem(Snapshot(conn), out SpscRecvRing.Item item) && item.Len == 7, "the item is not the two slices");
+            conn.ReturnBuffer(in item);
+        }
+        finally
+        {
+            System.Runtime.InteropServices.NativeMemory.Free(buffer);
+        }
+    }
+
+    // As its reactor does with what a recv brought, stamped as it stamps it.
+    private static unsafe void Receive(TcpConnection conn, ushort bid)
+        => Assert.True(conn.Complete(0, bid, hasBuffer: true, ptr: null), "the queue is full");
 
     private static Reactor NeverRunning(int id) => new(id, new ServerConfig { ReactorCount = 2, Tcp = new TcpOptions(), Udp = null });
 
@@ -253,6 +377,21 @@ internal static class ConnectionMoveTests
 
     [UnsafeAccessor(UnsafeAccessorKind.Method, Name = "Track")]
     private static extern void Track(Reactor reactor, TcpConnection conn);
+
+    [UnsafeAccessor(UnsafeAccessorKind.Method, Name = "JoinFleet")]
+    private static extern void JoinFleet(Reactor reactor);
+
+    [UnsafeAccessor(UnsafeAccessorKind.Field, Name = "_returned")]
+    private static extern ref long ReturnedOf(TcpConnection conn);
+
+    [UnsafeAccessor(UnsafeAccessorKind.Field, Name = "_returnQ")]
+    private static extern ref Mpsc<ushort> ReturnQOf(Reactor reactor);
+
+    [UnsafeAccessor(UnsafeAccessorKind.Field, Name = "_returnQInc")]
+    private static extern ref Mpsc<ulong>? ReturnQIncOf(Reactor reactor);
+
+    [UnsafeAccessor(UnsafeAccessorKind.StaticMethod, Name = "UnpackReturn")]
+    private static extern void UnpackReturn(Reactor? type, ulong packed, out int slot, out ushort gen, out ushort bid);
 
     [UnsafeAccessor(UnsafeAccessorKind.Method, Name = "Untrack")]
     private static extern void Untrack(Reactor reactor, TcpConnection conn);

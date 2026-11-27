@@ -138,15 +138,16 @@ public sealed record TcpOptions
     /// Let a busy reactor give connections to one that is not, among those sharing the <see cref="ServerConfig"/>. Off by
     /// default.
     ///
-    /// The kernel spreads connections over the reactors as they connect, before any of them has asked for anything. When
-    /// the busy ones happen to be on a few reactors, the others' cores stay unused: with two of four reactors' connections
-    /// silent, a server does half of what it could. With this on, the reactors look at their loads together, every
-    /// <see cref="RebalanceIntervalMs"/>: each reads how busy it was over the same tick (~250 ms), on a CPU or kept from
-    /// waiting for completions. The busiest is then paired with the idlest, the next busiest with the next idlest, and so on,
-    /// while the one is busy three quarters or more and the other 30 points less, and each gives its taker connections worth
-    /// half the difference, and no more than that share of them. While a look pairs anyone the next follows three ticks
-    /// later, and spreading one reactor's load over N takes about log2(N) of those. A connection that alone keeps a reactor
-    /// busy stays: it can't be split. Nothing moves between reactors that are all busy, however unevenly.
+    /// The kernel spreads connections over the reactors as they connect, before any of them has asked for anything.
+    /// When the busy ones happen to be on a few reactors, the others' cores stay unused: with two of four reactors'
+    /// connections silent, a server does half of what it could. With this on, the reactors look at their loads
+    /// together, every <see cref="RebalanceIntervalMs"/>: each reads how busy it was over the same two ticks (~250 ms
+    /// each), on a CPU or kept from waiting for completions. The busiest is then paired with the idlest, the next
+    /// busiest with the next idlest, and so on, while the one is busy three quarters or more and the other 30 points
+    /// less, and each gives its taker connections worth half the difference, and no more than that share of them. While
+    /// a look pairs anyone the next follows three ticks later, and spreading one reactor's load over N takes about
+    /// log2(N) of those. A connection that alone keeps a reactor busy stays: it can't be split. Nothing moves between
+    /// reactors that are all busy, however unevenly.
     /// </summary>
     /// <remarks>
     /// A connection moves as TCP has it, whatever protocol is on it, and the peer notices nothing: while a read of its
@@ -173,6 +174,10 @@ public sealed record TcpOptions
     ///
     /// Incremental mode has one thing more: a connection only moves to a reactor with a group id left
     /// (<see cref="IncrementalOptions.MaxConnections"/>).
+    ///
+    /// Off, a connection can't move, and hands its recv buffers back as it did before connections could. On, each
+    /// buffer handed back is counted, so that a move knows when the connection holds none, and checked for one that
+    /// comes back after the connection's life, whose next life can be on another reactor.
     ///
     /// What it can't see: a reactor goes by its own thread, so one whose CPU is shared, and that waits in a queue for it
     /// after a completion has come, reads less busy than it is. A connection is weighed by the time its recv completions

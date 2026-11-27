@@ -66,6 +66,15 @@ public sealed unsafe partial class TcpConnection
     // every reactor it comes to, where Generation stays with the life.
     internal int TagGen;
 
+    // Whether it can be given to another reactor: its reactor is one of a fleet (TcpOptions.Rebalance). Set with the slot.
+    // Without it, what it hands back goes the way it did before connections moved, and nothing counts it.
+    internal bool Movable;
+
+    // What its receives carry, to tell a buffer handed back after the life it was received in; set with the slot. Without
+    // moves its tag, which the reactor checks as it takes the buffer back, as before connections moved. With them its life,
+    // which the hand-back checks, as a tag from another reactor can be the same.
+    internal ushort Stamp;
+
     // What its reactor spent on it, handler included, in the tick being weighed and in the last one before that saw it.
     // What its receives took over the tick its reactor last weighed it in (TcpOptions.Rebalance), and for which look: the
     // look's number, or minus it once it was looked at for giving.

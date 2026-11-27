@@ -170,7 +170,10 @@
     other 30 points less. Each giver then gives its
     taker, for a tick, connections worth half the difference, and no more than that share of them.
     While a look pairs anyone the next follows three ticks later; one that could give none sits out
-    until the next look at the interval. Between looks a reactor pays nothing for any of this.</p>
+    until the next look at the interval. Between looks a reactor pays nothing for any of this. With the
+    option off a connection can't move, and hands its buffers back as it did before connections could;
+    on, each one handed back is counted, and checked for one that comes back after the connection's
+    life, whose next life can be on another reactor.</p>
     <p>A socket belongs to the process, so any ring can receive and send on it. What ties a connection
     to its reactor is the recv armed in its ring, what was received into its buffers, a send in
     flight, and its slot. A move undoes those on the one and redoes them on the other, with nothing

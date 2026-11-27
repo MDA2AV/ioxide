@@ -23,9 +23,28 @@ public sealed unsafe partial class TcpConnection
     internal int Generation => Volatile.Read(ref _generation);
 
     /// <summary>Hand a consumed recv buffer back, routed by mode.</summary>
-    public void ReturnBuffer(in SpscRecvRing.Item item) => HandBack(item.Gen, item.Bid, item.Ptr);
+    public void ReturnBuffer(in SpscRecvRing.Item item)
+    {
+        if (Movable)
+        {
+            HandBackMoving(item.Gen, item.Bid, item.Ptr);
+            return;
+        }
 
-    private void HandBack(ushort gen, ushort bid, byte* ptr)
+        // As before connections moved: the buffer is this reactor's, which drops it if its tag (Gen) is another life's.
+        if (IncrementalMode)
+        {
+            _reactor.EnqueueReturnQIncremental(Slot, item.Gen, item.Bid);
+        }
+        else
+        {
+            _reactor.EnqueueReturnQ(item.Bid);
+        }
+    }
+
+    // The connection can change reactors (TcpOptions.Rebalance): by now the buffer's life may be over, and the next one on
+    // another reactor, and a move waits until all it took is back.
+    private void HandBackMoving(ushort gen, ushort bid, byte* ptr)
     {
         // Read before the generation: while it is still that of the buffer's life, so are these.
         Reactor reactor = Volatile.Read(ref _reactor);
