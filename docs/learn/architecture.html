@@ -161,11 +161,16 @@
     <h2 id="rebalance">Connections that change reactors</h2>
     <p>The kernel spreads connections over the listeners as they connect, so the busy ones can end up
     on a few reactors while the others' cores stay unused. With <code>Tcp.Rebalance</code> (off by
-    default) a reactor that was busy three quarters or more of the last tick (on a CPU, or kept from
-    waiting for completions), next to one 30 points less busy in both of its last two ticks, weighs its
-    connections for a tick, by the time their recv completions take, and then gives that one
-    connections worth half the difference, and no more than that share of them. One that could give
-    none lets the other be until it has weighed again.</p>
+    default) the reactors look at their loads together every <code>Tcp.RebalanceIntervalMs</code>
+    (a minute by default; shorter for benchmarks), at the same moments by the clock. Each reads how busy
+    it was over the two ticks before (on a CPU, or kept from waiting for completions), and one that is
+    busy weighs its connections meanwhile, by the time their recv completions take. Once every reading is
+    in, one reactor pairs the busiest, by its last tick, with the idlest, by the busier of its two, the
+    next busiest with the next idlest, and so on, while the one is busy three quarters or more and the
+    other 30 points less. Each giver then gives its
+    taker, for a tick, connections worth half the difference, and no more than that share of them.
+    While a look pairs anyone the next follows three ticks later; one that could give none sits out
+    until the next look at the interval. Between looks a reactor pays nothing for any of this.</p>
     <p>A socket belongs to the process, so any ring can receive and send on it. What ties a connection
     to its reactor is the recv armed in its ring, what was received into its buffers, a send in
     flight, and its slot. A move undoes those on the one and redoes them on the other, with nothing

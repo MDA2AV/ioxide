@@ -47,7 +47,7 @@ public sealed unsafe partial class Reactor
             // Picked once a batch, not per CQE, so no completion pays for the mode test, nor for whether this reactor is in a
             // round of TcpOptions.Rebalance, which only a tick changes.
             uint ready = _ring.CqReady();
-            if (_balance != Balance.Off)
+            if (_weighing)
             {
                 for (uint i = 0; i < ready; i++)
                 {

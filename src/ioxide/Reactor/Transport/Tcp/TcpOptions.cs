@@ -140,10 +140,12 @@ public sealed record TcpOptions
     ///
     /// The kernel spreads connections over the reactors as they connect, before any of them has asked for anything. When
     /// the busy ones happen to be on a few reactors, the others' cores stay unused: with two of four reactors' connections
-    /// silent, a server does half of what it could. With this on, a reactor that was busy three quarters or more of the last
-    /// tick (~250 ms), on a CPU or kept from waiting for completions, next to one 30 points less busy in both of its last
-    /// two ticks, gives it connections worth half the difference, and no more than that share of them. A round takes three
-    /// ticks or so; spreading one reactor's load over N takes about log2(N) rounds. A connection that alone keeps a reactor
+    /// silent, a server does half of what it could. With this on, the reactors look at their loads together, every
+    /// <see cref="RebalanceIntervalMs"/>: each reads how busy it was over the same tick (~250 ms), on a CPU or kept from
+    /// waiting for completions. The busiest is then paired with the idlest, the next busiest with the next idlest, and so on,
+    /// while the one is busy three quarters or more and the other 30 points less, and each gives its taker connections worth
+    /// half the difference, and no more than that share of them. While a look pairs anyone the next follows three ticks
+    /// later, and spreading one reactor's load over N takes about log2(N) of those. A connection that alone keeps a reactor
     /// busy stays: it can't be split. Nothing moves between reactors that are all busy, however unevenly.
     /// </summary>
     /// <remarks>
@@ -178,4 +180,13 @@ public sealed record TcpOptions
     /// more than 2 s in one go stays.
     /// </remarks>
     public bool Rebalance { get; init; } = false;
+
+    /// <summary>
+    /// How often, with <see cref="Rebalance"/>, the reactors look at their loads together, in milliseconds: in whole ticks of
+    /// ~250 ms, three at the least. A minute by default, for a server whose load takes far longer than that to go uneven.
+    /// Each look reads the two ticks before it; between looks a reactor pays nothing for any of this. A look that pairs
+    /// reactors has the next follow it three ticks later, until the loads are even. A benchmark that changes the load every
+    /// few seconds wants a short interval: with 750 ms a reactor's load is spread over the others in two seconds or so.
+    /// </summary>
+    public int RebalanceIntervalMs { get; init; } = 60_000;
 }

@@ -67,8 +67,9 @@ public sealed unsafe partial class TcpConnection
     internal int TagGen;
 
     // What its reactor spent on it, handler included, in the tick being weighed and in the last one before that saw it.
+    // What its receives took over the tick its reactor last weighed it in (TcpOptions.Rebalance), and for which look: the
+    // look's number, or minus it once it was looked at for giving.
     internal long Weight;
-    internal long LastWeight;
     internal long WeighedTick = long.MinValue;
 
     // Recv buffers handed back, against those taken out of the queue. Not atomic: two threads returning at once can lose
@@ -102,7 +103,7 @@ public sealed unsafe partial class TcpConnection
     {
         MoveState = MoveNone;
         MoveTo = null;
-        LastWeight = 0;
+        Weight = 0;
         WeighedTick = long.MinValue;
         Volatile.Write(ref _home, reactor);
         Volatile.Write(ref _reactor, reactor);
@@ -119,7 +120,7 @@ public sealed unsafe partial class TcpConnection
         MoveState = MoveNone;
         MoveTo = null;
         Pinned = false;
-        LastWeight = 0;
+        Weight = 0;
         WeighedTick = long.MinValue;
         Volatile.Write(ref _returned, 0);
     }

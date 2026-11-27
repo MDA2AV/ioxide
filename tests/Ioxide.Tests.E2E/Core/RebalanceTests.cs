@@ -168,7 +168,7 @@ internal static class RebalanceTests
     private static ServerConfig On(ServerConfig? config = null)
     {
         config ??= MoveFleet.Shared();
-        return config with { Tcp = config.Tcp! with { Rebalance = true } };
+        return config with { Tcp = config.Tcp! with { Rebalance = true, RebalanceIntervalMs = 750 } };   // a look every three ticks
     }
 
     private static Task Work(TcpConnection conn) => Work(conn, WorkUs);

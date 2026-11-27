@@ -177,9 +177,9 @@ internal static class ConnectionMoveTests
         runner.Test("move: nothing of a move is left to the connection's next life", () =>
         {
             Reactor a = NeverRunning(0);
-            var conn = new TcpConnection(a, -1, 64, 8) { Pinned = true, MoveState = TcpConnection.MoveWaiting, MoveTo = a, LastWeight = 5, WeighedTick = 7 };
+            var conn = new TcpConnection(a, -1, 64, 8) { Pinned = true, MoveState = TcpConnection.MoveWaiting, MoveTo = a, Weight = 5, WeighedTick = 7 };
             conn.Clear();
-            Assert.True(!conn.Pinned && conn.MoveState == TcpConnection.MoveNone && conn.MoveTo is null && conn.LastWeight == 0 && conn.WeighedTick == long.MinValue,
+            Assert.True(!conn.Pinned && conn.MoveState == TcpConnection.MoveNone && conn.MoveTo is null && conn.Weight == 0 && conn.WeighedTick == long.MinValue,
                 "a new life begins with what the last one ended with");
         });
 

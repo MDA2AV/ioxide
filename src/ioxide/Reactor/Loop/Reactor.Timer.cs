@@ -65,15 +65,15 @@ public sealed unsafe partial class Reactor
         {
             wakeAt = Math.Min(wakeAt, now);
         }
-        bool weighing = _fleet.Length > 0;
-        if (weighing)
+        bool measuring = _measuring;   // over the tick before a look of TcpOptions.Rebalance
+        if (measuring)
         {
             _worked += Stopwatch.GetTimestamp() - _passFrom;   // this pass, past the last wait
         }
 
         // +1: the ms clock can read just short of the deadline when the kernel's timer wakes us.
         int rc = _ring.SubmitAndWait(1, Math.Max(0, wakeAt - now) + 1);
-        if (weighing)
+        if (measuring)
         {
             _passFrom = Stopwatch.GetTimestamp();
         }
