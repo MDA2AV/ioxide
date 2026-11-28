@@ -307,14 +307,15 @@ internal static class MoveStopTests
             Assert.True(fleet.Threads[1].Join(EndsWithinMs), "the reactor outlived its fault");
             Assert.True(ended.Task.Wait(EndsWithinMs), "the handler never heard of it");
             AssertClosed(client);
+            Assert.True(ReferenceEquals(conn.Reactor, fleet.B), "the connection the stopped reactor never took is still its giver's");
             AssertServes(fleet, fleet.A);
         });
 
-        runner.Test("move stop: so is one with a flush nobody has been told of yet, and its waiter is", () =>
+        runner.Test("move stop: so is one with a flush nobody has been told of yet, and its waiter is, on that reactor's thread, where a switch to the connection's host throws", () =>
         {
             const int Big = 8 * 1024 * 1024;
             var flushing = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-            var flushed = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var flushed = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
             var ended = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
             using var faulted = new ManualResetEventSlim();
             using var goOn = new ManualResetEventSlim();
@@ -331,7 +332,16 @@ internal static class MoveStopTests
                     ValueTask flush = conn.FlushAsync();
                     flushing.SetResult();
                     await flush;
-                    flushed.SetResult();
+                    string told = $"told on {Reactor.Current?.ShardIndex}";   // inline, by the stop's drain of what was posted there
+                    try
+                    {
+                        await new ReactorSwitch(conn.RingHost);
+                        flushed.SetResult($"{told}, and a switch went on");
+                    }
+                    catch (ObjectDisposedException)
+                    {
+                        flushed.SetResult($"{told}, and a switch threw");
+                    }
                     Assert.True((await read).IsClosed, "the read found the connection open");
                     ended.SetResult();
                 }
@@ -359,6 +369,7 @@ internal static class MoveStopTests
 
             Assert.True(fleet.Threads[1].Join(EndsWithinMs), "the reactor outlived its fault");
             Assert.True(flushed.Task.Wait(EndsWithinMs), "the flush's waiter was never told");
+            Assert.Equal("told on 1, and a switch threw", flushed.Task.Result);
             Assert.True(ended.Task.Wait(EndsWithinMs), "the handler never heard of the end");
             AssertClosed(client);
         });

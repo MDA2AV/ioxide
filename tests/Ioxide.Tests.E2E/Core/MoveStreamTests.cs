@@ -283,10 +283,7 @@ internal static class MoveStreamTests
         {
             await foreach (byte[] chunk in chunks.Reader.ReadAllAsync())
             {
-                while (!conn.Reactor.OnReactorThread)
-                {
-                    await new ReactorSwitch(conn.Reactor);
-                }
+                await new ReactorSwitch(conn.RingHost);
                 conn.Write(chunk);
                 while (chunks.Reader.TryRead(out byte[]? more))
                 {

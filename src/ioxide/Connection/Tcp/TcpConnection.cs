@@ -106,6 +106,7 @@ public sealed unsafe partial class TcpConnection
     {
         _reactor = reactor;
         _home = reactor;
+        _destination = reactor;
         ClientFd = fd;
         _writeSlabSize = writeSlabSize;
         _baseSlabSize = writeSlabSize;

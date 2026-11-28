@@ -70,12 +70,14 @@ public sealed partial class Nghttp2Connection : IDisposable
     private readonly TcpConnection? _tcp;
     private Reactor? _reactor;
 
-    /// <summary>The reactor this connection is served on.</summary>
-    internal Reactor? Reactor => _tcp is { } tcp ? tcp.Reactor : _reactor;
+    /// <summary>
+    /// Where this connection is served: the TCP connection's host, which follows it from reactor to reactor, or over any
+    /// other pipe the reactor the serving began on, or the one its first read completed on. <c>await new ReactorSwitch(Host)</c>
+    /// gets back there from wherever.
+    /// </summary>
+    internal IRingHost? Host => _tcp is { } tcp ? tcp.RingHost : _reactor;
 
-    // Back on the reactor, from wherever: while (OffReactor) await new ReactorSwitch(Reactor). The connection can have moved
-    // on by the time a switch lands, and the next one follows it.
-    internal bool OffReactor => Reactor is { OnReactorThread: false };
+    internal bool OffReactor => _tcp is { } tcp ? !tcp.Reactor.OnReactorThread : _reactor is { OnReactorThread: false };
 
     // Requests still being assembled, keyed by stream. A request only leaves here when its stream
     // ends, which is when it becomes dispatchable.

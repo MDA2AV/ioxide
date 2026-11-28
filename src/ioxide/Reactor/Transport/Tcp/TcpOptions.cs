@@ -156,16 +156,17 @@ public sealed record TcpOptions
     /// beside (and an HTTP/2 request handler, whose connection reads beside it, after any wait on its request or response):
     /// <list type="bullet">
     /// <item>What belongs to a reactor (a pool, a cache, the <c>Reactor</c> the handler was called with, which is the one
-    /// the connection was accepted on) is taken from <see cref="Reactor.Current"/> or
-    /// <see cref="TcpConnection.Reactor"/> afterwards, not kept across it.</item>
+    /// the connection was accepted on) is taken from <see cref="Reactor.Current"/> afterwards, not kept across it. Code
+    /// that keeps the reactor so as to get back to the connection's keeps <see cref="TcpConnection.RingHost"/> instead,
+    /// and switches to that.</item>
     /// <item>A handler that has to keep it, through a transaction over several reads say, sets
     /// <see cref="TcpConnection.Pinned"/> meanwhile.</item>
     /// <item>A connection that something other than its handler flushes while a read of it waits, as a broadcast to its
-    /// websocket does, or a timer of the reactor it was accepted on, has to be pinned, or flushed from the reactor it is on
-    /// (<see cref="TcpConnection.Reactor"/>): a flush asked for anywhere else while the connection is between two reactors
-    /// can get lost. That flush never completes, the connection can't be written to again, and only its peer or
-    /// <see cref="SendTimeoutMs"/> ends it. One that its own handler flushes, between its reads, on whichever thread, is
-    /// safe. So are ioxide's HTTP/2 stacks, given the connection or one of ioxide's two pipes over it, and its TLS pipes
+    /// websocket does, or a timer of the reactor it was accepted on, has to be pinned, or flushed from its reactor, which
+    /// <c>await new ReactorSwitch(connection.RingHost)</c> gets to: a flush asked for anywhere else while the connection
+    /// is between two reactors can get lost. That flush never completes, the connection can't be written to again, and
+    /// only its peer or <see cref="SendTimeoutMs"/> ends it. One that its own handler flushes, between its reads, on
+    /// whichever thread, is safe. So are ioxide's HTTP/2 stacks, given the connection or one of ioxide's two pipes over it, and its TLS pipes
     /// where BoringSSL encrypts: they take their flushes to the connection's reactor first. Over a pipe of another kind,
     /// such as an <c>SslStream</c>'s, an HTTP/2 stack stays on the reactor it began on, and its connection has to be
     /// pinned.</item>

@@ -70,18 +70,12 @@ public sealed partial class Nghttp2Connection
         try
         {
             await handler(request, writer);
-            while (OffReactor)   // back on the reactor, wherever the handler finished
-            {
-                await new ReactorSwitch(Reactor);
-            }
+            await new ReactorSwitch(Host);   // back on the reactor, wherever the handler finished
             await writer.CompleteAsync();
         }
         catch (Exception exception)
         {
-            while (OffReactor)
-            {
-                await new ReactorSwitch(Reactor);
-            }
+            await new ReactorSwitch(Host);
             Console.Error.WriteLine(
                 $"[ioxide.nghttp2] request handler faulted: {exception.GetBaseException().Message}");
             try

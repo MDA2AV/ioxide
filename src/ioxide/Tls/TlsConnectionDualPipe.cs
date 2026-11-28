@@ -100,10 +100,7 @@ public sealed class TlsConnectionDualPipe : IDuplexPipe, IAsyncDisposable
         // The session and the reader are the reactor's: freeing them under its SSL_write is a use after free.
         try
         {
-            while (!_conn.Reactor.OnReactorThread)   // again, if the connection moved meanwhile
-            {
-                await new ReactorSwitch(_conn.Reactor);
-            }
+            await new ReactorSwitch(_conn.RingHost);   // where the connection is by then
         }
         catch (ObjectDisposedException)
         {

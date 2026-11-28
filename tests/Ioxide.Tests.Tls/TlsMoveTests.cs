@@ -248,6 +248,92 @@ internal static class TlsMoveTests
             MoveFleet.AwaitLive(fleet.A, 0);
             MoveFleet.AwaitLive(fleet.B, 0);
         });
+
+        runner.Test("tls move: a flush another thread asks for while its connection is on its way from a reactor that stopped is made on the one it goes to", () =>
+        {
+            TlsConnectionDualPipe? pipe = null;
+            var flushed = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
+            using MoveFleet fleet = PipeFleet(made => pipe = made);
+            (SslStream client, TcpConnection conn) = Connect(fleet);
+            Assert.True(SpinWait.SpinUntil(() => Moves.ReadParkedOf(conn) && Moves.HoldsNothingOf(conn) && !conn.Pinned && pipe is not null, 5_000), "the handler never got to wait");
+
+            Task flushing;
+            using (Moves.Hold(fleet.B))
+            {
+                Assert.True(Moves.Begin(conn, fleet.B), "the move was refused");
+                Moves.WaitFor(conn, Moves.Given);
+                fleet.A.Stop();
+                Assert.True(fleet.Threads[0].Join(10_000), "the stop never ended");   // past its wait for what it gave away
+                flushing = Task.Run(async () =>
+                {
+                    pipe!.Output.Write("push"u8);
+                    FlushResult result = await pipe.Output.FlushAsync().ConfigureAwait(false);
+                    flushed.SetResult($"{Reactor.Current?.ShardIndex} {result.IsCompleted}");
+                });
+                Thread.Sleep(50);
+                Assert.True(!flushing.IsCompleted, "the flush was over with the connection between two reactors");
+            }
+            var buffer = new byte[4];
+            client.ReadExactly(buffer);
+            Assert.Equal("push", Encoding.ASCII.GetString(buffer));
+            Assert.True(flushing.Wait(5_000), "the flush never completed");
+            Assert.Equal("1 False", flushed.Task.Result);   // made on the second, which goes on
+        });
+
+        runner.Test("tls move: a faulted Complete from another thread, which the pipe's dispose overtakes on the connection's new reactor, still drops what was staged", () =>
+        {
+            TlsConnectionDualPipe? pipe = null;
+            using MoveFleet fleet = PipeFleet(made => pipe = made);
+            (SslStream client, TcpConnection conn) = Connect(fleet);
+            Assert.True(SpinWait.SpinUntil(() => Moves.ReadParkedOf(conn) && Moves.HoldsNothingOf(conn) && !conn.Pinned && pipe is not null, 5_000), "the handler never got to wait");
+
+            Moves.Held a;
+            using (Moves.Hold(fleet.B))
+            {
+                Assert.True(Moves.Begin(conn, fleet.B), "the move was refused");
+                Moves.WaitFor(conn, Moves.Given);
+                a = Moves.Hold(fleet.A);   // the Complete goes where this thread sees the connection, A, and waits there
+                pipe!.Output.Write("half"u8);
+                pipe.Output.Complete(new InvalidOperationException("the response failed"));
+            }
+
+            using (a)
+            {
+                Assert.True(SpinWait.SpinUntil(() => Moves.IsOn(conn, fleet.B), 5_000), Moves.Describe(conn));
+                Assert.True(Task.Run(async () => await pipe.DisposeAsync()).Wait(5_000), "the pipe was never disposed");   // on B, ahead of it
+            }
+            Assert.Equal(0, client.Read(new byte[16]));   // the close_notify, and no half a response before it
+            client.Dispose();
+            MoveFleet.AwaitLive(fleet.A, 0);
+            MoveFleet.AwaitLive(fleet.B, 0);
+        });
+    }
+
+    // Two reactors, each with its TLS service, whose handlers wrap the connection in a pipe and wait in a read: the pipe
+    // of one that completed its handshake (those the kernel put elsewhere are dropped before theirs).
+    private static MoveFleet PipeFleet(Action<TlsConnectionDualPipe> made)
+    {
+        TlsService[] services = new TlsService[2];
+        return new MoveFleet(2, async conn =>
+        {
+            try
+            {
+                TlsSession session = await services[Reactor.Current!.ShardIndex].AcceptAsync(conn);
+                var pipe = new TlsConnectionDualPipe(conn, session);
+                made(pipe);
+                while (!(await pipe.Input.ReadAsync()).IsCompleted)
+                {
+                }
+            }
+            catch (IOException)
+            {
+                // one that came to the other reactor, and was dropped
+            }
+            finally
+            {
+                conn.DecRef();
+            }
+        }, null, (i, reactor) => services[i] = TlsService.Start(reactor, Options()));
     }
 
     private static void RegisterHandshake(Runner runner)

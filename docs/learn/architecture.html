@@ -192,13 +192,15 @@
     <p>So a handler may find itself on another reactor after a read, or after a flush that a read waits
     beside, and an HTTP/2 request handler after any wait on its request or response: take what belongs
     to a reactor from <code>Reactor.Current</code> then, or set <code>conn.Pinned</code> while it can't
-    follow. What runs elsewhere and has to get to the connection's reactor asks <code>conn.Reactor</code>
-    again once it got there. ioxide's HTTP/2 stacks (given the connection or one of ioxide's pipes) and
-    its TLS pipes do; a TLS handshake and Kestrel's connections stay put. A flush asked for off the
-    connection's reactor while it is between two reactors can get lost, so a connection that something
-    other than its handler flushes while a read of it waits - another thread, a timer of the reactor it
-    was accepted on - has to be pinned, or flushed from <code>conn.Reactor</code>. So does one that an
-    HTTP/2 stack serves over a pipe of another kind, such as an <code>SslStream</code>'s.</p>
+    follow. What runs elsewhere and has to get to the connection's reactor keeps <code>conn.RingHost</code>
+    instead of a reactor, and switches to it: <code>await new ReactorSwitch(conn.RingHost)</code> lands on the
+    reactor serving the connection when it gets there, and what is posted through it follows the connection
+    too. Without the option it is the reactor itself. ioxide's HTTP/2 stacks (given the connection or one of
+    ioxide's pipes) and its TLS pipes do so; a TLS handshake and Kestrel's connections stay put. A flush
+    asked for off the connection's reactor while it is between two reactors can get lost, so a connection
+    that something other than its handler flushes while a read of it waits - another thread, a timer of the
+    reactor it was accepted on - has to be pinned, or flushed after that switch. So does one that an HTTP/2
+    stack serves over a pipe of another kind, such as an <code>SslStream</code>'s.</p>
 
     <h2>Wiring and services</h2>
     <p>Three seams connect an application: <code>TcpHandle</code> (the per-connection loop, with

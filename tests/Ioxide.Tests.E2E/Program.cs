@@ -29,6 +29,7 @@ internal static class Program
         TcpSweepTests.Register(runner);
         SlotTests.Register(runner);
         MoveTests.Register(runner);
+        MoveHostTests.Register(runner);
         MoveEndTests.Register(runner);
         MoveStopTests.Register(runner);
         MoveStreamTests.Register(runner);

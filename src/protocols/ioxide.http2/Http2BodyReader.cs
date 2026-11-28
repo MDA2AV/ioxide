@@ -133,10 +133,7 @@ public sealed class Http2BodyReader : IValueTaskSource<ReadOnlyMemory<byte>>
     [MethodImpl(MethodImplOptions.NoInlining)]
     private async ValueTask<ReadOnlyMemory<byte>> ReadOnReactor()
     {
-        while (_owner.OffReactor)
-        {
-            await new ReactorSwitch(_owner.Reactor);
-        }
+        await new ReactorSwitch(_owner.Host);
         return await ReadAsync();
     }
 

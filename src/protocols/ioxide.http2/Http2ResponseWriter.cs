@@ -226,10 +226,7 @@ public sealed class Http2ResponseWriter : IBufferWriter<byte>
 
         try
         {
-            while (_connection.OffReactor)
-            {
-                await new ReactorSwitch(_connection.Reactor);
-            }
+            await new ReactorSwitch(_connection.Host);
         }
         catch (ObjectDisposedException)
         {
@@ -272,7 +269,7 @@ public sealed class Http2ResponseWriter : IBufferWriter<byte>
     // Not async on the reactor: a flush that only waits for the pump's turn returns that wait, on this writer's waiter.
     private ValueTask<FlushResult> FlushCore(bool endStream)
     {
-        var onReactor = new ReactorSwitch(_connection.Reactor);
+        var onReactor = new ReactorSwitch(_connection.Host);
         if (!_headersSent || !onReactor.IsCompleted)
         {
             return FlushCoreAsync(endStream);
@@ -303,10 +300,7 @@ public sealed class Http2ResponseWriter : IBufferWriter<byte>
             throw new InvalidOperationException("Write the response headers before flushing a body chunk.");
         }
 
-        while (_connection.OffReactor)
-        {
-            await new ReactorSwitch(_connection.Reactor);
-        }
+        await new ReactorSwitch(_connection.Host);
 
         SendUnsentHeaders();
         return await Send(endStream);
@@ -418,6 +412,10 @@ public sealed class Http2ResponseWriter : IBufferWriter<byte>
             }
 
             await credited;
+            if (_connection.OffReactor)   // a credit handed out deep in a stack resumes this on the thread pool instead
+            {
+                await new ReactorSwitch(_connection.Host);
+            }
 
             // ResetStreamAsync from another task drops what is staged, and SendStaged would report nothing left as sent.
             if (!_connection.IsResponseLive(_streamId))

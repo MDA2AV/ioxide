@@ -126,12 +126,14 @@ public sealed partial class Http2Connection : IDisposable
     private readonly TcpConnection? _tcp;
     private Reactor? _reactor;
 
-    /// <summary>The reactor this connection is served on.</summary>
-    internal Reactor? Reactor => _tcp is { } tcp ? tcp.Reactor : _reactor;
+    /// <summary>
+    /// Where this connection is served: the TCP connection's host, which follows it from reactor to reactor, or over any
+    /// other pipe the reactor the serving began on, or the one its first read completed on. <c>await new ReactorSwitch(Host)</c>
+    /// gets back there from wherever.
+    /// </summary>
+    internal IRingHost? Host => _tcp is { } tcp ? tcp.RingHost : _reactor;
 
-    // Back on the reactor, from wherever: while (OffReactor) await new ReactorSwitch(Reactor). The connection can have moved
-    // on by the time a switch lands, and the next one follows it.
-    internal bool OffReactor => Reactor is { OnReactorThread: false };
+    internal bool OffReactor => _tcp is { } tcp ? !tcp.Reactor.OnReactorThread : _reactor is { OnReactorThread: false };
 
     /// <summary>
     /// Serve over an already-chosen transport. The pipe is the caller's to dispose.
@@ -248,9 +250,9 @@ public sealed partial class Http2Connection : IDisposable
             {
                 ReadResult read = await _pipe.Input.ReadAsync();
                 _reactor ??= Reactor.Current;   // a RunAsync begun off the reactor learns it here
-                while (OffReactor)              // a pipe may complete its read elsewhere: a default Pipe on the thread pool
+                if (OffReactor)   // a pipe may complete its read elsewhere: a default Pipe on the thread pool
                 {
-                    await new ReactorSwitch(Reactor);
+                    await new ReactorSwitch(Host);
                 }
 
                 bool received = Accumulate(read.Buffer);
@@ -304,10 +306,7 @@ public sealed partial class Http2Connection : IDisposable
     {
         try
         {
-            while (OffReactor)
-            {
-                await new ReactorSwitch(Reactor);
-            }
+            await new ReactorSwitch(Host);
         }
         catch (ObjectDisposedException)
         {
@@ -422,18 +421,12 @@ public sealed partial class Http2Connection : IDisposable
         try
         {
             Http2Response response = await inFlight;
-            while (OffReactor)   // back on the reactor, wherever the handler finished
-            {
-                await new ReactorSwitch(Reactor);
-            }
+            await new ReactorSwitch(Host);   // back on the reactor, wherever the handler finished
             WriteResponse(pending.StreamId, response);
         }
         catch (Exception exception)
         {
-            while (OffReactor)
-            {
-                await new ReactorSwitch(Reactor);
-            }
+            await new ReactorSwitch(Host);
             // Nobody can observe this task, so an escaping exception would vanish silently and the
             // peer would wait on a stream that is never coming.
             AnswerFault(request, pending.StreamId, exception);

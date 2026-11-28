@@ -65,17 +65,10 @@ public sealed unsafe partial class Reactor
         }
     }
 
-    /// <summary>
-    /// <see cref="ScheduleOnReactor"/> for a continuation somebody is waiting on, posted the way a
-    /// <see cref="ReactorSwitch"/> posts its own: if the reactor stops before running it, it runs on the
-    /// thread pool rather than never. There it finds <see cref="PostsClosed"/> set, and must leave alone
-    /// what the reactor owns.
-    /// </summary>
-    internal void ScheduleContinuation(Action continuation) => ScheduleOnReactor(ReactorSwitch.Resume, continuation);
-
     // A switch waiting on a stopped reactor resumes on the thread pool, where its GetResult throws, instead of
-    // waiting forever, as does a continuation posted like one (ScheduleContinuation). A connection given to it is
-    // closed. Every other post is dropped: it would never have run.
+    // waiting forever, as does a continuation posted like one (ReactorSwitch.Resume). A connection given to it is closed.
+    // What came through a connection's host goes on from the thread pool. Every other post is dropped: it would never
+    // have run.
     [MethodImpl(MethodImplOptions.NoInlining)]
     private void DrainStoppedPosts()
     {
@@ -87,6 +80,12 @@ public sealed unsafe partial class Reactor
             if (item.Callback == ReactorSwitch.Resume)
             {
                 ThreadPool.UnsafeQueueUserWorkItem(static continuation => continuation(), (Action)item.State!, preferLocal: false);
+            }
+            else if (item.Callback == ConnectionHost.HopRun)
+            {
+                // Through a connection's host: on the thread pool it follows the connection to a reactor that has it, or
+                // ends as what is posted here does.
+                ThreadPool.UnsafeQueueUserWorkItem(static hop => hop.Run(), (ConnectionHost.Hop)item.State!, preferLocal: false);
             }
             else if (item.Callback == Arrive)
             {

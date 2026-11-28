@@ -20,7 +20,7 @@ namespace ioxide;
 /// load the next bytes have nearly always arrived by the time a handler waits: with the recv armed, a busy connection is
 /// hardly ever idle.
 ///
-/// What other threads send a moving connection's way reaches it wherever it is by then (<see cref="TcpConnection.Reactor"/>),
+/// What other threads send a moving connection's way reaches it wherever it is by then (<see cref="TcpConnection.RingHost"/>),
 /// but for one thing: a flush another thread asks for while the connection is between two reactors can get lost.
 /// </remarks>
 public sealed unsafe partial class Reactor
@@ -205,7 +205,7 @@ public sealed unsafe partial class Reactor
     {
         TcpConnection conn = arrival.Conn;
 
-        if (_incremental && !SetupConnectionBufRing(conn, reserved: true))
+        if (_incremental && !TrySetupBufRing(conn))
         {
             SendBack(arrival);
             return;
@@ -236,6 +236,21 @@ public sealed unsafe partial class Reactor
         }
     }
 
+    // Its ring registered here, or not: no locked memory left, or a kernel refusing it otherwise, which as a throw out of the
+    // post queue would leave the connection on its way here for good.
+    private bool TrySetupBufRing(TcpConnection conn)
+    {
+        try
+        {
+            return SetupConnectionBufRing(conn, reserved: true);
+        }
+        catch (InvalidOperationException e)
+        {
+            Console.Error.WriteLine($"[r{_id}] a connection given here goes back: {e.Message}");
+            return false;
+        }
+    }
+
     // Incremental mode, and no locked memory left to register its ring with: home, which has just given some back. Without
     // room there either it is closed, as an accept past the limit is.
     private void SendBack(Arrival arrival)
@@ -246,6 +261,7 @@ public sealed unsafe partial class Reactor
         {
             if (home.ExpectArrival())
             {
+                arrival.Conn.HeadFor(home);   // before this reactor can stop: what comes through the host follows it home
                 home.ScheduleOnReactor(Arrive, new Arrival(home, arrival.Conn, arrival.FlushDone, From: null));
                 return;
             }
@@ -270,6 +286,7 @@ public sealed unsafe partial class Reactor
     private static void AbandonArrival(Arrival arrival)
     {
         TcpConnection conn = arrival.Conn;
+        conn.StrandOn(arrival.Target);
         conn.SuppressWriteShutdown();
         shutdown(conn.ClientFd, SHUT_RDWR);
         if (arrival.FlushDone)

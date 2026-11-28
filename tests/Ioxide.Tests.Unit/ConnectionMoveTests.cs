@@ -256,7 +256,7 @@ internal static class ConnectionMoveTests
         runner.Test("move: whose a connection is: its reactor's, and on that reactor's thread, once given away, the taker's", () =>
         {
             Reactor a = NeverRunning(0), b = NeverRunning(1);
-            var conn = new TcpConnection(a, -1, 64, 8);
+            var conn = new TcpConnection(a, -1, 64, 8) { Movable = true };   // a fleet's, as only those are given away
             Assert.True(ReferenceEquals(conn.Reactor, a), "a new connection is another reactor's");
 
             conn.LeaveFor(b);

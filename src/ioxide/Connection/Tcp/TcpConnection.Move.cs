@@ -7,11 +7,31 @@ namespace ioxide;
 public sealed unsafe partial class TcpConnection
 {
     // The reactor serving it: the one whose table it is in, or was in until the one it was given to takes it. Only the
-    // taker writes it, so what another thread sends to it meanwhile reaches the giver, which passes it on.
+    // taker writes it (or StrandOn, for a taker that stopped first), so what another thread sends to it meanwhile reaches
+    // the giver, which passes it on.
     private Reactor _reactor;
 
-    // The same, or the reactor it was given to. Only the thread of the one serving it writes it.
+    // The same, or the reactor it was given to. Only the thread of the one serving it writes it (or StrandOn).
     private Reactor _home;
+
+    // Where it is going while it is between two reactors, sent back home included, and where it is otherwise: what a hop
+    // through its host follows once the reactor it was posted to has stopped (ConnectionHost.Hop).
+    private Reactor _destination;
+
+    internal Reactor Destination => Volatile.Read(ref _destination);
+
+    // A taker that couldn't take it sends it back: home is where it is going now, though it is still the taker's to the
+    // home's own thread until home takes it again.
+    internal void HeadFor(Reactor home) => Volatile.Write(ref _destination, home);
+
+    // A stopped reactor that was to take it never did, and closed it: it is that one's, for every thread, so what follows
+    // it there ends as what was posted to that reactor did.
+    internal void StrandOn(Reactor stopped)
+    {
+        Volatile.Write(ref _destination, stopped);
+        Volatile.Write(ref _home, stopped);
+        Volatile.Write(ref _reactor, stopped);
+    }
 
     /// <summary>
     /// The reactor this connection is on. It changes only under <see cref="TcpOptions.Rebalance"/>, while a read waits, so
@@ -22,13 +42,18 @@ public sealed unsafe partial class TcpConnection
     /// to every other thread, as that one passes on what it is sent.
     ///
     /// On that reactor's own thread it doesn't change until the code running there returns or waits. Anywhere else it can
-    /// change at any moment: what must run on the connection's reactor asks again once it got there, as in
-    /// <c>while (!connection.Reactor.OnReactorThread) await new ReactorSwitch(connection.Reactor);</c>
+    /// change at any moment: what must run on the connection's reactor switches to <see cref="RingHost"/>, which follows it
+    /// (<c>await new ReactorSwitch(connection.RingHost)</c>), rather than to the reactor this returned.
     /// </remarks>
     public Reactor Reactor
     {
         get
         {
+            if (!Movable)
+            {
+                return _reactor;   // never another one
+            }
+
             // In this order: a home read here that a later reactor wrote brings that reactor's own arrival with it, so
             // the read below then finds it, and not this thread's.
             Reactor home = Volatile.Read(ref _home);
@@ -104,6 +129,7 @@ public sealed unsafe partial class TcpConnection
     {
         MoveState = MoveGiven;
         Slot = -1;   // which finds nothing
+        Volatile.Write(ref _destination, target);
         Volatile.Write(ref _home, target);
     }
 
@@ -114,6 +140,7 @@ public sealed unsafe partial class TcpConnection
         MoveTo = null;
         Weight = 0;
         WeighedTick = long.MinValue;
+        Volatile.Write(ref _destination, reactor);
         Volatile.Write(ref _home, reactor);
         Volatile.Write(ref _reactor, reactor);
     }

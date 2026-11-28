@@ -174,30 +174,8 @@ public sealed class MoveFleet : IDisposable
     }
 
     /// <summary>
-    /// <c>await</c>ed from another thread, continues on the connection's reactor, whichever that is by then. No async method:
-    /// one that is over by the time it is awaited leaves its caller where it is.
+    /// <c>await</c>ed from another thread, continues on the connection's reactor, whichever that is by then: the switch to
+    /// its host (<see cref="TcpConnection.RingHost"/>), which throws once that reactor has stopped.
     /// </summary>
-    public static HomeSwitch Home(TcpConnection conn) => new(conn);
-
-    public readonly struct HomeSwitch(TcpConnection conn) : System.Runtime.CompilerServices.ICriticalNotifyCompletion
-    {
-        public HomeSwitch GetAwaiter() => this;
-        public bool IsCompleted => conn.Reactor.OnReactorThread;
-        public void GetResult() { }
-        public void OnCompleted(Action continuation) => UnsafeOnCompleted(continuation);
-        public void UnsafeOnCompleted(Action continuation) => conn.Reactor.ScheduleOnReactor(Land, (conn, continuation));
-
-        private static readonly Action<object?> Land = static state =>
-        {
-            var (conn, continuation) = ((TcpConnection, Action))state!;
-            if (conn.Reactor.OnReactorThread)
-            {
-                continuation();
-            }
-            else
-            {
-                conn.Reactor.ScheduleOnReactor(Land, state);   // it has moved on
-            }
-        };
-    }
+    public static ReactorSwitch Home(TcpConnection conn) => new(conn.RingHost);
 }

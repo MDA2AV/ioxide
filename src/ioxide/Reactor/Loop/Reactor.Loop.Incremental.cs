@@ -103,6 +103,7 @@ public sealed unsafe partial class Reactor
         }
         if (ret < 0)
         {
+            FreeGid(gid);   // as for ENOMEM: the caller sheds the connection or sends it back
             throw new InvalidOperationException($"register pbuf_ring (inc) failed with errno {-ret}, gid={gid}");
         }
 

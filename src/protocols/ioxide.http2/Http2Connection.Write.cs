@@ -129,9 +129,9 @@ public sealed partial class Http2Connection
                 turn = TakeTurn();
 
                 FlushResult flushed = await _pipe.Output.FlushAsync();
-                while (OffReactor)   // a pipe may complete its flush elsewhere: a default Pipe on the thread pool
+                if (OffReactor)   // a pipe may complete its flush elsewhere: a default Pipe on the thread pool
                 {
-                    await new ReactorSwitch(Reactor);
+                    await new ReactorSwitch(Host);
                 }
 
                 // Over TCP a dead peer never makes a flush throw: this is the only word of it before the read sees the
@@ -209,10 +209,7 @@ public sealed partial class Http2Connection
     {
         try
         {
-            while (OffReactor)
-            {
-                await new ReactorSwitch(Reactor);
-            }
+            await new ReactorSwitch(Host);
         }
         catch (ObjectDisposedException)
         {
