@@ -93,7 +93,10 @@ if (lease.TryGet(pathBytes, out var asset))
     <p>The reader pool is what keeps concurrent requests from serializing: each rented
     <code>AssetReader</code> owns its buffer and in-flight slot, and the cache's descriptors are
     shared and positional, so any number of readers - within a reactor and across reactors - can
-    read the same file at once.</p>
+    read the same file at once. With <code>TcpOptions.Rebalance</code> the handler's connection can
+    change reactors at a read, so the readers are taken from <code>Reactor.Current</code> after it, not
+    once for the connection's life (<a href="architecture.html#rebalance">connections that change
+    reactors</a>).</p>
 
     <h2>Atomic reloads</h2>
     <p>Snapshots are immutable; deploys swap them whole. <code>StaticAssets.Reload()</code>

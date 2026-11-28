@@ -25,7 +25,7 @@ internal static class ConnectionSlotTests
             {
                 Assert.Equal(i, conns[i].Slot);
                 Assert.True(ReferenceEquals(At(reactor, i, conns[i]), conns[i]), $"connection {i} is not at its slot");
-                Assert.True(ConnAt(reactor, i, (ushort)(conns[i].Generation + 1)) is null, $"slot {i} was found by another generation");
+                Assert.True(ConnAt(reactor, i, (ushort)(conns[i].TagGen + 1)) is null, $"slot {i} was found by another generation");
             }
             Assert.True(ConnAt(reactor, Count, 0) is null && ConnAt(reactor, -1, 0) is null && ConnAt(reactor, int.MaxValue, 0) is null,
                 "a slot past the ones handed out was found");
@@ -54,7 +54,7 @@ internal static class ConnectionSlotTests
         {
             Reactor reactor = NeverRunning();
             TcpConnection a = Tracked(reactor), b = Tracked(reactor), c = Tracked(reactor);
-            (int slot, ushort generation) = (b.Slot, (ushort)b.Generation);
+            (int slot, ushort generation) = (b.Slot, (ushort)b.TagGen);
             Assert.Equal(3, LiveOf(reactor));
 
             Untrack(reactor, b);
@@ -163,7 +163,7 @@ internal static class ConnectionSlotTests
         FreeSlotsOf(reactor).Push(conn.Slot);
     }
 
-    private static TcpConnection? At(Reactor reactor, int slot, TcpConnection expected) => ConnAt(reactor, slot, (ushort)expected.Generation);
+    private static TcpConnection? At(Reactor reactor, int slot, TcpConnection expected) => ConnAt(reactor, slot, (ushort)expected.TagGen);
 
     [UnsafeAccessor(UnsafeAccessorKind.Method, Name = "Track")]
     private static extern void Track(Reactor reactor, TcpConnection conn);

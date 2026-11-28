@@ -94,6 +94,28 @@ public sealed unsafe partial class Reactor
         Wake();
     }
 
+    // Handed back after its connection's life, whose next one can be on another reactor (TcpOptions.Rebalance): a buffer
+    // is the one's whose memory it is. Nobody's, once that one has ended.
+    internal void ReturnLate(byte* buffer, ushort bid)
+    {
+        if (OwnsBuffer(buffer))
+        {
+            EnqueueReturnQ(bid);
+            return;
+        }
+        foreach (Reactor? reactor in _fleet)
+        {
+            if (reactor is not null && reactor.OwnsBuffer(buffer))
+            {
+                reactor.EnqueueReturnQ(bid);
+                return;
+            }
+        }
+    }
+
+    private bool OwnsBuffer(byte* buffer)
+        => buffer >= _bufSlab && buffer < _bufSlab + (_bufferRingEntries * (nuint)_recvBufferSize);
+
     private void DrainReturnQ()
     {
         bool any = false;
@@ -135,7 +157,8 @@ public sealed unsafe partial class Reactor
     private void Recycle(TcpConnection conn)
     {
         conn.MarkClosed();
-        SubmitCancel(Tag(KindTcpRecv, (ushort)conn.Generation, conn.Slot));   // before Clear() bumps the generation
+        SubmitCancel(Tag(KindTcpRecv, (ushort)conn.TagGen, conn.Slot));   // before its slot goes to another
+        EndMove(conn);   // closed on its way out: what it had reserved goes back
 
         // Before DrainRecv, which only sees what is still QUEUED: a reader or stream that pulled
         // buffers out holds the only record of them, and nothing obliges a handler to give them

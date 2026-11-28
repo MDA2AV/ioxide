@@ -53,8 +53,11 @@ public sealed partial class Nghttp2Connection
             while (!IsBroken)
             {
                 ReadResult read = await _pipe.Input.ReadAsync();
-                _reactor ??= Reactor.Current;        // a RunAsync begun off the reactor learns it here
-                await new ReactorSwitch(_reactor);   // a pipe may complete its read elsewhere: a default Pipe on the thread pool
+                _reactor ??= Reactor.Current;   // a RunAsync begun off the reactor learns it here
+                if (OffReactor)   // a pipe may complete its read elsewhere: a default Pipe on the thread pool
+                {
+                    await new ReactorSwitch(Host);
+                }
 
                 _inPass = true;
                 Feed(read.Buffer);
@@ -96,7 +99,7 @@ public sealed partial class Nghttp2Connection
     {
         try
         {
-            await new ReactorSwitch(_reactor);
+            await new ReactorSwitch(Host);
         }
         catch (ObjectDisposedException)
         {
@@ -203,12 +206,12 @@ public sealed partial class Nghttp2Connection
         try
         {
             Nghttp2Response response = await inFlight;
-            await new ReactorSwitch(_reactor);   // back on the reactor, wherever the handler finished
+            await new ReactorSwitch(Host);   // back on the reactor, wherever the handler finished
             SubmitResponse(pending.StreamId, response);
         }
         catch (Exception exception)
         {
-            await new ReactorSwitch(_reactor);
+            await new ReactorSwitch(Host);
             // Nobody can observe this task, so an escaping exception would vanish silently and the
             // peer would wait on a stream that is never coming.
             AnswerFault(pending.StreamId, exception);

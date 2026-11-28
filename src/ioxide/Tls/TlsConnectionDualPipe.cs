@@ -26,7 +26,11 @@ namespace ioxide.tls;
 /// off to kTLS RX, and keeps the userspace reader. <see cref="TlsSession"/> then reports the
 /// OUTCOME, which is what this reads.
 /// </summary>
-/// <remarks>Usable from any thread: reads, flushes and disposal from another run on the connection's reactor.</remarks>
+/// <remarks>
+/// Usable from any thread: reads and disposal from another run on the connection's reactor, and so do flushes where
+/// BoringSSL encrypts. Under kTLS transmit the writer is the connection's own, a flush of which, asked for off the
+/// connection's reactor while it moves (<see cref="TcpOptions.Rebalance"/>), can get lost.
+/// </remarks>
 public sealed class TlsConnectionDualPipe : IDuplexPipe, IAsyncDisposable
 {
     private readonly TcpConnection _conn;
@@ -82,6 +86,9 @@ public sealed class TlsConnectionDualPipe : IDuplexPipe, IAsyncDisposable
     /// <summary>Response bytes. Plaintext under kTLS TX; encrypted here otherwise.</summary>
     public PipeWriter Output => _writer;
 
+    /// <summary>The connection this is a pipe over.</summary>
+    public TcpConnection Connection => _conn;
+
     /// <summary>
     /// Whether the connection is still in the life this pipe was made for. Connections are pooled: once this is
     /// false, the connection has ended and may already be serving another client.
@@ -93,7 +100,7 @@ public sealed class TlsConnectionDualPipe : IDuplexPipe, IAsyncDisposable
         // The session and the reader are the reactor's: freeing them under its SSL_write is a use after free.
         try
         {
-            await new ReactorSwitch(_conn.Reactor);
+            await new ReactorSwitch(_conn.RingHost);   // where the connection is by then
         }
         catch (ObjectDisposedException)
         {

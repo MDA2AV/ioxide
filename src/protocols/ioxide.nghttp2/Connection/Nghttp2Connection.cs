@@ -1,6 +1,7 @@
 using System.Buffers;
 using System.IO.Pipelines;
 using System.Runtime.InteropServices;
+using ioxide.tls;
 
 namespace ioxide.nghttp2;
 
@@ -28,6 +29,10 @@ namespace ioxide.nghttp2;
 /// <c>TcpConnectionDualPipe</c> for h2c, or a <c>TlsConnectionDualPipe</c> for h2 over TLS, or a
 /// pipe over anything else - the protocol code is identical in every case, and the transport is
 /// chosen where the connection is accepted.
+///
+/// Given the connection or one of those two pipes, it follows the connection to whichever reactor that
+/// is on (<c>TcpOptions.Rebalance</c>). Over a pipe of another kind it stays on the reactor it began
+/// on, and its connection has to be pinned (<c>TcpConnection.Pinned</c>).
 /// </summary>
 /// <remarks>
 /// Reactor thread only. nghttp2's callbacks fire INSIDE <c>ih2_read</c>, so they may only deposit
@@ -60,11 +65,19 @@ public sealed partial class Nghttp2Connection : IDisposable
     // and the session returns no WINDOW_UPDATE of its own.
     private bool _streamBodies;
 
-    // The reactor this connection is served on; null when it runs without one, as over a test pipe.
+    // The TCP connection underneath, which can change reactors while a read waits (TcpOptions.Rebalance). Null over any
+    // other pipe, which stays on the reactor the serving began on - or runs without one, as over a test pipe.
+    private readonly TcpConnection? _tcp;
     private Reactor? _reactor;
 
-    internal Reactor? Reactor => _reactor;
-    internal bool OffReactor => _reactor is { OnReactorThread: false };
+    /// <summary>
+    /// Where this connection is served: the TCP connection's host, which follows it from reactor to reactor, or over any
+    /// other pipe the reactor the serving began on, or the one its first read completed on. <c>await new ReactorSwitch(Host)</c>
+    /// gets back there from wherever.
+    /// </summary>
+    internal IRingHost? Host => _tcp is { } tcp ? tcp.RingHost : _reactor;
+
+    internal bool OffReactor => _tcp is { } tcp ? !tcp.Reactor.OnReactorThread : _reactor is { OnReactorThread: false };
 
     // Requests still being assembled, keyed by stream. A request only leaves here when its stream
     // ends, which is when it becomes dispatchable.
@@ -105,6 +118,12 @@ public sealed partial class Nghttp2Connection : IDisposable
     public Nghttp2Connection(IDuplexPipe pipe, Nghttp2Options? options = null)
     {
         _pipe = pipe;
+        _tcp = pipe switch
+        {
+            TcpConnectionDualPipe tcp => tcp.Connection,
+            TlsConnectionDualPipe tls => tls.Connection,
+            _ => null,
+        };
         _options = options ?? new Nghttp2Options();
     }
 

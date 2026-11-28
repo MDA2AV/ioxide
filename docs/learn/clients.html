@@ -116,7 +116,10 @@ public ValueTask&lt;int&gt; ReadAsync(int fd, nint buffer, int length, long offs
       <li><b>Open on the right thread.</b> Create the client from <code>Reactor.OnStart</code> so
       its operations ride that reactor's ring, and register it (or its pool) with
       <code>reactor.AddService(...)</code>. One client per reactor - shared-nothing applies to
-      clients too.</li>
+      clients too. With <code>TcpOptions.Rebalance</code> a connection can change reactors at a read,
+      so a handler takes the client from <code>Reactor.Current</code> after one, not once for the
+      connection's life. A client is opened on a reactor, never on a connection's <code>RingHost</code>,
+      which follows the connection: through it go switches, posts and one-off waits only (<a href="architecture.html#rebalance">connections that change reactors</a>).</li>
       <li><b>Own native memory.</b> Allocate wire buffers with <code>NativeMemory.Alloc</code> and
       keep addresses as <code>nint</code> fields so async methods can do arithmetic on them.
       A buffer must stay valid until its operation completes.</li>

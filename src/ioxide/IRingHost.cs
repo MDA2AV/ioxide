@@ -10,6 +10,9 @@ namespace ioxide;
 /// thread (off-reactor callers are marshalled). Results: bytes transferred (0 for connect), or a
 /// negative errno. From the reactor's stop on, a submission throws <see cref="ObjectDisposedException"/>,
 /// and the stop cancels each one it already had.
+///
+/// A connection's <see cref="TcpConnection.RingHost"/> is one too, which follows the connection from reactor to reactor:
+/// a client that keeps state is opened on a <see cref="Reactor"/>, not on that.
 /// </summary>
 public interface IRingHost
 {

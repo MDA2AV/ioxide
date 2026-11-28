@@ -26,14 +26,36 @@ public sealed unsafe partial class Reactor
         }
 
         _returnQInc = new Mpsc<ulong>(1 << 16);
+        _freeGidCount = _maxConnections;
     }
 
-    private ushort AllocGid() => _freeGids!.Pop();
-    private void   FreeGid(ushort gid) => _freeGids!.Push(gid);
+    // Gids neither taken nor promised to a connection on its way here: never more than are in the stack. Any thread.
+    private int _freeGidCount;
 
-    private bool SetupConnectionBufRing(TcpConnection conn)
+    private bool TryReserveGid()
     {
-        if (_freeGids!.Count == 0)
+        if (Interlocked.Decrement(ref _freeGidCount) >= 0)
+        {
+            return true;
+        }
+        Interlocked.Increment(ref _freeGidCount);
+        return false;
+    }
+
+    private void UnreserveGid() => Interlocked.Increment(ref _freeGidCount);
+
+    private ushort AllocGid() => _freeGids!.Pop();
+
+    private void FreeGid(ushort gid)
+    {
+        _freeGids!.Push(gid);
+        UnreserveGid();   // past the push: whoever reserves it next finds it there
+    }
+
+    // reserved: its gid was, when its move began (TryReserveGid).
+    private bool SetupConnectionBufRing(TcpConnection conn, bool reserved = false)
+    {
+        if (!reserved && !TryReserveGid())
         {
             return false;   // at the gid cap (MaxConnections concurrent), where AllocGid would throw (#92)
         }
@@ -70,13 +92,18 @@ public sealed unsafe partial class Reactor
         int ret = io_uring_register(_ring.Fd, IORING_REGISTER_PBUF_RING, &reg, 1);
         if (ret == -ENOMEM)
         {
-            // Out of locked memory is the host's limit, not a fault: the accept sheds this connection.
-            Console.Error.WriteLine($"[r{_id}] connection shed: registering its buffer ring failed with ENOMEM (raise RLIMIT_MEMLOCK, `ulimit -l`)");
+            // Out of locked memory is the host's limit, not a fault: the accept sheds this connection, and one given here
+            // goes back.
+            if (!reserved)
+            {
+                ReportNoLockedMemory();
+            }
             FreeGid(gid);
             return false;
         }
         if (ret < 0)
         {
+            FreeGid(gid);   // as for ENOMEM: the caller sheds the connection or sends it back
             throw new InvalidOperationException($"register pbuf_ring (inc) failed with errno {-ret}, gid={gid}");
         }
 
@@ -88,12 +115,15 @@ public sealed unsafe partial class Reactor
         return true;
     }
 
+    private void ReportNoLockedMemory()
+        => Console.Error.WriteLine($"[r{_id}] connection shed: registering its buffer ring failed with ENOMEM (raise RLIMIT_MEMLOCK, `ulimit -l`)");
+
     private void TeardownConnectionBufRing(TcpConnection conn)
     {
         if (conn.IncrementalMode)
         {
-            // Recycle() cancelled the multishot recv first, so the kernel won't select
-            // from this group again before unregister.
+            // Recycle() cancelled the multishot recv first, or a move did and saw it end, so the
+            // kernel won't select from this group again before unregister.
             var reg = new io_uring_buf_reg { bgid = conn.Bgid };
             io_uring_register(_ring.Fd, IORING_UNREGISTER_PBUF_RING, &reg, 1);
             FreeGid(conn.Bgid);

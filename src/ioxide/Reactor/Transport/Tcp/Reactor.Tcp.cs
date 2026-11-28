@@ -103,15 +103,19 @@ public sealed unsafe partial class Reactor
             // Transient buffer-group exhaustion, not a peer error (#93): the multishot terminated
             // (F_MORE clear), so park the connection; RearmStarvedRecvs resumes it when buffers
             // return to the group.
-            if (conn != null)
-            {
-                ParkStarvedRecv(conn, gen);
-            }
+            OnStarvedRecv(conn, gen);
             return;
         }
 
         if (res <= 0)
         {
+            // The recv a move cancelled, which is the move's to go on with.
+            if (res == -ECANCELED && conn is { MoveState: TcpConnection.MoveCancelling })
+            {
+                RecvOver(conn);
+                return;
+            }
+
             // Peer EOF or recv error - reactor owns teardown.
             if (hasBuf)
             {
@@ -144,7 +148,30 @@ public sealed unsafe partial class Reactor
 
         if ((flags & IORING_CQE_F_MORE) == 0)
         {
-            SubmitRecvMultishot(conn, gen, BgId);
+            OnRecvEnded(conn, gen, BgId);
+        }
+    }
+
+    // A multishot recv ended on its own, short of an error: armed again, unless its connection waits for just that.
+    private void OnRecvEnded(TcpConnection conn, ushort gen, ushort bgid)
+    {
+        if (conn.MoveState == TcpConnection.MoveCancelling)
+        {
+            RecvOver(conn);
+            return;
+        }
+        SubmitRecvMultishot(conn, gen, bgid);
+    }
+
+    private void OnStarvedRecv(TcpConnection? conn, ushort gen)
+    {
+        if (conn is { MoveState: TcpConnection.MoveCancelling })
+        {
+            RecvOver(conn);
+        }
+        else if (conn != null)
+        {
+            ParkStarvedRecv(conn, gen);
         }
     }
 
@@ -164,15 +191,19 @@ public sealed unsafe partial class Reactor
         {
             // Per-connection group drained - e.g. a body larger than the ring while the handler
             // still holds buffers (#93). Park; the loop re-arms once a buffer recycles.
-            if (conn != null)
-            {
-                ParkStarvedRecv(conn, gen);
-            }
+            OnStarvedRecv(conn, gen);
             return;
         }
 
         if (res <= 0)
         {
+            // The recv a move cancelled, which is the move's to go on with.
+            if (res == -ECANCELED && conn is { MoveState: TcpConnection.MoveCancelling })
+            {
+                RecvOver(conn);
+                return;
+            }
+
             // Peer EOF / recv error - the per-conn ring is freed in Recycle.
             if (conn != null)
             {
@@ -210,7 +241,7 @@ public sealed unsafe partial class Reactor
 
         if (!more)
         {
-            SubmitRecvMultishot(conn, gen, conn.Bgid);
+            OnRecvEnded(conn, gen, conn.Bgid);
         }
     }
 
@@ -264,7 +295,7 @@ public sealed unsafe partial class Reactor
             conn.InitRefs();
             conn.ListenerPort = PortOf(listenFd);
             conn.BindSendOpFlags(_sendOpFlags);   // TcpOptions.SendWaitAll; the kTLS handoff clears it
-            SubmitRecvMultishot(conn, (ushort)conn.Generation, bgid);
+            SubmitRecvMultishot(conn, (ushort)conn.TagGen, bgid);
 
             _ = RunHandlerAsync(conn);
         }
@@ -297,6 +328,7 @@ public sealed unsafe partial class Reactor
     // and the table slot, so the slab cannot be recycled under it; FinishSend lets go (#221).
     private void CloseFromRecv(TcpConnection conn)
     {
+        EndMove(conn);
         conn.SuppressWriteShutdown();
 
         if (conn.FlushSubmitted)
@@ -429,18 +461,28 @@ public sealed unsafe partial class Reactor
     // the abort and ends by the shutdown alone, which is enough: it never sends zero-copy.
     private void CloseTcpConnections()
     {
-        sockaddr_in unspec = default;
         foreach (TcpConnection? conn in _slots.AsSpan(0, _slotsUsed))
         {
             if (conn is not null)
             {
-                if (!conn.SweepClosed)
-                {
-                    TcpSweepClose(conn);
-                }
-                connect(conn.ClientFd, &unspec, (uint)sizeof(sockaddr_in));
+                AbortConnection(conn);
             }
         }
+    }
+
+    private void AbortConnection(TcpConnection conn)
+    {
+        if (!conn.SweepClosed)
+        {
+            TcpSweepClose(conn);
+        }
+        ResetPeer(conn.ClientFd);
+    }
+
+    private static void ResetPeer(int fd)
+    {
+        sockaddr_in unspec = default;
+        connect(fd, &unspec, (uint)sizeof(sockaddr_in));
     }
 
     private static int OpenReusePortListener(ushort port, int backlog, IPAddress? address, bool dualStack, int userTimeoutMs)

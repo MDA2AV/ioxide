@@ -30,6 +30,11 @@ public sealed class Runner
             Console.WriteLine($"PASS  {name}");
             _passed++;
         }
+        catch (SkipException e)
+        {
+            Console.WriteLine($"SKIP  {name}: {e.Message}");
+            _skipped++;
+        }
         catch (Exception e)
         {
             Console.WriteLine($"FAIL  {name}: {e.Message}");
@@ -53,6 +58,10 @@ public sealed class Runner
     /// Why it fails, and where that is being tracked - an issue number, or the finding it came from.
     /// This is the whole value of the entry, so it is required rather than optional.
     /// </param>
+    /// <param name="failsWith">
+    /// Part of the message it fails with, when it fails for that reason: failing otherwise, as on a
+    /// setup gone wrong, is a FAIL, not the defect it is there for.
+    /// </param>
     /// <remarks>
     /// This exists so that "I found a bug" and "I fixed a bug" can be separate pieces of work
     /// without either one being lost. A finding described in prose is a claim; a test that
@@ -66,11 +75,17 @@ public sealed class Runner
     /// immediately rather than whenever somebody next reads the file. An expected-failure marker
     /// that can rot into a permanently-ignored test is worse than no marker.
     /// </remarks>
-    public void Pending(string name, Action body, string because, int timeoutMs = DefaultTimeoutMs)
+    public void Pending(string name, Action body, string because, int timeoutMs = DefaultTimeoutMs, string? failsWith = null)
     {
         try
         {
             RunWithWatchdog(name, body, timeoutMs);
+        }
+        catch (Exception e) when (failsWith is not null && !e.Message.Contains(failsWith, StringComparison.Ordinal))
+        {
+            Console.WriteLine($"FAIL  {name}: expected to fail with \"{failsWith}\" ({because}), but failed with: {e.Message}");
+            _failed++;
+            return;
         }
         catch (Exception)
         {
@@ -160,6 +175,9 @@ public sealed class Runner
         return _failed == 0 ? 0 : 1;
     }
 }
+
+/// <summary>Thrown by a test that finds it can prove nothing where it runs: it reports SKIP, with the reason.</summary>
+public sealed class SkipException(string reason) : Exception(reason);
 
 public static class Assert
 {

@@ -133,4 +133,66 @@ public sealed record TcpOptions
     /// as when the flush deadline cuts a connection.
     /// </remarks>
     public int SendTimeoutMs { get; init; } = 60_000;
+
+    /// <summary>
+    /// Let a busy reactor give connections to one that is not, among those sharing the <see cref="ServerConfig"/>. Off by
+    /// default.
+    ///
+    /// The kernel spreads connections over the reactors as they connect, before any of them has asked for anything.
+    /// When the busy ones happen to be on a few reactors, the others' cores stay unused: with two of four reactors'
+    /// connections silent, a server does half of what it could. With this on, the reactors look at their loads
+    /// together, every <see cref="RebalanceIntervalMs"/>: each reads how busy it was over the same two ticks (~250 ms
+    /// each), on a CPU or kept from waiting for completions. The busiest is then paired with the idlest, the next
+    /// busiest with the next idlest, and so on, while the one is busy three quarters or more and the other 30 points
+    /// less, and each gives its taker connections worth half the difference, and no more than that share of them. While
+    /// a look pairs anyone the next follows three ticks later, and spreading one reactor's load over N takes about
+    /// log2(N) of those. A connection that alone keeps a reactor busy stays: it can't be split. Nothing moves between
+    /// reactors that are all busy, however unevenly.
+    /// </summary>
+    /// <remarks>
+    /// A connection moves as TCP has it, whatever protocol is on it, and the peer notices nothing: while a read of its
+    /// handler's waits, everything received has been handed back and nothing is being sent. So what a handler may no longer
+    /// do is take it for granted that it resumes on the same reactor after a read, or after a flush that a read waits
+    /// beside (and an HTTP/2 request handler, whose connection reads beside it, after any wait on its request or response):
+    /// <list type="bullet">
+    /// <item>What belongs to a reactor (a pool, a cache, the <c>Reactor</c> the handler was called with, which is the one
+    /// the connection was accepted on) is taken from <see cref="Reactor.Current"/> afterwards, not kept across it. Code
+    /// that keeps the reactor so as to get back to the connection's keeps <see cref="TcpConnection.RingHost"/> instead,
+    /// and switches to that.</item>
+    /// <item>A handler that has to keep it, through a transaction over several reads say, sets
+    /// <see cref="TcpConnection.Pinned"/> meanwhile.</item>
+    /// <item>A connection that something other than its handler flushes while a read of it waits, as a broadcast to its
+    /// websocket does, or a timer of the reactor it was accepted on, has to be pinned, or flushed from its reactor, which
+    /// <c>await new ReactorSwitch(connection.RingHost)</c> gets to: a flush asked for anywhere else while the connection
+    /// is between two reactors can get lost. That flush never completes, the connection can't be written to again, and
+    /// only its peer or <see cref="SendTimeoutMs"/> ends it. One that its own handler flushes, between its reads, on
+    /// whichever thread, is safe. So are ioxide's HTTP/2 stacks, given the connection or one of ioxide's two pipes over it, and its TLS pipes
+    /// where BoringSSL encrypts: they take their flushes to the connection's reactor first. Over a pipe of another kind,
+    /// such as an <c>SslStream</c>'s, an HTTP/2 stack stays on the reactor it began on, and its connection has to be
+    /// pinned.</item>
+    /// </list>
+    /// A TLS handshake, and a connection served by Kestrel, stay where they are.
+    ///
+    /// Incremental mode has one thing more: a connection only moves to a reactor with a group id left
+    /// (<see cref="IncrementalOptions.MaxConnections"/>).
+    ///
+    /// Off, a connection can't move, and hands its recv buffers back as it did before connections could. On, each
+    /// buffer handed back is counted, so that a move knows when the connection holds none, and checked for one that
+    /// comes back after the connection's life, whose next life can be on another reactor.
+    ///
+    /// What it can't see: a reactor goes by its own thread, so one whose CPU is shared, and that waits in a queue for it
+    /// after a completion has come, reads less busy than it is. A connection is weighed by the time its recv completions
+    /// take, so what its handler does after awaiting something else isn't in its weight. One whose handler is at work for
+    /// more than 2 s in one go stays.
+    /// </remarks>
+    public bool Rebalance { get; init; } = false;
+
+    /// <summary>
+    /// How often, with <see cref="Rebalance"/>, the reactors look at their loads together, in milliseconds: in whole ticks of
+    /// ~250 ms, three at the least. A minute by default, for a server whose load takes far longer than that to go uneven.
+    /// Each look reads the two ticks before it; between looks a reactor pays nothing for any of this. A look that pairs
+    /// reactors has the next follow it three ticks later, until the loads are even. A benchmark that changes the load every
+    /// few seconds wants a short interval: with 750 ms a reactor's load is spread over the others in two seconds or so.
+    /// </summary>
+    public int RebalanceIntervalMs { get; init; } = 60_000;
 }

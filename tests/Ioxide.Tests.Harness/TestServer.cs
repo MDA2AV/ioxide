@@ -351,30 +351,29 @@ public static class TestServer
     /// </param>
     public static int StartSharded(int reactorCount, Func<int, Reactor, TcpConnection, Task> handle,
         Action<int, Reactor>? onStart = null)
+        => StartFleet(reactorCount, (reactor, conn) => handle(reactor.ShardIndex, reactor, conn), onStart: onStart).Port;
+
+    /// <summary>
+    /// <see cref="StartSharded"/> with the reactors and their threads at hand, for what goes on between reactors, and with a
+    /// config of the caller's (Port and ReactorCount are stamped here).
+    /// </summary>
+    public static (int Port, Reactor[] Reactors, Thread[] Threads) StartFleet(int reactorCount,
+        Func<Reactor, TcpConnection, Task> handle, ServerConfig? config = null, Action<int, Reactor>? onStart = null)
     {
         int port = ReserveFreePort();
-        var config = new ServerConfig
-        {
-            ReactorCount = reactorCount,
-            RecvBufferSize = 4096,
-            RecvSlots = 256,
-            Tcp = new TcpOptions
-            {
-                Port = (ushort)port,
-                WriteSlabSize = 16 * 1024,
-                PoolMax = 64,
-                RecvQueueEntries = 64,
-            },
-        };
+        config ??= DefaultConfig();
+        config = config with { Tcp = (config.Tcp ?? new TcpOptions()) with { Port = (ushort)port }, ReactorCount = reactorCount };
 
         using var ready = new CountdownEvent(reactorCount);
+        var reactors = new Reactor[reactorCount];
+        var threads = new Thread[reactorCount];
 
         for (int i = 0; i < reactorCount; i++)
         {
             int shard = i;
-            var reactor = new Reactor(shard, config)
+            var reactor = reactors[i] = new Reactor(shard, config)
             {
-                TcpHandle = (r, conn) => handle(shard, r, conn),
+                TcpHandle = handle,
                 OnStart = r =>
                 {
                     // Before the signal, so a shard that is "ready" is one whose service exists.
@@ -385,7 +384,7 @@ public static class TestServer
                 },
             };
 
-            var thread = new Thread(RunGuarded(reactor, port))
+            var thread = threads[i] = new Thread(RunGuarded(reactor, port))
             {
                 IsBackground = true,
                 Name = $"test-shard-{port}-{shard}",
@@ -401,7 +400,7 @@ public static class TestServer
             WaitForListen(port);
         }
 
-        return port;
+        return (port, reactors, threads);
     }
 
     /// <summary>

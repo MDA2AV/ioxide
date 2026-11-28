@@ -12,7 +12,7 @@ public sealed unsafe class SpscRecvRing
         public ushort Bid;
         public int Len;
         public bool HasBuffer;
-        public ushort Gen;   // connection generation when enqueued (incremental return guard)
+        public ushort Gen;   // the connection's stamp when enqueued (TcpConnection.Stamp), which tells a late return
 
         public ReadOnlySpan<byte> AsSpan() => new(Ptr, Len);
 
@@ -69,6 +69,9 @@ public sealed unsafe class SpscRecvRing
 
         return true;
     }
+
+    /// <summary>Items taken out since the last <see cref="Reset"/>.</summary>
+    internal long TakenCount => Volatile.Read(ref _head);
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public long SnapshotTail() => Volatile.Read(ref _tail);

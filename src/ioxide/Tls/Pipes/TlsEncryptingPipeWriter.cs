@@ -42,6 +42,9 @@ public sealed class TlsEncryptingPipeWriter : PipeWriter, IValueTaskSource<Flush
     private readonly Action _onFlushDone;
     private readonly Action _flushOnReactor;
 
+    // A faulted Complete asked for on another thread, ahead of getting to the reactor.
+    private Exception? _completeFault;
+
     public TlsEncryptingPipeWriter(TcpConnection connection, TlsSession session)
     {
         _conn = connection ?? throw new ArgumentNullException(nameof(connection));
@@ -81,13 +84,13 @@ public sealed class TlsEncryptingPipeWriter : PipeWriter, IValueTaskSource<Flush
 
         // SSL_write must not overlap the reactor's SSL_read on this session (#249), so a flush from
         // another thread encrypts and sends on the reactor, the way a plaintext flush sends from it.
-        Reactor reactor = _conn.Reactor;
-        if (!reactor.OnReactorThread)
+        if (!_conn.Reactor.OnReactorThread)
         {
-            // As a continuation: a reactor that has stopped, or stops before running it, hands it to the
-            // thread pool instead of dropping it, so the caller hears of the stop rather than waiting forever.
+            // As a continuation, through the host, which takes it wherever the connection is by then: a reactor that
+            // has stopped, or stops before running it, hands it to the thread pool instead of dropping it, so the caller
+            // hears of the stop rather than waiting forever.
             _core.Reset();
-            reactor.ScheduleContinuation(_flushOnReactor);
+            _conn.RingHost.ScheduleOnReactor(ReactorSwitch.Resume, _flushOnReactor);
             return new ValueTask<FlushResult>(this, _core.Version);
         }
 
@@ -130,15 +133,17 @@ public sealed class TlsEncryptingPipeWriter : PipeWriter, IValueTaskSource<Flush
         return false;
     }
 
-    // The flush a caller on another thread asked for. A completion since, by the pipe's dispose,
-    // has already committed what was staged. On the thread pool, the reactor stopped before it got here.
+    // The flush a caller on another thread asked for, posted through the connection's host, which brings it to the
+    // reactor serving the connection. A completion since, by the pipe's dispose, has already committed what was staged.
+    // Anywhere else no reactor will have the connection any more: one stopped before it got here.
     private void FlushOnReactor()
     {
         try
         {
-            if (_conn.Reactor.PostsClosed)
+            Reactor reactor = _conn.Reactor;
+            if (reactor.PostsClosed || !reactor.OnReactorThread)
             {
-                _core.SetResult(Stopped());
+                _core.SetResult(Stopped());   // SSL_write is that reactor's alone (#249)
             }
             else if (_completed)
             {
@@ -196,17 +201,22 @@ public sealed class TlsEncryptingPipeWriter : PipeWriter, IValueTaskSource<Flush
         }
 
         // Committing encrypts, so from another thread it runs on the reactor too. If the pipe's
-        // dispose gets there first, it completes the writer and commits the bytes itself.
-        Reactor reactor = _conn.Reactor;
-        if (!reactor.OnReactorThread)
+        // dispose gets there first, it completes the writer and commits the bytes itself - unless this
+        // one was faulted, which it knows before it is posted: across a move the dispose can overtake it.
+        if (!_conn.Reactor.OnReactorThread)
         {
-            reactor.ScheduleOnReactor(static state =>
+            if (exception is not null)
+            {
+                Volatile.Write(ref _completeFault, exception);
+            }
+            _conn.RingHost.ScheduleOnReactor(static state =>
             {
                 var (writer, error) = ((TlsEncryptingPipeWriter, Exception?))state!;
                 writer.Complete(error);
             }, (this, exception));
             return;
         }
+        exception ??= Volatile.Read(ref _completeFault);
         _completed = true;
 
         // Complete commits: advanced-but-unflushed plaintext is encrypted into the slab, exactly

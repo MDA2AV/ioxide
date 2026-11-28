@@ -70,7 +70,9 @@ public sealed unsafe partial class Reactor : IRingHost
     public Action<Reactor>? OnStart;
 
     /// <summary>
-    /// The per-connection TCP handler, invoked once per accepted connection (CQE accept path).
+    /// The per-connection TCP handler, invoked once per accepted connection (CQE accept path), with the reactor that
+    /// accepted it. Under <see cref="TcpOptions.Rebalance"/> that need not be the one it is on later
+    /// (<see cref="TcpConnection.Reactor"/>).
     /// </summary>
     public Func<Reactor, TcpConnection, Task> TcpHandle = null!;
 

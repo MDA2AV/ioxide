@@ -77,12 +77,12 @@ public sealed partial class Http2Connection
         try
         {
             await handler(request, writer);
-            await new ReactorSwitch(_reactor);   // back on the reactor, wherever the handler finished
+            await new ReactorSwitch(Host);   // back on the reactor, wherever the handler finished
             await writer.CompleteAsync();
         }
         catch (Exception exception)
         {
-            await new ReactorSwitch(_reactor);
+            await new ReactorSwitch(Host);
             ReportHandlerFault(request, exception);
             try
             {

@@ -76,7 +76,10 @@ public sealed record ServerConfig
 /// </summary>
 public sealed record IncrementalOptions
 {
-    /// <summary>One buffer-group id per active connection; accepts past this are shed.</summary>
+    /// <summary>
+    /// One buffer-group id per active connection; accepts past this are shed, and no connection is moved to a reactor at it
+    /// (<see cref="TcpOptions.Rebalance"/>).
+    /// </summary>
     public int MaxConnections { get; init; } = 4096;
 
     /// <summary>Buffers per connection ring.</summary>

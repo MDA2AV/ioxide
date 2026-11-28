@@ -170,7 +170,7 @@ public sealed unsafe partial class TcpConnection : IValueTaskSource, IFlushListe
     // the connection is allowed to have outstanding. False when nothing was staged - the flush is
     // over before it started, and the listener slot was never touched. <paramref name="listener"/>
     // is the adapter parking on the flush, or this connection for FlushAsync's awaiter;
-    // <paramref name="gen"/> is the generation the flush was queued under.
+    // <paramref name="gen"/> is the life the flush belongs to, which its awaiter's token carries.
     private bool ArmFlush(IFlushListener listener, out int gen)
     {
         int target = WriteTail;
@@ -206,11 +206,11 @@ public sealed unsafe partial class TcpConnection : IValueTaskSource, IFlushListe
             BuildIovec();
         }
 
-        // The generation lets the reactor drop a flush whose connection closed (or
-        // whose slot was reused) before the queue drained.
         gen = Volatile.Read(ref _generation);
 
-        _reactor.EnqueueFlush(Slot, gen);
+        // The tag's generation lets the reactor drop a flush whose connection closed (or
+        // whose slot was reused) before the queue drained.
+        _reactor.EnqueueFlush(Slot, TagGen);
 
         // Race recovery: if close raced in after the entry guard, self-complete so we
         // don't hang on a send the reactor will never make.

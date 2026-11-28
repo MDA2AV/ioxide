@@ -1,5 +1,6 @@
 using System.Buffers;
 using System.IO.Pipelines;
+using ioxide.tls;
 
 namespace ioxide.http2;
 
@@ -24,6 +25,10 @@ namespace ioxide.http2;
 /// It speaks to an <see cref="IDuplexPipe"/> and knows nothing about TLS: hand it a
 /// <c>TcpConnectionDualPipe</c> for h2c or a <c>TlsConnectionDualPipe</c> for h2 over TLS, and the
 /// protocol code is identical either way.
+///
+/// Given the connection or one of those two pipes, it follows the connection to whichever reactor that
+/// is on (<c>TcpOptions.Rebalance</c>). Over a pipe of another kind it stays on the reactor it began
+/// on, and its connection has to be pinned (<c>TcpConnection.Pinned</c>).
 /// </summary>
 /// <remarks>Reactor thread only.</remarks>
 public sealed partial class Http2Connection : IDisposable
@@ -116,11 +121,19 @@ public sealed partial class Http2Connection : IDisposable
     // What a stream consumes before it is credited: a quarter of its window, but at most the 65,535 a peer counts until it applies our SETTINGS, so any window it counts holds a step.
     private readonly int _creditStep;
 
-    // The reactor this connection is served on; null when it runs without one, as over a test pipe.
+    // The TCP connection underneath, which can change reactors while a read waits (TcpOptions.Rebalance). Null over any
+    // other pipe, which stays on the reactor the serving began on - or runs without one, as over a test pipe.
+    private readonly TcpConnection? _tcp;
     private Reactor? _reactor;
 
-    internal Reactor? Reactor => _reactor;
-    internal bool OffReactor => _reactor is { OnReactorThread: false };
+    /// <summary>
+    /// Where this connection is served: the TCP connection's host, which follows it from reactor to reactor, or over any
+    /// other pipe the reactor the serving began on, or the one its first read completed on. <c>await new ReactorSwitch(Host)</c>
+    /// gets back there from wherever.
+    /// </summary>
+    internal IRingHost? Host => _tcp is { } tcp ? tcp.RingHost : _reactor;
+
+    internal bool OffReactor => _tcp is { } tcp ? !tcp.Reactor.OnReactorThread : _reactor is { OnReactorThread: false };
 
     /// <summary>
     /// Serve over an already-chosen transport. The pipe is the caller's to dispose.
@@ -128,6 +141,12 @@ public sealed partial class Http2Connection : IDisposable
     public Http2Connection(IDuplexPipe pipe, Http2Options? options = null)
     {
         _pipe = pipe;
+        _tcp = pipe switch
+        {
+            TcpConnectionDualPipe tcp => tcp.Connection,
+            TlsConnectionDualPipe tls => tls.Connection,
+            _ => null,
+        };
         _options = options ?? new Http2Options();
         _decoder = new HpackDecoder();
         _initialStreamWindow = Math.Max(_options.InitialWindowSize, DefaultWindow);
@@ -230,8 +249,11 @@ public sealed partial class Http2Connection : IDisposable
             while (!IsBroken)
             {
                 ReadResult read = await _pipe.Input.ReadAsync();
-                _reactor ??= Reactor.Current;        // a RunAsync begun off the reactor learns it here
-                await new ReactorSwitch(_reactor);   // a pipe may complete its read elsewhere: a default Pipe on the thread pool
+                _reactor ??= Reactor.Current;   // a RunAsync begun off the reactor learns it here
+                if (OffReactor)   // a pipe may complete its read elsewhere: a default Pipe on the thread pool
+                {
+                    await new ReactorSwitch(Host);
+                }
 
                 bool received = Accumulate(read.Buffer);
                 _pipe.Input.AdvanceTo(read.Buffer.End);
@@ -284,7 +306,7 @@ public sealed partial class Http2Connection : IDisposable
     {
         try
         {
-            await new ReactorSwitch(_reactor);
+            await new ReactorSwitch(Host);
         }
         catch (ObjectDisposedException)
         {
@@ -399,12 +421,12 @@ public sealed partial class Http2Connection : IDisposable
         try
         {
             Http2Response response = await inFlight;
-            await new ReactorSwitch(_reactor);   // back on the reactor, wherever the handler finished
+            await new ReactorSwitch(Host);   // back on the reactor, wherever the handler finished
             WriteResponse(pending.StreamId, response);
         }
         catch (Exception exception)
         {
-            await new ReactorSwitch(_reactor);
+            await new ReactorSwitch(Host);
             // Nobody can observe this task, so an escaping exception would vanish silently and the
             // peer would wait on a stream that is never coming.
             AnswerFault(request, pending.StreamId, exception);

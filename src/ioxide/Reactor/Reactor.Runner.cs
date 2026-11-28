@@ -72,6 +72,7 @@ public sealed unsafe partial class Reactor
         if (_tcpEnabled)
         {
             AddTicker(TcpSweep);
+            JoinFleet();
         }
 
         StartTicker();
@@ -142,7 +143,8 @@ public sealed unsafe partial class Reactor
             CancelClientOps();
         }
 
-        return (TcpLive == 0 && _opFreeTop == _opTargets.Length) || Native.MonotonicMs >= deadlineMs;
+        return (TcpLive == 0 && Volatile.Read(ref _arriving) == 0 && Volatile.Read(ref _givenAway) == 0 && _opFreeTop == _opTargets.Length)
+            || Native.MonotonicMs >= deadlineMs;
     }
 
     // The clients stop, then every socket closes, ending every read, write and wait on one; Teardown runs it for a
@@ -180,6 +182,7 @@ public sealed unsafe partial class Reactor
         // A faulted loop never set it: UdpSendTo sends directly from here, as the ring may never be submitted again.
         _stopRequested = true;
         CloseAll();
+        LeaveFleet();
 
         // Taken away before it is closed, and its writers waited out: closing under one would
         // free the number and let that writer's 8 bytes land in whatever socket took it next.

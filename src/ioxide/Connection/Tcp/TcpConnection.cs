@@ -5,10 +5,6 @@ namespace ioxide;
 
 public sealed unsafe partial class TcpConnection
 {
-    private readonly Reactor _reactor;
-
-    internal Reactor Reactor => _reactor;
-
     public int ClientFd { get; private set; }
 
     // Where the reactor's table holds this connection, and what the tags of its operations name: taken at
@@ -95,9 +91,9 @@ public sealed unsafe partial class TcpConnection
     // The accept-time binding, past the setter: a 0 here is SendWaitAll off, not kTLS, so ZeroCopySend stays.
     internal void BindSendOpFlags(uint opFlags) => _sendOpFlags = opFlags;
 
-    // A new value per life from the reactor, at construction and on Clear(), so no two lives share one (#416);
-    // the low 16 bits serve as the IVTS token so stale awaiters from a previous pool life are detectable.
-    private int _generation;
+    // Which life of this object: the next number on every Clear(), so no two lives share one whichever reactors they
+    // were on. The low 16 bits serve as the IVTS token so stale awaiters from a previous pool life are detectable.
+    private int _generation = 1;
 
     // Two owners: the reactor (recv side) and the handler. Init 2 on accept; teardown
     // runs only at 0, so a connection is never recycled under a live handler.
@@ -109,7 +105,8 @@ public sealed unsafe partial class TcpConnection
     public TcpConnection(Reactor reactor, int fd, int writeSlabSize = 1024 * 16, int recvQueueEntries = 64, WriteOverflowStrategy overflow = WriteOverflowStrategy.Grow)
     {
         _reactor = reactor;
-        _generation = reactor.NextTcpGeneration();
+        _home = reactor;
+        _destination = reactor;
         ClientFd = fd;
         _writeSlabSize = writeSlabSize;
         _baseSlabSize = writeSlabSize;
@@ -198,7 +195,7 @@ public sealed unsafe partial class TcpConnection
         }
         else if (Interlocked.CompareExchange(ref _writeShutdown, 2, 0) == 0)   // not over one made, suppressed or already deferred
         {
-            _reactor.DeferWriteShutdown(Slot, Generation);
+            _reactor.DeferWriteShutdown(Slot, TagGen);
         }
     }
 
@@ -268,7 +265,8 @@ public sealed unsafe partial class TcpConnection
     internal void Clear()
     {
         // Bump generation first so stale IVTS tokens resolve to Closed()/no-op.
-        Interlocked.Exchange(ref _generation, _reactor.NextTcpGeneration());
+        Interlocked.Increment(ref _generation);
+        ClearMove();
 
         // Normally empty already: the teardown's MarkClosed delivered to any read or flush parked here.
         Volatile.Write(ref _readWaiter, null);
